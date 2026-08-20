@@ -12,19 +12,23 @@ CMD_FUNC(cmd_dbq)
 	if (!IsUser(client) && !IsServer(client))
 		return;
 
-	if (IsUser(client) && !IsOper(client)) {
+	if (IsUser(client) && !IsOper(client))
+	{
 		sendnumeric(client, ERR_NOPRIVILEGES);
 		return;
 	}
 
-	if (parc < 2) {
+	if (parc < 2)
+	{
 		sendto_one(client, NULL, ":%s 339 %s :Insufficient parameters. Syntax: /DBQ [server] <block>[::path]",
 		           me.name, client->name);
 		return;
 	}
 
-	if (parc >= 3) {
-		if (!match_simple(parv[1], me.name)) {
+	if (parc >= 3)
+	{
+		if (!match_simple(parv[1], me.name))
+		{
 			Client *target_server = find_server_quick(parv[1]);
 			if (target_server)
 				sendto_one(target_server, NULL, ":%s DBQ %s %s", client->id, parv[1], parv[2]);
@@ -33,12 +37,14 @@ CMD_FUNC(cmd_dbq)
 			return;
 		}
 		safe_strdup(query_str, parv[2]);
-	} else {
+	} else
+	{
 		safe_strdup(query_str, parv[1]);
 	}
 
 	block = udb_block_by_letter(query_str[0]);
-	if (!block) {
+	if (!block)
+	{
 		sendto_one(client, NULL, ":%s 339 %s :Block %c does not exist.",
 		           me.name, client->name, query_str[0]);
 		safe_free(query_str);
@@ -46,7 +52,8 @@ CMD_FUNC(cmd_dbq)
 	}
 
 	/* Query for block summary only (e.g. "/DBQ N") */
-	if (query_str[1] == '\0') {
+	if (query_str[1] == '\0')
+	{
 		sendto_one(client, NULL, ":%s 339 %s :%c %u %lu %lu %lX %s",
 		           me.name, client->name,
 		           block->letter, block->record_count, block->filesize,
@@ -58,7 +65,8 @@ CMD_FUNC(cmd_dbq)
 
 	/* Parse path (e.g. "N::davidlig::vhost") */
 	cur = query_str + 1;
-	if (cur[0] != ':' || cur[1] != ':' || cur[2] == '\0') {
+	if (cur[0] != ':' || cur[1] != ':' || cur[2] == '\0')
+	{
 		sendto_one(client, NULL, ":%s 339 %s :Invalid block format.",
 		           me.name, client->name);
 		safe_free(query_str);
@@ -67,16 +75,19 @@ CMD_FUNC(cmd_dbq)
 	cur += 2;
 
 	rec = block->tree;
-	while ((ds = strstr(cur, "::"))) {
+	while ((ds = strstr(cur, "::")))
+	{
 		*ds = '\0';
 		rec = udb_record_find(cur, rec);
-		if (!rec) goto notfound;
+		if (!rec)
+			goto notfound;
 		cur = ds + 2;
 	}
 	rec = udb_record_find(cur, rec);
 
-	if (!rec) {
-notfound:
+	if (!rec)
+	{
+	notfound:
 		sendto_one(client, NULL, ":%s 339 %s :Block not found: %s",
 		           me.name, client->name, query_str);
 		safe_free(query_str);
@@ -84,15 +95,19 @@ notfound:
 	}
 
 	/* Display the found record */
-	if (rec->data_str) {
+	if (rec->data_str)
+	{
 		sendto_one(client, NULL, ":%s 339 %s :DBQ %s %s",
 		           me.name, client->name, query_str, rec->data_str);
-	} else if (rec->data_num) {
+	} else if (rec->data_num)
+	{
 		sendto_one(client, NULL, ":%s 339 %s :DBQ %s %lu",
 		           me.name, client->name, query_str, rec->data_num);
-	} else {
+	} else
+	{
 		UdbRecord *child;
-		for (child = rec->child; child; child = child->sibling) {
+		for (child = rec->child; child; child = child->sibling)
+		{
 			if (child->data_str)
 				sendto_one(client, NULL, ":%s 339 %s :DBQ %s::%s %s",
 				           me.name, client->name, query_str, child->key, child->data_str);
@@ -113,5 +128,5 @@ notfound:
 
 static void udb_query_init(ModuleInfo *modinfo)
 {
-	CommandAdd(modinfo->handle, "DBQ", cmd_dbq, MAXPARA, CMD_USER|CMD_SERVER);
+	CommandAdd(modinfo->handle, "DBQ", cmd_dbq, MAXPARA, CMD_USER | CMD_SERVER);
 }

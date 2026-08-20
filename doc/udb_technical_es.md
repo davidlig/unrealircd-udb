@@ -41,7 +41,9 @@ Almacena configuraciones para usuarios registrados.
 *   **forbid**: Motivo de prohibición del canal.
 *   **suspended**: Desactiva el comportamiento de fundador y `+r` del canal registrado.
 *   **pass** y **challenge**: Credencial de autenticación de administrador del canal.
-*   **options**: Opciones numéricas del canal, incluido el candado de modos.
+*   **persistent**: Activa el `+P` nativo cuando está cargado el manejador de canales permanentes.
+*   **options**: Opciones numéricas: `*1` protege los bans locales y `*2`
+    bloquea cambios de modo salvo para el fundador identificado.
 
 ### 1.3 Reconciliación De Canales En Caliente
 
@@ -54,6 +56,17 @@ fundador identificado. UDB nunca concede `+o` al fundador.
 cualquiera de esas credenciales revoca `+a` solo cuando UDB lo había concedido.
 Borrar el perfil del canal revoca los privilegios de fundador y administrador
 gestionados por UDB y limpia el topic persistente.
+
+`INVITE <nick> <canal> <contraseña>` valida `C::<#canal>::pass` antes de
+ejecutar la invitación nativa. Una invitación local correcta concede al destino
+local un permiso de entrada de un solo uso que caduca en cinco minutos. Solo
+omite la contraseña de UDB y nunca concede `+a`; una contraseña enviada en
+`JOIN` sigue concediendo `+a`. Los INVITE con contraseña para destinos remotos
+se rechazan porque el permiso de un solo uso es local y no se transmite por S2S.
+
+UDB usa overrides de `MODE` y `SAMODE`, no inspección de texto crudo. Con la
+opción `*1`, los `+b` añadidos localmente se asocian a su autor y otro usuario
+local no puede eliminarlos, salvo un fundador identificado o un oper.
 
 #### Bloque I (IPs y Hosts)
 *   **clones**: Límite numérico de conexiones simultáneas (`*<numero>`).
@@ -93,7 +106,11 @@ bloque.
 `:<sid_origen> DB <destino> <subcomando> <parametros>`
 
 ### 2.1 Sincronización Inicial (Handshake)
-Cuando un servidor se conecta a otro, se verifica el estado de los bloques mediante CRC32.
+Cuando un servidor se conecta a otro, se verifica el estado de los bloques con
+un CRC32 de los registros lógicos canónicos. El digest ordena los registros
+serializados `ruta valor`, por lo que los encabezados, timestamps de guardado y
+el orden de inserción no lo afectan. El valor `2` de ModData de UDB negocia la
+capacidad de transferencia V4 por etapas.
 
 **INF (Información del Bloque):**
 `:<sid> DB <destino> INF <letra_bloque> <crc32_hex> <timestamp>`
@@ -101,9 +118,31 @@ Cuando un servidor se conecta a otro, se verifica el estado de los bloques media
 **RES (Request / Petición de Sincronización):**
 `:<sid> DB <destino> RES <letra_bloque>`
 
-**FDR (Fin De Resumen):**
-Marca el final de la transmisión masiva de un bloque.
-`:<sid> DB <destino> FDR <letra_bloque>`
+Para peers con capacidad staged, `RES` se responde mediante una transacción:
+
+**BEGIN:** `:<sid> DB <destino> BEGIN <bloque> <txid> <digest>`
+
+**PUT:** `:<sid> DB <destino> PUT <bloque> <txid> <ruta> :<valor>`
+
+**END:** `:<sid> DB <destino> END <bloque> <txid> <digest>`
+
+**ACK:** `:<sid> DB <destino> ACK <bloque> <txid> <digest>`
+
+Las rutas de `PUT` omiten el prefijo del bloque porque el bloque es un parámetro
+explícito. El receptor construye un árbol aislado por bloque y no aplica efectos
+en tiempo real durante la transferencia. En `END` valida el digest canónico,
+persiste el árbol staged atómicamente en el archivo temporal y solo entonces
+reemplaza el árbol activo. Una desconexión del peer, 60 segundos sin actividad,
+un `PUT` inválido, un txid inesperado o un digest incorrecto descarta solo el
+árbol staged; el árbol activo y durable anterior no cambian.
+
+Mientras exista una transacción staged, `INS`, `DEL`, `DRP` y `OPT` se rechazan
+con `UDB_ERR_SYNC_ACTIVE`, incluso desde el propagador. Fuera de una transacción
+esas mutaciones siguen requiriendo el propagador configurado.
+
+`FDR` se conserva solo para peers pre-V4 (ModData `1`). No forma parte del
+protocolo staged y mantiene la transferencia legacy in-place; una red mixta no
+obtiene aislamiento V4 en ese enlace legacy.
 
 ### 2.2 Modificación de Datos en Tiempo Real
 Para inyectar o eliminar registros en caliente, se usan los siguientes comandos (generalmente con destino `*` para broadcast).

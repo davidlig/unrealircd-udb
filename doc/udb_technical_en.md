@@ -26,7 +26,12 @@ davidlig::oper *4
 
 #### Block N (Nicks - Users)
 Stores configurations for registered users.
-*   **pass**: User password (plain text or hash like `sha256:hash`).
+*   **pass**: User password hash. Only Argon2id (`$argon2id$...`) and bcrypt
+    (`$2a$`, `$2b$`, or `$2y$`) are accepted; optional `argon2id:` and
+    `bcrypt:` prefixes are supported. Plaintext and legacy digest values fail
+    closed.
+*   **access**: Optional comma- or whitespace-separated IPv4/IPv6 CIDR list.
+    A successful NICK or GHOST credential check must also match this list.
 *   **vhost**: Custom virtual host applied on connect.
 *   **oper**: IRCop level (`*1` = Helper, `*2` = Admin, `*4` = Root).
 *   **swhois**: Extra line in the user's /WHOIS output.
@@ -41,7 +46,9 @@ Stores configurations for registered users.
 *   **forbid**: Channel prohibition reason.
 *   **suspended**: Disables registered-channel founder and `+r` behavior.
 *   **pass** and **challenge**: Channel-admin authentication credential.
-*   **options**: Numeric channel options, including the mode lock flag.
+*   **persistent**: Sets native `+P` when the permanent-channel mode handler is loaded.
+*   **options**: Numeric channel options: `*1` protects locally-added bans,
+    and `*2` locks mode changes to the identified founder.
 
 ### 1.3 Live Channel Reconciliation
 
@@ -54,6 +61,25 @@ only `+a` for the current membership. They are not a source of `+o`. Replacing
 or deleting either credential revokes `+a` only when it was granted by UDB.
 Deleting the channel profile revokes UDB-managed founder and channel-admin
 privileges and clears its persistent topic.
+
+`INVITE <nick> <channel> <password>` validates `C::<#channel>::pass` before
+performing the native invite. A successful local invite gives its local target a
+one-use entry grant that expires after five minutes. It bypasses only UDB's
+password check and never grants `+a`; a password supplied directly to `JOIN`
+continues to grant `+a`. Password-bearing INVITEs to remote targets are rejected
+because the one-use grant is intentionally local and is not sent over S2S.
+
+All UDB credential checks accept only `challenge` values `argon2id` (`argon2`
+is an alias) and `bcrypt`, and use UnrealIRCd's native authentication API. A
+missing challenge is accepted only when the stored hash has an unambiguous
+Argon2id or bcrypt prefix. Plaintext, MD5, SHA-256, Unix crypt, and unsupported
+challenge names fail closed. Failed checks are bounded and rate-limited by the
+active `S::flood` or `udb::password-flood` setting per profile and source IP.
+
+UDB uses command overrides for `MODE` and `SAMODE`, rather than raw command
+text inspection. With channel option `*1`, locally-added `+b` masks are tracked
+with their setter and cannot be removed by another local user, except an
+identified founder or an oper.
 
 #### Block I (IPs and Hosts)
 *   **clones**: Numeric limit of simultaneous connections (`*<number>`).
@@ -68,6 +94,19 @@ Defines active network sanctions.
 *   **Q**: Q-Line (Nick ban).
 *   **F**: Spamfilter (Ban by regular expressions).
     *   *Internal options for F:* `type` (target), `action`, `duration`, `reason`.
+
+Line records use `K::<type>::<pattern>` with optional child properties, for
+example `K::G::*@bad.example::duration *3600` and
+`K::G::*@bad.example::reason abuse`. `duration` is expressed in seconds and
+expires the G, Z, S, Q, or F record; `0` (or no duration record) is permanent.
+For F, the same duration is also passed to the spamfilter action TKL.
+
+Spamfilter patterns are plain regex strings by default for compatibility. To
+store a pattern that must be represented safely as base64, prefix standard,
+padded RFC 4648 base64 with `b64:`: `K::F::b64:Zm9vL2Jhcg==::type c` decodes to
+`foo/bar`. The payload must be a non-empty, valid padded base64 value whose
+decoded pattern is at most 3072 bytes and contains no NUL bytes. Invalid
+encoded patterns are rejected and never compiled or installed.
 
 #### Block S (Global / Setup)
 Global network settings and UDB behavior.
@@ -92,7 +131,10 @@ actively serving a block synchronization may only send records for that block.
 `:<source_sid> DB <target> <subcommand> <parameters>`
 
 ### 2.1 Initial Synchronization (Handshake)
-When a server connects to another, block states are verified using CRC32.
+When a server connects to another, block states are verified using a CRC32 over
+the canonical logical records. The digest sorts serialized `path value` records,
+so save timestamps, comment headers, and sibling insertion order do not affect
+it. UDB module ModData value `2` negotiates the staged V4 transfer capability.
 
 **INF (Block Information):**
 `:<sid> DB <target> INF <block_letter> <crc32_hex> <timestamp>`
@@ -100,9 +142,31 @@ When a server connects to another, block states are verified using CRC32.
 **RES (Sync Request):**
 `:<sid> DB <target> RES <block_letter>`
 
-**FDR (End of Summary):**
-Marks the end of a mass block transmission.
-`:<sid> DB <target> FDR <block_letter>`
+For peers with the staged capability, `RES` is answered with a transaction:
+
+**BEGIN:** `:<sid> DB <target> BEGIN <block> <txid> <digest>`
+
+**PUT:** `:<sid> DB <target> PUT <block> <txid> <path> :<value>`
+
+**END:** `:<sid> DB <target> END <block> <txid> <digest>`
+
+**ACK:** `:<sid> DB <target> ACK <block> <txid> <digest>`
+
+`PUT` paths omit the block prefix because the block is an explicit parameter.
+The receiver builds an isolated tree per block and never applies its runtime
+effects during transfer. On `END`, it verifies the canonical digest, writes the
+staged tree atomically via the block temporary file, then replaces the active
+tree and applies the new runtime effects. A peer quit, 60-second inactivity
+timeout, malformed `PUT`, unexpected transaction ID, or bad digest discards the
+staged tree only. The prior active and durable tree remain in use.
+
+While a block has a staged transaction, real-time `INS`, `DEL`, `DRP`, and `OPT`
+are rejected with `UDB_ERR_SYNC_ACTIVE`, including requests from the propagator.
+Outside a transaction those mutations still require the configured propagator.
+
+`FDR` remains only for pre-V4 peers (ModData value `1`). It is not part of the
+staged protocol and retains the legacy in-place transfer behavior; mixed V4 and
+legacy networks therefore do not get V4 isolation on the legacy link.
 
 ### 2.2 Real-time Data Modification
 To inject or delete records on the fly, the following commands are used (usually with target `*` for broadcast).

@@ -23,12 +23,11 @@
  * ======================================================================== */
 
 ModuleHeader MOD_HEADER = {
-	"third/udb",
-	"4.0.0",
-	"UDB - Unreal Database System (nick/channel/IP registration & sync)",
-	"David Abuín Fontán ('davidlig')",
-	"unrealircd-6"
-};
+    "third/udb",
+    "4.0.0",
+    "UDB - Unreal Database System (nick/channel/IP registration & sync)",
+    "David Abuín Fontán ('davidlig')",
+    "unrealircd-6"};
 
 /* ========================================================================
  * Implementation Files
@@ -117,6 +116,7 @@ MOD_LOAD()
 {
 	udb_blocks_load_all();
 	udb_nicks_load(modinfo);
+	udb_channels_load(modinfo);
 
 	unreal_log(ULOG_INFO, "udb", "UDB_LOADED", NULL,
 	           "[UDB] Unreal Database System v" UDB_VERSION " loaded successfully");
@@ -178,8 +178,7 @@ static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
 				             cep->file->filename, cep->line_number);
 				errors++;
 			}
-		}
-		else if (!strcmp(cep->name, "propagator"))
+		} else if (!strcmp(cep->name, "propagator"))
 		{
 			if (!cep->value || !*cep->value)
 			{
@@ -187,8 +186,7 @@ static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
 				             cep->file->filename, cep->line_number);
 				errors++;
 			}
-		}
-		else if (!strcmp(cep->name, "max-global-clones"))
+		} else if (!strcmp(cep->name, "max-global-clones"))
 		{
 			if (!cep->value || atoi(cep->value) < 0)
 			{
@@ -196,8 +194,7 @@ static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
 				             cep->file->filename, cep->line_number);
 				errors++;
 			}
-		}
-		else if (!strcmp(cep->name, "password-flood"))
+		} else if (!strcmp(cep->name, "password-flood"))
 		{
 			if (!cep->value || !strchr(cep->value, ':'))
 			{
@@ -205,8 +202,7 @@ static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
 				             cep->file->filename, cep->line_number);
 				errors++;
 			}
-		}
-		else
+		} else
 		{
 			config_error("%s:%i: unknown directive udb::%s",
 			             cep->file->filename, cep->line_number, cep->name);
@@ -242,16 +238,13 @@ static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
 		if (!strcmp(cep->name, "database-directory"))
 		{
 			safe_strdup(udb_cfg->db_directory, cep->value);
-		}
-		else if (!strcmp(cep->name, "propagator"))
+		} else if (!strcmp(cep->name, "propagator"))
 		{
 			safe_strdup(udb_cfg->propagator, cep->value);
-		}
-		else if (!strcmp(cep->name, "max-global-clones"))
+		} else if (!strcmp(cep->name, "max-global-clones"))
 		{
 			udb_cfg->max_global_clones = atoi(cep->value);
-		}
-		else if (!strcmp(cep->name, "password-flood"))
+		} else if (!strcmp(cep->name, "password-flood"))
 		{
 			const char *colon = strchr(cep->value, ':');
 			if (colon)
@@ -269,6 +262,8 @@ static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
 		udb_cfg->flood_attempts = 5;
 	if (udb_cfg->flood_period == 0)
 		udb_cfg->flood_period = 60;
+	udb_cfg->config_flood_attempts = udb_cfg->flood_attempts;
+	udb_cfg->config_flood_period = udb_cfg->flood_period;
 
 	return 1;
 }

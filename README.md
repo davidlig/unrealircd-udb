@@ -117,6 +117,16 @@ Detailed technical documentation is available in the `doc/` directory:
 
 ### Channel Authentication
 
+- UDB accepts only Argon2id (`$argon2id$...`, optionally prefixed with
+  `argon2id:`) and bcrypt (`$2a$`, `$2b$`, or `$2y$`, optionally prefixed with
+  `bcrypt:`). Configure a matching `challenge` as `argon2id` (or `argon2`) or
+  `bcrypt`. Plaintext, MD5, SHA-256, Unix crypt, and unrecognized challenge
+  names are rejected, including existing stored credentials.
+- Failed credential checks are rate-limited per UDB profile and source IP using
+  `S::flood` or `udb::password-flood`; the in-memory tracker is bounded.
+- `N::<nick>::access` may contain one or more comma- or whitespace-separated
+  IPv4 or IPv6 CIDRs. A valid nick password also requires a matching CIDR for
+  `/NICK` and `/GHOST`.
 - A channel founder receives only `+q` after identifying with the configured
   UDB nick profile.
 - A successful `C::<#channel>::pass` / `challenge` authentication grants only
@@ -124,6 +134,46 @@ Detailed technical documentation is available in the `doc/` directory:
 - Replacing or deleting the founder, password, challenge, or complete channel
   profile reconciles the live channel and removes UDB-managed privileges that
   are no longer valid.
+- `INVITE <nick> <channel> <password>` validates a channel password and gives a
+  local target one five-minute, one-use entry grant. That grant bypasses only
+  the UDB password check and never grants `+a`; `JOIN <channel> <password>`
+  continues to grant `+a`.
+- `C::<#channel>::persistent` sets native `+P` when `chanmodes/permanent` is
+  loaded. UDB does not emulate persistence if that handler is unavailable.
+- `C::<#channel>::options *1` protects locally-added `+b` entries from removal
+  by anyone other than their recorded owner, an identified founder, or an oper.
+
+### IP Policies
+
+- `I::<ip-or-host>::nolines <types>` creates an UnrealIRCd ban exception using
+  the child value, for example `GZQSTmc`. UDB only removes exceptions it created.
+- Include `c` in `nolines` to exempt that IP/host from UDB's clone throttle.
+- `I::<ip-or-host>::host <hostname>` overrides local clients and restores their
+  original host fields when the record is replaced, removed, or the module unloads.
+
+### Settings and Links
+
+- `S::quit_clones <message>` supplies the UDB clone-limit disconnect message.
+  `S::quit_ips <message>` is retained as validated settings state for IP-limit
+  handling; no separate IP-limit hook currently consumes it.
+- `S::flood <attempts>:<seconds>` overrides the active UDB password-flood
+  configuration. Removing it restores the `udb::password-flood` value.
+- `S::encryption_key <64-hex-chars>` and `S::suffix <.domain>` enable deterministic
+  UDB vhosts for local clients. UDB uses HMAC-SHA-256 over the client's original
+  IP and host, emits the first 16 digest bytes as 32 lowercase hexadecimal
+  characters, and appends the suffix. Both settings are required; replacing or
+  removing either setting immediately updates or restores connected local clients.
+  The key is a 256-bit hexadecimal HMAC key stored as a normal UDB setting, not
+  an encryption key for UDB files. An explicit `N::<nick>::vhost` takes precedence.
+  Suffixes must be valid dotted hostnames and leave room for the 32-character label.
+- Service settings (`nickserv`, `chanserv`, and `ipserv`) must be masks in
+  `nick!user@host` form. They drive the corresponding service identity helpers.
+- Select exactly one UDB propagator source: either `udb::propagator` or one
+  `L::<server>::options` record with the propagator bit. Zero or multiple sources
+  reject remote UDB writes. Debug notices redact diagnostic detail.
+- The `L::options` allow-clients bit is accepted and reported but deliberately
+  not enforced: this module does not identify a safe UnrealIRCd hook for that
+  leaf-client policy.
 
 
 ---

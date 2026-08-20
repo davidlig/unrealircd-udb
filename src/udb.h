@@ -19,9 +19,10 @@
 #define UDB_H
 
 #include "unrealircd.h"
+#include <openssl/hmac.h>
 
-#define UDB_VERSION       "4.0.0"
-#define UDB_DB_SUBDIR     "data"
+#define UDB_VERSION   "4.0.0"
+#define UDB_DB_SUBDIR "data"
 
 /* ========================================================================
  * Data Structures
@@ -48,63 +49,76 @@
  * ======================================================================== */
 
 typedef struct UdbRecord UdbRecord;
-typedef struct UdbBlock  UdbBlock;
+typedef struct UdbBlock UdbBlock;
+typedef struct UdbSyncSession UdbSyncSession;
+
+#define UDB_SYNC_TIMEOUT 60
 
 struct UdbRecord {
-	char          *key;         /* Record key (nick, #channel, ip, etc.) */
-	unsigned int   id;          /* Internal sequence ID */
-	char          *data_str;    /* String data value (NULL if numeric) */
-	unsigned long  data_num;    /* Numeric data value */
-	UdbRecord     *hash_next;   /* Next entry in hash bucket */
-	UdbRecord     *parent;      /* Parent record */
-	UdbRecord     *sibling;     /* Next sibling at same level */
-	UdbRecord     *child;       /* First child record */
-	unsigned char  block_idx;   /* Block index (0-5) for fast parent lookups */
-	unsigned int   is_b64:1;    /* 1 if key is base64-encoded */
-	unsigned int   is_dynamic_key:1; /* 1 if key was dynamically allocated */
+	char *key;                       /* Record key (nick, #channel, ip, etc.) */
+	unsigned int id;                 /* Internal sequence ID */
+	char *data_str;                  /* String data value (NULL if numeric) */
+	unsigned long data_num;          /* Numeric data value */
+	UdbRecord *hash_next;            /* Next entry in hash bucket */
+	UdbRecord *parent;               /* Parent record */
+	UdbRecord *sibling;              /* Next sibling at same level */
+	UdbRecord *child;                /* First child record */
+	unsigned char block_idx;         /* Block index (0-5) for fast parent lookups */
+	unsigned int is_b64 : 1;         /* 1 if key is base64-encoded */
+	unsigned int is_dynamic_key : 1; /* 1 if key was dynamically allocated */
 };
 
 struct UdbBlock {
-	UdbRecord     *tree;        /* Root node of the record tree */
-	UdbBlock      *next;        /* Next block in global chain */
-	unsigned long  checksum;    /* CRC32 of serialized data */
-	char          *filepath;    /* Absolute path to block file on disk */
-	unsigned int   id;          /* Block sequence ID */
-	unsigned long  filesize;    /* Current serialized data size */
-	time_t         modified_at; /* Timestamp of last modification */
-	Client        *syncing_from;/* Server currently syncing this block to us */
-	unsigned int   record_count;/* Total number of records in tree */
-	char           letter;      /* Block identifier: N, C, I, S, L, K */
-	unsigned int   version;     /* Data format version */
+	UdbRecord *tree;           /* Root node of the record tree */
+	UdbBlock *next;            /* Next block in global chain */
+	unsigned long checksum;    /* CRC32 of serialized data */
+	char *filepath;            /* Absolute path to block file on disk */
+	unsigned int id;           /* Block sequence ID */
+	unsigned long filesize;    /* Current serialized data size */
+	time_t modified_at;        /* Timestamp of last modification */
+	Client *syncing_from;      /* Server currently syncing this block to us */
+	UdbSyncSession *session;   /* Isolated V4 staged synchronization, if any */
+	unsigned int record_count; /* Total number of records in tree */
+	char letter;               /* Block identifier: N, C, I, S, L, K */
+	unsigned int version;      /* Data format version */
+};
+
+/* A received V4 transfer never touches the active tree until END validates. */
+struct UdbSyncSession {
+	Client *peer;
+	char txid[32];
+	time_t deadline;
+	UdbRecord *tree;
+	unsigned int record_count;
 };
 
 /* ========================================================================
  * Block Identifiers
  * ======================================================================== */
-#define UDB_BLOCK_NICKS     'N'
-#define UDB_BLOCK_CHANNELS  'C'
-#define UDB_BLOCK_IPS       'I'
-#define UDB_BLOCK_SETTINGS  'S'
-#define UDB_BLOCK_LINKS     'L'
-#define UDB_BLOCK_LINES     'K'
+#define UDB_BLOCK_NICKS    'N'
+#define UDB_BLOCK_CHANNELS 'C'
+#define UDB_BLOCK_IPS      'I'
+#define UDB_BLOCK_SETTINGS 'S'
+#define UDB_BLOCK_LINKS    'L'
+#define UDB_BLOCK_LINES    'K'
 
-#define UDB_NUM_BLOCKS       6
+#define UDB_NUM_BLOCKS 6
 
 /* ========================================================================
  * Sub-record Keys
  * ======================================================================== */
 
 /* Nick sub-records: N::<nick>::<key> <value> */
-#define NKEY_ACCESS     "access"     /* IP/CIDR access restriction */
-#define NKEY_PASS       "pass"       /* Password hash */
-#define NKEY_VHOST      "vhost"      /* Virtual host */
-#define NKEY_FORBID     "forbid"     /* Forbidden nick (value = reason) */
-#define NKEY_SUSPENDED  "suspended"  /* Suspended nick (value = reason) */
-#define NKEY_OPER       "oper"       /* Oper level bitmask (*N) */
-#define NKEY_CHALLENGE  "challenge"  /* Password hash method */
-#define NKEY_MODES      "modes"      /* Allowed oper modes */
-#define NKEY_SNOMASKS   "snomasks"   /* Allowed snomasks */
-#define NKEY_SWHOIS     "swhois"     /* Custom SWHOIS line */
+#define NKEY_ACCESS    "access"    /* IP/CIDR access restriction */
+#define NKEY_PASS      "pass"      /* Password hash */
+#define NKEY_VHOST     "vhost"     /* Virtual host */
+#define NKEY_FORBID    "forbid"    /* Forbidden nick (value = reason) */
+#define NKEY_SUSPENDED "suspended" /* Suspended nick (value = reason) */
+#define NKEY_OPER      "oper"      /* Oper level bitmask (*N) */
+#define NKEY_CHALLENGE "challenge" /* Password hash method */
+#define NKEY_MODES     "modes"     /* Allowed oper modes */
+#define NKEY_SNOMASKS  "snomasks"  /* Allowed snomasks */
+#define NKEY_SWHOIS    "swhois"    /* Custom SWHOIS line */
 
 /* Channel sub-records: C::<#chan>::<key> <value> */
 #define CKEY_FOUNDER    "founder"    /* Founder nick */
@@ -116,83 +130,102 @@ struct UdbBlock {
 #define CKEY_PASS       "pass"       /* Channel password for +ao */
 #define CKEY_CHALLENGE  "challenge"  /* Channel password hash method */
 #define CKEY_OPTIONS    "options"    /* Channel option flags (*N) */
+#define CKEY_PERSISTENT "persistent" /* Keep the channel alive through native +P */
 
 /* IP sub-records: I::<ip|host>::<key> <value> */
-#define IKEY_CLONES     "clones"     /* Max clones allowed (*N) */
-#define IKEY_NOLINES    "nolines"    /* Exempt from *lines (GZQST chars) */
-#define IKEY_HOST       "host"       /* Reverse DNS override */
+#define IKEY_CLONES  "clones"  /* Max clones allowed (*N) */
+#define IKEY_NOLINES "nolines" /* Ban exception types (eg. GZQSTmc) */
+#define IKEY_HOST    "host"    /* Reverse DNS override */
 
 /* Settings sub-records: S::<key> <value> */
-#define SKEY_CRYPT_KEY  "encryption_key"  /* Host cloaking key */
-#define SKEY_SUFFIX     "suffix"          /* Virtual host suffix */
-#define SKEY_NICKSERV   "nickserv"        /* NickServ bot mask */
-#define SKEY_CHANSERV   "chanserv"        /* ChanServ bot mask */
-#define SKEY_IPSERV     "ipserv"          /* IpServ bot mask */
-#define SKEY_CLONES     "clones"          /* Global max clones (*N) */
-#define SKEY_QUIT_IPS   "quit_ips"        /* Quit message for IP limit */
+#define SKEY_CRYPT_KEY   "encryption_key" /* Host cloaking key */
+#define SKEY_SUFFIX      "suffix"         /* Virtual host suffix */
+#define SKEY_NICKSERV    "nickserv"       /* NickServ bot mask */
+#define SKEY_CHANSERV    "chanserv"       /* ChanServ bot mask */
+#define SKEY_IPSERV      "ipserv"         /* IpServ bot mask */
+#define SKEY_CLONES      "clones"         /* Global max clones (*N) */
+#define SKEY_QUIT_IPS    "quit_ips"       /* Quit message for IP limit */
 #define SKEY_QUIT_CLONES "quit_clones"    /* Quit message for clone limit */
-#define SKEY_CHALLENGE  "challenge"       /* Global hash method */
-#define SKEY_FLOOD      "flood"           /* Password flood limit V:S */
-#define SKEY_PREFIXES   "prefixes"        /* Channel mode prefixes */
+#define SKEY_CHALLENGE   "challenge"      /* Global hash method */
+#define SKEY_FLOOD       "flood"          /* Password flood limit V:S */
+#define SKEY_PREFIXES    "prefixes"       /* Channel mode prefixes */
 
 /* Link sub-records: L::<server>::<key> <value> */
-#define LKEY_OPTIONS    "options"         /* Link option flags (*N) */
+#define LKEY_OPTIONS "options" /* Link option flags (*N) */
 
 /* Line sub-records: K::<type>::<pattern>::<key> <value> */
-#define KKEY_TYPE       "type"            /* Spamfilter target type */
-#define KKEY_ACTION     "action"          /* Spamfilter action */
-#define KKEY_DURATION   "duration"        /* TKL duration */
-#define KKEY_REASON     "reason"          /* Ban reason */
+#define KKEY_TYPE     "type"     /* Spamfilter target type */
+#define KKEY_ACTION   "action"   /* Spamfilter action */
+#define KKEY_DURATION "duration" /* TKL duration */
+#define KKEY_REASON   "reason"   /* Ban reason */
+
+/* Spamfilter pattern encoding: K::F::b64:<RFC 4648 base64>::... */
+#define UDB_SPAMFILTER_B64_PREFIX  "b64:"
+#define UDB_SPAMFILTER_PATTERN_MAX 3072
 
 /* ========================================================================
  * Error Codes (for DB ERR protocol messages)
  * ======================================================================== */
-#define UDB_ERR_NO_BLOCK    1   /* Block does not exist */
-#define UDB_ERR_OFFSET      2   /* Data offset mismatch */
-#define UDB_ERR_NOT_HUB     3   /* Only hub can insert/delete */
-#define UDB_ERR_PARAMS      4   /* Missing parameters */
-#define UDB_ERR_CANNOT_OPEN 5   /* Cannot open block file */
-#define UDB_ERR_FATAL       6   /* Fatal / internal error */
-#define UDB_ERR_SYNC_ACTIVE 7   /* Sync already in progress */
-#define UDB_ERR_NO_SYNC     8   /* No sync was requested */
-#define UDB_ERR_FORBIDDEN   9   /* Forbidden server */
-#define UDB_ERR_DUPLICATE  10   /* Duplicate record */
+#define UDB_ERR_NO_BLOCK    1  /* Block does not exist */
+#define UDB_ERR_OFFSET      2  /* Data offset mismatch */
+#define UDB_ERR_NOT_HUB     3  /* Only hub can insert/delete */
+#define UDB_ERR_PARAMS      4  /* Missing parameters */
+#define UDB_ERR_CANNOT_OPEN 5  /* Cannot open block file */
+#define UDB_ERR_FATAL       6  /* Fatal / internal error */
+#define UDB_ERR_SYNC_ACTIVE 7  /* Sync already in progress */
+#define UDB_ERR_NO_SYNC     8  /* No sync was requested */
+#define UDB_ERR_FORBIDDEN   9  /* Forbidden server */
+#define UDB_ERR_DUPLICATE   10 /* Duplicate record */
+
+/* SHA-256 is deliberately handled by UDB, not Auth_Check(). */
+#define UDB_AUTHTYPE_SHA256 1001
 
 /* ========================================================================
  * Oper Levels (bitmask stored in N::<nick>::oper *<value>)
  * ======================================================================== */
-#define UDB_OPER_HELPER    0x1  /* Pre-operator: receives +h automatically */
-#define UDB_OPER_ADMIN     0x2  /* Admin: receives +oa */
-#define UDB_OPER_ROOT      0x4  /* Root: receives +oN, can /rehash /restart */
+#define UDB_OPER_HELPER 0x1 /* Pre-operator: receives +h automatically */
+#define UDB_OPER_ADMIN  0x2 /* Admin: receives +oa */
+#define UDB_OPER_ROOT   0x4 /* Root: receives +oN, can /rehash /restart */
 
 /* ========================================================================
  * Channel Option Flags (bitmask in C::<#chan>::options *<value>)
  * ======================================================================== */
-#define UDB_CHOPT_PROTECT_BANS  0x1  /* Only ban author can remove their bans */
-#define UDB_CHOPT_LOCK_MODES    0x2  /* Channel modes are locked */
+#define UDB_CHOPT_PROTECT_BANS 0x1 /* Only ban author can remove their bans */
+#define UDB_CHOPT_LOCK_MODES   0x2 /* Channel modes are locked */
 
 /* ========================================================================
  * Link Option Flags (bitmask in L::<server>::options *<value>)
  * ======================================================================== */
-#define UDB_LNKOPT_DEBUG         0x1  /* Debug: receives all UDB mode changes */
-#define UDB_LNKOPT_PROPAGATOR    0x2  /* Propagator: only server that can push data */
-#define UDB_LNKOPT_ALLOW_CLIENTS 0x4  /* Allow clients on non-UDB leaf uline */
+#define UDB_LNKOPT_DEBUG         0x1 /* Debug: receives all UDB mode changes */
+#define UDB_LNKOPT_PROPAGATOR    0x2 /* Propagator: only server that can push data */
+#define UDB_LNKOPT_ALLOW_CLIENTS 0x4 /* Allow clients on non-UDB leaf uline */
 
 /* ========================================================================
  * Hash Table Configuration
  * ======================================================================== */
-#define UDB_HASH_SIZE  2048
-#define UDB_HASH_MASK  (UDB_HASH_SIZE - 1)
+#define UDB_HASH_SIZE              2048
+#define UDB_HASH_MASK              (UDB_HASH_SIZE - 1)
+#define UDB_PASSWORD_FAILURE_SLOTS 256
+
+typedef struct UdbPasswordFailure {
+	char profile[CHANNELLEN + 1];
+	char ip[INET6_ADDRSTRLEN];
+	unsigned char block_idx;
+	unsigned int attempts;
+	time_t since;
+} UdbPasswordFailure;
 
 /* ========================================================================
  * Module Configuration (parsed from unrealircd.conf udb { } block)
  * ======================================================================== */
 typedef struct UdbConfig {
-	char *db_directory;     /* Directory for database files */
-	char *propagator;       /* Propagator server name */
-	int   max_global_clones;/* Global clone limit (0 = use ircd default) */
-	int   flood_attempts;   /* Password flood: max attempts */
-	int   flood_period;     /* Password flood: time window in seconds */
+	char *db_directory;        /* Directory for database files */
+	char *propagator;          /* Propagator server name */
+	int max_global_clones;     /* Global clone limit (0 = use ircd default) */
+	int flood_attempts;        /* Password flood: max attempts */
+	int flood_period;          /* Password flood: time window in seconds */
+	int config_flood_attempts; /* password-flood value from unrealircd.conf */
+	int config_flood_period;   /* password-flood value from unrealircd.conf */
 } UdbConfig;
 
 /* ========================================================================
@@ -200,8 +233,8 @@ typedef struct UdbConfig {
  * ======================================================================== */
 typedef struct UdbContext {
 	/* Block pointers (indexed by letter for fast lookup) */
-	UdbBlock  *blocks[256];  /* blocks['N'], blocks['C'], etc. */
-	UdbBlock  *block_list;   /* Linked list of all blocks */
+	UdbBlock *blocks[256]; /* blocks['N'], blocks['C'], etc. */
+	UdbBlock *block_list;  /* Linked list of all blocks */
 
 	/* Root trees (convenience aliases for blocks[X]->tree) */
 	UdbRecord *nicks;
@@ -215,105 +248,130 @@ typedef struct UdbContext {
 	UdbRecord **hash_table[UDB_NUM_BLOCKS];
 
 	/* State */
-	Client    *propagator;   /* Currently known propagator server */
-	int        block_count;
-	int        total_records;
+	Client *propagator; /* Currently known propagator server */
+	char *quit_ips;
+	char *quit_clones;
+	char *encryption_key;
+	char *suffix;
+	char *nickserv_mask;
+	char *chanserv_mask;
+	char *ipserv_mask;
+	int block_count;
+	int total_records;
 } UdbContext;
 
 /* ========================================================================
  * Global State (defined in udb_core.inc.c)
  * ======================================================================== */
 static UdbContext *udb_ctx = NULL;
-static UdbConfig  *udb_cfg = NULL;
+static UdbConfig *udb_cfg = NULL;
+static UdbPasswordFailure udb_password_failures[UDB_PASSWORD_FAILURE_SLOTS];
 
 /* ========================================================================
  * Core Engine API (udb_core.inc.c)
  * ======================================================================== */
 
 /* Initialization and shutdown */
-static int  udb_engine_init(void);
+static int udb_engine_init(void);
 static void udb_engine_shutdown(void);
 
 /* Block management */
-static UdbBlock  *udb_block_create(char letter, const char *name);
-static int        udb_block_load(UdbBlock *block);
-static void       udb_block_unload(UdbBlock *block);
-static void       udb_block_reset(UdbBlock *block);
-static void       udb_blocks_load_all(void);
-static void       udb_blocks_save_all(void);
-static UdbBlock  *udb_block_by_letter(char letter);
+static UdbBlock *udb_block_create(char letter, const char *name);
+static int udb_block_load(UdbBlock *block);
+static void udb_block_unload(UdbBlock *block);
+static void udb_block_reset(UdbBlock *block);
+static void udb_blocks_load_all(void);
+static void udb_blocks_save_all(void);
+static UdbBlock *udb_block_by_letter(char letter);
 
 /* Record operations */
 static UdbRecord *udb_record_find(const char *key, UdbRecord *parent);
 static UdbRecord *udb_record_create(UdbRecord *parent);
 static UdbRecord *udb_record_insert(UdbBlock *block, UdbRecord *parent,
-                                     const char *key, const char *data_str,
-                                     unsigned long data_num, int persist);
+                                    const char *key, const char *data_str,
+                                    unsigned long data_num, int persist);
 static UdbRecord *udb_record_find_path(UdbBlock *block, const char *path);
 static UdbRecord *udb_record_delete(UdbBlock *block, UdbRecord *rec, int persist);
-static void       udb_record_free_tree(UdbRecord *rec);
+static void udb_record_free_tree(UdbRecord *rec);
 
 /* Hash operations */
 static void udb_hash_init(void);
 static void udb_hash_destroy(void);
 static void udb_hash_insert_record(UdbRecord *rec, int block_idx, const char *key);
-static int  udb_hash_remove_record(UdbRecord *rec, int block_idx, const char *key);
+static int udb_hash_remove_record(UdbRecord *rec, int block_idx, const char *key);
 static UdbRecord *udb_hash_find(int block_idx, const char *key);
 
 /* File I/O */
-static int        udb_file_save_block(UdbBlock *block);
-static int        udb_file_load_block(UdbBlock *block);
+static int udb_file_save_block(UdbBlock *block);
+static int udb_file_load_block(UdbBlock *block);
 static UdbRecord *udb_file_parse_line(UdbBlock *block, char *line);
-static void       udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp,
-                                     char *pathbuf, int pathlen);
+static void udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp,
+                               char *pathbuf, int pathlen);
 
 /* Checksum */
 static unsigned long udb_crc32(const char *data, size_t len);
 static unsigned long udb_compute_block_checksum(UdbBlock *block);
+static unsigned long udb_compute_tree_checksum(UdbRecord *tree);
+static int udb_stage_parse_line(UdbBlock *block, UdbSyncSession *session,
+                                const char *line);
+static int udb_stage_persist_block(UdbBlock *block, UdbSyncSession *session);
+static int udb_block_commit_stage(UdbBlock *block, UdbSyncSession *session,
+                                  unsigned long checksum);
+static void udb_sync_session_free(UdbBlock *block);
 
 /* Block index helpers */
-static int  udb_block_letter_to_index(char letter);
+static int udb_block_letter_to_index(char letter);
 
 /* ========================================================================
  * Protocol API (udb_protocol.inc.c)
  * ======================================================================== */
 static void udb_sync_to_server(Client *server);
-static int  udb_is_udb_server(Client *server);
-static int  udb_is_propagator(Client *server);
+static int udb_is_udb_server(Client *server);
+static int udb_is_propagator(Client *server);
 
 /* ========================================================================
  * Nick API (udb_nicks.inc.c)
  * ======================================================================== */
 static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync);
 static void udb_nick_strip(Client *client, UdbRecord *nick_rec);
-static int  udb_check_password(const char *pass, UdbRecord *profile_rec,
-                               Client *client);
+static int udb_check_password(const char *pass, UdbRecord *profile_rec,
+                              Client *client);
+static int udb_nick_access_allowed(Client *client, UdbRecord *nick_rec);
 static void udb_nick_set_vhost(Client *client, UdbRecord *vhost_rec);
 static void udb_nick_remove_vhost(Client *client);
 static void udb_nick_grant_oper(Client *client, UdbRecord *nick_rec,
-                                 UdbRecord *oper_rec);
+                                UdbRecord *oper_rec);
 static void udb_nick_set_modes(Client *client, UdbRecord *nick_rec,
-                                UdbRecord *mode_rec, const char *modes);
+                               UdbRecord *mode_rec, const char *modes);
 static void udb_nick_set_swhois(Client *client, UdbRecord *nick_rec,
-                                 UdbRecord *swhois_rec);
+                                UdbRecord *swhois_rec);
 static void udb_nick_set_snomasks(Client *client, UdbRecord *nick_rec,
-                                   UdbRecord *snomask_rec);
+                                  UdbRecord *snomask_rec);
 
 /* ========================================================================
  * Channel API (udb_channels.inc.c)
  * ======================================================================== */
 static void udb_channel_apply_record(Channel *channel, UdbRecord *chan_rec,
-                                      const char *subkey, int is_new);
+                                     const char *subkey, int is_new);
 static void udb_channel_remove_record(Channel *channel, UdbRecord *chan_rec,
-                                       const char *subkey);
+                                      const char *subkey);
+static int udb_channels_load(ModuleInfo *modinfo);
 
 /* ========================================================================
  * IP API (udb_ips.inc.c)
  * ======================================================================== */
 static void udb_ip_apply_record(const char *ip_key, UdbRecord *ip_rec,
-                                 const char *subkey, int is_new);
+                                const char *subkey, int is_new);
 static void udb_ip_remove_record(const char *ip_key, UdbRecord *ip_rec,
-                                  const char *subkey);
+                                 const char *subkey);
+static void udb_ip_refresh_derived_hosts(void);
+static void udb_ips_shutdown(void);
+
+/* Settings and link API */
+static int udb_settings_apply_record(UdbRecord *rec);
+static void udb_settings_remove_record(UdbRecord *rec);
+static void udb_link_apply_record(UdbRecord *rec);
+static void udb_link_remove_record(UdbRecord *rec);
 
 /* ========================================================================
  * Lines API (udb_lines.inc.c)
@@ -335,12 +393,12 @@ static const char *udb_get_bot_nick(const char *service_key, int force_default);
 static const char *udb_get_bot_mask(const char *service_key, int force_default);
 
 /* Apply/remove special record effects (dispatcher) */
-static int  udb_apply_special_record(UdbBlock *block, UdbRecord *rec, int is_new);
+static int udb_apply_special_record(UdbBlock *block, UdbRecord *rec, int is_new);
 static void udb_remove_special_record(UdbBlock *block, UdbRecord *rec);
 
 /* Debug output */
 static void udb_send_to_debugs(Client *source, const char *fmt, ...)
-                                __attribute__((format(printf, 2, 3)));
+    __attribute__((format(printf, 2, 3)));
 
 /* Logging helpers - wrap unreal_log for consistent subsystem */
 #define udb_log(level, event_id, client, msg, ...) \

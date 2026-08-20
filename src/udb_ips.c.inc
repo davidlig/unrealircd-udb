@@ -2,24 +2,246 @@
  * Implements IP and host tracking and restrictions for UDB.
  */
 
+typedef struct UdbIpHostState UdbIpHostState;
+struct UdbIpHostState {
+	char key[256];
+	char realhost[HOSTLEN + 1];
+	char cloakedhost[HOSTLEN + 1];
+	char *virthost;
+	long host_umodes;
+	int derived_vhost;
+};
+
+static ModDataInfo *udb_ip_host_md = NULL;
+
+static void udb_ip_restore_host(Client *client, const char *ip_key);
+
+static void udb_ip_host_state_free(ModData *m)
+{
+	UdbIpHostState *state = m->ptr;
+
+	if (!state)
+		return;
+	safe_free(state->virthost);
+	safe_free(state);
+}
+
+static void udb_ip_save_host_state(Client *client, const char *key)
+{
+	UdbIpHostState *state = moddata_local_client(client, udb_ip_host_md).ptr;
+
+	if (state)
+		return;
+	state = safe_alloc(sizeof(*state));
+	strlcpy(state->key, key, sizeof(state->key));
+	strlcpy(state->realhost, client->user->realhost, sizeof(state->realhost));
+	strlcpy(state->cloakedhost, client->user->cloakedhost, sizeof(state->cloakedhost));
+	safe_strdup(state->virthost, client->user->virthost);
+	state->host_umodes = client->umodes & (UMODE_HIDE | UMODE_SETHOST);
+	moddata_local_client(client, udb_ip_host_md).ptr = state;
+}
+
+static int udb_ip_tkl_is_owned(TKL *tkl)
+{
+	return tkl && tkl->set_by && tkl->ptr.banexception &&
+	       tkl->ptr.banexception->reason &&
+	       !strcmp(tkl->set_by, "UDB") &&
+	       !strcmp(tkl->ptr.banexception->reason, "UDB Nolines Exemption");
+}
+
+static int udb_ip_is_throttle_exempt(UdbRecord *ip_rec)
+{
+	UdbRecord *nolines = udb_record_find(IKEY_NOLINES, ip_rec);
+
+	/* 'c' is UnrealIRCd's connect-flood exception type. */
+	return nolines && nolines->data_str &&
+	       (strchr(nolines->data_str, 'c') || strchr(nolines->data_str, 'C'));
+}
+
+static int udb_ip_client_matches(Client *client, const char *ip_key)
+{
+	UdbIpHostState *state;
+
+	if (!client || !MyConnect(client) || !client->user)
+		return 0;
+	state = udb_ip_host_md ? moddata_local_client(client, udb_ip_host_md).ptr : NULL;
+	return (client->ip && !strcasecmp(client->ip, ip_key)) ||
+	       (state && !strcasecmp(state->key, ip_key)) ||
+	       (!state && !strcasecmp(client->user->realhost, ip_key));
+}
+
+static void udb_ip_apply_host(Client *client, const char *ip_key, const char *host)
+{
+	UdbIpHostState *state = moddata_local_client(client, udb_ip_host_md).ptr;
+
+	if (state && state->derived_vhost)
+		udb_ip_restore_host(client, state->key);
+	udb_ip_save_host_state(client, ip_key);
+
+	strlcpy(client->user->realhost, host, sizeof(client->user->realhost));
+	strlcpy(client->user->cloakedhost, host, sizeof(client->user->cloakedhost));
+	safe_strdup(client->user->virthost, host);
+}
+
+static void udb_ip_restore_host(Client *client, const char *ip_key)
+{
+	UdbIpHostState *state = moddata_local_client(client, udb_ip_host_md).ptr;
+
+	if (!state || strcasecmp(state->key, ip_key))
+		return;
+	strlcpy(client->user->realhost, state->realhost, sizeof(client->user->realhost));
+	strlcpy(client->user->cloakedhost, state->cloakedhost, sizeof(client->user->cloakedhost));
+	safe_strdup(client->user->virthost, state->virthost);
+	client->umodes = (client->umodes & ~(UMODE_HIDE | UMODE_SETHOST)) |
+	                 state->host_umodes;
+	udb_ip_host_state_free(&moddata_local_client(client, udb_ip_host_md));
+	moddata_local_client(client, udb_ip_host_md).ptr = NULL;
+}
+
+static const char *udb_ip_explicit_vhost(Client *client)
+{
+	UdbRecord *nick_rec;
+	UdbRecord *vhost_rec;
+
+	if (!client || !client->user || !udb_ctx || !udb_ctx->nicks)
+		return NULL;
+	nick_rec = udb_record_find(client->name, udb_ctx->nicks);
+	if (!nick_rec && strcmp(client->user->account, "*"))
+		nick_rec = udb_record_find(client->user->account, udb_ctx->nicks);
+	vhost_rec = nick_rec ? udb_record_find(NKEY_VHOST, nick_rec) : NULL;
+	return vhost_rec ? vhost_rec->data_str : NULL;
+}
+
+static int udb_ip_derive_vhost(Client *client, char *host, size_t hostlen)
+{
+	UdbIpHostState *state = moddata_local_client(client, udb_ip_host_md).ptr;
+	const char *realhost = state ? state->realhost : client->user->realhost;
+	unsigned char key[32], digest[EVP_MAX_MD_SIZE];
+	unsigned int digestlen;
+	char input[HOSTLEN + INET6_ADDRSTRLEN + 32];
+	size_t i;
+
+	if (!udb_ctx || !udb_ctx->encryption_key || !udb_ctx->suffix || !client->ip)
+		return 0;
+	for (i = 0; i < sizeof(key); i++)
+		sscanf(udb_ctx->encryption_key + (i * 2), "%2hhx", &key[i]);
+	snprintf(input, sizeof(input), "UDB-vhost-v1|%s|%s", client->ip, realhost);
+	if (!HMAC(EVP_sha256(), key, sizeof(key), (unsigned char *)input, strlen(input),
+	          digest, &digestlen) ||
+	    digestlen < 16)
+		return 0;
+	for (i = 0; i < 16; i++)
+		snprintf(host + (i * 2), hostlen - (i * 2), "%02x", digest[i]);
+	strlcat(host, udb_ctx->suffix, hostlen);
+	return 1;
+}
+
+static void udb_ip_refresh_derived_hosts(void)
+{
+	Client *client;
+
+	if (!udb_ip_host_md)
+		return;
+	list_for_each_entry(client, &lclient_list, lclient_node)
+	{
+		UdbIpHostState *state;
+		const char *explicit_vhost;
+		char host[HOSTLEN + 1];
+
+		if (!client->user || !MyConnect(client))
+			continue;
+		state = moddata_local_client(client, udb_ip_host_md).ptr;
+		explicit_vhost = udb_ip_explicit_vhost(client);
+		if (explicit_vhost)
+		{
+			/* A nick vhost supersedes a derived vhost without restoring over it. */
+			if (state && state->derived_vhost)
+			{
+				udb_ip_host_state_free(&moddata_local_client(client, udb_ip_host_md));
+				moddata_local_client(client, udb_ip_host_md).ptr = NULL;
+			}
+			continue;
+		}
+		if (!udb_ip_derive_vhost(client, host, sizeof(host)))
+		{
+			if (state && state->derived_vhost)
+			{
+				userhost_save_current(client);
+				udb_ip_restore_host(client, state->key);
+				userhost_changed(client);
+			}
+			continue;
+		}
+		if (state && !state->derived_vhost)
+			continue; /* I::host remains a stronger, explicit IP override. */
+		if (state && state->derived_vhost && !strcmp(client->user->virthost, host))
+			continue;
+		userhost_save_current(client);
+		udb_ip_save_host_state(client, client->ip);
+		state = moddata_local_client(client, udb_ip_host_md).ptr;
+		safe_strdup(client->user->virthost, host);
+		client->umodes |= UMODE_HIDE | UMODE_SETHOST;
+		state->derived_vhost = 1;
+		sendto_server(client, 0, 0, NULL, ":%s SETHOST %s", client->id, host);
+		userhost_changed(client);
+	}
+}
+
+static void udb_ip_reconcile_host(const char *ip_key, const char *host)
+{
+	Client *client;
+
+	list_for_each_entry(client, &lclient_list, lclient_node)
+	{
+		if (!udb_ip_client_matches(client, ip_key))
+			continue;
+		if (host)
+			udb_ip_apply_host(client, ip_key, host);
+		else
+			udb_ip_restore_host(client, ip_key);
+	}
+}
+
 static void udb_ip_apply_record(const char *ip_key, UdbRecord *ip_rec, const char *subkey, int is_new)
 {
-	if (!strcmp(subkey, IKEY_NOLINES)) {
-		if (ip_rec->data_str) {
+	(void)is_new;
+	if (!strcmp(subkey, IKEY_NOLINES))
+	{
+		UdbRecord *nolines = udb_record_find(IKEY_NOLINES, ip_rec);
+		TKL *tkl = find_tkl_banexception(TKL_EXCEPTION, "*", ip_key, 0);
+
+		if (udb_ip_tkl_is_owned(tkl))
+		{
+			tkl_del_line(tkl);
+			tkl = NULL;
+		}
+		if (!tkl && nolines && nolines->data_str && *nolines->data_str)
+		{
 			tkl_add_banexception(TKL_EXCEPTION, "*", ip_key, NULL,
 			                     "UDB Nolines Exemption", "UDB", 0, TStime(), 0,
-			                     ip_rec->data_str, 0);
+			                     nolines->data_str, 0);
 		}
+	} else if (!strcmp(subkey, IKEY_HOST))
+	{
+		UdbRecord *host = udb_record_find(IKEY_HOST, ip_rec);
+		if (host && host->data_str && *host->data_str)
+			udb_ip_reconcile_host(ip_key, host->data_str);
 	}
 }
 
 static void udb_ip_remove_record(const char *ip_key, UdbRecord *ip_rec, const char *subkey)
 {
-	if (!strcmp(subkey, IKEY_NOLINES)) {
+	if (!strcmp(subkey, IKEY_NOLINES))
+	{
 		TKL *tkl;
-		if ((tkl = find_tkl_banexception(TKL_EXCEPTION, "*", ip_key, 0))) {
+		if ((tkl = find_tkl_banexception(TKL_EXCEPTION, "*", ip_key, 0)) &&
+		    udb_ip_tkl_is_owned(tkl))
+		{
 			tkl_del_line(tkl);
 		}
+	} else if (!strcmp(subkey, IKEY_HOST))
+	{
+		udb_ip_reconcile_host(ip_key, NULL);
 	}
 }
 
@@ -37,23 +259,26 @@ static int udb_hook_pre_connect(Client *client)
 	if (!ip_rec && client->user)
 		ip_rec = udb_hash_find(udb_block_letter_to_index('I'), client->user->realhost);
 
-	if (ip_rec) {
+	if (ip_rec)
+	{
 		/* Apply Clone Limit */
 		sub_rec = udb_record_find(IKEY_CLONES, ip_rec);
 		if (sub_rec && sub_rec->data_num > 0)
 			limit = (int)sub_rec->data_num;
-		
+
 		/* Apply Host Override */
 		sub_rec = udb_record_find(IKEY_HOST, ip_rec);
-		if (sub_rec && sub_rec->data_str && client->user) {
-			strlcpy(client->user->realhost, sub_rec->data_str, sizeof(client->user->realhost));
-			strlcpy(client->user->cloakedhost, sub_rec->data_str, sizeof(client->user->cloakedhost));
-			safe_strdup(client->user->virthost, sub_rec->data_str);
-		}
+		if (sub_rec && sub_rec->data_str && *sub_rec->data_str && client->user)
+			udb_ip_apply_host(client, ip_rec->key, sub_rec->data_str);
+
+		if (udb_ip_is_throttle_exempt(ip_rec))
+			return HOOK_CONTINUE;
 	}
+	udb_ip_refresh_derived_hosts();
 
 	/* Fallback to global clones if no specific IP limit */
-	if (limit == 0 && udb_ctx && udb_ctx->settings) {
+	if (limit == 0 && udb_ctx && udb_ctx->settings)
+	{
 		UdbRecord *g_clones = udb_record_find(SKEY_CLONES, udb_ctx->settings);
 		if (g_clones && g_clones->data_num > 0)
 			limit = (int)g_clones->data_num;
@@ -64,7 +289,8 @@ static int udb_hook_pre_connect(Client *client)
 
 	int clone_count = 0;
 	Client *c;
-	list_for_each_entry(c, &lclient_list, lclient_node) {
+	list_for_each_entry(c, &lclient_list, lclient_node)
+	{
 		if (c->ip && !strcmp(c->ip, client->ip))
 			clone_count++;
 	}
@@ -72,12 +298,7 @@ static int udb_hook_pre_connect(Client *client)
 	if (clone_count < limit)
 		return 0;
 
-	const char *quit_msg = "Too many connections from your IP";
-	if (udb_ctx && udb_ctx->settings) {
-		UdbRecord *qmsg = udb_record_find("quit_clones", udb_ctx->settings);
-		if (qmsg && qmsg->data_str)
-			quit_msg = qmsg->data_str;
-	}
+	const char *quit_msg = (udb_ctx && udb_ctx->quit_clones) ? udb_ctx->quit_clones : "Too many connections from your IP";
 
 	udb_log(ULOG_INFO, "UDB_CLONES", client,
 	        "Rejecting $client.ip (Exceeds UDB clone limit of $limit)",
@@ -86,7 +307,52 @@ static int udb_hook_pre_connect(Client *client)
 	return HOOK_DENY;
 }
 
+static int udb_hook_local_quit(Client *client, MessageTag *mtags, const char *comment)
+{
+	UdbIpHostState *state;
+
+	(void)mtags;
+	(void)comment;
+	if (!client || !client->user || !udb_ip_host_md)
+		return HOOK_CONTINUE;
+	state = moddata_local_client(client, udb_ip_host_md).ptr;
+	if (state)
+		udb_ip_restore_host(client, state->key);
+	return HOOK_CONTINUE;
+}
+
+static void udb_ips_shutdown(void)
+{
+	Client *client;
+	UdbRecord *ip_rec;
+
+	if (udb_ip_host_md)
+	{
+		list_for_each_entry(client, &lclient_list, lclient_node)
+		{
+			UdbIpHostState *state = moddata_local_client(client, udb_ip_host_md).ptr;
+			if (state && client->user)
+				udb_ip_restore_host(client, state->key);
+		}
+	}
+	if (udb_ctx && udb_ctx->ips)
+	{
+		for (ip_rec = udb_ctx->ips->child; ip_rec; ip_rec = ip_rec->sibling)
+			udb_ip_remove_record(ip_rec->key, ip_rec, IKEY_NOLINES);
+	}
+}
+
 static void udb_ips_init(ModuleInfo *modinfo)
 {
+	ModDataInfo mreq;
+
+	memset(&mreq, 0, sizeof(mreq));
+	mreq.name = "udb_ip_host_state";
+	mreq.type = MODDATATYPE_LOCAL_CLIENT;
+	mreq.free = udb_ip_host_state_free;
+	udb_ip_host_md = ModDataAdd(modinfo->handle, mreq);
+	if (!udb_ip_host_md)
+		return;
 	HookAdd(modinfo->handle, HOOKTYPE_PRE_LOCAL_CONNECT, 0, udb_hook_pre_connect);
+	HookAdd(modinfo->handle, HOOKTYPE_LOCAL_QUIT, 0, udb_hook_local_quit);
 }
