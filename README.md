@@ -171,9 +171,6 @@ Detailed technical documentation is available in the `doc/` directory:
 - Select exactly one UDB propagator source: either `udb::propagator` or one
   `L::<server>::options` record with the propagator bit. Zero or multiple sources
   reject remote UDB writes. Debug notices redact diagnostic detail.
-- The `L::options` allow-clients bit is accepted and reported but deliberately
-  not enforced: this module does not identify a safe UnrealIRCd hook for that
-  leaf-client policy.
 
 
 ---

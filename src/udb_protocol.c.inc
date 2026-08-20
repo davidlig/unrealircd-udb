@@ -129,7 +129,7 @@ static const char *udb_selected_propagator(void)
 		{
 			UdbRecord *options = udb_record_find(LKEY_OPTIONS, link);
 			if (options && !options->data_str &&
-			    !(options->data_num & ~(UDB_LNKOPT_DEBUG | UDB_LNKOPT_PROPAGATOR | UDB_LNKOPT_ALLOW_CLIENTS)) &&
+			    !(options->data_num & ~(UDB_LNKOPT_DEBUG | UDB_LNKOPT_PROPAGATOR)) &&
 			    (options->data_num & UDB_LNKOPT_PROPAGATOR))
 			{
 				selected = link->key;

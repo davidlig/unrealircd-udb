@@ -238,12 +238,9 @@ static void udb_link_apply_record(UdbRecord *rec)
 	if (!rec || !rec->parent || !rec->key || strcmp(rec->key, LKEY_OPTIONS))
 		return;
 	udb_ctx->propagator = NULL;
-	if (rec->data_str || (rec->data_num & ~(UDB_LNKOPT_DEBUG | UDB_LNKOPT_PROPAGATOR | UDB_LNKOPT_ALLOW_CLIENTS)))
+	if (rec->data_str || (rec->data_num & ~(UDB_LNKOPT_DEBUG | UDB_LNKOPT_PROPAGATOR)))
 		udb_log(ULOG_WARNING, "UDB_LINK_OPTIONS", NULL,
 		        "Ignoring invalid L::options for $server", log_data_string("server", rec->parent->key));
-	if (rec->data_num & UDB_LNKOPT_ALLOW_CLIENTS)
-		udb_log(ULOG_WARNING, "UDB_LINK_ALLOW_CLIENTS", NULL,
-		        "L::options allow-clients is validated but not enforced: no safe UnrealIRCd hook is available");
 }
 
 static void udb_link_remove_record(UdbRecord *rec)
@@ -373,7 +370,7 @@ static const char *udb_get_shared_subkey(const char *key)
 	    "pass", "vhost", "oper", "swhois", "snomasks", "modes", "access",
 	    "forbid", "suspended", "challenge", "founder", "topic", "options",
 	    "clones", "nolines", "host", "encryption_key", "suffix", "nickserv",
-	    "chanserv", "ipserv", "quit_ips", "quit_clones", "flood", "prefixes",
+	    "chanserv", "ipserv", "quit_ips", "quit_clones", "flood",
 	    "type", "action", "duration", "reason", NULL};
 	for (int i = 0; known_keys[i]; i++)
 	{

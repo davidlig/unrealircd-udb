@@ -175,7 +175,6 @@ struct UdbSyncSession {
 #define SKEY_QUIT_CLONES "quit_clones"    /* Quit message for clone limit */
 #define SKEY_CHALLENGE   "challenge"      /* Global hash method */
 #define SKEY_FLOOD       "flood"          /* Password flood limit V:S */
-#define SKEY_PREFIXES    "prefixes"       /* Channel mode prefixes */
 
 /* Link sub-records: L::<server>::<key> <value> */
 #define LKEY_OPTIONS "options" /* Link option flags (*N) */
@@ -223,9 +222,8 @@ struct UdbSyncSession {
 /* ========================================================================
  * Link Option Flags (bitmask in L::<server>::options *<value>)
  * ======================================================================== */
-#define UDB_LNKOPT_DEBUG         0x1 /* Debug: receives all UDB mode changes */
-#define UDB_LNKOPT_PROPAGATOR    0x2 /* Propagator: only server that can push data */
-#define UDB_LNKOPT_ALLOW_CLIENTS 0x4 /* Allow clients on non-UDB leaf uline */
+#define UDB_LNKOPT_DEBUG      0x1 /* Debug: receives all UDB mode changes */
+#define UDB_LNKOPT_PROPAGATOR 0x2 /* Propagator: only server that can push data */
 
 /* ========================================================================
  * Hash Table Configuration
@@ -697,12 +695,9 @@ static void udb_link_apply_record(UdbRecord *rec)
 	if (!rec || !rec->parent || !rec->key || strcmp(rec->key, LKEY_OPTIONS))
 		return;
 	udb_ctx->propagator = NULL;
-	if (rec->data_str || (rec->data_num & ~(UDB_LNKOPT_DEBUG | UDB_LNKOPT_PROPAGATOR | UDB_LNKOPT_ALLOW_CLIENTS)))
+	if (rec->data_str || (rec->data_num & ~(UDB_LNKOPT_DEBUG | UDB_LNKOPT_PROPAGATOR)))
 		udb_log(ULOG_WARNING, "UDB_LINK_OPTIONS", NULL,
 		        "Ignoring invalid L::options for $server", log_data_string("server", rec->parent->key));
-	if (rec->data_num & UDB_LNKOPT_ALLOW_CLIENTS)
-		udb_log(ULOG_WARNING, "UDB_LINK_ALLOW_CLIENTS", NULL,
-		        "L::options allow-clients is validated but not enforced: no safe UnrealIRCd hook is available");
 }
 
 static void udb_link_remove_record(UdbRecord *rec)
@@ -832,7 +827,7 @@ static const char *udb_get_shared_subkey(const char *key)
 	    "pass", "vhost", "oper", "swhois", "snomasks", "modes", "access",
 	    "forbid", "suspended", "challenge", "founder", "topic", "options",
 	    "clones", "nolines", "host", "encryption_key", "suffix", "nickserv",
-	    "chanserv", "ipserv", "quit_ips", "quit_clones", "flood", "prefixes",
+	    "chanserv", "ipserv", "quit_ips", "quit_clones", "flood",
 	    "type", "action", "duration", "reason", NULL};
 	for (int i = 0; known_keys[i]; i++)
 	{
@@ -2069,7 +2064,7 @@ static const char *udb_selected_propagator(void)
 		{
 			UdbRecord *options = udb_record_find(LKEY_OPTIONS, link);
 			if (options && !options->data_str &&
-			    !(options->data_num & ~(UDB_LNKOPT_DEBUG | UDB_LNKOPT_PROPAGATOR | UDB_LNKOPT_ALLOW_CLIENTS)) &&
+			    !(options->data_num & ~(UDB_LNKOPT_DEBUG | UDB_LNKOPT_PROPAGATOR)) &&
 			    (options->data_num & UDB_LNKOPT_PROPAGATOR))
 			{
 				selected = link->key;

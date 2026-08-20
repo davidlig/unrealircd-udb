@@ -148,7 +148,6 @@ struct UdbSyncSession {
 #define SKEY_QUIT_CLONES "quit_clones"    /* Quit message for clone limit */
 #define SKEY_CHALLENGE   "challenge"      /* Global hash method */
 #define SKEY_FLOOD       "flood"          /* Password flood limit V:S */
-#define SKEY_PREFIXES    "prefixes"       /* Channel mode prefixes */
 
 /* Link sub-records: L::<server>::<key> <value> */
 #define LKEY_OPTIONS "options" /* Link option flags (*N) */
@@ -196,9 +195,8 @@ struct UdbSyncSession {
 /* ========================================================================
  * Link Option Flags (bitmask in L::<server>::options *<value>)
  * ======================================================================== */
-#define UDB_LNKOPT_DEBUG         0x1 /* Debug: receives all UDB mode changes */
-#define UDB_LNKOPT_PROPAGATOR    0x2 /* Propagator: only server that can push data */
-#define UDB_LNKOPT_ALLOW_CLIENTS 0x4 /* Allow clients on non-UDB leaf uline */
+#define UDB_LNKOPT_DEBUG      0x1 /* Debug: receives all UDB mode changes */
+#define UDB_LNKOPT_PROPAGATOR 0x2 /* Propagator: only server that can push data */
 
 /* ========================================================================
  * Hash Table Configuration
