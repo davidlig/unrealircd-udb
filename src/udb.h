@@ -238,6 +238,7 @@ static void udb_engine_shutdown(void);
 static UdbBlock  *udb_block_create(char letter, const char *name);
 static int        udb_block_load(UdbBlock *block);
 static void       udb_block_unload(UdbBlock *block);
+static void       udb_block_reset(UdbBlock *block);
 static void       udb_blocks_load_all(void);
 static void       udb_blocks_save_all(void);
 static UdbBlock  *udb_block_by_letter(char letter);
@@ -285,8 +286,8 @@ static int  udb_is_propagator(Client *server);
  * ======================================================================== */
 static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync);
 static void udb_nick_strip(Client *client, UdbRecord *nick_rec);
-static int  udb_nick_check_password(const char *nick, const char *pass,
-                                     UdbRecord *nick_rec, Client *client);
+static int  udb_check_password(const char *pass, UdbRecord *profile_rec,
+                               Client *client);
 static void udb_nick_set_vhost(Client *client, UdbRecord *vhost_rec);
 static void udb_nick_remove_vhost(Client *client);
 static void udb_nick_grant_oper(Client *client, UdbRecord *nick_rec,

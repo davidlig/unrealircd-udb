@@ -35,14 +35,29 @@ Stores configurations for registered users.
 
 #### Block C (Channels)
 *   **founder**: Nickname of the original channel founder (granted +q automatically).
+*   **modes**: Channel modes managed by UDB. Parameters follow the mode string.
 *   **topic**: The persistent channel topic.
-*   **mlock**: Mode lock. Prevents specific modes from being added or removed.
-*   **bantime**: Default time (numeric) for banning users.
-*   **bantype**: Default ban type.
+*   **access**: Child records keyed by the identified nicknames allowed to join.
+*   **forbid**: Channel prohibition reason.
+*   **suspended**: Disables registered-channel founder and `+r` behavior.
+*   **pass** and **challenge**: Channel-admin authentication credential.
+*   **options**: Numeric channel options, including the mode lock flag.
+
+### 1.3 Live Channel Reconciliation
+
+UDB owns the founder `+q` state of a registered channel. When `founder` is
+replaced, UDB removes `+q` from the previous present founder and grants it to
+the new identified founder. A founder never receives `+o` from UDB.
+
+`pass` and `challenge` authenticate a joining user for that channel and grant
+only `+a` for the current membership. They are not a source of `+o`. Replacing
+or deleting either credential revokes `+a` only when it was granted by UDB.
+Deleting the channel profile revokes UDB-managed founder and channel-admin
+privileges and clears its persistent topic.
 
 #### Block I (IPs and Hosts)
 *   **clones**: Numeric limit of simultaneous connections (`*<number>`).
-*   **vhost**: Automatic VHost assigned to this IP.
+*   **host**: Host override applied before a local connection completes.
 *   **nolines**: Sanction exemption letters (e.g., `GZT` to exempt from G-Lines, Z-Lines, etc.).
 
 #### Block K (Lines and Bans)
@@ -70,6 +85,9 @@ Global network settings and UDB behavior.
 ## 2. S2S (Server-to-Server) Protocol
 
 The UDB protocol integrates into UnrealIRCd's native S2S traffic using the extended `DB` command.
+Only peers advertising the UDB module capability are synchronized. Real-time
+mutations must originate from the configured `udb::propagator`; a peer that is
+actively serving a block synchronization may only send records for that block.
 **General structure:**
 `:<source_sid> DB <target> <subcommand> <parameters>`
 
@@ -106,10 +124,10 @@ Deletes a node and cascades to children.
 
 ### 2.3 Error Handling (ERR)
 `:<sid> DB <target> ERR <subcommand> <error_code> <extra>`
-*   `2`: UDB_ERR_NO_BLOCK (Specified block does not exist)
-*   `3`: UDB_ERR_NO_SYNC (No synchronization was requested)
-*   `4`: UDB_ERR_SYNC_ACTIVE (A synchronization is already in progress)
-*   `5`: UDB_ERR_FORBIDDEN (Action denied due to permissions)
+*   `1`: UDB_ERR_NO_BLOCK (Specified block does not exist)
+*   `7`: UDB_ERR_SYNC_ACTIVE (A synchronization is already in progress)
+*   `8`: UDB_ERR_NO_SYNC (No synchronization was requested)
+*   `9`: UDB_ERR_FORBIDDEN (Action denied due to permissions)
 
 ---
 

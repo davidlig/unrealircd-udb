@@ -14,14 +14,49 @@ static void udb_md_unserialize(const char *str, ModData *m) {
 
 static int udb_is_udb_server(Client *server) {
     if (!server || !IsServer(server)) return 0;
-    return 1;
+    return udb_server_md && moddata_client(server, udb_server_md).i;
 }
 
 static int udb_is_propagator(Client *server) {
     if (!server || !IsServer(server)) return 0;
-    if (udb_cfg && udb_cfg->propagator && !strcasecmp(server->name, udb_cfg->propagator))
+    if (udb_cfg && udb_cfg->propagator && !strcasecmp(server->name, udb_cfg->propagator)) {
+        udb_ctx->propagator = server;
         return 1;
+    }
     return 0;
+}
+
+/* Paths are passed to the file parser without the block prefix. */
+static UdbBlock *udb_protocol_path_block(const char *path) {
+    const char *component;
+    const char *separator;
+    size_t len;
+    UdbBlock *block;
+
+    if (!path)
+        return NULL;
+
+    len = strlen(path);
+    if (len < 4 || len >= 512 || path[1] != ':' || path[2] != ':' || !path[3])
+        return NULL;
+
+    block = udb_block_by_letter(path[0]);
+    if (!block)
+        return NULL;
+
+    component = path + 3;
+    while ((separator = strstr(component, "::"))) {
+        if (separator == component || !separator[2])
+            return NULL;
+        component = separator + 2;
+    }
+
+    return block;
+}
+
+static void udb_protocol_params_error(Client *client, const char *subcmd) {
+    sendto_one(client, NULL, ":%s DB %s ERR %s %d 0", me.id, client->id,
+               subcmd ? subcmd : "0", UDB_ERR_PARAMS);
 }
 
 static void udb_sync_to_server(Client *server) {
@@ -40,6 +75,28 @@ static int udb_hook_server_sync(Client *client) {
     return 0;
 }
 
+static int udb_hook_server_quit(Client *client, MessageTag *mtags) {
+    UdbBlock *block;
+
+    if (!udb_ctx || !client)
+        return 0;
+
+    if (udb_ctx->propagator == client)
+        udb_ctx->propagator = NULL;
+
+    for (block = udb_ctx->block_list; block; block = block->next) {
+        if (block->syncing_from != client)
+            continue;
+
+        /* Discard an incomplete in-memory snapshot and restore the last
+         * durable block instead of leaving a partially synchronized tree. */
+        block->syncing_from = NULL;
+        udb_block_reset(block);
+        udb_block_load(block);
+    }
+    return 0;
+}
+
 CMD_FUNC(cmd_db) {
     /* Process DB protocol messages sent via server-to-server connection */
 
@@ -50,20 +107,24 @@ CMD_FUNC(cmd_db) {
 
     const char *target = parv[1];
     const char *subcmd = parv[2];
-    int offset = 0;
 
-    if (!strcasecmp(parv[1], "DB") && parc > 3) {
-        target = parv[2];
-        subcmd = parv[3];
-        offset = 1;
+    if (!target || !*target || !subcmd || !*subcmd) {
+        udb_protocol_params_error(client, subcmd);
+        return;
+    }
+
+    if (!udb_is_udb_server(client)) {
+        sendto_one(client, NULL, ":%s DB %s ERR %s %d 0", me.id, client->id,
+                   subcmd, UDB_ERR_FORBIDDEN);
+        return;
     }
     
     char logbuf[512];
-    snprintf(logbuf, sizeof(logbuf), "[UDB] S2S DB received: parc=%d target=%s subcmd=%s offset=%d", parc, target, subcmd, offset);
+    snprintf(logbuf, sizeof(logbuf), "[UDB] S2S DB received: parc=%d target=%s subcmd=%s", parc, target, subcmd);
     unreal_log(ULOG_INFO, "udb", "UDB_CMD_DB", client, "$msg", log_data_string("msg", logbuf));
 
-    int is_broadcast = (strchr(target, '*') || strchr(target, '?')) ? 1 : 0;
-    int is_for_me = is_broadcast || !match_simple(target, me.id) || !match_simple(target, me.name);
+    int is_broadcast = !strcmp(target, "*");
+    int is_for_me = is_broadcast || !strcmp(target, me.id) || !strcmp(target, me.name);
 
     switch (toupper((unsigned char)subcmd[0])) {
         case 'I':
@@ -82,8 +143,7 @@ CMD_FUNC(cmd_db) {
                     
                     if (crc32 != block->checksum) {
                         if (remote_ts > block->modified_at) {
-                            udb_block_unload(block);
-                            sendto_server(client, 0, 0, NULL, ":%s DB * DRP %c", me.id, letter);
+                            udb_block_reset(block);
                             sendto_one(client, NULL, ":%s DB %s RES %c", me.id, client->id, letter);
                             block->syncing_from = client;
                             block->modified_at = remote_ts;
@@ -97,23 +157,28 @@ CMD_FUNC(cmd_db) {
                 sendto_server(client, 0, 0, NULL, ":%s DB %s INF %c %s %s", client->id, target, letter, parv[4], parv[5]);
             }
             else if (!strcasecmp(subcmd, "INS")) {
-                if (parc < 5 + offset) return;
-                const char *path = parv[3 + offset];
-                const char *data = parv[4 + offset];
-                char letter = path[0];
+                if (parc < 5) {
+                    udb_protocol_params_error(client, subcmd);
+                    return;
+                }
+                const char *path = parv[3];
+                const char *data = parv[4];
+                UdbBlock *block = udb_protocol_path_block(path);
+                char letter = path && *path ? path[0] : '0';
+
+                if (!block) {
+                    udb_protocol_params_error(client, subcmd);
+                    return;
+                }
                 
                 if (is_for_me) {
-                    UdbBlock *block = udb_block_by_letter(letter);
-                    if (!block) {
-                        sendto_one(client, NULL, ":%s DB %s ERR INS %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
+                    if (block->syncing_from && block->syncing_from != client) {
+                        sendto_one(client, NULL, ":%s DB %s ERR INS %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
                         return;
                     }
-                    
-                    if (block->syncing_from) {
-                        if (block->syncing_from != client) {
-                            sendto_one(client, NULL, ":%s DB %s ERR INS %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
-                            return;
-                        }
+                    if (block->syncing_from != client && !udb_is_propagator(client)) {
+                        sendto_one(client, NULL, ":%s DB %s ERR INS %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
+                        return;
                     }
 
                     int len = strlen(path) + strlen(data) + 2;
@@ -125,7 +190,8 @@ CMD_FUNC(cmd_db) {
                     if (rec) {
                         udb_apply_special_record(block, rec, 1);
                     }
-                    udb_file_save_block(block);
+                    if (!block->syncing_from)
+                        udb_file_save_block(block);
                     
                     char logbuf[512];
                     snprintf(logbuf, sizeof(logbuf), "[UDB] Inserted record via S2S: %s -> %s", path, data);
@@ -186,33 +252,32 @@ CMD_FUNC(cmd_db) {
 
         case 'D':
             if (!strcasecmp(subcmd, "DEL")) {
-                if (parc < 4) return;
+                if (parc < 4) {
+                    udb_protocol_params_error(client, subcmd);
+                    return;
+                }
                 const char *path = parv[3];
-                char letter = path[0];
+                UdbBlock *block = udb_protocol_path_block(path);
+                char letter = path && *path ? path[0] : '0';
+
+                if (!block) {
+                    udb_protocol_params_error(client, subcmd);
+                    return;
+                }
                 
                 if (is_for_me) {
-                    UdbBlock *block = udb_block_by_letter(letter);
-                    if (!block) {
-                        sendto_one(client, NULL, ":%s DB %s ERR DEL %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
-                        return;
-                    }
-                    
                     if (block->syncing_from) {
                         if (block->syncing_from != client) {
                             sendto_one(client, NULL, ":%s DB %s ERR DEL %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
                             return;
                         }
-                    } else {
-                        Client *prop = udb_ctx->propagator;
-                        if (prop && prop != client) {
-                            sendto_one(client, NULL, ":%s DB %s ERR DEL %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
-                            return;
-                        }
+                    } else if (!udb_is_propagator(client)) {
+                        sendto_one(client, NULL, ":%s DB %s ERR DEL %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
+                        return;
                     }
                     
                     UdbRecord *rec = udb_record_find_path(block, path + 3);
                     if (rec) {
-                        udb_remove_special_record(block, rec);
                         udb_record_delete(block, rec, 1);
                     }
                     
@@ -238,13 +303,16 @@ CMD_FUNC(cmd_db) {
                         sendto_one(client, NULL, ":%s DB %s ERR DRP %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
                         return;
                     }
+                    if (!udb_is_propagator(client)) {
+                        sendto_one(client, NULL, ":%s DB %s ERR DRP %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
+                        return;
+                    }
                     
-                    udb_block_unload(block);
-                    FILE *fp = fopen(block->filepath, "w");
-                    if (fp) fclose(fp);
+                    udb_block_reset(block);
                     block->checksum = 0;
                     block->filesize = 0;
-                    block->record_count = 0;
+                    if (!block->syncing_from)
+                        udb_file_save_block(block);
                     
                     if (!is_broadcast) return;
                 }
@@ -268,8 +336,7 @@ CMD_FUNC(cmd_db) {
                         return;
                     }
                     
-                    udb_block_unload(block);
-                    udb_block_load(block);
+                    udb_file_save_block(block);
                     block->syncing_from = NULL;
                     
                     if (!is_broadcast) return;
@@ -287,6 +354,10 @@ CMD_FUNC(cmd_db) {
                     UdbBlock *block = udb_block_by_letter(letter);
                     if (!block) {
                         sendto_one(client, NULL, ":%s DB %s ERR OPT %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
+                        return;
+                    }
+                    if (!udb_is_propagator(client)) {
+                        sendto_one(client, NULL, ":%s DB %s ERR OPT %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
                         return;
                     }
                     if (parc >= 5) {
@@ -329,7 +400,8 @@ static int udb_protocol_init(ModuleInfo *modinfo) {
     mreq.type = MODDATATYPE_CLIENT;
     mreq.serialize = udb_md_serialize;
     mreq.unserialize = udb_md_unserialize;
-    mreq.sync = 1;
+    mreq.sync = MODDATA_SYNC_NORMAL;
+    mreq.self_write = 1;
     udb_server_md = ModDataAdd(modinfo->handle, mreq);
 
     if (!udb_server_md) {
@@ -341,6 +413,7 @@ static int udb_protocol_init(ModuleInfo *modinfo) {
 
     CommandAdd(modinfo->handle, "DB", cmd_db, MAXPARA, CMD_SERVER);
     HookAdd(modinfo->handle, HOOKTYPE_SERVER_SYNC, 0, udb_hook_server_sync);
+    HookAdd(modinfo->handle, HOOKTYPE_SERVER_QUIT, 0, udb_hook_server_quit);
 
     return 0;
 }

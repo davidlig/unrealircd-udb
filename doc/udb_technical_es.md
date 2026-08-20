@@ -35,14 +35,29 @@ Almacena configuraciones para usuarios registrados.
 
 #### Bloque C (Canales)
 *   **founder**: Nick del fundador original del canal (se le otorga +q automáticamente).
+*   **modes**: Modos de canal gestionados por UDB. Los parámetros siguen a la cadena de modos.
 *   **topic**: El tema (topic) persistente del canal.
-*   **mlock**: Bloqueo de modos (modes lock). Impide que se quiten o pongan ciertos modos.
-*   **bantime**: Tiempo por defecto (numérico) para banear usuarios.
-*   **bantype**: Tipo de baneo predeterminado.
+*   **access**: Subregistros con los nicks identificados que pueden entrar.
+*   **forbid**: Motivo de prohibición del canal.
+*   **suspended**: Desactiva el comportamiento de fundador y `+r` del canal registrado.
+*   **pass** y **challenge**: Credencial de autenticación de administrador del canal.
+*   **options**: Opciones numéricas del canal, incluido el candado de modos.
+
+### 1.3 Reconciliación De Canales En Caliente
+
+UDB controla el estado `+q` del fundador de un canal registrado. Al sustituir
+`founder`, retira `+q` al fundador anterior presente y se lo concede al nuevo
+fundador identificado. UDB nunca concede `+o` al fundador.
+
+`pass` y `challenge` autentican a un usuario al entrar en ese canal y conceden
+únicamente `+a` durante esa membresía. No conceden `+o`. Sustituir o borrar
+cualquiera de esas credenciales revoca `+a` solo cuando UDB lo había concedido.
+Borrar el perfil del canal revoca los privilegios de fundador y administrador
+gestionados por UDB y limpia el topic persistente.
 
 #### Bloque I (IPs y Hosts)
 *   **clones**: Límite numérico de conexiones simultáneas (`*<numero>`).
-*   **vhost**: VHost automático asignado a esta IP.
+*   **host**: Override de host aplicado antes de completar una conexión local.
 *   **nolines**: Letras de exención de sanciones (ej. `GZT` para eximir de G-Lines, Z-Lines, etc.).
 
 #### Bloque K (Líneas y Sanciones)
@@ -70,6 +85,10 @@ Ajustes globales de la red y comportamientos de UDB.
 ## 2. Protocolo S2S (Server-to-Server)
 
 El protocolo UDB se integra en el tráfico S2S nativo de UnrealIRCd utilizando el comando extendido `DB`.
+Solo se sincronizan peers que anuncian la capacidad del módulo UDB. Las
+mutaciones en caliente deben proceder del `udb::propagator` configurado; un
+peer que sirve una sincronización activa solo puede enviar registros de ese
+bloque.
 **Estructura general:**
 `:<sid_origen> DB <destino> <subcomando> <parametros>`
 
@@ -106,10 +125,10 @@ Elimina un nodo en cascada.
 
 ### 2.3 Manejo de Errores (ERR)
 `:<sid> DB <destino> ERR <subcomando> <codigo_error> <extra>`
-*   `2`: UDB_ERR_NO_BLOCK (El bloque especificado no existe)
-*   `3`: UDB_ERR_NO_SYNC (No se ha solicitado una sincronización)
-*   `4`: UDB_ERR_SYNC_ACTIVE (Ya hay una sincronización en curso)
-*   `5`: UDB_ERR_FORBIDDEN (Acción denegada por permisos)
+*   `1`: UDB_ERR_NO_BLOCK (El bloque especificado no existe)
+*   `7`: UDB_ERR_SYNC_ACTIVE (Ya hay una sincronización en curso)
+*   `8`: UDB_ERR_NO_SYNC (No se ha solicitado una sincronización)
+*   `9`: UDB_ERR_FORBIDDEN (Acción denegada por permisos)
 
 ---
 

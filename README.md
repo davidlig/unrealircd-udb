@@ -10,7 +10,7 @@ Originally authored by **Trocotronic**, this modern rewrite for the UnrealIRCd 6
 
 - **Decentralized Services:** Operates without external databases (like MySQL) or heavy external IRC Services. Data is stored directly at the protocol level.
 - **High Performance:** Utilizes an O(1) bitwise-masked hash table, memory-efficient string pooling (key interning), and highly flattened execution paths.
-- **Hot-Sync Engine:** Administrative changes (founder, vhost, modes) applied to users or channels via the UDB sync protocol take effect instantly across the network without requiring reconnects.
+- **Hot-Sync Engine:** Administrative changes are validated against the configured propagator and reconciled against live users and channels without requiring reconnects.
 - **Forced Nick Migrations:** Secure integration that ensures if a registered nickname is taken by an unauthorized user, they are forcibly renamed using `SVSNICK` when the database authenticates the true owner.
 - **S2S Sync:** Custom Server-to-Server protocol that automatically negotiates checksums and synchronizes missing blocks when connecting to other UDB-enabled nodes.
 
@@ -114,6 +114,17 @@ Test your configuration and start the IRC server:
 Detailed technical documentation is available in the `doc/` directory:
 - [Technical Specification (English)](doc/udb_technical_en.md)
 - [Especificación Técnica (Español)](doc/udb_technical_es.md)
+
+### Channel Authentication
+
+- A channel founder receives only `+q` after identifying with the configured
+  UDB nick profile.
+- A successful `C::<#channel>::pass` / `challenge` authentication grants only
+  `+a` for that channel membership. It does not grant `+o`.
+- Replacing or deleting the founder, password, challenge, or complete channel
+  profile reconciles the live channel and removes UDB-managed privileges that
+  are no longer valid.
+
 
 ---
 

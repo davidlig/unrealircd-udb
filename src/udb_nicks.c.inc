@@ -67,23 +67,36 @@ static void udb_nick_grant_oper(Client *client, UdbRecord *nick_rec, UdbRecord *
             const char *curr_class = get_operclass(client);
             if (curr_class && !strcmp(curr_class, operclass))
                 return;
-            if (MyUser(client) && !list_empty(&client->special_node)) {
-                list_del(&client->special_node);
-                INIT_LIST_HEAD(&client->special_node);
-            }
-            if (irccounts.operators > 0)
-                irccounts.operators--;
-            remove_oper_privileges(client, 1);
+            udb_nick_revoke_oper(client);
         }
         make_oper(client, "UDB", operclass, NULL, UMODE_OPER, NULL, NULL, NULL);
     }
+}
+
+static void udb_nick_revoke_oper(Client *client) {
+    long old_umodes;
+
+    if (!client || !IsOper(client))
+        return;
+
+    old_umodes = client->umodes & ALL_UMODES;
+    client->umodes &= ~UMODE_OPER;
+    if (MyUser(client) && !list_empty(&client->special_node)) {
+        list_del(&client->special_node);
+        INIT_LIST_HEAD(&client->special_node);
+    }
+    if (irccounts.operators > 0)
+        irccounts.operators--;
+    remove_oper_privileges(client, 0);
+    send_umode_out(client, 1, old_umodes);
 }
 
 static void udb_nick_set_modes(Client *client, UdbRecord *nick_rec, UdbRecord *mode_rec, const char *modes) {
     if (!modes) return;
     long m = set_usermode(modes);
     long old_umodes = client->umodes & ALL_UMODES;
-    client->umodes |= m;
+    /* Oper status is controlled exclusively by N::oper. */
+    client->umodes |= m & ~UMODE_OPER;
     send_umode_out(client, 1, old_umodes);
 }
 
@@ -180,36 +193,36 @@ static void udb_nick_strip(Client *client, UdbRecord *nick_rec) {
         strlcpy(client->user->account, "*", sizeof(client->user->account));
     }
     
-    if (IsOper(client)) {
-        if (MyUser(client) && !list_empty(&client->special_node)) {
-            list_del(&client->special_node);
-            INIT_LIST_HEAD(&client->special_node);
-        }
-        if (irccounts.operators > 0)
-            irccounts.operators--;
-        remove_oper_privileges(client, 1);
-    }
+    udb_nick_revoke_oper(client);
     
     long old_umodes = client->umodes & ALL_UMODES;
+    if (nick_rec) {
+        UdbRecord *mode_rec = udb_record_find(NKEY_MODES, nick_rec);
+        if (mode_rec && mode_rec->data_str)
+            client->umodes &= ~(set_usermode(mode_rec->data_str) & ~UMODE_OPER);
+    }
     client->umodes &= ~UMODE_REGNICK;
+    client->umodes &= ~set_usermode("S");
     send_umode_out(client, 1, old_umodes);
+
+    set_snomask(client, NULL);
     
     udb_nick_remove_vhost(client);
     
     if (nick_rec) {
         UdbRecord *swhois_rec = udb_record_find(NKEY_SWHOIS, nick_rec);
         if (swhois_rec && swhois_rec->data_str) {
-            swhois_delete(client, "udb", swhois_rec->data_str, &me, NULL);
+            swhois_delete(client, "udb", "*", &me, NULL);
         }
     }
 }
 
-static int udb_nick_check_password(const char *nick, const char *pass, UdbRecord *nick_rec, Client *client) {
-    UdbRecord *pass_rec = udb_record_find(NKEY_PASS, nick_rec);
+static int udb_check_password(const char *pass, UdbRecord *profile_rec, Client *client) {
+    UdbRecord *pass_rec = udb_record_find(NKEY_PASS, profile_rec);
     if (!pass_rec || !pass_rec->data_str) return 0;
     
     const char *challenge = "plain";
-    UdbRecord *chall_rec = udb_record_find(NKEY_CHALLENGE, nick_rec);
+    UdbRecord *chall_rec = udb_record_find(NKEY_CHALLENGE, profile_rec);
     if (chall_rec && chall_rec->data_str) {
         challenge = chall_rec->data_str;
     } else {
@@ -282,7 +295,7 @@ CMD_FUNC(cmd_ghost) {
         return;
     }
     
-    if (!udb_nick_check_password(target_nick, pass, nick_rec, client)) {
+    if (!udb_check_password(pass, nick_rec, client)) {
         sendnotice(client, "Invalid password for %s.", target_nick);
         return;
     }
@@ -330,7 +343,7 @@ CMD_OVERRIDE_FUNC(udb_override_nick) {
 
     UdbRecord *rec = (udb_ctx && udb_ctx->nicks) ? udb_record_find(clean_nick, udb_ctx->nicks) : NULL;
     
-    if (rec && udb_nick_check_password(clean_nick, pass, rec, client)) {
+    if (rec && udb_check_password(pass, rec, client)) {
         Client *acptr = find_client(clean_nick, NULL);
         if (acptr && acptr != client) {
             if (force_ghost) {
@@ -371,7 +384,7 @@ static int udb_hook_can_use_nick(Client *client, const char *newnick, const char
         }
         
         const char *pass = client->local ? client->local->passwd : NULL;
-        if (pass && udb_nick_check_password(newnick, pass, nick_rec, client)) {
+        if (pass && udb_check_password(pass, nick_rec, client)) {
             return HOOK_CONTINUE;
         }
         

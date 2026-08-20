@@ -13,6 +13,7 @@
 /* Forward declare prototypes from other inc files to prevent compiler warnings */
 static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync);
 static void udb_nick_strip(Client *client, UdbRecord *nick_rec);
+static void udb_nick_revoke_oper(Client *client);
 static void udb_channel_apply_record(Channel *channel, UdbRecord *chan_rec, const char *subkey, int is_new);
 static void udb_channel_remove_record(Channel *channel, UdbRecord *chan_rec, const char *subkey);
 static void udb_ip_apply_record(const char *ip_key, UdbRecord *ip_rec, const char *subkey, int is_new);
@@ -51,6 +52,13 @@ static void udb_hash_destroy(void) {
             udb_ctx->hash_table[i] = NULL;
         }
     }
+}
+
+static void udb_hash_clear_block(int block_idx) {
+    if (block_idx < 0 || block_idx >= UDB_NUM_BLOCKS)
+        return;
+    safe_free(udb_ctx->hash_table[block_idx]);
+    udb_ctx->hash_table[block_idx] = safe_alloc(sizeof(UdbRecord *) * UDB_HASH_SIZE);
 }
 
 static unsigned int udb_hash_str(const char *str) {
@@ -511,6 +519,51 @@ static UdbBlock *udb_block_create(char letter, const char *name) {
     return b;
 }
 
+static void udb_block_set_context_root(UdbBlock *block) {
+    if (!udb_ctx || !block)
+        return;
+    switch (block->letter) {
+        case 'N': udb_ctx->nicks = block->tree; break;
+        case 'C': udb_ctx->channels = block->tree; break;
+        case 'I': udb_ctx->ips = block->tree; break;
+        case 'S': udb_ctx->settings = block->tree; break;
+        case 'L': udb_ctx->links = block->tree; break;
+        case 'K': udb_ctx->lines = block->tree; break;
+    }
+}
+
+static void udb_block_reset(UdbBlock *block) {
+    char *name = NULL;
+    int block_idx;
+
+    if (!block)
+        return;
+
+    if (block->tree && block->tree->key)
+        safe_strdup(name, block->tree->key);
+    else
+        safe_strdup(name, "UDB");
+    block_idx = udb_block_letter_to_index(block->letter);
+
+    if (block->tree) {
+        if (udb_ctx->total_records >= block->record_count)
+            udb_ctx->total_records -= block->record_count;
+        else
+            udb_ctx->total_records = 0;
+        udb_record_free_tree(block->tree);
+    }
+    udb_hash_clear_block(block_idx);
+
+    block->tree = udb_record_create(NULL);
+    block->tree->block_idx = (unsigned char)block_idx;
+    safe_strdup(block->tree->key, name);
+    block->tree->is_dynamic_key = 1;
+    block->tree->data_num = 1;
+    block->record_count = 0;
+    udb_block_set_context_root(block);
+    safe_free(name);
+}
+
 static int udb_block_load(UdbBlock *block) {
     return udb_file_load_block(block);
 }
@@ -630,7 +683,7 @@ static int udb_apply_special_record(UdbBlock *block, UdbRecord *rec, int is_new)
     if (block->letter == 'N') {
         UdbRecord *nick_rec = rec->parent == block->tree ? rec : rec->parent;
         Client *client = find_user(nick_rec->key, NULL);
-        if (client && IsUser(client)) {
+        if (client && MyUser(client)) {
             udb_nick_apply(client, nick_rec, is_new);
         }
     } else if (block->letter == 'C') {
@@ -654,21 +707,21 @@ static void udb_remove_special_record(UdbBlock *block, UdbRecord *rec) {
         if (rec->parent != block->tree) {
             UdbRecord *nick_rec = rec->parent;
             Client *client = find_user(nick_rec->key, NULL);
-            if (client && IsUser(client)) {
+            if (client && MyUser(client)) {
                 if (!strcmp(rec->key, NKEY_VHOST)) {
                     udb_nick_remove_vhost(client);
                 } else if (!strcmp(rec->key, NKEY_OPER)) {
-                    if (IsOper(client)) {
-                        if (MyUser(client) && !list_empty(&client->special_node)) {
-                            list_del(&client->special_node);
-                            INIT_LIST_HEAD(&client->special_node);
-                        }
-                        if (irccounts.operators > 0)
-                            irccounts.operators--;
-                        remove_oper_privileges(client, 1);
-                    }
+                    udb_nick_revoke_oper(client);
                 } else if (!strcmp(rec->key, NKEY_SWHOIS)) {
                     swhois_delete(client, "udb", "*", &me, NULL);
+                } else if (!strcmp(rec->key, NKEY_MODES)) {
+                    long old_umodes = client->umodes & ALL_UMODES;
+                    UdbRecord *mode_rec = udb_record_find(NKEY_MODES, nick_rec);
+                    if (mode_rec && mode_rec->data_str)
+                        client->umodes &= ~(set_usermode(mode_rec->data_str) & ~UMODE_OPER);
+                    send_umode_out(client, 1, old_umodes);
+                } else if (!strcmp(rec->key, NKEY_SNOMASKS)) {
+                    set_snomask(client, NULL);
                 } else if (!strcmp(rec->key, NKEY_SUSPENDED)) {
                     long old_umodes = client->umodes & ALL_UMODES;
                     client->umodes &= ~set_usermode("S");
@@ -679,7 +732,7 @@ static void udb_remove_special_record(UdbBlock *block, UdbRecord *rec) {
             }
         } else {
             Client *client = find_user(rec->key, NULL);
-            if (client && IsUser(client)) {
+            if (client && MyUser(client)) {
                 udb_nick_strip(client, rec);
             }
         }
