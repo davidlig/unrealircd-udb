@@ -275,6 +275,7 @@ static UdbRecord *udb_record_create(UdbRecord *parent);
 static UdbRecord *udb_record_insert(UdbBlock *block, UdbRecord *parent,
                                      const char *key, const char *data_str,
                                      unsigned long data_num, int persist);
+static UdbRecord *udb_record_find_path(UdbBlock *block, const char *path);
 static UdbRecord *udb_record_delete(UdbBlock *block, UdbRecord *rec, int persist);
 static void       udb_record_free_tree(UdbRecord *rec);
 
@@ -286,11 +287,11 @@ static int  udb_hash_remove_record(UdbRecord *rec, int block_idx, const char *ke
 static UdbRecord *udb_hash_find(int block_idx, const char *key);
 
 /* File I/O */
-static int  udb_file_save_block(UdbBlock *block);
-static int  udb_file_load_block(UdbBlock *block);
-static int  udb_file_parse_line(UdbBlock *block, char *line);
-static void udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp,
-                                char *pathbuf, int pathlen);
+static int        udb_file_save_block(UdbBlock *block);
+static int        udb_file_load_block(UdbBlock *block);
+static UdbRecord *udb_file_parse_line(UdbBlock *block, char *line);
+static void       udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp,
+                                     char *pathbuf, int pathlen);
 
 /* Checksum */
 static unsigned long udb_crc32(const char *data, size_t len);
@@ -314,6 +315,7 @@ static void udb_nick_strip(Client *client, UdbRecord *nick_rec);
 static int  udb_nick_check_password(const char *nick, const char *pass,
                                      UdbRecord *nick_rec, Client *client);
 static void udb_nick_set_vhost(Client *client, UdbRecord *vhost_rec);
+static void udb_nick_remove_vhost(Client *client);
 static void udb_nick_grant_oper(Client *client, UdbRecord *nick_rec,
                                  UdbRecord *oper_rec);
 static void udb_nick_set_modes(Client *client, UdbRecord *nick_rec,
@@ -542,6 +544,22 @@ static UdbRecord *udb_record_find(const char *key, UdbRecord *parent) {
     return NULL;
 }
 
+static UdbRecord *udb_record_find_path(UdbBlock *block, const char *path) {
+    if (!block || !block->tree || !path) return NULL;
+    char pathbuf[512];
+    strlcpy(pathbuf, path, sizeof(pathbuf));
+    char *cur = pathbuf;
+    char *ds;
+    UdbRecord *rec = block->tree;
+    while ((ds = strstr(cur, "::"))) {
+        *ds = '\0';
+        rec = udb_record_find(cur, rec);
+        if (!rec) return NULL;
+        cur = ds + 2;
+    }
+    return udb_record_find(cur, rec);
+}
+
 static UdbRecord *udb_record_insert(UdbBlock *block, UdbRecord *parent, const char *key, const char *data_str, unsigned long data_num, int persist) {
     if (!parent) parent = block->tree;
     UdbRecord *rec = udb_record_find(key, parent);
@@ -682,8 +700,8 @@ static unsigned long udb_compute_block_checksum(UdbBlock *block) {
 /* ========================================================================
  * File I/O Operations
  * ======================================================================== */
-static int udb_file_parse_line(UdbBlock *block, char *line) {
-    if (!line || !*line || *line == ';') return 0;
+static UdbRecord *udb_file_parse_line(UdbBlock *block, char *line) {
+    if (!line || !*line || *line == ';') return NULL;
     
     char *value = strchr(line, ' ');
     char *data_str = NULL;
@@ -700,6 +718,7 @@ static int udb_file_parse_line(UdbBlock *block, char *line) {
     
     char *p = line;
     UdbRecord *parent = block->tree;
+    UdbRecord *leaf_rec = NULL;
     while (p && *p) {
         char *next = strstr(p, "::");
         if (next) {
@@ -728,11 +747,17 @@ static int udb_file_parse_line(UdbBlock *block, char *line) {
             if (parent == block->tree) {
                 udb_hash_insert_record(rec, udb_block_letter_to_index(block->letter), p);
             }
+            block->record_count++;
+            udb_ctx->total_records++;
         }
         
         if (!next) {
             if (data_str && *data_str == '*') {
                 rec->data_num = atoi(data_str + 1);
+                if (rec->data_str) {
+                    safe_free(rec->data_str);
+                    rec->data_str = NULL;
+                }
             } else if (data_str) {
                 safe_strdup(rec->data_str, data_str);
                 rec->data_num = 0;
@@ -743,14 +768,13 @@ static int udb_file_parse_line(UdbBlock *block, char *line) {
                 }
                 rec->data_num = data_num;
             }
-            block->record_count++;
-            udb_ctx->total_records++;
+            leaf_rec = rec;
         }
         
         parent = rec;
         p = next;
     }
-    return 1;
+    return leaf_rec;
 }
 
 static void udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbuf, int pathlen) {
@@ -1028,10 +1052,37 @@ static int udb_apply_special_record(UdbBlock *block, UdbRecord *rec, int is_new)
 static void udb_remove_special_record(UdbBlock *block, UdbRecord *rec) {
     if (!rec) return;
     if (block->letter == 'N') {
-        UdbRecord *nick_rec = rec->parent == block->tree ? rec : rec->parent;
-        Client *client = find_user(nick_rec->key, NULL);
-        if (client && IsUser(client)) {
-            udb_nick_strip(client, nick_rec);
+        if (rec->parent != block->tree) {
+            UdbRecord *nick_rec = rec->parent;
+            Client *client = find_user(nick_rec->key, NULL);
+            if (client && IsUser(client)) {
+                if (!strcmp(rec->key, NKEY_VHOST)) {
+                    udb_nick_remove_vhost(client);
+                } else if (!strcmp(rec->key, NKEY_OPER)) {
+                    if (IsOper(client)) {
+                        if (MyUser(client) && !list_empty(&client->special_node)) {
+                            list_del(&client->special_node);
+                            INIT_LIST_HEAD(&client->special_node);
+                        }
+                        if (irccounts.operators > 0)
+                            irccounts.operators--;
+                        remove_oper_privileges(client, 1);
+                    }
+                } else if (!strcmp(rec->key, NKEY_SWHOIS)) {
+                    swhois_delete(client, "udb", "*", &me, NULL);
+                } else if (!strcmp(rec->key, NKEY_SUSPENDED)) {
+                    long old_umodes = client->umodes & ALL_UMODES;
+                    client->umodes &= ~set_usermode("S");
+                    send_umode_out(client, 1, old_umodes);
+                } else if (!strcmp(rec->key, NKEY_PASS)) {
+                    udb_nick_strip(client, nick_rec);
+                }
+            }
+        } else {
+            Client *client = find_user(rec->key, NULL);
+            if (client && IsUser(client)) {
+                udb_nick_strip(client, rec);
+            }
         }
     } else if (block->letter == 'C') {
         UdbRecord *chan_rec = rec->parent == block->tree ? rec : rec->parent;
@@ -1209,8 +1260,14 @@ CMD_FUNC(cmd_db) {
                     int len = strlen(path) + strlen(data) + 2;
                     char *line = safe_alloc(len);
                     snprintf(line, len, "%s %s", path + 3, data);
-                    udb_file_parse_line(block, line);
+                    UdbRecord *rec = udb_file_parse_line(block, line);
                     safe_free(line);
+                    
+                    if (rec) {
+                        udb_apply_special_record(block, rec, 1);
+                    }
+                    udb_file_save_block(block);
+                    
                     char logbuf[512];
                     snprintf(logbuf, sizeof(logbuf), "[UDB] Inserted record via S2S: %s -> %s", path, data);
                     unreal_log(ULOG_INFO, "udb", "UDB_INS_RECEIVED", client, "$msg", log_data_string("msg", logbuf));
@@ -1294,10 +1351,11 @@ CMD_FUNC(cmd_db) {
                         }
                     }
                     
-                    char *line = NULL;
-                    safe_strdup(line, path + 3);
-                    udb_file_parse_line(block, line);
-                    safe_free(line);
+                    UdbRecord *rec = udb_record_find_path(block, path + 3);
+                    if (rec) {
+                        udb_remove_special_record(block, rec);
+                        udb_record_delete(block, rec, 1);
+                    }
                     
                     if (udb_ctx->propagator && block->syncing_from == client) {
                         sendto_server(client, 0, 0, NULL, ":%s DB %s DEL %s", udb_ctx->propagator->id, target, path);
@@ -1435,15 +1493,55 @@ static int udb_protocol_init(ModuleInfo *modinfo) {
 #include <openssl/evp.h>
 
 static void udb_nick_set_vhost(Client *client, UdbRecord *vhost_rec) {
-    if (!vhost_rec || !vhost_rec->data_str) return;
+    if (!client || !client->user || !vhost_rec || !vhost_rec->data_str) return;
+    
+    /* If the vhost is already active and set to this exact value, nothing to do */
+    if (client->user->virthost && !strcmp(client->user->virthost, vhost_rec->data_str) && IsHidden(client) && IsSetHost(client))
+        return;
+
     userhost_save_current(client);
     safe_strdup(client->user->virthost, vhost_rec->data_str);
+    client->umodes |= UMODE_HIDE;
+    client->umodes |= UMODE_SETHOST;
+
+    if (IsUser(client)) {
+        sendto_server(client, 0, 0, NULL, ":%s SETHOST %s", client->id, client->user->virthost);
+    }
+
+    if (MyConnect(client)) {
+        sendto_one(client, NULL, ":%s MODE %s :+tx", client->name, client->name);
+        sendnotice(client, "*** Your vhost is now %s", client->user->virthost);
+    }
+
+    userhost_changed(client);
+}
+
+static void udb_nick_remove_vhost(Client *client) {
+    if (!client || !client->user) return;
+    
+    userhost_save_current(client);
+    
+    if (*client->user->cloakedhost) {
+        safe_strdup(client->user->virthost, client->user->cloakedhost);
+    } else {
+        safe_strdup(client->user->virthost, client->user->realhost);
+    }
+    
+    client->umodes &= ~UMODE_SETHOST;
+    
+    if (IsUser(client)) {
+        sendto_server(client, 0, 0, NULL, ":%s SETHOST %s", client->id, client->user->virthost);
+    }
+    if (MyConnect(client)) {
+        sendto_one(client, NULL, ":%s MODE %s :-t", client->name, client->name);
+        sendnotice(client, "*** Your vhost has been removed");
+    }
+    
     userhost_changed(client);
 }
 
 static void udb_nick_grant_oper(Client *client, UdbRecord *nick_rec, UdbRecord *oper_rec) {
     if (!oper_rec) return;
-    if (IsOper(client)) return; /* Already oper, do not add to oper_list again! */
     
     unsigned long level = oper_rec->data_num;
     const char *operclass = NULL;
@@ -1457,6 +1555,18 @@ static void udb_nick_grant_oper(Client *client, UdbRecord *nick_rec, UdbRecord *
     }
     
     if (operclass) {
+        if (IsOper(client)) {
+            const char *curr_class = get_operclass(client);
+            if (curr_class && !strcmp(curr_class, operclass))
+                return;
+            if (MyUser(client) && !list_empty(&client->special_node)) {
+                list_del(&client->special_node);
+                INIT_LIST_HEAD(&client->special_node);
+            }
+            if (irccounts.operators > 0)
+                irccounts.operators--;
+            remove_oper_privileges(client, 1);
+        }
         make_oper(client, "UDB", operclass, NULL, UMODE_OPER, NULL, NULL, NULL);
     }
 }
@@ -1470,7 +1580,8 @@ static void udb_nick_set_modes(Client *client, UdbRecord *nick_rec, UdbRecord *m
 }
 
 static void udb_nick_set_swhois(Client *client, UdbRecord *nick_rec, UdbRecord *swhois_rec) {
-    if (!swhois_rec || !swhois_rec->data_str) return;
+    if (!client || !client->user || !swhois_rec || !swhois_rec->data_str) return;
+    swhois_delete(client, "udb", "*", &me, NULL);
     swhois_add(client, "udb", 100, swhois_rec->data_str, &me, NULL);
 }
 
@@ -1505,11 +1616,19 @@ static void udb_nick_force_rename(Client *client, const char *nick_in_db) {
 static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync) {
     if (!client || !nick_rec) return;
 
+    UdbRecord *forbid = udb_record_find(NKEY_FORBID, nick_rec);
+    if (forbid) {
+        udb_nick_force_rename(client, nick_rec->key);
+        return;
+    }
+
     /* If this is a hot sync, check if the user is identified */
     if (is_hot_sync) {
-        UdbRecord *pass_rec = udb_record_find(NKEY_PASS, nick_rec);
-        if (pass_rec && !has_user_mode(client, 'r')) {
-            udb_nick_force_rename(client, nick_rec->key);
+        if (!has_user_mode(client, 'r')) {
+            UdbRecord *pass_rec = udb_record_find(NKEY_PASS, nick_rec);
+            if (pass_rec) {
+                udb_nick_force_rename(client, nick_rec->key);
+            }
             return; /* Abort applying vhosts/opers to this unauthorized user */
         }
     }
@@ -1567,11 +1686,7 @@ static void udb_nick_strip(Client *client, UdbRecord *nick_rec) {
     client->umodes &= ~UMODE_REGNICK;
     send_umode_out(client, 1, old_umodes);
     
-    if (client->user) {
-        userhost_save_current(client);
-        safe_strdup(client->user->virthost, client->user->realhost);
-        userhost_changed(client);
-    }
+    udb_nick_remove_vhost(client);
     
     if (nick_rec) {
         UdbRecord *swhois_rec = udb_record_find(NKEY_SWHOIS, nick_rec);

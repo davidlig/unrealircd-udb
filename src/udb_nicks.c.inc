@@ -1,15 +1,55 @@
 #include <openssl/evp.h>
 
 static void udb_nick_set_vhost(Client *client, UdbRecord *vhost_rec) {
-    if (!vhost_rec || !vhost_rec->data_str) return;
+    if (!client || !client->user || !vhost_rec || !vhost_rec->data_str) return;
+    
+    /* If the vhost is already active and set to this exact value, nothing to do */
+    if (client->user->virthost && !strcmp(client->user->virthost, vhost_rec->data_str) && IsHidden(client) && IsSetHost(client))
+        return;
+
     userhost_save_current(client);
     safe_strdup(client->user->virthost, vhost_rec->data_str);
+    client->umodes |= UMODE_HIDE;
+    client->umodes |= UMODE_SETHOST;
+
+    if (IsUser(client)) {
+        sendto_server(client, 0, 0, NULL, ":%s SETHOST %s", client->id, client->user->virthost);
+    }
+
+    if (MyConnect(client)) {
+        sendto_one(client, NULL, ":%s MODE %s :+tx", client->name, client->name);
+        sendnotice(client, "*** Your vhost is now %s", client->user->virthost);
+    }
+
+    userhost_changed(client);
+}
+
+static void udb_nick_remove_vhost(Client *client) {
+    if (!client || !client->user) return;
+    
+    userhost_save_current(client);
+    
+    if (*client->user->cloakedhost) {
+        safe_strdup(client->user->virthost, client->user->cloakedhost);
+    } else {
+        safe_strdup(client->user->virthost, client->user->realhost);
+    }
+    
+    client->umodes &= ~UMODE_SETHOST;
+    
+    if (IsUser(client)) {
+        sendto_server(client, 0, 0, NULL, ":%s SETHOST %s", client->id, client->user->virthost);
+    }
+    if (MyConnect(client)) {
+        sendto_one(client, NULL, ":%s MODE %s :-t", client->name, client->name);
+        sendnotice(client, "*** Your vhost has been removed");
+    }
+    
     userhost_changed(client);
 }
 
 static void udb_nick_grant_oper(Client *client, UdbRecord *nick_rec, UdbRecord *oper_rec) {
     if (!oper_rec) return;
-    if (IsOper(client)) return; /* Already oper, do not add to oper_list again! */
     
     unsigned long level = oper_rec->data_num;
     const char *operclass = NULL;
@@ -23,6 +63,18 @@ static void udb_nick_grant_oper(Client *client, UdbRecord *nick_rec, UdbRecord *
     }
     
     if (operclass) {
+        if (IsOper(client)) {
+            const char *curr_class = get_operclass(client);
+            if (curr_class && !strcmp(curr_class, operclass))
+                return;
+            if (MyUser(client) && !list_empty(&client->special_node)) {
+                list_del(&client->special_node);
+                INIT_LIST_HEAD(&client->special_node);
+            }
+            if (irccounts.operators > 0)
+                irccounts.operators--;
+            remove_oper_privileges(client, 1);
+        }
         make_oper(client, "UDB", operclass, NULL, UMODE_OPER, NULL, NULL, NULL);
     }
 }
@@ -36,7 +88,8 @@ static void udb_nick_set_modes(Client *client, UdbRecord *nick_rec, UdbRecord *m
 }
 
 static void udb_nick_set_swhois(Client *client, UdbRecord *nick_rec, UdbRecord *swhois_rec) {
-    if (!swhois_rec || !swhois_rec->data_str) return;
+    if (!client || !client->user || !swhois_rec || !swhois_rec->data_str) return;
+    swhois_delete(client, "udb", "*", &me, NULL);
     swhois_add(client, "udb", 100, swhois_rec->data_str, &me, NULL);
 }
 
@@ -71,11 +124,19 @@ static void udb_nick_force_rename(Client *client, const char *nick_in_db) {
 static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync) {
     if (!client || !nick_rec) return;
 
+    UdbRecord *forbid = udb_record_find(NKEY_FORBID, nick_rec);
+    if (forbid) {
+        udb_nick_force_rename(client, nick_rec->key);
+        return;
+    }
+
     /* If this is a hot sync, check if the user is identified */
     if (is_hot_sync) {
-        UdbRecord *pass_rec = udb_record_find(NKEY_PASS, nick_rec);
-        if (pass_rec && !has_user_mode(client, 'r')) {
-            udb_nick_force_rename(client, nick_rec->key);
+        if (!has_user_mode(client, 'r')) {
+            UdbRecord *pass_rec = udb_record_find(NKEY_PASS, nick_rec);
+            if (pass_rec) {
+                udb_nick_force_rename(client, nick_rec->key);
+            }
             return; /* Abort applying vhosts/opers to this unauthorized user */
         }
     }
@@ -133,11 +194,7 @@ static void udb_nick_strip(Client *client, UdbRecord *nick_rec) {
     client->umodes &= ~UMODE_REGNICK;
     send_umode_out(client, 1, old_umodes);
     
-    if (client->user) {
-        userhost_save_current(client);
-        safe_strdup(client->user->virthost, client->user->realhost);
-        userhost_changed(client);
-    }
+    udb_nick_remove_vhost(client);
     
     if (nick_rec) {
         UdbRecord *swhois_rec = udb_record_find(NKEY_SWHOIS, nick_rec);

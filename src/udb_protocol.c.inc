@@ -119,8 +119,14 @@ CMD_FUNC(cmd_db) {
                     int len = strlen(path) + strlen(data) + 2;
                     char *line = safe_alloc(len);
                     snprintf(line, len, "%s %s", path + 3, data);
-                    udb_file_parse_line(block, line);
+                    UdbRecord *rec = udb_file_parse_line(block, line);
                     safe_free(line);
+                    
+                    if (rec) {
+                        udb_apply_special_record(block, rec, 1);
+                    }
+                    udb_file_save_block(block);
+                    
                     char logbuf[512];
                     snprintf(logbuf, sizeof(logbuf), "[UDB] Inserted record via S2S: %s -> %s", path, data);
                     unreal_log(ULOG_INFO, "udb", "UDB_INS_RECEIVED", client, "$msg", log_data_string("msg", logbuf));
@@ -204,10 +210,11 @@ CMD_FUNC(cmd_db) {
                         }
                     }
                     
-                    char *line = NULL;
-                    safe_strdup(line, path + 3);
-                    udb_file_parse_line(block, line);
-                    safe_free(line);
+                    UdbRecord *rec = udb_record_find_path(block, path + 3);
+                    if (rec) {
+                        udb_remove_special_record(block, rec);
+                        udb_record_delete(block, rec, 1);
+                    }
                     
                     if (udb_ctx->propagator && block->syncing_from == client) {
                         sendto_server(client, 0, 0, NULL, ":%s DB %s DEL %s", udb_ctx->propagator->id, target, path);

@@ -143,6 +143,22 @@ static UdbRecord *udb_record_find(const char *key, UdbRecord *parent) {
     return NULL;
 }
 
+static UdbRecord *udb_record_find_path(UdbBlock *block, const char *path) {
+    if (!block || !block->tree || !path) return NULL;
+    char pathbuf[512];
+    strlcpy(pathbuf, path, sizeof(pathbuf));
+    char *cur = pathbuf;
+    char *ds;
+    UdbRecord *rec = block->tree;
+    while ((ds = strstr(cur, "::"))) {
+        *ds = '\0';
+        rec = udb_record_find(cur, rec);
+        if (!rec) return NULL;
+        cur = ds + 2;
+    }
+    return udb_record_find(cur, rec);
+}
+
 static UdbRecord *udb_record_insert(UdbBlock *block, UdbRecord *parent, const char *key, const char *data_str, unsigned long data_num, int persist) {
     if (!parent) parent = block->tree;
     UdbRecord *rec = udb_record_find(key, parent);
@@ -283,8 +299,8 @@ static unsigned long udb_compute_block_checksum(UdbBlock *block) {
 /* ========================================================================
  * File I/O Operations
  * ======================================================================== */
-static int udb_file_parse_line(UdbBlock *block, char *line) {
-    if (!line || !*line || *line == ';') return 0;
+static UdbRecord *udb_file_parse_line(UdbBlock *block, char *line) {
+    if (!line || !*line || *line == ';') return NULL;
     
     char *value = strchr(line, ' ');
     char *data_str = NULL;
@@ -301,6 +317,7 @@ static int udb_file_parse_line(UdbBlock *block, char *line) {
     
     char *p = line;
     UdbRecord *parent = block->tree;
+    UdbRecord *leaf_rec = NULL;
     while (p && *p) {
         char *next = strstr(p, "::");
         if (next) {
@@ -329,11 +346,17 @@ static int udb_file_parse_line(UdbBlock *block, char *line) {
             if (parent == block->tree) {
                 udb_hash_insert_record(rec, udb_block_letter_to_index(block->letter), p);
             }
+            block->record_count++;
+            udb_ctx->total_records++;
         }
         
         if (!next) {
             if (data_str && *data_str == '*') {
                 rec->data_num = atoi(data_str + 1);
+                if (rec->data_str) {
+                    safe_free(rec->data_str);
+                    rec->data_str = NULL;
+                }
             } else if (data_str) {
                 safe_strdup(rec->data_str, data_str);
                 rec->data_num = 0;
@@ -344,14 +367,13 @@ static int udb_file_parse_line(UdbBlock *block, char *line) {
                 }
                 rec->data_num = data_num;
             }
-            block->record_count++;
-            udb_ctx->total_records++;
+            leaf_rec = rec;
         }
         
         parent = rec;
         p = next;
     }
-    return 1;
+    return leaf_rec;
 }
 
 static void udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbuf, int pathlen) {
@@ -629,10 +651,37 @@ static int udb_apply_special_record(UdbBlock *block, UdbRecord *rec, int is_new)
 static void udb_remove_special_record(UdbBlock *block, UdbRecord *rec) {
     if (!rec) return;
     if (block->letter == 'N') {
-        UdbRecord *nick_rec = rec->parent == block->tree ? rec : rec->parent;
-        Client *client = find_user(nick_rec->key, NULL);
-        if (client && IsUser(client)) {
-            udb_nick_strip(client, nick_rec);
+        if (rec->parent != block->tree) {
+            UdbRecord *nick_rec = rec->parent;
+            Client *client = find_user(nick_rec->key, NULL);
+            if (client && IsUser(client)) {
+                if (!strcmp(rec->key, NKEY_VHOST)) {
+                    udb_nick_remove_vhost(client);
+                } else if (!strcmp(rec->key, NKEY_OPER)) {
+                    if (IsOper(client)) {
+                        if (MyUser(client) && !list_empty(&client->special_node)) {
+                            list_del(&client->special_node);
+                            INIT_LIST_HEAD(&client->special_node);
+                        }
+                        if (irccounts.operators > 0)
+                            irccounts.operators--;
+                        remove_oper_privileges(client, 1);
+                    }
+                } else if (!strcmp(rec->key, NKEY_SWHOIS)) {
+                    swhois_delete(client, "udb", "*", &me, NULL);
+                } else if (!strcmp(rec->key, NKEY_SUSPENDED)) {
+                    long old_umodes = client->umodes & ALL_UMODES;
+                    client->umodes &= ~set_usermode("S");
+                    send_umode_out(client, 1, old_umodes);
+                } else if (!strcmp(rec->key, NKEY_PASS)) {
+                    udb_nick_strip(client, nick_rec);
+                }
+            }
+        } else {
+            Client *client = find_user(rec->key, NULL);
+            if (client && IsUser(client)) {
+                udb_nick_strip(client, rec);
+            }
         }
     } else if (block->letter == 'C') {
         UdbRecord *chan_rec = rec->parent == block->tree ? rec : rec->parent;

@@ -248,6 +248,7 @@ static UdbRecord *udb_record_create(UdbRecord *parent);
 static UdbRecord *udb_record_insert(UdbBlock *block, UdbRecord *parent,
                                      const char *key, const char *data_str,
                                      unsigned long data_num, int persist);
+static UdbRecord *udb_record_find_path(UdbBlock *block, const char *path);
 static UdbRecord *udb_record_delete(UdbBlock *block, UdbRecord *rec, int persist);
 static void       udb_record_free_tree(UdbRecord *rec);
 
@@ -259,11 +260,11 @@ static int  udb_hash_remove_record(UdbRecord *rec, int block_idx, const char *ke
 static UdbRecord *udb_hash_find(int block_idx, const char *key);
 
 /* File I/O */
-static int  udb_file_save_block(UdbBlock *block);
-static int  udb_file_load_block(UdbBlock *block);
-static int  udb_file_parse_line(UdbBlock *block, char *line);
-static void udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp,
-                                char *pathbuf, int pathlen);
+static int        udb_file_save_block(UdbBlock *block);
+static int        udb_file_load_block(UdbBlock *block);
+static UdbRecord *udb_file_parse_line(UdbBlock *block, char *line);
+static void       udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp,
+                                     char *pathbuf, int pathlen);
 
 /* Checksum */
 static unsigned long udb_crc32(const char *data, size_t len);
@@ -287,6 +288,7 @@ static void udb_nick_strip(Client *client, UdbRecord *nick_rec);
 static int  udb_nick_check_password(const char *nick, const char *pass,
                                      UdbRecord *nick_rec, Client *client);
 static void udb_nick_set_vhost(Client *client, UdbRecord *vhost_rec);
+static void udb_nick_remove_vhost(Client *client);
 static void udb_nick_grant_oper(Client *client, UdbRecord *nick_rec,
                                  UdbRecord *oper_rec);
 static void udb_nick_set_modes(Client *client, UdbRecord *nick_rec,
