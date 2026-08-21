@@ -774,10 +774,13 @@ static void udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbu
 static int udb_file_write_snapshot(UdbBlock *block, UdbRecord *tree,
                                    unsigned int record_count)
 {
+	char dir_path[UDB_BLOCK_PATH_MAX];
 	char tmp_path[UDB_BLOCK_PATH_MAX];
 	char pathbuf[4096] = "";
+	char *slash;
 	FILE *fp = NULL;
 	UdbRecord *rec;
+	int dir_fd = -1;
 	int fd = -1;
 	int flags = O_WRONLY | O_CREAT | O_EXCL;
 	int tmp_created = 0;
@@ -786,6 +789,14 @@ static int udb_file_write_snapshot(UdbBlock *block, UdbRecord *tree,
 		return 0;
 	if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", block->filepath) >= sizeof(tmp_path))
 		return 0;
+	strlcpy(dir_path, block->filepath, sizeof(dir_path));
+	slash = strrchr(dir_path, '/');
+	if (!slash)
+		strlcpy(dir_path, ".", sizeof(dir_path));
+	else if (slash == dir_path)
+		slash[1] = '\0';
+	else
+		*slash = '\0';
 
 #ifdef O_NOFOLLOW
 	flags |= O_NOFOLLOW;
@@ -794,6 +805,13 @@ static int udb_file_write_snapshot(UdbBlock *block, UdbRecord *tree,
 	if (fd < 0)
 		return 0;
 	tmp_created = 1;
+	dir_fd = open(dir_path, O_RDONLY
+#ifdef O_DIRECTORY
+	                            | O_DIRECTORY
+#endif
+	);
+	if (dir_fd < 0)
+		goto cleanup;
 	if (fchmod(fd, 0600) != 0)
 		goto cleanup;
 	fp = fdopen(fd, "w");
@@ -806,7 +824,9 @@ static int udb_file_write_snapshot(UdbBlock *block, UdbRecord *tree,
 	if (tree)
 		for (rec = tree->child; rec; rec = rec->sibling)
 			udb_serialize_tree(rec, 0, fp, pathbuf, sizeof(pathbuf));
-	if (ferror(fp))
+	if (fflush(fp) != 0 || ferror(fp))
+		goto cleanup;
+	if (fsync(fileno(fp)) != 0)
 		goto cleanup;
 	if (fclose(fp) != 0)
 	{
@@ -816,6 +836,15 @@ static int udb_file_write_snapshot(UdbBlock *block, UdbRecord *tree,
 	fp = NULL;
 	if (rename(tmp_path, block->filepath) != 0)
 		goto cleanup;
+	tmp_created = 0;
+	if (fsync(dir_fd) != 0)
+		goto cleanup;
+	if (close(dir_fd) != 0)
+	{
+		dir_fd = -1;
+		return 0;
+	}
+	dir_fd = -1;
 	return 1;
 
 cleanup:
@@ -823,6 +852,8 @@ cleanup:
 		fclose(fp);
 	else if (fd >= 0)
 		close(fd);
+	if (dir_fd >= 0)
+		close(dir_fd);
 	if (tmp_created)
 		unlink(tmp_path);
 	return 0;

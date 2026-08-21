@@ -254,9 +254,13 @@ mutation.
 
 Snapshots are created with exclusive creation and mode `0600`, independent of
 the process umask. Where the platform provides `O_NOFOLLOW`, it is used as an
-additional symlink safeguard. UDB aborts and removes its temporary snapshot on
-open, permission, stream, close, or rename failure; snapshots and active block
-files always remain beneath the configured database directory.
+additional symlink safeguard. UDB flushes and `fsync`s the temporary snapshot
+before closing and renaming it, then `fsync`s the containing directory after the
+rename. UDB aborts and removes its temporary snapshot on open, permission,
+stream, file-sync, close, or rename failure. A directory-sync failure is
+reported after the replacement is visible, but before its crash durability is
+confirmed; snapshots and active block files always remain beneath the configured
+database directory.
 
 **DRP (Drop / Empty Block):**
 `:<sid> DB * DRP <block_letter>`

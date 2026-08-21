@@ -242,10 +242,14 @@ mutación no se reenvía.
 
 Los snapshots se crean de forma exclusiva con modo `0600`, independiente de la
 umask del proceso. Cuando la plataforma proporciona `O_NOFOLLOW`, se usa como
-protección adicional contra enlaces simbólicos. UDB aborta y elimina su snapshot
-temporal ante un fallo de apertura, permisos, flujo, cierre o renombrado; los
-snapshots y bloques activos siempre permanecen bajo el directorio de base de
-datos configurado.
+protección adicional contra enlaces simbólicos. UDB vacía y ejecuta `fsync` del
+snapshot temporal antes de cerrarlo y renombrarlo, y después ejecuta `fsync` del
+directorio contenedor. UDB aborta y elimina su snapshot temporal ante un fallo
+de apertura, permisos, flujo, sincronización del archivo, cierre o renombrado.
+Un fallo al sincronizar el directorio se informa después de que el reemplazo sea
+visible, pero antes de confirmar su durabilidad ante un fallo; los snapshots y
+bloques activos siempre permanecen bajo el directorio de base de datos
+configurado.
 
 **DRP (Drop / Vaciar Bloque):**
 `:<sid> DB * DRP <letra_bloque>`
