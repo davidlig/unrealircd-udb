@@ -381,6 +381,8 @@ static const char *udb_get_bot_mask(const char *service_key, int force_default);
 /* Runtime dispatcher; concrete per-block effects stay in their own modules. */
 static int udb_apply_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new);
 static void udb_remove_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
+static void udb_apply_tree_effects(UdbContext *ctx, UdbBlock *block);
+static void udb_remove_tree_effects(UdbContext *ctx, UdbBlock *block);
 static void udb_send_to_debugs(Client *source, const char *fmt, ...)
     __attribute__((format(printf, 2, 3)));
 
@@ -1662,13 +1664,7 @@ static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSessi
 		block->filesize = st.st_size;
 	udb_sync_session_free(block);
 
-	for (rec = block->tree->child; rec; rec = rec->sibling)
-	{
-		UdbRecord *child;
-		udb_apply_special_record(ctx, block, rec, 1);
-		for (child = rec->child; child; child = child->sibling)
-			udb_apply_special_record(ctx, block, child, 1);
-	}
+	udb_apply_tree_effects(ctx, block);
 	return 1;
 }
 
@@ -1965,6 +1961,56 @@ static void udb_remove_special_record(UdbContext *ctx, UdbBlock *block, UdbRecor
 	{
 		udb_lines_remove_effect(ctx, block, rec);
 	}
+}
+
+static void udb_tree_effects_walk(UdbContext *ctx, UdbBlock *block, UdbRecord *rec,
+                                  unsigned int depth, int remove)
+{
+	UdbRecord *child;
+	int apply = 0;
+
+	if (!rec)
+		return;
+	for (child = rec->child; child; child = child->sibling)
+		udb_tree_effects_walk(ctx, block, child, depth + 1, remove);
+
+	/* Select each runtime owner once; K patterns are below their line type. */
+	switch (block->letter)
+	{
+		case 'N':
+			apply = depth == 1;
+			break;
+		case 'C':
+		case 'I':
+			apply = depth == (remove ? 1 : 2);
+			break;
+		case 'K':
+			apply = depth == 2;
+			break;
+		case 'S':
+		case 'L':
+			apply = 1;
+			break;
+	}
+	if (apply)
+	{
+		if (remove)
+			udb_remove_special_record(ctx, block, rec);
+		else
+			udb_apply_special_record(ctx, block, rec, 1);
+	}
+}
+
+static void udb_apply_tree_effects(UdbContext *ctx, UdbBlock *block)
+{
+	if (ctx && block && block->tree)
+		udb_tree_effects_walk(ctx, block, block->tree, 0, 0);
+}
+
+static void udb_remove_tree_effects(UdbContext *ctx, UdbBlock *block)
+{
+	if (ctx && block && block->tree)
+		udb_tree_effects_walk(ctx, block, block->tree, 0, 1);
 }
 
 /* End of udb_effects.c.inc */
@@ -5502,22 +5548,7 @@ static void udb_block_reset(UdbContext *ctx, UdbBlock *block)
 
 	if (!block)
 		return;
-	if (block->letter == 'I' && block->tree)
-	{
-		UdbRecord *rec;
-		for (rec = block->tree->child; rec; rec = rec->sibling)
-		{
-			UdbRecord *child;
-			for (child = rec->child; child; child = child->sibling)
-				udb_ip_remove_record(rec->key, rec, child->key);
-		}
-	}
-	if ((block->letter == 'S' || block->letter == 'L') && block->tree)
-	{
-		UdbRecord *rec;
-		for (rec = block->tree->child; rec; rec = rec->sibling)
-			udb_remove_special_record(ctx, block, rec);
-	}
+	udb_remove_tree_effects(ctx, block);
 
 	if (block->tree && block->tree->key)
 		safe_strdup(name, block->tree->key);

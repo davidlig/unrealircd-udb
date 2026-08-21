@@ -464,13 +464,7 @@ static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSessi
 		block->filesize = st.st_size;
 	udb_sync_session_free(block);
 
-	for (rec = block->tree->child; rec; rec = rec->sibling)
-	{
-		UdbRecord *child;
-		udb_apply_special_record(ctx, block, rec, 1);
-		for (child = rec->child; child; child = child->sibling)
-			udb_apply_special_record(ctx, block, child, 1);
-	}
+	udb_apply_tree_effects(ctx, block);
 	return 1;
 }
 

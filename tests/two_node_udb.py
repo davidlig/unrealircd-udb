@@ -32,6 +32,7 @@ RENAME_FAIL_MODULE = RENAME_FAIL_SOURCE.with_suffix(".so")
 RENAME_FAIL_TARGET = str(PERMDATADIR / "udb_N.db")
 RENAME_FAIL_ARM = str(PERMDATADIR / "udb-snapshot-rename-fail-go")
 MUTATOR_OPT_TRIGGER = "udb-test-mutator-opt-go"
+K_STAGED_RECORD = "G::*@udb-staged.test::reason staged-sync-k-effect"
 
 
 def skip(message):
@@ -181,7 +182,7 @@ def staged_snapshot_observed(a_log, b_log):
 
 def snapshot_rename_failure_observed(a_log, b_log, b_db, baseline):
     return (ordered(udb_commands(b_log), ("HEL", "INF", "BEGIN", "PUT", "END")) and
-            "ERR" in udb_commands(a_log) and "ACK" not in udb_commands(a_log) and
+            "ERR" in udb_commands(a_log) and "Staged sync acknowledged for block N" not in log_text(a_log) and
             b_db.read_bytes() == baseline and not b_db.with_suffix(".db.tmp").exists() and
             "UDB_TEST_SNAPSHOT_RENAME_FAIL:" in log_text(b_log) and
             "digest or persistence failure" in log_text(b_log) and
@@ -296,12 +297,16 @@ def main():
             third_modules.mkdir(parents=True)
             shutil.copy2(args.module, third_modules / "udb.so")
         shutil.copy2(MUTATOR_MODULE, a / "modules" / "third" / "udb_test_mutator.so")
-        # Seed only node A. A successful staged sync must make this record appear
-        # in node B's separately mounted PERMDATADIR.
+        # Seed only node A. A successful staged sync must replace both a profile
+        # block and a nested K-line record in node B's separate data tree.
         a_db = a / "data" / "udb_N.db"
         b_db = b / "data" / "udb_N.db"
+        a_k_db = a / "data" / "udb_K.db"
+        b_k_db = b / "data" / "udb_K.db"
         a_db.write_text("harness-a::marker synced\n", encoding="ascii")
         b_db.write_text("harness-b::marker prior\n", encoding="ascii")
+        a_k_db.write_text(K_STAGED_RECORD + "\n", encoding="ascii")
+        b_k_db.write_text("G::*@udb-prior.test::reason prior\n", encoding="ascii")
         b_baseline = b_db.read_bytes()
         # Make A authoritative even on filesystems with one-second mtime resolution.
         old_time = time.time() - 60
@@ -349,10 +354,12 @@ def main():
             return 0
         while time.monotonic() < deadline:
             if ("harness-a::marker synced" in b_db.read_text(errors="replace") and
+                    K_STAGED_RECORD in b_k_db.read_text(errors="replace") and
                     staged_snapshot_observed(logs[0], logs[1])):
                 break
             time.sleep(0.25)
         if ("harness-a::marker synced" not in b_db.read_text(errors="replace") or
+                K_STAGED_RECORD not in b_k_db.read_text(errors="replace") or
                 not staged_snapshot_observed(logs[0], logs[1])):
             print_diagnostics(logs, b_db)
             return skip("S2S linked, but UDB staged N-block transfer was not observed; this is not a PASS")
@@ -360,7 +367,7 @@ def main():
             print(f"FAIL: node B active UDB snapshot mode is {stat.S_IMODE(b_db.stat().st_mode):04o}, expected 0600",
                   file=sys.stderr)
             return 1
-        print("PASS: UDB capability negotiation and staged N-block sync committed a private 0600 snapshot in node B")
+        print("PASS: UDB capability negotiation staged N and nested K records into node B")
         if args.runtime_rename_failure or args.runtime_opt_rename_failure:
             b_baseline = b_db.read_bytes()
             (b / "data" / "udb-snapshot-rename-fail-go").touch()

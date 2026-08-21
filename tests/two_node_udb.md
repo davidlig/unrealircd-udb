@@ -24,8 +24,8 @@ seconds, and emits its matching `DEL`.
 The harness seeds different `N` blocks (with
 node B deliberately older), starts node B and then node A, and waits for both
 logs to report a linked and synced S2S connection. It then requires the staged
-`HEL`, `INF`, `RES`, `BEGIN`, `PUT`, `END`, and `ACK` exchange and the `N` block from A
-to be committed in B. A `PASS` therefore means real module loading, link
+`HEL`, `INF`, `RES`, `BEGIN`, `PUT`, `END`, and `ACK` exchange and the `N` block plus a
+nested `K` line from A to be committed in B. A `PASS` therefore means real module loading, link
 establishment, negotiated UDB capability, and staged synchronization occurred.
 It additionally requires node B to receive the fixture `INS` and `DEL`, persist
 the inserted record before deletion, and persist its absence after deletion.
@@ -40,7 +40,7 @@ python3 src/modules/third/udb/tests/two_node_udb.py --snapshot-rename-failure
 This additionally builds a test-only `LD_PRELOAD` fixture and applies it only to
 node B. It returns `EIO` only when the configured `udb_N.db.tmp` is renamed to
 `udb_N.db`. The harness then requires B's original database bytes to remain
-unchanged, no `.tmp` file, no staged `ACK`/commit, and both the interposer and
+unchanged, no `.tmp` file, no staged N-block `ACK`/commit, and both the interposer and
 staged persistence-failure evidence in the logs. The normal invocation does not
 build or preload this fixture and retains its existing successful-sync checks.
 

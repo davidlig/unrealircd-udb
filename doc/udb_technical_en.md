@@ -197,8 +197,11 @@ forwarded.
 `PUT` paths omit the block prefix because the block is an explicit parameter.
 The receiver builds an isolated tree per block and never applies its runtime
 effects during transfer. On `END`, it verifies the canonical digest, writes the
-staged tree atomically via the block temporary file, then replaces the active
-tree and applies the new runtime effects. A peer quit, 60-second inactivity
+staged tree atomically via the block temporary file, removes every runtime
+effect represented by the outgoing tree, then replaces the active tree and
+recursively applies each incoming effect owner once. This includes live N, C,
+I, S/L, and K state, so nested K patterns are installed after commit without
+duplicate application. A peer quit, 60-second inactivity
 timeout, malformed `PUT`, unexpected transaction ID, or bad digest discards the
 staged tree only. The prior active and durable tree remain in use.
 

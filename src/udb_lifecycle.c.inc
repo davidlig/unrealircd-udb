@@ -57,22 +57,7 @@ static void udb_block_reset(UdbContext *ctx, UdbBlock *block)
 
 	if (!block)
 		return;
-	if (block->letter == 'I' && block->tree)
-	{
-		UdbRecord *rec;
-		for (rec = block->tree->child; rec; rec = rec->sibling)
-		{
-			UdbRecord *child;
-			for (child = rec->child; child; child = child->sibling)
-				udb_ip_remove_record(rec->key, rec, child->key);
-		}
-	}
-	if ((block->letter == 'S' || block->letter == 'L') && block->tree)
-	{
-		UdbRecord *rec;
-		for (rec = block->tree->child; rec; rec = rec->sibling)
-			udb_remove_special_record(ctx, block, rec);
-	}
+	udb_remove_tree_effects(ctx, block);
 
 	if (block->tree && block->tree->key)
 		safe_strdup(name, block->tree->key);

@@ -52,3 +52,53 @@ static void udb_remove_special_record(UdbContext *ctx, UdbBlock *block, UdbRecor
 		udb_lines_remove_effect(ctx, block, rec);
 	}
 }
+
+static void udb_tree_effects_walk(UdbContext *ctx, UdbBlock *block, UdbRecord *rec,
+                                  unsigned int depth, int remove)
+{
+	UdbRecord *child;
+	int apply = 0;
+
+	if (!rec)
+		return;
+	for (child = rec->child; child; child = child->sibling)
+		udb_tree_effects_walk(ctx, block, child, depth + 1, remove);
+
+	/* Select each runtime owner once; K patterns are below their line type. */
+	switch (block->letter)
+	{
+		case 'N':
+			apply = depth == 1;
+			break;
+		case 'C':
+		case 'I':
+			apply = depth == (remove ? 1 : 2);
+			break;
+		case 'K':
+			apply = depth == 2;
+			break;
+		case 'S':
+		case 'L':
+			apply = 1;
+			break;
+	}
+	if (apply)
+	{
+		if (remove)
+			udb_remove_special_record(ctx, block, rec);
+		else
+			udb_apply_special_record(ctx, block, rec, 1);
+	}
+}
+
+static void udb_apply_tree_effects(UdbContext *ctx, UdbBlock *block)
+{
+	if (ctx && block && block->tree)
+		udb_tree_effects_walk(ctx, block, block->tree, 0, 0);
+}
+
+static void udb_remove_tree_effects(UdbContext *ctx, UdbBlock *block)
+{
+	if (ctx && block && block->tree)
+		udb_tree_effects_walk(ctx, block, block->tree, 0, 1);
+}

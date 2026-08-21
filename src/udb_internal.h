@@ -224,6 +224,8 @@ static const char *udb_get_bot_mask(const char *service_key, int force_default);
 /* Runtime dispatcher; concrete per-block effects stay in their own modules. */
 static int udb_apply_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new);
 static void udb_remove_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
+static void udb_apply_tree_effects(UdbContext *ctx, UdbBlock *block);
+static void udb_remove_tree_effects(UdbContext *ctx, UdbBlock *block);
 static void udb_send_to_debugs(Client *source, const char *fmt, ...)
     __attribute__((format(printf, 2, 3)));
 
