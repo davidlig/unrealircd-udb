@@ -163,7 +163,19 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer,
 static void udb_sync_ack(Client *peer, const char *block);
 static void udb_sync_send_stage(Client *server, UdbBlock *block);
 static void udb_sync_server_quit(Client *client);
-static int udb_is_propagator(UdbContext *ctx, Client *server);
+static void udb_sendto_confirmed_servers(Client *except, const char *fmt, ...)
+    __attribute__((format(printf, 2, 3)));
+static void udb_protocol_params_error(Client *client, const char *subcmd);
+static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target,
+                             const char *path, const char *data, int is_for_me,
+                             int is_broadcast);
+static void udb_mutation_del(UdbContext *ctx, Client *client, const char *target,
+                             const char *path, int is_for_me, int is_broadcast);
+static void udb_mutation_drp(UdbContext *ctx, Client *client, const char *target,
+                             char letter, int is_for_me, int is_broadcast);
+static void udb_mutation_opt(UdbContext *ctx, Client *client, const char *target,
+                             char letter, const char *modified_at, int is_for_me,
+                             int is_broadcast);
 static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync);
 static void udb_nick_strip(Client *client, UdbRecord *nick_rec);
 static void udb_nick_remove_record(UdbBlock *block, UdbRecord *rec);

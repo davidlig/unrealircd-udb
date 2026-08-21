@@ -15,87 +15,6 @@ static void udb_sendto_confirmed_servers(Client *except, const char *fmt, ...)
 	    sendto_one(server, NULL, "%s", line);
 }
 
-static const char *udb_selected_propagator(UdbContext *ctx)
-{
-	const char *selected = NULL;
-	UdbRecord *link;
-	int sources = 0;
-
-	if (udb_cfg && udb_cfg->propagator && *udb_cfg->propagator)
-	{
-		selected = udb_cfg->propagator;
-		sources++;
-	}
-	if (ctx && ctx->links)
-	{
-		for (link = ctx->links->child; link; link = link->sibling)
-		{
-			UdbRecord *options = udb_record_find(ctx, LKEY_OPTIONS, link);
-			if (options && !options->data_str &&
-			    !(options->data_num & ~(UDB_LNKOPT_DEBUG | UDB_LNKOPT_PROPAGATOR)) &&
-			    (options->data_num & UDB_LNKOPT_PROPAGATOR))
-			{
-				selected = link->key;
-				sources++;
-			}
-		}
-	}
-	if (sources != 1)
-	{
-		ctx->propagator = NULL;
-		udb_send_to_debugs(NULL, "propagator selection rejected");
-		udb_log(ULOG_WARNING, "UDB_PROPAGATOR_SELECTION", NULL,
-		        "Rejecting UDB writes: exactly one propagator source is required");
-		return NULL;
-	}
-	return selected;
-}
-
-static int udb_is_propagator(UdbContext *ctx, Client *server)
-{
-	const char *selected;
-
-	if (!server || !IsServer(server))
-		return 0;
-	selected = udb_selected_propagator(ctx);
-	if (selected && !strcasecmp(server->name, selected))
-	{
-		ctx->propagator = server;
-		return 1;
-	}
-	return 0;
-}
-
-/* Paths are passed to the file parser without the block prefix. */
-static UdbBlock *udb_protocol_path_block(UdbContext *ctx, const char *path)
-{
-	const char *component;
-	const char *separator;
-	size_t len;
-	UdbBlock *block;
-
-	if (!path)
-		return NULL;
-
-	len = strlen(path);
-	if (len < 4 || len >= 512 || path[1] != ':' || path[2] != ':' || !path[3])
-		return NULL;
-
-	block = udb_block_by_letter(ctx, path[0]);
-	if (!block)
-		return NULL;
-
-	component = path + 3;
-	while ((separator = strstr(component, "::")))
-	{
-		if (separator == component || !separator[2])
-			return NULL;
-		component = separator + 2;
-	}
-
-	return block;
-}
-
 static void udb_protocol_params_error(Client *client, const char *subcmd)
 {
 	sendto_one(client, NULL, ":%s DB %s ERR %s %d 0", me.id, client->id,
@@ -355,62 +274,7 @@ CMD_FUNC(cmd_db)
 					udb_protocol_params_error(client, subcmd);
 					return;
 				}
-				const char *path = parv[3];
-				const char *data = parv[4];
-				UdbBlock *block = udb_protocol_path_block(ctx, path);
-				char letter = path && *path ? path[0] : '0';
-
-				if (!block)
-				{
-					udb_protocol_params_error(client, subcmd);
-					return;
-				}
-
-				if (is_for_me)
-				{
-					if (block->session)
-					{
-						sendto_one(client, NULL, ":%s DB %s ERR INS %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
-						return;
-					}
-					if (block->syncing_from && block->syncing_from != client)
-					{
-						sendto_one(client, NULL, ":%s DB %s ERR INS %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
-						return;
-					}
-					if (block->syncing_from != client && !udb_is_propagator(ctx, client))
-					{
-						sendto_one(client, NULL, ":%s DB %s ERR INS %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
-						return;
-					}
-
-					int len = strlen(path) + strlen(data) + 2;
-					char *line = safe_alloc(len);
-					snprintf(line, len, "%s %s", path + 3, data);
-					UdbRecord *rec = udb_file_parse_line(ctx, block, line);
-					safe_free(line);
-
-					if (rec)
-					{
-						udb_apply_special_record(ctx, block, rec, 1);
-					}
-					if (!block->syncing_from)
-						udb_file_save_block(ctx, block);
-
-					char logbuf[512];
-					snprintf(logbuf, sizeof(logbuf), "[UDB] Inserted record via S2S: %s -> %s", path, data);
-					unreal_log(ULOG_INFO, "udb", "UDB_INS_RECEIVED", client, "$msg", log_data_string("msg", logbuf));
-
-					if (udb_ctx->propagator && block->syncing_from == client)
-					{
-						udb_sendto_confirmed_servers(client, ":%s DB %s INS %s %s", udb_ctx->propagator->id, target, path, data);
-						return;
-					}
-
-					if (!is_broadcast)
-						return;
-				}
-				udb_sendto_confirmed_servers(client, ":%s DB %s INS %s %s", client->id, target, path, data);
+				udb_mutation_ins(ctx, client, target, parv[3], parv[4], is_for_me, is_broadcast);
 			}
 			break;
 
@@ -480,91 +344,12 @@ CMD_FUNC(cmd_db)
 					udb_protocol_params_error(client, subcmd);
 					return;
 				}
-				const char *path = parv[3];
-				UdbBlock *block = udb_protocol_path_block(ctx, path);
-				char letter = path && *path ? path[0] : '0';
-
-				if (!block)
-				{
-					udb_protocol_params_error(client, subcmd);
-					return;
-				}
-
-				if (is_for_me)
-				{
-					if (block->session)
-					{
-						sendto_one(client, NULL, ":%s DB %s ERR DEL %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
-						return;
-					}
-					if (block->syncing_from)
-					{
-						if (block->syncing_from != client)
-						{
-							sendto_one(client, NULL, ":%s DB %s ERR DEL %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
-							return;
-						}
-					} else if (!udb_is_propagator(ctx, client))
-					{
-						sendto_one(client, NULL, ":%s DB %s ERR DEL %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
-						return;
-					}
-
-					UdbRecord *rec = udb_record_find_path(ctx, block, path + 3);
-					if (rec)
-					{
-						udb_record_delete(ctx, block, rec, 1);
-					}
-
-					if (udb_ctx->propagator && block->syncing_from == client)
-					{
-						udb_sendto_confirmed_servers(client, ":%s DB %s DEL %s", udb_ctx->propagator->id, target, path);
-						return;
-					}
-					if (!is_broadcast)
-						return;
-				}
-				udb_sendto_confirmed_servers(client, ":%s DB %s DEL %s", client->id, target, path);
+				udb_mutation_del(ctx, client, target, parv[3], is_for_me, is_broadcast);
 			} else if (!strcasecmp(subcmd, "DRP"))
 			{
 				if (parc < 4)
 					return;
-				char letter = *parv[3];
-
-				if (is_for_me)
-				{
-					UdbBlock *block = udb_block_by_letter(ctx, letter);
-					if (!block)
-					{
-						sendto_one(client, NULL, ":%s DB %s ERR DRP %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
-						return;
-					}
-					if (block->session)
-					{
-						sendto_one(client, NULL, ":%s DB %s ERR DRP %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
-						return;
-					}
-					if (block->syncing_from && block->syncing_from != client)
-					{
-						sendto_one(client, NULL, ":%s DB %s ERR DRP %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
-						return;
-					}
-					if (!udb_is_propagator(ctx, client))
-					{
-						sendto_one(client, NULL, ":%s DB %s ERR DRP %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
-						return;
-					}
-
-					udb_block_reset(ctx, block);
-					block->checksum = 0;
-					block->filesize = 0;
-					if (!block->syncing_from)
-						udb_file_save_block(ctx, block);
-
-					if (!is_broadcast)
-						return;
-				}
-				udb_sendto_confirmed_servers(client, ":%s DB %s DRP %c", client->id, target, *parv[3]);
+				udb_mutation_drp(ctx, client, target, *parv[3], is_for_me, is_broadcast);
 			}
 			break;
 
@@ -611,39 +396,8 @@ CMD_FUNC(cmd_db)
 			{
 				if (parc < 4)
 					return;
-				char letter = *parv[3];
-
-				if (is_for_me)
-				{
-					UdbBlock *block = udb_block_by_letter(ctx, letter);
-					if (!block)
-					{
-						sendto_one(client, NULL, ":%s DB %s ERR OPT %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
-						return;
-					}
-					if (block->session)
-					{
-						sendto_one(client, NULL, ":%s DB %s ERR OPT %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
-						return;
-					}
-					if (!udb_is_propagator(ctx, client))
-					{
-						sendto_one(client, NULL, ":%s DB %s ERR OPT %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
-						return;
-					}
-					if (parc >= 5)
-					{
-						block->modified_at = atol(parv[4]);
-					}
-					udb_file_save_block(ctx, block);
-
-					if (!is_broadcast)
-						return;
-				}
-				if (parc >= 5)
-					udb_sendto_confirmed_servers(client, ":%s DB %s OPT %c %s", client->id, target, *parv[3], parv[4]);
-				else
-					udb_sendto_confirmed_servers(client, ":%s DB %s OPT %c", client->id, target, *parv[3]);
+				udb_mutation_opt(ctx, client, target, *parv[3], parc >= 5 ? parv[4] : NULL,
+				                 is_for_me, is_broadcast);
 			}
 			break;
 	}

@@ -51,6 +51,9 @@ ModuleHeader MOD_HEADER = {
 /* Staged synchronization sessions: HEL capability and transfer state */
 #include "udb_sync.c.inc"
 
+/* Authorized real-time mutations: validation, effects, persistence, forwarding */
+#include "udb_mutation.c.inc"
+
 /* S2S protocol handler: DB command parsing, routing, and server sync */
 #include "udb_protocol.c.inc"
 
