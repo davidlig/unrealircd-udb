@@ -159,6 +159,7 @@ static void udb_sync_session_free(UdbBlock *block);
 static int udb_block_letter_to_index(char letter);
 
 static void udb_sync_to_server(Client *server);
+static int udb_remote_wins_equal_timestamp(Client *server);
 static int udb_has_hello(Client *server);
 static int udb_has_staged_sync(Client *server);
 static int udb_peer_authorizes_us(Client *server);

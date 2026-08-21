@@ -178,6 +178,12 @@ selected by the receiver.
 **RES (Sync Request):**
 `:<sid> DB <target> RES <block_letter>`
 
+When checksums differ, the newer `timestamp` wins. If timestamps are equal,
+the lexicographically higher server SID wins. The SID is the immutable server
+identity already carried in the DB frame, unlike a configurable server name or
+link arrival order. Only the loser sends `RES` for each block; this prevents reciprocal RES and
+snapshot exchanges while retaining the configured direct-propagator checks.
+
 For peers with the staged capability, `RES` is answered with a transaction:
 
 **BEGIN:** `:<sid> DB <target> BEGIN <block> <txid> <digest>`

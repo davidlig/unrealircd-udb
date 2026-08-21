@@ -180,6 +180,15 @@ def staged_snapshot_observed(a_log, b_log):
             ordered(udb_commands(a_log), ("HEL", "RES", "ACK")))
 
 
+def equal_timestamp_winner_observed(a_log, b_log):
+    # 0B1 wins over 0A1, so only A requests B's divergent equal-time blocks.
+    a_commands = udb_commands(a_log)
+    b_commands = udb_commands(b_log)
+    return (ordered(a_commands, ("HEL", "INF", "BEGIN", "PUT", "END")) and
+            ordered(b_commands, ("HEL", "INF", "RES", "ACK")) and
+            a_commands.count("RES") == 0 and b_commands.count("RES") == 2)
+
+
 def snapshot_rename_failure_observed(a_log, b_log, b_db, baseline):
     return (ordered(udb_commands(b_log), ("HEL", "INF", "BEGIN", "PUT", "END")) and
             "ERR" in udb_commands(a_log) and "Staged sync acknowledged for block N" not in log_text(a_log) and
@@ -265,7 +274,7 @@ def main():
     parser.add_argument("--timeout", type=int, default=15, help="S2S wait time in seconds")
     parser.add_argument("--keep", action="store_true", help="preserve temporary node directories")
     parser.add_argument("--snapshot-rename-failure", action="store_true",
-                        help="fail node B's UDB N snapshot rename and verify staged-sync rollback")
+                        help="fail node A's UDB N snapshot rename and verify staged-sync rollback")
     parser.add_argument("--runtime-rename-failure", action="store_true",
                         help="fail node B's armed live INS snapshot rename and verify no local commit")
     parser.add_argument("--runtime-opt-rename-failure", action="store_true",
@@ -297,20 +306,21 @@ def main():
             third_modules.mkdir(parents=True)
             shutil.copy2(args.module, third_modules / "udb.so")
         shutil.copy2(MUTATOR_MODULE, a / "modules" / "third" / "udb_test_mutator.so")
-        # Seed only node A. A successful staged sync must replace both a profile
-        # block and a nested K-line record in node B's separate data tree.
+        # Seed divergent blocks with the same mtime. B's higher immutable SID
+        # (0B1 > 0A1) must win, with A issuing the sole RES request.
         a_db = a / "data" / "udb_N.db"
         b_db = b / "data" / "udb_N.db"
         a_k_db = a / "data" / "udb_K.db"
         b_k_db = b / "data" / "udb_K.db"
-        a_db.write_text("harness-a::marker synced\n", encoding="ascii")
-        b_db.write_text("harness-b::marker prior\n", encoding="ascii")
-        a_k_db.write_text(K_STAGED_RECORD + "\n", encoding="ascii")
-        b_k_db.write_text("G::*@udb-prior.test::reason prior\n", encoding="ascii")
+        a_db.write_text("harness-a::marker loser\n", encoding="ascii")
+        b_db.write_text("harness-b::marker winner\n", encoding="ascii")
+        a_k_db.write_text("G::*@udb-loser.test::reason loser\n", encoding="ascii")
+        b_k_db.write_text(K_STAGED_RECORD + "\n", encoding="ascii")
+        a_baseline = a_db.read_bytes()
         b_baseline = b_db.read_bytes()
-        # Make A authoritative even on filesystems with one-second mtime resolution.
-        old_time = time.time() - 60
-        os.utime(b_db, (old_time, old_time))
+        tie_time = int(time.time()) - 60
+        for db in (a_db, b_db, a_k_db, b_k_db):
+            os.utime(db, (tie_time, tie_time))
 
         a_client, a_server, a_tls, b_client, b_server, b_tls = (free_port() for _ in range(6))
         a_conf, b_conf = a / "unrealircd.conf", b / "unrealircd.conf"
@@ -327,9 +337,9 @@ def main():
             with log.open("w") as output:
                 mutator = MUTATOR_MODULE if node == a else None
                 processes.append(subprocess.Popen(bwrap_command(node, args.ircd, config, args.module, mutator,
-                                                                  rename_failure=(args.snapshot_rename_failure or
-                                                                                  args.runtime_rename_failure or
-                                                                                  args.runtime_opt_rename_failure) and node == b,
+                                                                  rename_failure=(args.snapshot_rename_failure and node == a) or
+                                                                                 ((args.runtime_rename_failure or
+                                                                                   args.runtime_opt_rename_failure) and node == b),
                                                                   rename_failure_arm=(args.runtime_rename_failure or
                                                                                       args.runtime_opt_rename_failure) and node == b),
                                                    stdout=output, stderr=subprocess.STDOUT,
@@ -344,30 +354,30 @@ def main():
         deadline = time.monotonic() + args.timeout
         if args.snapshot_rename_failure:
             while time.monotonic() < deadline:
-                if snapshot_rename_failure_observed(logs[0], logs[1], b_db, b_baseline):
+                if snapshot_rename_failure_observed(logs[1], logs[0], a_db, a_baseline):
                     break
                 time.sleep(0.25)
-            if not snapshot_rename_failure_observed(logs[0], logs[1], b_db, b_baseline):
-                print_diagnostics(logs, b_db)
+            if not snapshot_rename_failure_observed(logs[1], logs[0], a_db, a_baseline):
+                print_diagnostics(logs, a_db)
                 return 1
-            print("PASS: failed N snapshot rename left node B baseline unchanged with no tmp or ACK/commit")
+            print("PASS: failed N snapshot rename left node A baseline unchanged with no tmp or ACK/commit")
             return 0
         while time.monotonic() < deadline:
-            if ("harness-a::marker synced" in b_db.read_text(errors="replace") and
-                    K_STAGED_RECORD in b_k_db.read_text(errors="replace") and
-                    staged_snapshot_observed(logs[0], logs[1])):
+            if ("harness-b::marker winner" in a_db.read_text(errors="replace") and
+                    K_STAGED_RECORD in a_k_db.read_text(errors="replace") and
+                    equal_timestamp_winner_observed(logs[0], logs[1])):
                 break
             time.sleep(0.25)
-        if ("harness-a::marker synced" not in b_db.read_text(errors="replace") or
-                K_STAGED_RECORD not in b_k_db.read_text(errors="replace") or
-                not staged_snapshot_observed(logs[0], logs[1])):
-            print_diagnostics(logs, b_db)
-            return skip("S2S linked, but UDB staged N-block transfer was not observed; this is not a PASS")
-        if not snapshot_is_private(b_db):
-            print(f"FAIL: node B active UDB snapshot mode is {stat.S_IMODE(b_db.stat().st_mode):04o}, expected 0600",
+        if ("harness-b::marker winner" not in a_db.read_text(errors="replace") or
+                K_STAGED_RECORD not in a_k_db.read_text(errors="replace") or
+                not equal_timestamp_winner_observed(logs[0], logs[1])):
+            print_diagnostics(logs, a_db)
+            return skip("S2S linked, but deterministic equal-timestamp staged transfer was not observed; this is not a PASS")
+        if not snapshot_is_private(a_db):
+            print(f"FAIL: node A active UDB snapshot mode is {stat.S_IMODE(a_db.stat().st_mode):04o}, expected 0600",
                   file=sys.stderr)
             return 1
-        print("PASS: UDB capability negotiation staged N and nested K records into node B")
+        print("PASS: higher-SID B won divergent equal-timestamp N and nested K blocks with one RES per block")
         if args.runtime_rename_failure or args.runtime_opt_rename_failure:
             b_baseline = b_db.read_bytes()
             (b / "data" / "udb-snapshot-rename-fail-go").touch()

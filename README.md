@@ -194,7 +194,7 @@ Run these from the UnrealIRCd source root after building `udb.so`:
 # One node: runtime nick/channel reconciliation against a prepared server.
 python3 src/modules/third/udb/tests/runtime_channel_nick.py
 
-# Two nodes: HEL 4, staged N and nested K records, and authorized real-time INS/DEL.
+# Two nodes: deterministic equal-timestamp conflict resolution, staged N/K records, and authorized INS/DEL.
 python3 src/modules/third/udb/tests/two_node_udb.py
 
 # Two nodes: prove a failed live INS snapshot leaves B unchanged.
@@ -211,8 +211,9 @@ The one-node smoke test is a client fixture: preload its isolated server with
 only Argon2id, SHA-256, or crypt credentials and set `UDB_TEST_HOST` /
 `UDB_TEST_PORT` if needed. The two-node harness builds and loads the test-only
 mutator on authoritative node A; it emits authorized `INS` then `DEL` to node
-B after HEL and the staged snapshot settle. The two-node staged assertion also
-requires a nested K-line record to replace B's prior K tree. The three-node harness has no
+B after HEL and the staged snapshot settle. The two-node harness seeds divergent
+equal-mtime blocks and verifies that the lexicographically higher server SID
+wins with one `RES` per divergent block, including a nested K-line replacement. The three-node harness has no
 mutator: A is the sole seeded source, B must commit A's marker, and only then
 does C start so the B-to-C staged path is observable. See the matching files in
 `tests/` for isolation prerequisites, `--timeout`, and `--keep`.

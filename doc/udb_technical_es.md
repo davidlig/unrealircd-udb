@@ -166,6 +166,13 @@ el receptor lo ha seleccionado explícitamente.
 **RES (Request / Petición de Sincronización):**
 `:<sid> DB <destino> RES <letra_bloque>`
 
+Cuando los checksums difieren, gana el `timestamp` más reciente. Si los
+timestamps son iguales, gana el SID de servidor lexicográficamente mayor. El
+SID es la identidad inmutable del servidor que ya contiene el frame DB, a
+diferencia de un nombre configurable o del orden de llegada del enlace. Solo el
+perdedor envía `RES` por bloque; esto evita intercambios recíprocos de RES y snapshots sin
+alterar las comprobaciones del propagador directo configurado.
+
 Para peers con capacidad staged, `RES` se responde mediante una transacción:
 
 **BEGIN:** `:<sid> DB <destino> BEGIN <bloque> <txid> <digest>`
