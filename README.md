@@ -192,7 +192,12 @@ Detailed technical documentation is available in the `doc/` directory:
   containing directory after rename. Failed creation, writing, file sync,
   closing, or rename removes the temporary file without changing the active
   database. A directory-sync failure is reported after the rename has occurred,
-  so the replacement is visible but not confirmed crash-durable.
+   so the replacement is visible but not confirmed crash-durable.
+- Persisted records with an empty `::` path component, an invalid path, or an
+  overlong line are logged and skipped; the rest of the block still loads.
+- Staged `END` digests must be complete, non-empty hexadecimal values that fit
+  in `unsigned long`. Invalid or overflowing input aborts the staged tree and
+  leaves the active snapshot unchanged.
 
 
 ---
@@ -223,6 +228,9 @@ python3 src/modules/third/udb/tests/two_node_udb.py --snapshot-fsync-failure
 # Two nodes: prove failed live DEL and DRP snapshots retain B's records.
 python3 src/modules/third/udb/tests/two_node_udb.py --runtime-del-rename-failure
 python3 src/modules/third/udb/tests/two_node_udb.py --runtime-drp-rename-failure
+
+# Two nodes: reject empty, partial, and overflowing END digests for an empty staged tree.
+python3 src/modules/third/udb/tests/two_node_udb.py --malformed-end-checksum
 
 # Three nodes: prove A -> B commits before B -> C propagation.
 python3 src/modules/third/udb/tests/three_node_udb.py

@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import os
 import pathlib
+import secrets
 import shutil
 import signal
 import socket
@@ -39,7 +40,8 @@ def sha256(password):
     return hashlib.sha256(password.encode("ascii")).hexdigest()
 
 
-def write_config(path, name, sid, client_port, server_port, tls_port, peer, peer_port, dbdir, autoconnect):
+def write_config(path, name, sid, client_port, server_port, tls_port, peer, peer_port, dbdir, autoconnect,
+                 link_password):
     outgoing = (f'    outgoing {{ bind-ip "127.0.0.1"; hostname "127.0.0.1"; port {peer_port}; '
                 'options { autoconnect; } }\n') if autoconnect else ""
     path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
@@ -66,7 +68,7 @@ listen {{ ip "127.0.0.1"; port {server_port}; options {{ serversonly; }} }}
 listen {{ ip "127.0.0.1"; port {tls_port}; options {{ tls; }} }}
 link {peer} {{
     incoming {{ mask "127.0.0.1"; }}
-{outgoing}    password "udb-harness-link";
+ {outgoing}    password "{link_password}";
     class servers;
 }}
 loadmodule "cloak_sha256";
@@ -263,10 +265,11 @@ def main():
 
         a_client, a_server, a_tls, b_client, b_server, b_tls = (free_port() for _ in range(6))
         a_conf, b_conf = a / "unrealircd.conf", b / "unrealircd.conf"
+        link_password = "udb-test-" + secrets.token_hex(32)
         write_config(a_conf, "udb-a.test", "0A1", a_client, a_server, a_tls, "udb-b.test", b_server,
-                     a / "data", True)
+                     a / "data", True, link_password)
         write_config(b_conf, "udb-b.test", "0B1", b_client, b_server, b_tls, "udb-a.test", a_server,
-                     b / "data", False)
+                     b / "data", False, link_password)
         run_configtest(a, args.ircd, a_conf)
         run_configtest(b, args.ircd, b_conf)
 

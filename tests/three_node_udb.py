@@ -5,6 +5,7 @@ import argparse
 import os
 import pathlib
 import re
+import secrets
 import shutil
 import signal
 import socket
@@ -43,14 +44,15 @@ def free_port():
         return sock.getsockname()[1]
 
 
-def write_config(path, name, sid, ports, links, module, dbdir, propagator, load_mutator=False):
+def write_config(path, name, sid, ports, links, module, dbdir, propagator, link_password,
+                 load_mutator=False):
     link_text = ""
     for peer, peer_port, autoconnect in links:
         outgoing = (f'    outgoing {{ bind-ip "127.0.0.1"; hostname "127.0.0.1"; port {peer_port}; '
                     'options { autoconnect; } }\n') if autoconnect else ""
         link_text += f'''link {peer} {{
     incoming {{ mask "127.0.0.1"; }}
-{outgoing}    password "udb-harness-link";
+ {outgoing}    password "{link_password}";
     class servers;
 }}
 '''
@@ -281,9 +283,14 @@ def main():
 
         ports = [tuple(free_port() for _ in range(3)) for _ in range(3)]
         a_conf, b_conf, c_conf = (node / "unrealircd.conf" for node in (a, b, c))
-        write_config(a_conf, "udb-a.test", "0A1", ports[0], (("udb-b.test", ports[1][1], True),), args.module, a / "data", "udb-b.test", True)
-        write_config(b_conf, "udb-b.test", "0B1", ports[1], (("udb-a.test", ports[0][1], False), ("udb-c.test", ports[2][1], True)), args.module, b / "data", "udb-a.test", True)
-        write_config(c_conf, "udb-c.test", "0C1", ports[2], (("udb-b.test", ports[1][1], False),), args.module, c / "data", "udb-b.test", True)
+        link_password = "udb-test-" + secrets.token_hex(32)
+        write_config(a_conf, "udb-a.test", "0A1", ports[0], (("udb-b.test", ports[1][1], True),),
+                     args.module, a / "data", "udb-b.test", link_password, True)
+        write_config(b_conf, "udb-b.test", "0B1", ports[1],
+                     (("udb-a.test", ports[0][1], False), ("udb-c.test", ports[2][1], True)),
+                     args.module, b / "data", "udb-a.test", link_password, True)
+        write_config(c_conf, "udb-c.test", "0C1", ports[2], (("udb-b.test", ports[1][1], False),),
+                     args.module, c / "data", "udb-b.test", link_password, True)
         for node, config in ((a, a_conf), (b, b_conf), (c, c_conf)):
             run_configtest(node, args.ircd, config)
 

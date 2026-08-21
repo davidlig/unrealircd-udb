@@ -184,6 +184,21 @@ def wait_for_daemon(process, host, port, timeout):
     raise RuntimeError("daemon did not open its client listener")
 
 
+def malformed_persisted_paths_rejected(log):
+    text = log.read_text(errors="replace")
+    return (text.count("Skipping malformed persisted record in block N") == 4 and
+            "Skipping overlong persisted record" in text)
+
+
+def wait_for_log(predicate, log, timeout):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate(log):
+            return True
+        time.sleep(0.05)
+    return predicate(log)
+
+
 def exercise(host, port):
     clients = []
     try:
@@ -271,7 +286,12 @@ def main():
             f"alice::pass sha256:{sha256('secret')}\n"
             "alice::challenge sha256\n"
             "alice::access 127.0.0.0/8\n"
-            "alice::vhost alice.test\n",
+            "alice::vhost alice.test\n"
+            "::leading invalid\n"
+            "alice::::double invalid\n"
+            "alice:::triple invalid\n"
+            "alice:: trailing\n" +
+            ("x" * 4096) + " value\n",
             encoding="ascii")
         (data / "udb_C.db").write_text(
             "#vault::founder alice\n"
@@ -287,6 +307,9 @@ def main():
             process = subprocess.Popen(bwrap_command(node, args.ircd, config), stdout=output,
                                        stderr=subprocess.STDOUT, text=True)
         wait_for_daemon(process, "127.0.0.1", port, args.timeout)
+        require(wait_for_log(malformed_persisted_paths_rejected, log, args.timeout),
+                "malformed and overlong persisted UDB paths were not rejected with warnings")
+        print("PASS: malformed and overlong persisted UDB paths were skipped without aborting the block load")
         exercise("127.0.0.1", port)
         return 0
     except EnvironmentUnavailable as exc:

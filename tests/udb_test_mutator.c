@@ -17,6 +17,7 @@ ModuleHeader MOD_HEADER = {
 #define MUTATOR_DEL_GO    "udb-test-mutator-del-go"
 #define MUTATOR_DRP_GO    "udb-test-mutator-drp-go"
 #define MUTATOR_OPT_GO    "udb-test-mutator-opt-go"
+#define MUTATOR_END_GO    "udb-test-mutator-end-go"
 
 static Client *mutator_peer;
 static const char *mutator_value;
@@ -88,6 +89,25 @@ EVENT(udb_test_mutator_event)
 	}
 	if (mutator_state < 0 || !mutator_peer || TStime() < mutator_deadline)
 		return;
+	if (mutator_state == 0 && mutator_trigger_exists(MUTATOR_END_GO))
+	{
+		if (!IsServer(mutator_peer) || !MyConnect(mutator_peer))
+		{
+			mutator_state = -1;
+			return;
+		}
+		/* Each END targets an empty staged tree, whose valid digest is zero. */
+		sendto_one(mutator_peer, NULL, ":%s DB %s BEGIN N empty 00000000", me.id, mutator_peer->id);
+		sendto_one(mutator_peer, NULL, ":%s DB %s END N empty :", me.id, mutator_peer->id);
+		sendto_one(mutator_peer, NULL, ":%s DB %s BEGIN N partial 00000000", me.id, mutator_peer->id);
+		sendto_one(mutator_peer, NULL, ":%s DB %s END N partial 0badg", me.id, mutator_peer->id);
+		sendto_one(mutator_peer, NULL, ":%s DB %s BEGIN N overflow 00000000", me.id, mutator_peer->id);
+		sendto_one(mutator_peer, NULL, ":%s DB %s END N overflow FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF", me.id, mutator_peer->id);
+		mutator_state = 2;
+		unreal_log(ULOG_INFO, "udb-test-mutator", "UDB_TEST_MUTATOR", mutator_peer,
+		           "[UDB_TEST_MUTATOR] emitted malformed staged END digests", NULL);
+		return;
+	}
 	if (mutator_state == 0 && mutator_trigger_exists(MUTATOR_DRP_GO))
 	{
 		if (!IsServer(mutator_peer) || !MyConnect(mutator_peer))

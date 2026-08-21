@@ -5,6 +5,7 @@ import argparse
 import os
 import pathlib
 import re
+import secrets
 import shutil
 import signal
 import socket
@@ -28,6 +29,7 @@ MUTATOR_DRP_TRIGGER = "udb-test-mutator-drp-go"
 RENAME_FAIL_SOURCE = ROOT / "src/modules/third/udb/tests/udb_snapshot_rename_fail.c"
 RENAME_FAIL_MODULE = RENAME_FAIL_SOURCE.with_suffix(".so")
 MUTATOR_OPT_TRIGGER = "udb-test-mutator-opt-go"
+MUTATOR_END_TRIGGER = "udb-test-mutator-end-go"
 K_STAGED_RECORD = "G::*@udb-staged.test::reason staged-sync-k-effect"
 
 
@@ -43,7 +45,7 @@ def free_port():
 
 
 def write_config(path, name, sid, client_port, server_port, tls_port, peer, peer_port, module, dbdir,
-                 propagator, autoconnect, load_mutator=False):
+                 propagator, autoconnect, link_password, load_mutator=False):
     outgoing = (f'    outgoing {{ bind-ip "127.0.0.1"; hostname "127.0.0.1"; port {peer_port}; '
                 'options { autoconnect; } }\n') if autoconnect else ""
     path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
@@ -70,8 +72,8 @@ listen {{ ip "127.0.0.1"; port {server_port}; options {{ serversonly; }} }}
 listen {{ ip "127.0.0.1"; port {tls_port}; options {{ tls; }} }}
 link {peer} {{
     incoming {{ mask "127.0.0.1"; }}
-{outgoing}    password "udb-harness-link";
-    password "udb-harness-link";
+ {outgoing}    password "{link_password}";
+    password "{link_password}";
     class servers;
 }}
 loadmodule "cloak_sha256";
@@ -263,6 +265,13 @@ def runtime_drp_rename_failure_observed(a_log, b_log, b_db, baseline):
             "cmd=DRP err=6" in log_text(a_log))
 
 
+def malformed_end_checksums_rejected(a_log, b_log, b_db, baseline):
+    return (udb_commands(b_log).count("END") >= 3 and
+            log_text(a_log).count("cmd=END err=6") >= 3 and
+            log_text(b_log).count("digest or persistence failure") >= 3 and
+            b_db.read_bytes() == baseline and not db_contains(b_db, "attack"))
+
+
 def print_diagnostics(logs, b_db=None):
     commands = [udb_commands(log) for log in logs]
     print("DIAGNOSTIC: S2S link evidence was observed, but staged UDB snapshot evidence was not.",
@@ -319,6 +328,8 @@ def main():
                         help="fail node B's armed live DEL snapshot rename and verify rollback")
     parser.add_argument("--runtime-drp-rename-failure", action="store_true",
                         help="fail node B's armed live DRP snapshot rename and verify rollback")
+    parser.add_argument("--malformed-end-checksum", action="store_true",
+                        help="reject empty, partial, and overflowing END checksums without committing")
     args = parser.parse_args()
 
     if not shutil.which("bwrap"):
@@ -366,11 +377,13 @@ def main():
 
         a_client, a_server, a_tls, b_client, b_server, b_tls = (free_port() for _ in range(6))
         a_conf, b_conf = a / "unrealircd.conf", b / "unrealircd.conf"
+        link_password = "udb-test-" + secrets.token_hex(32)
         write_config(a_conf, "udb-a.test", "0A1", a_client, a_server, a_tls,
-                     "udb-b.test", b_server, args.module, a / "data", "udb-b.test", True,
-                     load_mutator=True)
+                      "udb-b.test", b_server, args.module, a / "data", "udb-b.test", True,
+                      link_password, load_mutator=True)
         write_config(b_conf, "udb-b.test", "0B1", b_client, b_server, b_tls,
-                     "udb-a.test", a_server, args.module, b / "data", "udb-a.test", False)
+                      "udb-a.test", a_server, args.module, b / "data", "udb-a.test", False,
+                      link_password)
         run_configtest(a, args.ircd, a_conf, args.module, MUTATOR_MODULE)
         run_configtest(b, args.ircd, b_conf, args.module)
 
@@ -440,6 +453,19 @@ def main():
                   file=sys.stderr)
             return 1
         print("PASS: higher-SID B won divergent equal-timestamp N and nested K blocks with one RES per block")
+        if args.malformed_end_checksum:
+            b_baseline = b_db.read_bytes()
+            (a / "data" / MUTATOR_END_TRIGGER).touch()
+            deadline = time.monotonic() + args.timeout
+            while time.monotonic() < deadline:
+                if malformed_end_checksums_rejected(logs[0], logs[1], b_db, b_baseline):
+                    break
+                time.sleep(0.25)
+            if not malformed_end_checksums_rejected(logs[0], logs[1], b_db, b_baseline):
+                print_diagnostics(logs, b_db)
+                return 1
+            print("PASS: empty-tree staged END rejected empty, partial, and overflowing checksums without commit")
+            return 0
         if args.runtime_del_rename_failure:
             (a / "data" / MUTATOR_INS_TRIGGER).touch()
             deadline = time.monotonic() + args.timeout
