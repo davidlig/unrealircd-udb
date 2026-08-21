@@ -32,7 +32,7 @@ module
  */
 
 #ifndef UDB_INTERNAL_H
-#define UDB_INTERNAL_H
+ #define UDB_INTERNAL_H
 
 /* UDB - Unreal Database System for UnrealIRCd 6
  * Originally by Trocotronic & MaD (UDB 3.6.1 for UnrealIRCd 3.2.8)
@@ -52,128 +52,128 @@ module
  *   udb_query.inc.c   - DBQ user command for querying the database
  */
 
-#ifndef UDB_H
-#define UDB_H
+ #ifndef UDB_H
+  #define UDB_H
 
-#define UDB_VERSION "4.0.0"
+  #define UDB_VERSION "4.0.0"
 
-/* ========================================================================
+  /* ========================================================================
  * Block Identifiers
  * ======================================================================== */
-#define UDB_BLOCK_NICKS    'N'
-#define UDB_BLOCK_CHANNELS 'C'
-#define UDB_BLOCK_IPS      'I'
-#define UDB_BLOCK_SETTINGS 'S'
-#define UDB_BLOCK_LINKS    'L'
-#define UDB_BLOCK_LINES    'K'
+  #define UDB_BLOCK_NICKS    'N'
+  #define UDB_BLOCK_CHANNELS 'C'
+  #define UDB_BLOCK_IPS      'I'
+  #define UDB_BLOCK_SETTINGS 'S'
+  #define UDB_BLOCK_LINKS    'L'
+  #define UDB_BLOCK_LINES    'K'
 
-#define UDB_NUM_BLOCKS 6
+  #define UDB_NUM_BLOCKS 6
 
-/* ========================================================================
+  /* ========================================================================
  * Sub-record Keys
  * ======================================================================== */
 
-/* Nick sub-records: N::<nick>::<key> <value> */
-#define NKEY_ACCESS    "access"    /* IP/CIDR access restriction */
-#define NKEY_PASS      "pass"      /* Password hash */
-#define NKEY_VHOST     "vhost"     /* Virtual host */
-#define NKEY_FORBID    "forbid"    /* Forbidden nick (value = reason) */
-#define NKEY_SUSPENDED "suspended" /* Suspended nick (value = reason) */
-#define NKEY_OPER      "oper"      /* Oper level bitmask (*N) */
-#define NKEY_CHALLENGE "challenge" /* Password hash method */
-#define NKEY_MODES     "modes"     /* Allowed oper modes */
-#define NKEY_SNOMASKS  "snomasks"  /* Allowed snomasks */
-#define NKEY_SWHOIS    "swhois"    /* Custom SWHOIS line */
+  /* Nick sub-records: N::<nick>::<key> <value> */
+  #define NKEY_ACCESS    "access"    /* IP/CIDR access restriction */
+  #define NKEY_PASS      "pass"      /* Password hash */
+  #define NKEY_VHOST     "vhost"     /* Virtual host */
+  #define NKEY_FORBID    "forbid"    /* Forbidden nick (value = reason) */
+  #define NKEY_SUSPENDED "suspended" /* Suspended nick (value = reason) */
+  #define NKEY_OPER      "oper"      /* Oper level bitmask (*N) */
+  #define NKEY_CHALLENGE "challenge" /* Password hash method */
+  #define NKEY_MODES     "modes"     /* Allowed oper modes */
+  #define NKEY_SNOMASKS  "snomasks"  /* Allowed snomasks */
+  #define NKEY_SWHOIS    "swhois"    /* Custom SWHOIS line */
 
-/* Channel sub-records: C::<#chan>::<key> <value> */
-#define CKEY_FOUNDER    "founder"    /* Founder nick */
-#define CKEY_MODES      "modes"      /* Locked channel modes */
-#define CKEY_TOPIC      "topic"      /* Persistent topic */
-#define CKEY_ACCESS     "access"     /* Access list (has sub-records per nick) */
-#define CKEY_FORBID     "forbid"     /* Forbidden channel (value = reason) */
-#define CKEY_SUSPENDED  "suspended"  /* Suspended channel */
-#define CKEY_PASS       "pass"       /* Channel password for +ao */
-#define CKEY_CHALLENGE  "challenge"  /* Channel password hash method */
-#define CKEY_OPTIONS    "options"    /* Channel option flags (*N) */
-#define CKEY_PERSISTENT "persistent" /* Keep the channel alive through native +P */
+  /* Channel sub-records: C::<#chan>::<key> <value> */
+  #define CKEY_FOUNDER    "founder"    /* Founder nick */
+  #define CKEY_MODES      "modes"      /* Locked channel modes */
+  #define CKEY_TOPIC      "topic"      /* Persistent topic */
+  #define CKEY_ACCESS     "access"     /* Access list (has sub-records per nick) */
+  #define CKEY_FORBID     "forbid"     /* Forbidden channel (value = reason) */
+  #define CKEY_SUSPENDED  "suspended"  /* Suspended channel */
+  #define CKEY_PASS       "pass"       /* Channel password for +ao */
+  #define CKEY_CHALLENGE  "challenge"  /* Channel password hash method */
+  #define CKEY_OPTIONS    "options"    /* Channel option flags (*N) */
+  #define CKEY_PERSISTENT "persistent" /* Keep the channel alive through native +P */
 
-/* IP sub-records: I::<ip|host>::<key> <value> */
-#define IKEY_CLONES  "clones"  /* Max clones allowed (*N) */
-#define IKEY_NOLINES "nolines" /* Ban exception types (eg. GZQSTmc) */
-#define IKEY_HOST    "host"    /* Reverse DNS override */
+  /* IP sub-records: I::<ip|host>::<key> <value> */
+  #define IKEY_CLONES  "clones"  /* Max clones allowed (*N) */
+  #define IKEY_NOLINES "nolines" /* Ban exception types (eg. GZQSTmc) */
+  #define IKEY_HOST    "host"    /* Reverse DNS override */
 
-/* Settings sub-records: S::<key> <value> */
-#define SKEY_CRYPT_KEY   "encryption_key" /* Host cloaking key */
-#define SKEY_SUFFIX      "suffix"         /* Virtual host suffix */
-#define SKEY_NICKSERV    "nickserv"       /* NickServ bot mask */
-#define SKEY_CHANSERV    "chanserv"       /* ChanServ bot mask */
-#define SKEY_IPSERV      "ipserv"         /* IpServ bot mask */
-#define SKEY_CLONES      "clones"         /* Global max clones (*N) */
-#define SKEY_QUIT_IPS    "quit_ips"       /* Quit message for IP limit */
-#define SKEY_QUIT_CLONES "quit_clones"    /* Quit message for clone limit */
-#define SKEY_CHALLENGE   "challenge"      /* Global hash method */
-#define SKEY_FLOOD       "flood"          /* Password flood limit V:S */
+  /* Settings sub-records: S::<key> <value> */
+  #define SKEY_CRYPT_KEY   "encryption_key" /* Host cloaking key */
+  #define SKEY_SUFFIX      "suffix"         /* Virtual host suffix */
+  #define SKEY_NICKSERV    "nickserv"       /* NickServ bot mask */
+  #define SKEY_CHANSERV    "chanserv"       /* ChanServ bot mask */
+  #define SKEY_IPSERV      "ipserv"         /* IpServ bot mask */
+  #define SKEY_CLONES      "clones"         /* Global max clones (*N) */
+  #define SKEY_QUIT_IPS    "quit_ips"       /* Quit message for IP limit */
+  #define SKEY_QUIT_CLONES "quit_clones"    /* Quit message for clone limit */
+  #define SKEY_CHALLENGE   "challenge"      /* Global hash method */
+  #define SKEY_FLOOD       "flood"          /* Password flood limit V:S */
 
-/* Link sub-records: L::<server>::<key> <value> */
-#define LKEY_OPTIONS "options" /* Link option flags (*N) */
+  /* Link sub-records: L::<server>::<key> <value> */
+  #define LKEY_OPTIONS "options" /* Link option flags (*N) */
 
-/* Line sub-records: K::<type>::<pattern>::<key> <value> */
-#define KKEY_TYPE     "type"     /* Spamfilter target type */
-#define KKEY_ACTION   "action"   /* Spamfilter action */
-#define KKEY_DURATION "duration" /* TKL duration */
-#define KKEY_REASON   "reason"   /* Ban reason */
+  /* Line sub-records: K::<type>::<pattern>::<key> <value> */
+  #define KKEY_TYPE     "type"     /* Spamfilter target type */
+  #define KKEY_ACTION   "action"   /* Spamfilter action */
+  #define KKEY_DURATION "duration" /* TKL duration */
+  #define KKEY_REASON   "reason"   /* Ban reason */
 
-/* Spamfilter pattern encoding: K::F::b64:<RFC 4648 base64>::... */
-#define UDB_SPAMFILTER_B64_PREFIX  "b64:"
-#define UDB_SPAMFILTER_PATTERN_MAX 3072
+  /* Spamfilter pattern encoding: K::F::b64:<RFC 4648 base64>::... */
+  #define UDB_SPAMFILTER_B64_PREFIX  "b64:"
+  #define UDB_SPAMFILTER_PATTERN_MAX 3072
 
-/* ========================================================================
+  /* ========================================================================
  * Error Codes (for DB ERR protocol messages)
  * ======================================================================== */
-#define UDB_ERR_NO_BLOCK    1  /* Block does not exist */
-#define UDB_ERR_OFFSET      2  /* Data offset mismatch */
-#define UDB_ERR_NOT_HUB     3  /* Only hub can insert/delete */
-#define UDB_ERR_PARAMS      4  /* Missing parameters */
-#define UDB_ERR_CANNOT_OPEN 5  /* Cannot open block file */
-#define UDB_ERR_FATAL       6  /* Fatal / internal error */
-#define UDB_ERR_SYNC_ACTIVE 7  /* Sync already in progress */
-#define UDB_ERR_NO_SYNC     8  /* No sync was requested */
-#define UDB_ERR_FORBIDDEN   9  /* Forbidden server */
-#define UDB_ERR_DUPLICATE   10 /* Duplicate record */
+  #define UDB_ERR_NO_BLOCK    1  /* Block does not exist */
+  #define UDB_ERR_OFFSET      2  /* Data offset mismatch */
+  #define UDB_ERR_NOT_HUB     3  /* Only hub can insert/delete */
+  #define UDB_ERR_PARAMS      4  /* Missing parameters */
+  #define UDB_ERR_CANNOT_OPEN 5  /* Cannot open block file */
+  #define UDB_ERR_FATAL       6  /* Fatal / internal error */
+  #define UDB_ERR_SYNC_ACTIVE 7  /* Sync already in progress */
+  #define UDB_ERR_NO_SYNC     8  /* No sync was requested */
+  #define UDB_ERR_FORBIDDEN   9  /* Forbidden server */
+  #define UDB_ERR_DUPLICATE   10 /* Duplicate record */
 
-/* SHA-256 is deliberately handled by UDB, not Auth_Check(). */
-#define UDB_AUTHTYPE_SHA256 1001
+  /* SHA-256 is deliberately handled by UDB, not Auth_Check(). */
+  #define UDB_AUTHTYPE_SHA256 1001
 
-/* ========================================================================
+  /* ========================================================================
  * Oper Levels (bitmask stored in N::<nick>::oper *<value>)
  * ======================================================================== */
-#define UDB_OPER_HELPER 0x1 /* Pre-operator: receives +h automatically */
-#define UDB_OPER_ADMIN  0x2 /* Admin: receives +oa */
-#define UDB_OPER_ROOT   0x4 /* Root: receives +oN, can /rehash /restart */
+  #define UDB_OPER_HELPER 0x1 /* Pre-operator: receives +h automatically */
+  #define UDB_OPER_ADMIN  0x2 /* Admin: receives +oa */
+  #define UDB_OPER_ROOT   0x4 /* Root: receives +oN, can /rehash /restart */
 
-/* ========================================================================
+  /* ========================================================================
  * Channel Option Flags (bitmask in C::<#chan>::options *<value>)
  * ======================================================================== */
-#define UDB_CHOPT_PROTECT_BANS 0x1 /* Only ban author can remove their bans */
-#define UDB_CHOPT_LOCK_MODES   0x2 /* Channel modes are locked */
+  #define UDB_CHOPT_PROTECT_BANS 0x1 /* Only ban author can remove their bans */
+  #define UDB_CHOPT_LOCK_MODES   0x2 /* Channel modes are locked */
 
-/* ========================================================================
+  /* ========================================================================
  * Link Option Flags (bitmask in L::<server>::options *<value>)
  * ======================================================================== */
-#define UDB_LNKOPT_DEBUG      0x1 /* Debug: receives all UDB mode changes */
-#define UDB_LNKOPT_PROPAGATOR 0x2 /* Propagator: only server that can push data */
+  #define UDB_LNKOPT_DEBUG      0x1 /* Debug: receives all UDB mode changes */
+  #define UDB_LNKOPT_PROPAGATOR 0x2 /* Propagator: only server that can push data */
 
-#endif /* UDB_H */
+ #endif /* UDB_H */
 
 
-#include "unrealircd.h"
-#include <openssl/hmac.h>
+ #include "unrealircd.h"
+ #include <openssl/hmac.h>
 
-#define UDB_DB_SUBDIR              "data"
-#define UDB_SYNC_TIMEOUT           60
-#define UDB_HASH_SIZE              2048
-#define UDB_HASH_MASK              (UDB_HASH_SIZE - 1)
-#define UDB_PASSWORD_FAILURE_SLOTS 256
+ #define UDB_DB_SUBDIR              "data"
+ #define UDB_SYNC_TIMEOUT           60
+ #define UDB_HASH_SIZE              2048
+ #define UDB_HASH_MASK              (UDB_HASH_SIZE - 1)
+ #define UDB_PASSWORD_FAILURE_SLOTS 256
 
 typedef struct UdbRecord UdbRecord;
 typedef struct UdbBlock UdbBlock;
@@ -307,6 +307,19 @@ static void udb_sync_session_free(UdbBlock *block);
 static int udb_block_letter_to_index(char letter);
 
 static void udb_sync_to_server(Client *server);
+static int udb_has_hello(Client *server);
+static int udb_has_staged_sync(Client *server);
+static void udb_sync_hello_start(Client *server);
+static int udb_sync_hello_ack(Client *server);
+static void udb_sync_abort(UdbBlock *block, const char *reason);
+static int udb_sync_begin(UdbBlock *block, Client *peer, const char *txid);
+static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid,
+                        const char *path, const char *data);
+static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer,
+                        const char *txid, const char *checksum, unsigned long *digest);
+static void udb_sync_ack(Client *peer, const char *block);
+static void udb_sync_send_stage(Client *server, UdbBlock *block);
+static void udb_sync_server_quit(Client *client);
 static int udb_is_propagator(UdbContext *ctx, Client *server);
 static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync);
 static void udb_nick_strip(Client *client, UdbRecord *nick_rec);
@@ -355,9 +368,9 @@ static void udb_ips_init(ModuleInfo *modinfo);
 static void udb_lines_init(ModuleInfo *modinfo);
 static void udb_query_init(ModuleInfo *modinfo);
 
-#define udb_log(level, event_id, client, msg, ...) \
-	unreal_log(level, "udb", event_id, client, "[UDB] " msg, ##__VA_ARGS__)
-#define udb_strdup(dest, src) safe_strdup(dest, src)
+ #define udb_log(level, event_id, client, msg, ...) \
+		unreal_log(level, "udb", event_id, client, "[UDB] " msg, ##__VA_ARGS__)
+ #define udb_strdup(dest, src) safe_strdup(dest, src)
 
 #endif /* UDB_INTERNAL_H */
 
@@ -1720,11 +1733,9 @@ static void udb_remove_special_record(UdbContext *ctx, UdbBlock *block, UdbRecor
 
 /* End of udb_effects.c.inc */
 
-/* S2S protocol handler: DB command, server sync */
-/* Inlined: udb_protocol.c.inc */
-/* UDB - Unreal Database System for UnrealIRCd 6
- * Protocol implementation (S2S DB command and sync)
- */
+/* Staged synchronization sessions: HEL capability and transfer state */
+/* Inlined: udb_sync.c.inc */
+/* UDB staged synchronization session state. */
 
 static unsigned long udb_sync_txid = 0;
 
@@ -1772,7 +1783,7 @@ static int udb_has_staged_sync(Client *server)
 	return udb_has_hello(server);
 }
 
-static void udb_hello_start(Client *server)
+static void udb_sync_hello_start(Client *server)
 {
 	UdbHelloPeer *peer;
 
@@ -1786,17 +1797,17 @@ static void udb_hello_start(Client *server)
 	sendto_one(server, NULL, ":%s DB %s HEL 4", me.id, server->id);
 }
 
-static void udb_sendto_confirmed_servers(Client *except, const char *fmt, ...)
+static int udb_sync_hello_ack(Client *server)
 {
-	Client *server;
-	char line[4096];
-	va_list args;
+	UdbHelloPeer *peer = udb_hello_peer(server, 1);
 
-	va_start(args, fmt);
-	vsnprintf(line, sizeof(line), fmt, args);
-	va_end(args);
-	list_for_each_entry(server, &client_list, client_node) if (server != except && IsServer(server) && MyConnect(server) && udb_has_hello(server))
-	    sendto_one(server, NULL, "%s", line);
+	if (peer->state != UDB_HEL_WAITING)
+		return 0;
+	peer->state = UDB_HEL_CONFIRMED;
+	udb_log(ULOG_INFO, "UDB_HEL_CONFIRMED", server,
+	        "UDB HEL 4 capability confirmed for directly linked server");
+	udb_sync_to_server(server);
+	return 1;
 }
 
 static void udb_sync_abort(UdbBlock *block, const char *reason)
@@ -1817,7 +1828,11 @@ static int udb_sync_begin(UdbBlock *block, Client *peer, const char *txid)
 	if (!block || !peer || !txid || !*txid || strlen(txid) >= sizeof(session->txid))
 		return 0;
 	if (block->session)
+	{
+		if (block->session->peer == peer)
+			udb_sync_abort(block, "duplicate BEGIN");
 		return 0;
+	}
 	session = safe_alloc(sizeof(*session));
 	session->peer = peer;
 	strlcpy(session->txid, txid, sizeof(session->txid));
@@ -1829,6 +1844,56 @@ static int udb_sync_begin(UdbBlock *block, Client *peer, const char *txid)
 	block->session = session;
 	block->syncing_from = peer;
 	return 1;
+}
+
+static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid,
+                        const char *path, const char *data)
+{
+	UdbSyncSession *session = block ? block->session : NULL;
+	char line[4096];
+
+	if (!session || session->peer != peer || strcmp(session->txid, txid))
+	{
+		if (session && session->peer == peer)
+			udb_sync_abort(block, "invalid PUT sequence");
+		return UDB_ERR_NO_SYNC;
+	}
+	if (snprintf(line, sizeof(line), "%s %s", path, data) >= (int)sizeof(line) ||
+	    !udb_stage_parse_line(block, session, line))
+	{
+		udb_sync_abort(block, "invalid PUT payload");
+		return UDB_ERR_PARAMS;
+	}
+	session->deadline = time(NULL) + UDB_SYNC_TIMEOUT;
+	return 0;
+}
+
+static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer,
+                        const char *txid, const char *checksum, unsigned long *digest)
+{
+	UdbSyncSession *session = block ? block->session : NULL;
+
+	if (!session || session->peer != peer || strcmp(session->txid, txid))
+	{
+		if (session && session->peer == peer)
+			udb_sync_abort(block, "invalid END sequence");
+		return UDB_ERR_NO_SYNC;
+	}
+	*digest = udb_compute_tree_checksum(session->tree);
+	if (*digest != strtoul(checksum, NULL, 16) ||
+	    !udb_stage_persist_block(block, session) ||
+	    !udb_block_commit_stage(ctx, block, session, *digest))
+	{
+		udb_sync_abort(block, "digest or persistence failure");
+		return UDB_ERR_FATAL;
+	}
+	return 0;
+}
+
+static void udb_sync_ack(Client *peer, const char *block)
+{
+	udb_log(ULOG_INFO, "UDB_SYNC_ACK", peer,
+	        "Staged sync acknowledged for block $block", log_data_string("block", block));
 }
 
 static void udb_sync_send_tree(Client *server, UdbRecord *rec, int depth,
@@ -1883,16 +1948,56 @@ EVENT(udb_sync_timeout_event)
 	for (block = udb_ctx ? udb_ctx->block_list : NULL; block; block = block->next)
 		if (block->session && block->session->deadline <= now)
 			udb_sync_abort(block, "timeout");
-
 	for (peer = udb_hello_peers; peer; peer = peer->next)
-	{
 		if (peer->state == UDB_HEL_WAITING && peer->deadline <= now)
 		{
 			peer->state = UDB_HEL_UNSUPPORTED;
 			udb_log(ULOG_INFO, "UDB_HEL_TIMEOUT", peer->peer,
 			        "No UDB HEL 4 acknowledgement from directly linked server; capability disabled for this link");
 		}
-	}
+}
+
+static void udb_sync_server_quit(Client *client)
+{
+	UdbBlock *block;
+	UdbHelloPeer **peer;
+
+	if (!udb_ctx || !client)
+		return;
+	for (peer = &udb_hello_peers; *peer; peer = &(*peer)->next)
+		if ((*peer)->peer == client)
+		{
+			UdbHelloPeer *old = *peer;
+			*peer = old->next;
+			safe_free(old);
+			break;
+		}
+	for (block = udb_ctx->block_list; block; block = block->next)
+		if (block->session && block->session->peer == client)
+			udb_sync_abort(block, "peer quit");
+		else if (block->syncing_from == client)
+			block->syncing_from = NULL;
+}
+
+/* End of udb_sync.c.inc */
+
+/* S2S protocol handler: DB command parsing, routing, and server sync */
+/* Inlined: udb_protocol.c.inc */
+/* UDB - Unreal Database System for UnrealIRCd 6
+ * Protocol implementation (S2S DB command and sync)
+ */
+
+static void udb_sendto_confirmed_servers(Client *except, const char *fmt, ...)
+{
+	Client *server;
+	char line[4096];
+	va_list args;
+
+	va_start(args, fmt);
+	vsnprintf(line, sizeof(line), fmt, args);
+	va_end(args);
+	list_for_each_entry(server, &client_list, client_node) if (server != except && IsServer(server) && MyConnect(server) && udb_has_hello(server))
+	    sendto_one(server, NULL, "%s", line);
 }
 
 static const char *udb_selected_propagator(UdbContext *ctx)
@@ -1999,36 +2104,18 @@ static int udb_hook_server_sync(Client *client)
 {
 	if (!client || !IsServer(client) || !MyConnect(client))
 		return 0;
-	udb_hello_start(client);
+	udb_sync_hello_start(client);
 	return 0;
 }
 
 static int udb_hook_server_quit(Client *client, MessageTag *mtags)
 {
-	UdbBlock *block;
-	UdbHelloPeer **peer;
-
 	if (!udb_ctx || !client)
 		return 0;
 
 	if (udb_ctx->propagator == client)
 		udb_ctx->propagator = NULL;
-	for (peer = &udb_hello_peers; *peer; peer = &(*peer)->next)
-		if ((*peer)->peer == client)
-		{
-			UdbHelloPeer *old = *peer;
-			*peer = old->next;
-			safe_free(old);
-			break;
-		}
-
-	for (block = udb_ctx->block_list; block; block = block->next)
-	{
-		if (block->session && block->session->peer == client)
-			udb_sync_abort(block, "peer quit");
-		else if (block->syncing_from == client)
-			block->syncing_from = NULL;
-	}
+	udb_sync_server_quit(client);
 	return 0;
 }
 
@@ -2056,30 +2143,22 @@ CMD_FUNC(cmd_db)
 	/* HEL is the sole DB frame accepted before UDB capability confirmation. */
 	if (!strcasecmp(subcmd, "HEL"))
 	{
-		UdbHelloPeer *peer;
-
 		if (!IsServer(client) || !MyConnect(client) ||
 		    (strcmp(target, me.id) && strcmp(target, me.name)) ||
 		    parc < 4 || strcmp(parv[3], "4"))
 			return;
 		snprintf(logbuf, sizeof(logbuf), "[UDB] S2S DB received: parc=%d target=%s subcmd=%s", parc, target, subcmd);
 		unreal_log(ULOG_INFO, "udb", "UDB_CMD_DB", client, "$msg", log_data_string("msg", logbuf));
-		peer = udb_hello_peer(client, 1);
 		if (parc == 5 && !strcasecmp(parv[4], "ACK"))
 		{
-			if (peer->state != UDB_HEL_WAITING)
-				return;
-			peer->state = UDB_HEL_CONFIRMED;
-			udb_log(ULOG_INFO, "UDB_HEL_CONFIRMED", client,
-			        "UDB HEL 4 capability confirmed for directly linked server");
-			udb_sync_to_server(client);
+			udb_sync_hello_ack(client);
 			return;
 		}
 		if (parc != 4)
 			return;
 		/* Each side sends its own request, so only an ACK confirms outbound data. */
-		if (!peer->state)
-			udb_hello_start(client);
+		if (!udb_has_hello(client))
+			udb_sync_hello_start(client);
 		sendto_one(client, NULL, ":%s DB %s HEL 4 ACK", me.id, client->id);
 		return;
 	}
@@ -2111,13 +2190,6 @@ CMD_FUNC(cmd_db)
 				block = udb_block_by_letter(ctx, *parv[3]);
 				if (is_for_me)
 				{
-					if (block && block->session && block->session->peer == client)
-					{
-						udb_sync_abort(block, "duplicate BEGIN");
-						sendto_one(client, NULL, ":%s DB %s ERR BEGIN %d %c", me.id, client->id,
-						           UDB_ERR_SYNC_ACTIVE, *parv[3]);
-						return;
-					}
 					if (!block || !udb_sync_begin(block, client, parv[4]))
 					{
 						sendto_one(client, NULL, ":%s DB %s ERR BEGIN %d %c", me.id, client->id,
@@ -2136,8 +2208,7 @@ CMD_FUNC(cmd_db)
 			if (!strcasecmp(subcmd, "PUT"))
 			{
 				UdbBlock *block;
-				UdbSyncSession *session;
-				char line[4096];
+				int error;
 				if (parc < 7 || !udb_has_staged_sync(client))
 				{
 					udb_protocol_params_error(client, subcmd);
@@ -2146,24 +2217,13 @@ CMD_FUNC(cmd_db)
 				block = udb_block_by_letter(ctx, *parv[3]);
 				if (is_for_me)
 				{
-					session = block ? block->session : NULL;
-					if (!session || session->peer != client || strcmp(session->txid, parv[4]))
+					error = udb_sync_put(block, client, parv[4], parv[5], parv[6]);
+					if (error)
 					{
-						if (session && session->peer == client)
-							udb_sync_abort(block, "invalid PUT sequence");
 						sendto_one(client, NULL, ":%s DB %s ERR PUT %d %c", me.id, client->id,
-						           UDB_ERR_NO_SYNC, parv[3] ? *parv[3] : '0');
+						           error, parv[3] ? *parv[3] : '0');
 						return;
 					}
-					if (snprintf(line, sizeof(line), "%s %s", parv[5], parv[6]) >= (int)sizeof(line) ||
-					    !udb_stage_parse_line(block, session, line))
-					{
-						udb_sync_abort(block, "invalid PUT payload");
-						sendto_one(client, NULL, ":%s DB %s ERR PUT %d %c", me.id, client->id,
-						           UDB_ERR_PARAMS, *parv[3]);
-						return;
-					}
-					session->deadline = time(NULL) + UDB_SYNC_TIMEOUT;
 					if (!is_broadcast)
 						return;
 				}
@@ -2176,8 +2236,8 @@ CMD_FUNC(cmd_db)
 			if (!strcasecmp(subcmd, "END"))
 			{
 				UdbBlock *block;
-				UdbSyncSession *session;
 				unsigned long digest;
+				int error;
 				if (parc < 6 || !udb_has_staged_sync(client))
 				{
 					udb_protocol_params_error(client, subcmd);
@@ -2186,23 +2246,11 @@ CMD_FUNC(cmd_db)
 				block = udb_block_by_letter(ctx, *parv[3]);
 				if (is_for_me)
 				{
-					session = block ? block->session : NULL;
-					if (!session || session->peer != client || strcmp(session->txid, parv[4]))
+					error = udb_sync_end(ctx, block, client, parv[4], parv[5], &digest);
+					if (error)
 					{
-						if (session && session->peer == client)
-							udb_sync_abort(block, "invalid END sequence");
 						sendto_one(client, NULL, ":%s DB %s ERR END %d %c", me.id, client->id,
-						           UDB_ERR_NO_SYNC, parv[3] ? *parv[3] : '0');
-						return;
-					}
-					digest = udb_compute_tree_checksum(session->tree);
-					if (digest != strtoul(parv[5], NULL, 16) ||
-					    !udb_stage_persist_block(block, session) ||
-					    !udb_block_commit_stage(ctx, block, session, digest))
-					{
-						udb_sync_abort(block, "digest or persistence failure");
-						sendto_one(client, NULL, ":%s DB %s ERR END %d %c", me.id, client->id,
-						           UDB_ERR_FATAL, *parv[3]);
+						           error, parv[3] ? *parv[3] : '0');
 						return;
 					}
 					sendto_one(client, NULL, ":%s DB %s ACK %c %s %08lX", me.id, client->id,
@@ -2244,9 +2292,7 @@ CMD_FUNC(cmd_db)
 				}
 				if (is_for_me)
 				{
-					udb_log(ULOG_INFO, "UDB_SYNC_ACK", client,
-					        "Staged sync acknowledged for block $block",
-					        log_data_string("block", parv[3]));
+					udb_sync_ack(client, parv[3]);
 					if (!is_broadcast)
 						return;
 				}

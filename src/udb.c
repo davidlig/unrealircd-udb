@@ -48,7 +48,10 @@ ModuleHeader MOD_HEADER = {
 /* Runtime effects: special-record dispatch only */
 #include "udb_effects.c.inc"
 
-/* S2S protocol handler: DB command, server sync */
+/* Staged synchronization sessions: HEL capability and transfer state */
+#include "udb_sync.c.inc"
+
+/* S2S protocol handler: DB command parsing, routing, and server sync */
 #include "udb_protocol.c.inc"
 
 /* Nick management: registration, identification, ghost, vhost, oper */

@@ -150,6 +150,19 @@ static void udb_sync_session_free(UdbBlock *block);
 static int udb_block_letter_to_index(char letter);
 
 static void udb_sync_to_server(Client *server);
+static int udb_has_hello(Client *server);
+static int udb_has_staged_sync(Client *server);
+static void udb_sync_hello_start(Client *server);
+static int udb_sync_hello_ack(Client *server);
+static void udb_sync_abort(UdbBlock *block, const char *reason);
+static int udb_sync_begin(UdbBlock *block, Client *peer, const char *txid);
+static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid,
+                        const char *path, const char *data);
+static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer,
+                        const char *txid, const char *checksum, unsigned long *digest);
+static void udb_sync_ack(Client *peer, const char *block);
+static void udb_sync_send_stage(Client *server, UdbBlock *block);
+static void udb_sync_server_quit(Client *client);
 static int udb_is_propagator(UdbContext *ctx, Client *server);
 static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync);
 static void udb_nick_strip(Client *client, UdbRecord *nick_rec);
