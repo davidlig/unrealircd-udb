@@ -11,17 +11,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
-/* Forward declare prototypes from other inc files to prevent compiler warnings */
-static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync);
-static void udb_nick_strip(Client *client, UdbRecord *nick_rec);
-static void udb_nick_revoke_oper(Client *client);
-static void udb_channel_apply_record(Channel *channel, UdbRecord *chan_rec, const char *subkey, int is_new);
-static void udb_channel_remove_record(Channel *channel, UdbRecord *chan_rec, const char *subkey);
-static void udb_ip_apply_record(const char *ip_key, UdbRecord *ip_rec, const char *subkey, int is_new);
-static void udb_ip_remove_record(const char *ip_key, UdbRecord *ip_rec, const char *subkey);
-static void udb_ips_shutdown(void);
-static void udb_line_apply_record(UdbRecord *line_rec, int is_new);
-static void udb_line_remove_record(UdbRecord *line_rec);
+/* Local helper declared before its later definition. */
 static void udb_block_set_context_root(UdbBlock *block);
 
 static int udb_setting_string_valid(const char *value)

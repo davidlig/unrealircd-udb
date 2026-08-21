@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 UDB Bundle Script
-Combines modular UDB sources (udb.c, udb.h, udb_*.c.inc) into a single,
+Combines modular UDB sources (udb.c, udb.h, udb_internal.h, udb_*.c.inc) into a single,
 self-contained files/udb.c and generates modules.list for UnrealIRCd Module Manager.
 """
 
@@ -47,9 +47,11 @@ module
 def bundle_sources():
     os.makedirs(DIST_DIR, exist_ok=True)
     
-    # Read udb.h
+    # Read public and implementation-only headers.
     with open(os.path.join(SRC_DIR, "udb.h"), "r", encoding="utf-8") as f:
         udb_h_content = f.read()
+    with open(os.path.join(SRC_DIR, "udb_internal.h"), "r", encoding="utf-8") as f:
+        udb_internal_h_content = f.read()
 
     # Read udb.c
     with open(os.path.join(SRC_DIR, "udb.c"), "r", encoding="utf-8") as f:
@@ -58,8 +60,14 @@ def bundle_sources():
     # Remove initial multi-line comment from udb.c if any
     clean_udb_c = re.sub(r'/\*.*?\*/', '', udb_c_content, count=1, flags=re.DOTALL).strip()
 
-    # Replace #include "udb.h" with udb_h_content
-    clean_udb_c = re.sub(r'#include\s+"udb\.h"', udb_h_content, clean_udb_c)
+    # Inline the public header into the internal header, then inline that
+    # complete implementation interface into the one-file distribution.
+    udb_internal_h_content = re.sub(
+        r'#include\s+"udb\.h"', udb_h_content, udb_internal_h_content
+    )
+    clean_udb_c = re.sub(
+        r'#include\s+"udb_internal\.h"', udb_internal_h_content, clean_udb_c
+    )
 
     # Function to replace #include "udb_*.c.inc" with actual file content
     def replace_inc(match):

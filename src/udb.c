@@ -16,7 +16,7 @@
  * License: GNU General Public License v2+
  */
 
-#include "udb.h"
+#include "udb_internal.h"
 
 /* ========================================================================
  * Module Header
