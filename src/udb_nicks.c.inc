@@ -165,7 +165,7 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync)
 	if (!client || !nick_rec)
 		return;
 
-	UdbRecord *forbid = udb_record_find(NKEY_FORBID, nick_rec);
+	UdbRecord *forbid = udb_record_find(udb_ctx, NKEY_FORBID, nick_rec);
 	if (forbid)
 	{
 		udb_nick_force_rename(client, nick_rec->key);
@@ -177,7 +177,7 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync)
 	{
 		if (!has_user_mode(client, 'r'))
 		{
-			UdbRecord *pass_rec = udb_record_find(NKEY_PASS, nick_rec);
+			UdbRecord *pass_rec = udb_record_find(udb_ctx, NKEY_PASS, nick_rec);
 			if (pass_rec)
 			{
 				udb_nick_force_rename(client, nick_rec->key);
@@ -194,7 +194,7 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync)
 	long old_umodes = client->umodes & ALL_UMODES;
 	client->umodes |= UMODE_REGNICK;
 
-	UdbRecord *susp = udb_record_find(NKEY_SUSPENDED, nick_rec);
+	UdbRecord *susp = udb_record_find(udb_ctx, NKEY_SUSPENDED, nick_rec);
 	if (susp)
 	{
 		client->umodes |= set_usermode("S");
@@ -202,25 +202,25 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync)
 
 	send_umode_out(client, 1, old_umodes);
 
-	UdbRecord *vhost_rec = udb_record_find(NKEY_VHOST, nick_rec);
+	UdbRecord *vhost_rec = udb_record_find(udb_ctx, NKEY_VHOST, nick_rec);
 	if (vhost_rec)
 		udb_nick_set_vhost(client, vhost_rec);
 
-	UdbRecord *oper_rec = udb_record_find(NKEY_OPER, nick_rec);
+	UdbRecord *oper_rec = udb_record_find(udb_ctx, NKEY_OPER, nick_rec);
 	if (oper_rec)
 		udb_nick_grant_oper(client, nick_rec, oper_rec);
 
-	UdbRecord *modes_rec = udb_record_find(NKEY_MODES, nick_rec);
+	UdbRecord *modes_rec = udb_record_find(udb_ctx, NKEY_MODES, nick_rec);
 	if (modes_rec && modes_rec->data_str)
 	{
 		udb_nick_set_modes(client, nick_rec, modes_rec, modes_rec->data_str);
 	}
 
-	UdbRecord *swhois_rec = udb_record_find(NKEY_SWHOIS, nick_rec);
+	UdbRecord *swhois_rec = udb_record_find(udb_ctx, NKEY_SWHOIS, nick_rec);
 	if (swhois_rec)
 		udb_nick_set_swhois(client, nick_rec, swhois_rec);
 
-	UdbRecord *sno_rec = udb_record_find(NKEY_SNOMASKS, nick_rec);
+	UdbRecord *sno_rec = udb_record_find(udb_ctx, NKEY_SNOMASKS, nick_rec);
 	if (sno_rec)
 		udb_nick_set_snomasks(client, nick_rec, sno_rec);
 }
@@ -240,7 +240,7 @@ static void udb_nick_strip(Client *client, UdbRecord *nick_rec)
 	long old_umodes = client->umodes & ALL_UMODES;
 	if (nick_rec)
 	{
-		UdbRecord *mode_rec = udb_record_find(NKEY_MODES, nick_rec);
+		UdbRecord *mode_rec = udb_record_find(udb_ctx, NKEY_MODES, nick_rec);
 		if (mode_rec && mode_rec->data_str)
 			client->umodes &= ~(set_usermode(mode_rec->data_str) & ~UMODE_OPER);
 	}
@@ -254,7 +254,7 @@ static void udb_nick_strip(Client *client, UdbRecord *nick_rec)
 
 	if (nick_rec)
 	{
-		UdbRecord *swhois_rec = udb_record_find(NKEY_SWHOIS, nick_rec);
+		UdbRecord *swhois_rec = udb_record_find(udb_ctx, NKEY_SWHOIS, nick_rec);
 		if (swhois_rec && swhois_rec->data_str)
 		{
 			swhois_delete(client, "udb", "*", &me, NULL);
@@ -375,18 +375,18 @@ static int udb_check_password(const char *pass, UdbRecord *profile_rec, Client *
 
 	if (!pass || !profile_rec || udb_password_flooded(profile_rec, client))
 		return 0;
-	pass_rec = udb_record_find(NKEY_PASS, profile_rec);
+	pass_rec = udb_record_find(udb_ctx, NKEY_PASS, profile_rec);
 	if (!pass_rec || BadPtr(pass_rec->data_str))
 	{
 		udb_password_failure_record(profile_rec, client, 0);
 		return 0;
 	}
-	chall_rec = udb_record_find(NKEY_CHALLENGE, profile_rec);
+	chall_rec = udb_record_find(udb_ctx, NKEY_CHALLENGE, profile_rec);
 	if (chall_rec && chall_rec->data_str)
 		challenge = chall_rec->data_str;
 	else if (udb_ctx && udb_ctx->settings)
 	{
-		UdbRecord *global = udb_record_find(SKEY_CHALLENGE, udb_ctx->settings);
+		UdbRecord *global = udb_record_find(udb_ctx, SKEY_CHALLENGE, udb_ctx->settings);
 		if (global && global->data_str)
 			challenge = global->data_str;
 	}
@@ -454,7 +454,7 @@ static int udb_cidr_matches(const char *ip, const char *cidr)
 
 static int udb_nick_access_allowed(Client *client, UdbRecord *nick_rec)
 {
-	UdbRecord *access_rec = udb_record_find(NKEY_ACCESS, nick_rec);
+	UdbRecord *access_rec = udb_record_find(udb_ctx, NKEY_ACCESS, nick_rec);
 	const char *p;
 
 	if (!access_rec)
@@ -494,7 +494,7 @@ CMD_FUNC(cmd_ghost)
 		return;
 	}
 
-	UdbRecord *nick_rec = udb_record_find(target_nick, udb_ctx->nicks);
+	UdbRecord *nick_rec = udb_record_find(udb_ctx, target_nick, udb_ctx->nicks);
 	if (!nick_rec)
 	{
 		sendnotice(client, "Nick %s is not registered.", target_nick);
@@ -559,7 +559,7 @@ CMD_OVERRIDE_FUNC(udb_override_nick)
 	if (client->local)
 		safe_strdup(client->local->passwd, pass);
 
-	UdbRecord *rec = (udb_ctx && udb_ctx->nicks) ? udb_record_find(clean_nick, udb_ctx->nicks) : NULL;
+	UdbRecord *rec = (udb_ctx && udb_ctx->nicks) ? udb_record_find(udb_ctx, clean_nick, udb_ctx->nicks) : NULL;
 
 	if (rec && udb_check_password(pass, rec, client) && udb_nick_access_allowed(client, rec))
 	{
@@ -596,10 +596,10 @@ static int udb_hook_can_use_nick(Client *client, const char *newnick, const char
 	if (!MyConnect(client))
 		return HOOK_CONTINUE;
 
-	UdbRecord *nick_rec = udb_record_find(newnick, udb_ctx->nicks);
+	UdbRecord *nick_rec = udb_record_find(udb_ctx, newnick, udb_ctx->nicks);
 	if (nick_rec)
 	{
-		UdbRecord *forbid = udb_record_find(NKEY_FORBID, nick_rec);
+		UdbRecord *forbid = udb_record_find(udb_ctx, NKEY_FORBID, nick_rec);
 		if (forbid)
 		{
 			*reject_reason = "This nick is forbidden.";
@@ -632,8 +632,8 @@ static int udb_hook_nick_change(Client *client, MessageTag *mtags, const char *n
 	if (!MyConnect(client))
 		return 0;
 
-	UdbRecord *old_rec = udb_record_find(client->name, udb_ctx->nicks);
-	UdbRecord *new_rec = udb_record_find(newnick, udb_ctx->nicks);
+	UdbRecord *old_rec = udb_record_find(udb_ctx, client->name, udb_ctx->nicks);
+	UdbRecord *new_rec = udb_record_find(udb_ctx, newnick, udb_ctx->nicks);
 
 	if (old_rec && old_rec != new_rec)
 	{
@@ -650,7 +650,7 @@ static int udb_hook_post_nick_change(Client *client, MessageTag *recv_mtags, con
 	if (!MyConnect(client))
 		return 0;
 
-	UdbRecord *new_rec = udb_record_find(client->name, udb_ctx->nicks);
+	UdbRecord *new_rec = udb_record_find(udb_ctx, client->name, udb_ctx->nicks);
 	if (new_rec)
 	{
 		udb_nick_apply(client, new_rec, 0);
@@ -663,7 +663,7 @@ static int udb_hook_local_connect(Client *client)
 	if (!udb_ctx || !udb_ctx->nicks)
 		return 0;
 
-	UdbRecord *nick_rec = udb_record_find(client->name, udb_ctx->nicks);
+	UdbRecord *nick_rec = udb_record_find(udb_ctx, client->name, udb_ctx->nicks);
 	if (nick_rec)
 	{
 		udb_nick_apply(client, nick_rec, 0);

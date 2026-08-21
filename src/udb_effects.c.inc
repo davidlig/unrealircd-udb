@@ -4,7 +4,7 @@
  * and line effect implementations.
  */
 
-static int udb_apply_special_record(UdbBlock *block, UdbRecord *rec, int is_new)
+static int udb_apply_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new)
 {
 	if (!rec)
 		return 0;
@@ -30,12 +30,12 @@ static int udb_apply_special_record(UdbBlock *block, UdbRecord *rec, int is_new)
 		udb_ip_apply_record(ip_rec->key, ip_rec, rec->key, is_new);
 	} else if (block->letter == 'S')
 	{
-		if (!udb_settings_apply_record(rec))
+		if (!udb_settings_apply_record(ctx, rec))
 			udb_log(ULOG_WARNING, "UDB_SETTING_INVALID", NULL,
 			        "Ignoring invalid or unsupported S::$setting", log_data_string("setting", rec->key));
 	} else if (block->letter == 'L')
 	{
-		udb_link_apply_record(rec);
+		udb_link_apply_record(ctx, rec);
 	} else if (block->letter == 'K')
 	{
 		udb_line_apply_record(rec, is_new);
@@ -43,7 +43,7 @@ static int udb_apply_special_record(UdbBlock *block, UdbRecord *rec, int is_new)
 	return 1;
 }
 
-static void udb_remove_special_record(UdbBlock *block, UdbRecord *rec)
+static void udb_remove_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec)
 {
 	if (!rec)
 		return;
@@ -67,7 +67,7 @@ static void udb_remove_special_record(UdbBlock *block, UdbRecord *rec)
 				} else if (!strcmp(rec->key, NKEY_MODES))
 				{
 					long old_umodes = client->umodes & ALL_UMODES;
-					UdbRecord *mode_rec = udb_record_find(NKEY_MODES, nick_rec);
+					UdbRecord *mode_rec = udb_record_find(ctx, NKEY_MODES, nick_rec);
 					if (mode_rec && mode_rec->data_str)
 						client->umodes &= ~(set_usermode(mode_rec->data_str) & ~UMODE_OPER);
 					send_umode_out(client, 1, old_umodes);
@@ -115,10 +115,10 @@ static void udb_remove_special_record(UdbBlock *block, UdbRecord *rec)
 		}
 	} else if (block->letter == 'S')
 	{
-		udb_settings_remove_record(rec);
+		udb_settings_remove_record(ctx, rec);
 	} else if (block->letter == 'L')
 	{
-		udb_link_remove_record(rec);
+		udb_link_remove_record(ctx, rec);
 	} else if (block->letter == 'K')
 	{
 		udb_line_remove_record(rec);

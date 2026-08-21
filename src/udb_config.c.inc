@@ -113,17 +113,17 @@ static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
 	return 1;
 }
 
-static void udb_config_free(void)
+static void udb_config_free(UdbContext *ctx)
 {
-	if (udb_ctx)
+	if (ctx)
 	{
-		safe_free(udb_ctx->quit_ips);
-		safe_free(udb_ctx->quit_clones);
-		safe_free(udb_ctx->encryption_key);
-		safe_free(udb_ctx->suffix);
-		safe_free(udb_ctx->nickserv_mask);
-		safe_free(udb_ctx->chanserv_mask);
-		safe_free(udb_ctx->ipserv_mask);
+		safe_free(ctx->quit_ips);
+		safe_free(ctx->quit_clones);
+		safe_free(ctx->encryption_key);
+		safe_free(ctx->suffix);
+		safe_free(ctx->nickserv_mask);
+		safe_free(ctx->chanserv_mask);
+		safe_free(ctx->ipserv_mask);
 	}
 	if (udb_cfg)
 	{
@@ -227,7 +227,7 @@ static void udb_settings_restore_flood(void)
 	udb_cfg->flood_period = udb_cfg->config_flood_period;
 }
 
-static int udb_settings_apply_record(UdbRecord *rec)
+static int udb_settings_apply_record(UdbContext *ctx, UdbRecord *rec)
 {
 	int attempts;
 	int period;
@@ -238,12 +238,12 @@ static int udb_settings_apply_record(UdbRecord *rec)
 	{
 		if (!udb_setting_string_valid(rec->data_str))
 			return 0;
-		udb_settings_replace(&udb_ctx->quit_ips, rec->data_str);
+		udb_settings_replace(&ctx->quit_ips, rec->data_str);
 	} else if (!strcmp(rec->key, SKEY_QUIT_CLONES))
 	{
 		if (!udb_setting_string_valid(rec->data_str))
 			return 0;
-		udb_settings_replace(&udb_ctx->quit_clones, rec->data_str);
+		udb_settings_replace(&ctx->quit_clones, rec->data_str);
 	} else if (!strcmp(rec->key, SKEY_FLOOD))
 	{
 		if (!udb_flood_valid(rec->data_str, &attempts, &period))
@@ -257,29 +257,29 @@ static int udb_settings_apply_record(UdbRecord *rec)
 	{
 		if (!udb_suffix_valid(rec->data_str))
 			return 0;
-		udb_settings_replace(&udb_ctx->suffix, rec->data_str);
+		udb_settings_replace(&ctx->suffix, rec->data_str);
 		udb_ip_refresh_derived_hosts();
 	} else if (!strcmp(rec->key, SKEY_CRYPT_KEY))
 	{
 		if (!udb_encryption_key_valid(rec->data_str))
 			return 0;
-		udb_settings_replace(&udb_ctx->encryption_key, rec->data_str);
+		udb_settings_replace(&ctx->encryption_key, rec->data_str);
 		udb_ip_refresh_derived_hosts();
 	} else if (!strcmp(rec->key, SKEY_NICKSERV))
 	{
 		if (!udb_service_mask_valid(rec->data_str))
 			return 0;
-		udb_settings_replace(&udb_ctx->nickserv_mask, rec->data_str);
+		udb_settings_replace(&ctx->nickserv_mask, rec->data_str);
 	} else if (!strcmp(rec->key, SKEY_CHANSERV))
 	{
 		if (!udb_service_mask_valid(rec->data_str))
 			return 0;
-		udb_settings_replace(&udb_ctx->chanserv_mask, rec->data_str);
+		udb_settings_replace(&ctx->chanserv_mask, rec->data_str);
 	} else if (!strcmp(rec->key, SKEY_IPSERV))
 	{
 		if (!udb_service_mask_valid(rec->data_str))
 			return 0;
-		udb_settings_replace(&udb_ctx->ipserv_mask, rec->data_str);
+		udb_settings_replace(&ctx->ipserv_mask, rec->data_str);
 	} else
 	{
 		return 0;
@@ -287,44 +287,44 @@ static int udb_settings_apply_record(UdbRecord *rec)
 	return 1;
 }
 
-static void udb_settings_remove_record(UdbRecord *rec)
+static void udb_settings_remove_record(UdbContext *ctx, UdbRecord *rec)
 {
 	if (!rec || !rec->key)
 		return;
 	if (!strcmp(rec->key, SKEY_QUIT_IPS))
-		udb_settings_replace(&udb_ctx->quit_ips, NULL);
+		udb_settings_replace(&ctx->quit_ips, NULL);
 	else if (!strcmp(rec->key, SKEY_QUIT_CLONES))
-		udb_settings_replace(&udb_ctx->quit_clones, NULL);
+		udb_settings_replace(&ctx->quit_clones, NULL);
 	else if (!strcmp(rec->key, SKEY_FLOOD))
 		udb_settings_restore_flood();
 	else if (!strcmp(rec->key, SKEY_SUFFIX))
 	{
-		udb_settings_replace(&udb_ctx->suffix, NULL);
+		udb_settings_replace(&ctx->suffix, NULL);
 		udb_ip_refresh_derived_hosts();
 	} else if (!strcmp(rec->key, SKEY_CRYPT_KEY))
 	{
-		udb_settings_replace(&udb_ctx->encryption_key, NULL);
+		udb_settings_replace(&ctx->encryption_key, NULL);
 		udb_ip_refresh_derived_hosts();
 	} else if (!strcmp(rec->key, SKEY_NICKSERV))
-		udb_settings_replace(&udb_ctx->nickserv_mask, NULL);
+		udb_settings_replace(&ctx->nickserv_mask, NULL);
 	else if (!strcmp(rec->key, SKEY_CHANSERV))
-		udb_settings_replace(&udb_ctx->chanserv_mask, NULL);
+		udb_settings_replace(&ctx->chanserv_mask, NULL);
 	else if (!strcmp(rec->key, SKEY_IPSERV))
-		udb_settings_replace(&udb_ctx->ipserv_mask, NULL);
+		udb_settings_replace(&ctx->ipserv_mask, NULL);
 }
 
-static void udb_link_apply_record(UdbRecord *rec)
+static void udb_link_apply_record(UdbContext *ctx, UdbRecord *rec)
 {
 	if (!rec || !rec->parent || !rec->key || strcmp(rec->key, LKEY_OPTIONS))
 		return;
-	udb_ctx->propagator = NULL;
+	ctx->propagator = NULL;
 	if (rec->data_str || (rec->data_num & ~(UDB_LNKOPT_DEBUG | UDB_LNKOPT_PROPAGATOR)))
 		udb_log(ULOG_WARNING, "UDB_LINK_OPTIONS", NULL,
 		        "Ignoring invalid L::options for $server", log_data_string("server", rec->parent->key));
 }
 
-static void udb_link_remove_record(UdbRecord *rec)
+static void udb_link_remove_record(UdbContext *ctx, UdbRecord *rec)
 {
 	if (rec && rec->key && !strcmp(rec->key, LKEY_OPTIONS))
-		udb_ctx->propagator = NULL;
+		ctx->propagator = NULL;
 }

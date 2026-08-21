@@ -51,7 +51,7 @@ static int udb_ip_tkl_is_owned(TKL *tkl)
 
 static int udb_ip_is_throttle_exempt(UdbRecord *ip_rec)
 {
-	UdbRecord *nolines = udb_record_find(IKEY_NOLINES, ip_rec);
+	UdbRecord *nolines = udb_record_find(udb_ctx, IKEY_NOLINES, ip_rec);
 
 	/* 'c' is UnrealIRCd's connect-flood exception type. */
 	return nolines && nolines->data_str &&
@@ -105,10 +105,10 @@ static const char *udb_ip_explicit_vhost(Client *client)
 
 	if (!client || !client->user || !udb_ctx || !udb_ctx->nicks)
 		return NULL;
-	nick_rec = udb_record_find(client->name, udb_ctx->nicks);
+	nick_rec = udb_record_find(udb_ctx, client->name, udb_ctx->nicks);
 	if (!nick_rec && strcmp(client->user->account, "*"))
-		nick_rec = udb_record_find(client->user->account, udb_ctx->nicks);
-	vhost_rec = nick_rec ? udb_record_find(NKEY_VHOST, nick_rec) : NULL;
+		nick_rec = udb_record_find(udb_ctx, client->user->account, udb_ctx->nicks);
+	vhost_rec = nick_rec ? udb_record_find(udb_ctx, NKEY_VHOST, nick_rec) : NULL;
 	return vhost_rec ? vhost_rec->data_str : NULL;
 }
 
@@ -207,7 +207,7 @@ static void udb_ip_apply_record(const char *ip_key, UdbRecord *ip_rec, const cha
 	(void)is_new;
 	if (!strcmp(subkey, IKEY_NOLINES))
 	{
-		UdbRecord *nolines = udb_record_find(IKEY_NOLINES, ip_rec);
+		UdbRecord *nolines = udb_record_find(udb_ctx, IKEY_NOLINES, ip_rec);
 		TKL *tkl = find_tkl_banexception(TKL_EXCEPTION, "*", ip_key, 0);
 
 		if (udb_ip_tkl_is_owned(tkl))
@@ -223,7 +223,7 @@ static void udb_ip_apply_record(const char *ip_key, UdbRecord *ip_rec, const cha
 		}
 	} else if (!strcmp(subkey, IKEY_HOST))
 	{
-		UdbRecord *host = udb_record_find(IKEY_HOST, ip_rec);
+		UdbRecord *host = udb_record_find(udb_ctx, IKEY_HOST, ip_rec);
 		if (host && host->data_str && *host->data_str)
 			udb_ip_reconcile_host(ip_key, host->data_str);
 	}
@@ -255,19 +255,19 @@ static int udb_hook_pre_connect(Client *client)
 		return 0;
 
 	/* Lookup IP or Host in UDB */
-	ip_rec = udb_hash_find(udb_block_letter_to_index('I'), client->ip);
+	ip_rec = udb_hash_find(udb_ctx, udb_block_letter_to_index('I'), client->ip);
 	if (!ip_rec && client->user)
-		ip_rec = udb_hash_find(udb_block_letter_to_index('I'), client->user->realhost);
+		ip_rec = udb_hash_find(udb_ctx, udb_block_letter_to_index('I'), client->user->realhost);
 
 	if (ip_rec)
 	{
 		/* Apply Clone Limit */
-		sub_rec = udb_record_find(IKEY_CLONES, ip_rec);
+		sub_rec = udb_record_find(udb_ctx, IKEY_CLONES, ip_rec);
 		if (sub_rec && sub_rec->data_num > 0)
 			limit = (int)sub_rec->data_num;
 
 		/* Apply Host Override */
-		sub_rec = udb_record_find(IKEY_HOST, ip_rec);
+		sub_rec = udb_record_find(udb_ctx, IKEY_HOST, ip_rec);
 		if (sub_rec && sub_rec->data_str && *sub_rec->data_str && client->user)
 			udb_ip_apply_host(client, ip_rec->key, sub_rec->data_str);
 
@@ -279,7 +279,7 @@ static int udb_hook_pre_connect(Client *client)
 	/* Fallback to global clones if no specific IP limit */
 	if (limit == 0 && udb_ctx && udb_ctx->settings)
 	{
-		UdbRecord *g_clones = udb_record_find(SKEY_CLONES, udb_ctx->settings);
+		UdbRecord *g_clones = udb_record_find(udb_ctx, SKEY_CLONES, udb_ctx->settings);
 		if (g_clones && g_clones->data_num > 0)
 			limit = (int)g_clones->data_num;
 	}

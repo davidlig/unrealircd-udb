@@ -56,7 +56,7 @@ static int udb_channel_is_identified_founder(Client *client, UdbRecord *chan_rec
 
 	if (!client || !chan_rec)
 		return 0;
-	founder_rec = udb_record_find(CKEY_FOUNDER, chan_rec);
+	founder_rec = udb_record_find(udb_ctx, CKEY_FOUNDER, chan_rec);
 	return founder_rec && founder_rec->data_str &&
 	       !strcasecmp(client->name, founder_rec->data_str) &&
 	       has_user_mode(client, 'r');
@@ -398,7 +398,7 @@ static int udb_channel_pending_auth_take(Client *client, Channel *channel)
 static void udb_channel_reconcile_founder(Channel *channel, UdbRecord *chan_rec)
 {
 	Member *member;
-	int suspended = chan_rec && udb_record_find(CKEY_SUSPENDED, chan_rec);
+	int suspended = chan_rec && udb_record_find(udb_ctx, CKEY_SUSPENDED, chan_rec);
 
 	for (member = channel->members; member; member = member->next)
 	{
@@ -464,7 +464,7 @@ static void udb_channel_clear_topic(Channel *channel)
 
 static void udb_channel_apply_record(Channel *channel, UdbRecord *chan_rec, const char *subkey, int is_new)
 {
-	UdbRecord *sub_rec = udb_record_find(subkey, chan_rec);
+	UdbRecord *sub_rec = udb_record_find(udb_ctx, subkey, chan_rec);
 	if (!sub_rec || !sub_rec->data_str)
 		return;
 
@@ -503,7 +503,7 @@ static void udb_channel_remove_record(Channel *channel, UdbRecord *chan_rec, con
 		udb_channel_reconcile_founder(channel, NULL);
 	} else if (!strcmp(subkey, CKEY_MODES))
 	{
-		UdbRecord *mode_rec = udb_record_find(CKEY_MODES, chan_rec);
+		UdbRecord *mode_rec = udb_record_find(udb_ctx, CKEY_MODES, chan_rec);
 		udb_channel_remove_modes(channel, mode_rec ? mode_rec->data_str : NULL);
 	} else if (!strcmp(subkey, CKEY_PERSISTENT))
 	{
@@ -516,24 +516,24 @@ static void udb_channel_remove_record(Channel *channel, UdbRecord *chan_rec, con
 		udb_channel_clear_topic(channel);
 	} else if (!strcasecmp(subkey, chan_rec->key))
 	{
-		UdbRecord *mode_rec = udb_record_find(CKEY_MODES, chan_rec);
+		UdbRecord *mode_rec = udb_record_find(udb_ctx, CKEY_MODES, chan_rec);
 		udb_channel_reconcile_founder(channel, NULL);
 		udb_channel_revoke_udb_admins(channel);
 		udb_channel_remove_modes(channel, mode_rec ? mode_rec->data_str : NULL);
 		udb_channel_set_persistent(channel, 0);
-		if (udb_record_find(CKEY_TOPIC, chan_rec))
+		if (udb_record_find(udb_ctx, CKEY_TOPIC, chan_rec))
 			udb_channel_clear_topic(channel);
 	}
 }
 
 static int udb_hook_pre_local_join(Client *client, Channel *channel, const char *key)
 {
-	UdbRecord *chan_rec = udb_record_find(channel->name, udb_ctx->channels);
+	UdbRecord *chan_rec = udb_record_find(udb_ctx, channel->name, udb_ctx->channels);
 	UdbRecord *pass_rec;
 	if (!chan_rec)
 		return HOOK_CONTINUE;
 
-	UdbRecord *forbid_rec = udb_record_find(CKEY_FORBID, chan_rec);
+	UdbRecord *forbid_rec = udb_record_find(udb_ctx, CKEY_FORBID, chan_rec);
 	if (forbid_rec)
 	{
 		return HOOK_CONTINUE; /* Let can_join handle the reject with proper numeric */
@@ -544,7 +544,7 @@ static int udb_hook_pre_local_join(Client *client, Channel *channel, const char 
 
 	/* CAN_JOIN already verified this credential. Record it only after all
      * regular join checks have succeeded, immediately before membership. */
-	pass_rec = udb_record_find(CKEY_PASS, chan_rec);
+	pass_rec = udb_record_find(udb_ctx, CKEY_PASS, chan_rec);
 	if (pass_rec && pass_rec->data_str && *pass_rec->data_str && key &&
 	    udb_check_password(key, chan_rec, client))
 	{
@@ -561,11 +561,11 @@ static int udb_hook_pre_local_join(Client *client, Channel *channel, const char 
 static int udb_hook_can_join(Client *client, Channel *channel, const char *key, char **errmsg)
 {
 	static char errbuf[512];
-	UdbRecord *chan_rec = udb_record_find(channel->name, udb_ctx->channels);
+	UdbRecord *chan_rec = udb_record_find(udb_ctx, channel->name, udb_ctx->channels);
 	if (!chan_rec)
 		return 0;
 
-	UdbRecord *forbid_rec = udb_record_find(CKEY_FORBID, chan_rec);
+	UdbRecord *forbid_rec = udb_record_find(udb_ctx, CKEY_FORBID, chan_rec);
 	if (forbid_rec)
 	{
 		snprintf(errbuf, sizeof(errbuf), "%%s :%s", forbid_rec->data_str ? forbid_rec->data_str : "Channel is forbidden");
@@ -576,7 +576,7 @@ static int udb_hook_can_join(Client *client, Channel *channel, const char *key, 
 	int is_founder = udb_channel_is_identified_founder(client, chan_rec);
 	int has_invite_grant = udb_channel_invite_grant_take(client, channel, 0);
 
-	UdbRecord *pass_rec = udb_record_find(CKEY_PASS, chan_rec);
+	UdbRecord *pass_rec = udb_record_find(udb_ctx, CKEY_PASS, chan_rec);
 	if (pass_rec && pass_rec->data_str && *pass_rec->data_str && !is_founder && !has_invite_grant)
 	{
 		if (!key || !udb_check_password(key, chan_rec, client))
@@ -586,10 +586,10 @@ static int udb_hook_can_join(Client *client, Channel *channel, const char *key, 
 		}
 	}
 
-	UdbRecord *access_rec = udb_record_find(CKEY_ACCESS, chan_rec);
+	UdbRecord *access_rec = udb_record_find(udb_ctx, CKEY_ACCESS, chan_rec);
 	if (access_rec && !is_founder)
 	{
-		UdbRecord *acc_entry = udb_record_find(client->name, access_rec);
+		UdbRecord *acc_entry = udb_record_find(udb_ctx, client->name, access_rec);
 		if (!acc_entry || !has_user_mode(client, 'r'))
 		{
 			snprintf(errbuf, sizeof(errbuf), "%%s :You must be authorized and identified to join this channel");
@@ -602,7 +602,7 @@ static int udb_hook_can_join(Client *client, Channel *channel, const char *key, 
 
 static void handle_join(Client *client, Channel *channel, MessageTag *mtags)
 {
-	UdbRecord *chan_rec = udb_record_find(channel->name, udb_ctx->channels);
+	UdbRecord *chan_rec = udb_record_find(udb_ctx, channel->name, udb_ctx->channels);
 	if (!chan_rec)
 		return;
 
@@ -610,7 +610,7 @@ static void handle_join(Client *client, Channel *channel, MessageTag *mtags)
 
 	if (channel->users == 1)
 	{
-		UdbRecord *susp_rec = udb_record_find(CKEY_SUSPENDED, chan_rec);
+		UdbRecord *susp_rec = udb_record_find(udb_ctx, CKEY_SUSPENDED, chan_rec);
 
 		/* A registered channel assigns founder authority exclusively as +q. */
 		if (!IsServer(client) && !IsULine(client))
@@ -625,7 +625,7 @@ static void handle_join(Client *client, Channel *channel, MessageTag *mtags)
 
 		udb_channel_apply_record(channel, chan_rec, CKEY_MODES, 0);
 		udb_channel_apply_record(channel, chan_rec, CKEY_TOPIC, 0);
-		if (udb_record_find(CKEY_PERSISTENT, chan_rec))
+		if (udb_record_find(udb_ctx, CKEY_PERSISTENT, chan_rec))
 			udb_channel_set_persistent(channel, 1);
 	}
 
@@ -723,8 +723,8 @@ CMD_OVERRIDE_FUNC(udb_override_invite)
 	}
 	channel = find_channel(parv[2]);
 	target = find_user(parv[1], NULL);
-	chan_rec = channel ? udb_record_find(channel->name, udb_ctx->channels) : NULL;
-	pass_rec = chan_rec ? udb_record_find(CKEY_PASS, chan_rec) : NULL;
+	chan_rec = channel ? udb_record_find(udb_ctx, channel->name, udb_ctx->channels) : NULL;
+	pass_rec = chan_rec ? udb_record_find(udb_ctx, CKEY_PASS, chan_rec) : NULL;
 	if (!pass_rec || !pass_rec->data_str || !*pass_rec->data_str)
 	{
 		CALL_NEXT_COMMAND_OVERRIDE();
@@ -765,8 +765,8 @@ CMD_OVERRIDE_FUNC(udb_override_mode)
 		return;
 	}
 	channel = find_channel(parv[1]);
-	chan_rec = (channel && udb_ctx && udb_ctx->channels) ? udb_record_find(channel->name, udb_ctx->channels) : NULL;
-	options_rec = chan_rec ? udb_record_find(CKEY_OPTIONS, chan_rec) : NULL;
+	chan_rec = (channel && udb_ctx && udb_ctx->channels) ? udb_record_find(udb_ctx, channel->name, udb_ctx->channels) : NULL;
+	options_rec = chan_rec ? udb_record_find(udb_ctx, CKEY_OPTIONS, chan_rec) : NULL;
 	if (!chan_rec)
 	{
 		CALL_NEXT_COMMAND_OVERRIDE();
@@ -805,11 +805,11 @@ static const char *udb_hook_pre_topic(Client *client, Channel *channel, const ch
 	if (IsServer(client))
 		return topic;
 
-	UdbRecord *chan_rec = udb_record_find(channel->name, udb_ctx->channels);
+	UdbRecord *chan_rec = udb_record_find(udb_ctx, channel->name, udb_ctx->channels);
 	if (!chan_rec)
 		return topic;
 
-	UdbRecord *topic_rec = udb_record_find(CKEY_TOPIC, chan_rec);
+	UdbRecord *topic_rec = udb_record_find(udb_ctx, CKEY_TOPIC, chan_rec);
 	if (topic_rec)
 	{
 		int is_founder = udb_channel_is_identified_founder(client, chan_rec);

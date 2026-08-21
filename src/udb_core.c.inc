@@ -41,11 +41,11 @@ static int udb_password_record_valid(UdbBlock *block, const char *path,
 	return 1;
 }
 
-static UdbRecord *udb_record_insert(UdbBlock *block, UdbRecord *parent, const char *key, const char *data_str, unsigned long data_num, int persist)
+static UdbRecord *udb_record_insert(UdbContext *ctx, UdbBlock *block, UdbRecord *parent, const char *key, const char *data_str, unsigned long data_num, int persist)
 {
 	if (!parent)
 		parent = block->tree;
-	UdbRecord *rec = udb_record_find(key, parent);
+	UdbRecord *rec = udb_record_find(ctx, key, parent);
 	if (!rec)
 	{
 		rec = udb_record_create(parent);
@@ -71,10 +71,10 @@ static UdbRecord *udb_record_insert(UdbBlock *block, UdbRecord *parent, const ch
 		}
 		if (parent == block->tree)
 		{
-			udb_hash_insert_record(rec, udb_block_letter_to_index(block->letter), key);
+			udb_hash_insert_record(ctx, rec, udb_block_letter_to_index(block->letter), key);
 		}
 		block->record_count++;
-		udb_ctx->total_records++;
+		ctx->total_records++;
 	}
 
 	if (rec->data_str)
@@ -99,16 +99,16 @@ static UdbRecord *udb_record_insert(UdbBlock *block, UdbRecord *parent, const ch
 
 	if (persist)
 	{
-		udb_file_save_block(block);
+		udb_file_save_block(ctx, block);
 	}
 
-	udb_apply_special_record(block, rec, 1);
+	udb_apply_special_record(ctx, block, rec, 1);
 
 	return rec;
 }
 
 
-static UdbRecord *udb_record_delete(UdbBlock *block, UdbRecord *rec, int persist)
+static UdbRecord *udb_record_delete(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int persist)
 {
 	UdbRecord *line_rec = NULL;
 	if (!rec)
@@ -119,13 +119,13 @@ static UdbRecord *udb_record_delete(UdbBlock *block, UdbRecord *rec, int persist
 	    rec->parent->parent != block->tree)
 		line_rec = rec->parent;
 
-	udb_remove_special_record(block, rec);
+	udb_remove_special_record(ctx, block, rec);
 
 	if (rec->parent)
 	{
 		if (rec->parent->parent == NULL)
 		{
-			udb_hash_remove_record(rec, udb_block_letter_to_index(block->letter), rec->key);
+			udb_hash_remove_record(ctx, rec, udb_block_letter_to_index(block->letter), rec->key);
 		}
 
 		UdbRecord *curr = rec->parent->child;
@@ -147,8 +147,8 @@ static UdbRecord *udb_record_delete(UdbBlock *block, UdbRecord *rec, int persist
 
 	if (block->record_count > 0)
 		block->record_count--;
-	if (udb_ctx->total_records > 0)
-		udb_ctx->total_records--;
+	if (ctx->total_records > 0)
+		ctx->total_records--;
 
 	udb_record_free_tree(rec);
 
@@ -158,7 +158,7 @@ static UdbRecord *udb_record_delete(UdbBlock *block, UdbRecord *rec, int persist
 
 	if (persist)
 	{
-		udb_file_save_block(block);
+		udb_file_save_block(ctx, block);
 	}
 	return NULL;
 }
@@ -380,7 +380,7 @@ static void udb_sync_session_free(UdbBlock *block)
 	block->syncing_from = NULL;
 }
 
-static int udb_block_commit_stage(UdbBlock *block, UdbSyncSession *session,
+static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSession *session,
                                   unsigned long checksum)
 {
 	UdbRecord *rec;
@@ -389,15 +389,15 @@ static int udb_block_commit_stage(UdbBlock *block, UdbSyncSession *session,
 	if (!block || !session || block->session != session)
 		return 0;
 	/* Persistence succeeded before this point; only now may active state move. */
-	udb_block_reset(block);
+	udb_block_reset(ctx, block);
 	udb_record_free_tree(block->tree);
 	block->tree = session->tree;
 	session->tree = NULL;
 	block->record_count = session->record_count;
-	udb_ctx->total_records += block->record_count;
+	ctx->total_records += block->record_count;
 	for (rec = block->tree->child; rec; rec = rec->sibling)
-		udb_hash_insert_record(rec, udb_block_letter_to_index(block->letter), rec->key);
-	udb_block_set_context_root(block);
+		udb_hash_insert_record(ctx, rec, udb_block_letter_to_index(block->letter), rec->key);
+	udb_block_set_context_root(ctx, block);
 	block->checksum = checksum;
 	block->modified_at = time(NULL);
 	if (stat(block->filepath, &st) == 0)
@@ -407,9 +407,9 @@ static int udb_block_commit_stage(UdbBlock *block, UdbSyncSession *session,
 	for (rec = block->tree->child; rec; rec = rec->sibling)
 	{
 		UdbRecord *child;
-		udb_apply_special_record(block, rec, 1);
+		udb_apply_special_record(ctx, block, rec, 1);
 		for (child = rec->child; child; child = child->sibling)
-			udb_apply_special_record(block, child, 1);
+			udb_apply_special_record(ctx, block, child, 1);
 	}
 	return 1;
 }
@@ -417,7 +417,7 @@ static int udb_block_commit_stage(UdbBlock *block, UdbSyncSession *session,
 /* ========================================================================
  * File I/O Operations
  * ======================================================================== */
-static UdbRecord *udb_file_parse_line(UdbBlock *block, char *line)
+static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *line)
 {
 	if (!line || !*line || *line == ';')
 		return NULL;
@@ -452,7 +452,7 @@ static UdbRecord *udb_file_parse_line(UdbBlock *block, char *line)
 			next += 2;
 		}
 
-		UdbRecord *rec = udb_record_find(p, parent);
+		UdbRecord *rec = udb_record_find(ctx, p, parent);
 		if (!rec)
 		{
 			rec = udb_record_create(parent);
@@ -478,10 +478,10 @@ static UdbRecord *udb_file_parse_line(UdbBlock *block, char *line)
 			}
 			if (parent == block->tree)
 			{
-				udb_hash_insert_record(rec, udb_block_letter_to_index(block->letter), p);
+				udb_hash_insert_record(ctx, rec, udb_block_letter_to_index(block->letter), p);
 			}
 			block->record_count++;
-			udb_ctx->total_records++;
+			ctx->total_records++;
 		}
 
 		if (!next)
@@ -517,7 +517,7 @@ static UdbRecord *udb_file_parse_line(UdbBlock *block, char *line)
 }
 
 
-static int udb_file_load_block(UdbBlock *block)
+static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 {
 	if (!block || !block->filepath)
 		return 0;
@@ -538,7 +538,7 @@ static int udb_file_load_block(UdbBlock *block)
 		if (line[0] == ';' || line[0] == '\0')
 			continue;
 
-		udb_file_parse_line(block, line);
+		udb_file_parse_line(ctx, block, line);
 	}
 	fclose(fp);
 
@@ -548,10 +548,10 @@ static int udb_file_load_block(UdbBlock *block)
 		UdbRecord *sub = curr->child;
 		while (sub)
 		{
-			udb_apply_special_record(block, sub, 1);
+			udb_apply_special_record(ctx, block, sub, 1);
 			sub = sub->sibling;
 		}
-		udb_apply_special_record(block, curr, 1);
+		udb_apply_special_record(ctx, block, curr, 1);
 		curr = curr->sibling;
 	}
 
@@ -619,10 +619,10 @@ static void udb_send_to_debugs(Client *source, const char *fmt, ...)
 		{
 			if (udb_ctx && udb_ctx->links)
 			{
-				UdbRecord *srv_rec = udb_record_find(client->name, udb_ctx->links);
+				UdbRecord *srv_rec = udb_record_find(udb_ctx, client->name, udb_ctx->links);
 				if (srv_rec)
 				{
-					UdbRecord *opt_rec = udb_record_find(LKEY_OPTIONS, srv_rec);
+					UdbRecord *opt_rec = udb_record_find(udb_ctx, LKEY_OPTIONS, srv_rec);
 					if (opt_rec && (opt_rec->data_num & UDB_LNKOPT_DEBUG))
 					{
 						sendto_one(client, NULL, ":%s NOTICE %s :[UDB Debug] %s", me.id, client->id, buf);
@@ -635,10 +635,10 @@ static void udb_send_to_debugs(Client *source, const char *fmt, ...)
 	// Also send to local opers if our own server has the debug option
 	if (udb_ctx && udb_ctx->links)
 	{
-		UdbRecord *me_rec = udb_record_find(me.name, udb_ctx->links);
+		UdbRecord *me_rec = udb_record_find(udb_ctx, me.name, udb_ctx->links);
 		if (me_rec)
 		{
-			UdbRecord *opt_rec = udb_record_find(LKEY_OPTIONS, me_rec);
+			UdbRecord *opt_rec = udb_record_find(udb_ctx, LKEY_OPTIONS, me_rec);
 			if (opt_rec && (opt_rec->data_num & UDB_LNKOPT_DEBUG))
 			{
 				unreal_log(ULOG_INFO, "udb", "UDB_DEBUG_OPER", source,

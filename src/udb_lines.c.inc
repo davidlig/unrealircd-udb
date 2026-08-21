@@ -168,7 +168,7 @@ static void udb_line_apply_record(UdbRecord *rec, int is_new)
 	udb_line_remove_owned(type, pattern);
 
 	const char *reason = NULL;
-	raz = udb_record_find(KKEY_REASON, line_rec);
+	raz = udb_record_find(udb_ctx, KKEY_REASON, line_rec);
 	if (raz && raz->data_str)
 	{
 		reason = raz->data_str;
@@ -180,13 +180,13 @@ static void udb_line_apply_record(UdbRecord *rec, int is_new)
 	if (!reason)
 		return;
 
-	dur = udb_record_find(KKEY_DURATION, line_rec);
+	dur = udb_record_find(udb_ctx, KKEY_DURATION, line_rec);
 	expires = dur && dur->data_num ? TStime() + (time_t)dur->data_num : 0;
 
 	if (type == 'F')
 	{
-		UdbRecord *tip = udb_record_find(KKEY_TYPE, line_rec);
-		UdbRecord *acc = udb_record_find(KKEY_ACTION, line_rec);
+		UdbRecord *tip = udb_record_find(udb_ctx, KKEY_TYPE, line_rec);
+		UdbRecord *acc = udb_record_find(udb_ctx, KKEY_ACTION, line_rec);
 
 		if (tip && acc && tip->data_str && acc->data_str)
 		{

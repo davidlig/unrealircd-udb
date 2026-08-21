@@ -105,37 +105,37 @@ static UdbPasswordFailure udb_password_failures[UDB_PASSWORD_FAILURE_SLOTS];
 static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs);
 static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type);
 static int udb_config_posttest(int *errs);
-static void udb_config_free(void);
+static void udb_config_free(UdbContext *ctx);
 static int udb_module_test(ModuleInfo *modinfo);
 static int udb_module_init(ModuleInfo *modinfo);
 static int udb_module_load(ModuleInfo *modinfo);
 static int udb_module_unload(void);
 static int udb_engine_init(void);
 static void udb_engine_shutdown(void);
-static UdbBlock *udb_block_create(char letter, const char *name);
-static void udb_block_set_context_root(UdbBlock *block);
-static int udb_block_load(UdbBlock *block);
-static void udb_block_unload(UdbBlock *block);
-static void udb_block_reset(UdbBlock *block);
-static void udb_blocks_load_all(void);
-static void udb_blocks_save_all(void);
-static UdbBlock *udb_block_by_letter(char letter);
-static UdbRecord *udb_record_find(const char *key, UdbRecord *parent);
+static UdbBlock *udb_block_create(UdbContext *ctx, char letter, const char *name);
+static void udb_block_set_context_root(UdbContext *ctx, UdbBlock *block);
+static int udb_block_load(UdbContext *ctx, UdbBlock *block);
+static void udb_block_unload(UdbContext *ctx, UdbBlock *block);
+static void udb_block_reset(UdbContext *ctx, UdbBlock *block);
+static void udb_blocks_load_all(UdbContext *ctx);
+static void udb_blocks_save_all(UdbContext *ctx);
+static UdbBlock *udb_block_by_letter(UdbContext *ctx, char letter);
+static UdbRecord *udb_record_find(UdbContext *ctx, const char *key, UdbRecord *parent);
 static UdbRecord *udb_record_create(UdbRecord *parent);
-static UdbRecord *udb_record_insert(UdbBlock *block, UdbRecord *parent,
+static UdbRecord *udb_record_insert(UdbContext *ctx, UdbBlock *block, UdbRecord *parent,
                                     const char *key, const char *data_str,
                                     unsigned long data_num, int persist);
-static UdbRecord *udb_record_find_path(UdbBlock *block, const char *path);
-static UdbRecord *udb_record_delete(UdbBlock *block, UdbRecord *rec, int persist);
+static UdbRecord *udb_record_find_path(UdbContext *ctx, UdbBlock *block, const char *path);
+static UdbRecord *udb_record_delete(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int persist);
 static void udb_record_free_tree(UdbRecord *rec);
-static void udb_hash_init(void);
-static void udb_hash_destroy(void);
-static void udb_hash_insert_record(UdbRecord *rec, int block_idx, const char *key);
-static int udb_hash_remove_record(UdbRecord *rec, int block_idx, const char *key);
-static UdbRecord *udb_hash_find(int block_idx, const char *key);
-static int udb_file_save_block(UdbBlock *block);
-static int udb_file_load_block(UdbBlock *block);
-static UdbRecord *udb_file_parse_line(UdbBlock *block, char *line);
+static void udb_hash_init(UdbContext *ctx);
+static void udb_hash_destroy(UdbContext *ctx);
+static void udb_hash_insert_record(UdbContext *ctx, UdbRecord *rec, int block_idx, const char *key);
+static int udb_hash_remove_record(UdbContext *ctx, UdbRecord *rec, int block_idx, const char *key);
+static UdbRecord *udb_hash_find(UdbContext *ctx, int block_idx, const char *key);
+static int udb_file_save_block(UdbContext *ctx, UdbBlock *block);
+static int udb_file_load_block(UdbContext *ctx, UdbBlock *block);
+static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *line);
 static void udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbuf,
                                int pathlen);
 static unsigned long udb_crc32(const char *data, size_t len);
@@ -144,13 +144,13 @@ static unsigned long udb_compute_tree_checksum(UdbRecord *tree);
 static int udb_stage_parse_line(UdbBlock *block, UdbSyncSession *session,
                                 const char *line);
 static int udb_stage_persist_block(UdbBlock *block, UdbSyncSession *session);
-static int udb_block_commit_stage(UdbBlock *block, UdbSyncSession *session,
+static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSession *session,
                                   unsigned long checksum);
 static void udb_sync_session_free(UdbBlock *block);
 static int udb_block_letter_to_index(char letter);
 
 static void udb_sync_to_server(Client *server);
-static int udb_is_propagator(Client *server);
+static int udb_is_propagator(UdbContext *ctx, Client *server);
 static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync);
 static void udb_nick_strip(Client *client, UdbRecord *nick_rec);
 static void udb_nick_revoke_oper(Client *client);
@@ -178,17 +178,17 @@ static void udb_ip_remove_record(const char *ip_key, UdbRecord *ip_rec,
                                  const char *subkey);
 static void udb_ip_refresh_derived_hosts(void);
 static void udb_ips_shutdown(void);
-static int udb_settings_apply_record(UdbRecord *rec);
-static void udb_settings_remove_record(UdbRecord *rec);
-static void udb_link_apply_record(UdbRecord *rec);
-static void udb_link_remove_record(UdbRecord *rec);
+static int udb_settings_apply_record(UdbContext *ctx, UdbRecord *rec);
+static void udb_settings_remove_record(UdbContext *ctx, UdbRecord *rec);
+static void udb_link_apply_record(UdbContext *ctx, UdbRecord *rec);
+static void udb_link_remove_record(UdbContext *ctx, UdbRecord *rec);
 static void udb_line_apply_record(UdbRecord *line_rec, int is_new);
 static void udb_line_remove_record(UdbRecord *line_rec);
 static const char *udb_get_bot_nick(const char *service_key, int force_default);
 static const char *udb_get_bot_mask(const char *service_key, int force_default);
 /* Runtime dispatcher; concrete per-block effects stay in their own modules. */
-static int udb_apply_special_record(UdbBlock *block, UdbRecord *rec, int is_new);
-static void udb_remove_special_record(UdbBlock *block, UdbRecord *rec);
+static int udb_apply_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new);
+static void udb_remove_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
 static void udb_send_to_debugs(Client *source, const char *fmt, ...)
     __attribute__((format(printf, 2, 3)));
 

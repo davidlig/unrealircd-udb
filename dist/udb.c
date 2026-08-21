@@ -262,37 +262,37 @@ static UdbPasswordFailure udb_password_failures[UDB_PASSWORD_FAILURE_SLOTS];
 static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs);
 static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type);
 static int udb_config_posttest(int *errs);
-static void udb_config_free(void);
+static void udb_config_free(UdbContext *ctx);
 static int udb_module_test(ModuleInfo *modinfo);
 static int udb_module_init(ModuleInfo *modinfo);
 static int udb_module_load(ModuleInfo *modinfo);
 static int udb_module_unload(void);
 static int udb_engine_init(void);
 static void udb_engine_shutdown(void);
-static UdbBlock *udb_block_create(char letter, const char *name);
-static void udb_block_set_context_root(UdbBlock *block);
-static int udb_block_load(UdbBlock *block);
-static void udb_block_unload(UdbBlock *block);
-static void udb_block_reset(UdbBlock *block);
-static void udb_blocks_load_all(void);
-static void udb_blocks_save_all(void);
-static UdbBlock *udb_block_by_letter(char letter);
-static UdbRecord *udb_record_find(const char *key, UdbRecord *parent);
+static UdbBlock *udb_block_create(UdbContext *ctx, char letter, const char *name);
+static void udb_block_set_context_root(UdbContext *ctx, UdbBlock *block);
+static int udb_block_load(UdbContext *ctx, UdbBlock *block);
+static void udb_block_unload(UdbContext *ctx, UdbBlock *block);
+static void udb_block_reset(UdbContext *ctx, UdbBlock *block);
+static void udb_blocks_load_all(UdbContext *ctx);
+static void udb_blocks_save_all(UdbContext *ctx);
+static UdbBlock *udb_block_by_letter(UdbContext *ctx, char letter);
+static UdbRecord *udb_record_find(UdbContext *ctx, const char *key, UdbRecord *parent);
 static UdbRecord *udb_record_create(UdbRecord *parent);
-static UdbRecord *udb_record_insert(UdbBlock *block, UdbRecord *parent,
+static UdbRecord *udb_record_insert(UdbContext *ctx, UdbBlock *block, UdbRecord *parent,
                                     const char *key, const char *data_str,
                                     unsigned long data_num, int persist);
-static UdbRecord *udb_record_find_path(UdbBlock *block, const char *path);
-static UdbRecord *udb_record_delete(UdbBlock *block, UdbRecord *rec, int persist);
+static UdbRecord *udb_record_find_path(UdbContext *ctx, UdbBlock *block, const char *path);
+static UdbRecord *udb_record_delete(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int persist);
 static void udb_record_free_tree(UdbRecord *rec);
-static void udb_hash_init(void);
-static void udb_hash_destroy(void);
-static void udb_hash_insert_record(UdbRecord *rec, int block_idx, const char *key);
-static int udb_hash_remove_record(UdbRecord *rec, int block_idx, const char *key);
-static UdbRecord *udb_hash_find(int block_idx, const char *key);
-static int udb_file_save_block(UdbBlock *block);
-static int udb_file_load_block(UdbBlock *block);
-static UdbRecord *udb_file_parse_line(UdbBlock *block, char *line);
+static void udb_hash_init(UdbContext *ctx);
+static void udb_hash_destroy(UdbContext *ctx);
+static void udb_hash_insert_record(UdbContext *ctx, UdbRecord *rec, int block_idx, const char *key);
+static int udb_hash_remove_record(UdbContext *ctx, UdbRecord *rec, int block_idx, const char *key);
+static UdbRecord *udb_hash_find(UdbContext *ctx, int block_idx, const char *key);
+static int udb_file_save_block(UdbContext *ctx, UdbBlock *block);
+static int udb_file_load_block(UdbContext *ctx, UdbBlock *block);
+static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *line);
 static void udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbuf,
                                int pathlen);
 static unsigned long udb_crc32(const char *data, size_t len);
@@ -301,13 +301,13 @@ static unsigned long udb_compute_tree_checksum(UdbRecord *tree);
 static int udb_stage_parse_line(UdbBlock *block, UdbSyncSession *session,
                                 const char *line);
 static int udb_stage_persist_block(UdbBlock *block, UdbSyncSession *session);
-static int udb_block_commit_stage(UdbBlock *block, UdbSyncSession *session,
+static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSession *session,
                                   unsigned long checksum);
 static void udb_sync_session_free(UdbBlock *block);
 static int udb_block_letter_to_index(char letter);
 
 static void udb_sync_to_server(Client *server);
-static int udb_is_propagator(Client *server);
+static int udb_is_propagator(UdbContext *ctx, Client *server);
 static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync);
 static void udb_nick_strip(Client *client, UdbRecord *nick_rec);
 static void udb_nick_revoke_oper(Client *client);
@@ -335,17 +335,17 @@ static void udb_ip_remove_record(const char *ip_key, UdbRecord *ip_rec,
                                  const char *subkey);
 static void udb_ip_refresh_derived_hosts(void);
 static void udb_ips_shutdown(void);
-static int udb_settings_apply_record(UdbRecord *rec);
-static void udb_settings_remove_record(UdbRecord *rec);
-static void udb_link_apply_record(UdbRecord *rec);
-static void udb_link_remove_record(UdbRecord *rec);
+static int udb_settings_apply_record(UdbContext *ctx, UdbRecord *rec);
+static void udb_settings_remove_record(UdbContext *ctx, UdbRecord *rec);
+static void udb_link_apply_record(UdbContext *ctx, UdbRecord *rec);
+static void udb_link_remove_record(UdbContext *ctx, UdbRecord *rec);
 static void udb_line_apply_record(UdbRecord *line_rec, int is_new);
 static void udb_line_remove_record(UdbRecord *line_rec);
 static const char *udb_get_bot_nick(const char *service_key, int force_default);
 static const char *udb_get_bot_mask(const char *service_key, int force_default);
 /* Runtime dispatcher; concrete per-block effects stay in their own modules. */
-static int udb_apply_special_record(UdbBlock *block, UdbRecord *rec, int is_new);
-static void udb_remove_special_record(UdbBlock *block, UdbRecord *rec);
+static int udb_apply_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new);
+static void udb_remove_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
 static void udb_send_to_debugs(Client *source, const char *fmt, ...)
     __attribute__((format(printf, 2, 3)));
 
@@ -415,30 +415,30 @@ static int udb_block_letter_to_index(char letter)
 	}
 }
 
-static void udb_hash_init(void)
+static void udb_hash_init(UdbContext *ctx)
 {
 	for (int i = 0; i < UDB_NUM_BLOCKS; i++)
-		udb_ctx->hash_table[i] = safe_alloc(sizeof(UdbRecord *) * UDB_HASH_SIZE);
+		ctx->hash_table[i] = safe_alloc(sizeof(UdbRecord *) * UDB_HASH_SIZE);
 }
 
-static void udb_hash_destroy(void)
+static void udb_hash_destroy(UdbContext *ctx)
 {
 	for (int i = 0; i < UDB_NUM_BLOCKS; i++)
 	{
-		if (udb_ctx->hash_table[i])
+		if (ctx->hash_table[i])
 		{
-			safe_free(udb_ctx->hash_table[i]);
-			udb_ctx->hash_table[i] = NULL;
+			safe_free(ctx->hash_table[i]);
+			ctx->hash_table[i] = NULL;
 		}
 	}
 }
 
-static void udb_hash_clear_block(int block_idx)
+static void udb_hash_clear_block(UdbContext *ctx, int block_idx)
 {
 	if (block_idx < 0 || block_idx >= UDB_NUM_BLOCKS)
 		return;
-	safe_free(udb_ctx->hash_table[block_idx]);
-	udb_ctx->hash_table[block_idx] = safe_alloc(sizeof(UdbRecord *) * UDB_HASH_SIZE);
+	safe_free(ctx->hash_table[block_idx]);
+	ctx->hash_table[block_idx] = safe_alloc(sizeof(UdbRecord *) * UDB_HASH_SIZE);
 }
 
 static unsigned int udb_hash_str(const char *str)
@@ -455,18 +455,18 @@ static unsigned int udb_hash_str(const char *str)
 	return hash & UDB_HASH_MASK;
 }
 
-static void udb_hash_insert_record(UdbRecord *rec, int block_idx, const char *key)
+static void udb_hash_insert_record(UdbContext *ctx, UdbRecord *rec, int block_idx, const char *key)
 {
 	unsigned int h = udb_hash_str(key);
 
-	rec->hash_next = udb_ctx->hash_table[block_idx][h];
-	udb_ctx->hash_table[block_idx][h] = rec;
+	rec->hash_next = ctx->hash_table[block_idx][h];
+	ctx->hash_table[block_idx][h] = rec;
 }
 
-static int udb_hash_remove_record(UdbRecord *rec, int block_idx, const char *key)
+static int udb_hash_remove_record(UdbContext *ctx, UdbRecord *rec, int block_idx, const char *key)
 {
 	unsigned int h = udb_hash_str(key);
-	UdbRecord *curr = udb_ctx->hash_table[block_idx][h];
+	UdbRecord *curr = ctx->hash_table[block_idx][h];
 	UdbRecord *prev = NULL;
 
 	while (curr)
@@ -476,7 +476,7 @@ static int udb_hash_remove_record(UdbRecord *rec, int block_idx, const char *key
 			if (prev)
 				prev->hash_next = curr->hash_next;
 			else
-				udb_ctx->hash_table[block_idx][h] = curr->hash_next;
+				ctx->hash_table[block_idx][h] = curr->hash_next;
 			return 1;
 		}
 		prev = curr;
@@ -485,7 +485,7 @@ static int udb_hash_remove_record(UdbRecord *rec, int block_idx, const char *key
 	return 0;
 }
 
-static UdbRecord *udb_hash_find(int block_idx, const char *key)
+static UdbRecord *udb_hash_find(UdbContext *ctx, int block_idx, const char *key)
 {
 	unsigned int h;
 	UdbRecord *curr;
@@ -493,7 +493,7 @@ static UdbRecord *udb_hash_find(int block_idx, const char *key)
 	if (!key)
 		return NULL;
 	h = udb_hash_str(key);
-	curr = udb_ctx->hash_table[block_idx][h];
+	curr = ctx->hash_table[block_idx][h];
 	while (curr)
 	{
 		if (!strcasecmp(curr->key, key))
@@ -535,21 +535,21 @@ static UdbRecord *udb_record_create(UdbRecord *parent)
 	return rec;
 }
 
-static UdbRecord *udb_record_find(const char *key, UdbRecord *parent)
+static UdbRecord *udb_record_find(UdbContext *ctx, const char *key, UdbRecord *parent)
 {
 	UdbRecord *child;
 
 	if (!parent)
 		return NULL;
-	if (parent->parent == NULL && udb_ctx)
-		return udb_hash_find(parent->block_idx, key);
+	if (parent->parent == NULL && ctx)
+		return udb_hash_find(ctx, parent->block_idx, key);
 	for (child = parent->child; child; child = child->sibling)
 		if (!strcasecmp(child->key, key))
 			return child;
 	return NULL;
 }
 
-static UdbRecord *udb_record_find_path(UdbBlock *block, const char *path)
+static UdbRecord *udb_record_find_path(UdbContext *ctx, UdbBlock *block, const char *path)
 {
 	char pathbuf[512];
 	char *cur;
@@ -564,12 +564,12 @@ static UdbRecord *udb_record_find_path(UdbBlock *block, const char *path)
 	while ((ds = strstr(cur, "::")))
 	{
 		*ds = '\0';
-		rec = udb_record_find(cur, rec);
+		rec = udb_record_find(ctx, cur, rec);
 		if (!rec)
 			return NULL;
 		cur = ds + 2;
 	}
-	return udb_record_find(cur, rec);
+	return udb_record_find(ctx, cur, rec);
 }
 
 static void udb_record_free_tree(UdbRecord *rec)
@@ -619,7 +619,7 @@ static void udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbu
 	pathbuf[old_len] = '\0';
 }
 
-static int udb_file_save_block(UdbBlock *block)
+static int udb_file_save_block(UdbContext *ctx, UdbBlock *block)
 {
 	char tmp_path[512];
 	char pathbuf[4096] = "";
@@ -641,6 +641,7 @@ static int udb_file_save_block(UdbBlock *block)
 			udb_serialize_tree(rec, 0, fp, pathbuf, sizeof(pathbuf));
 	fclose(fp);
 	rename(tmp_path, block->filepath);
+	(void)ctx;
 	block->checksum = udb_compute_block_checksum(block);
 	block->modified_at = time(NULL);
 	if (stat(block->filepath, &st) == 0)
@@ -767,17 +768,17 @@ static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
 	return 1;
 }
 
-static void udb_config_free(void)
+static void udb_config_free(UdbContext *ctx)
 {
-	if (udb_ctx)
+	if (ctx)
 	{
-		safe_free(udb_ctx->quit_ips);
-		safe_free(udb_ctx->quit_clones);
-		safe_free(udb_ctx->encryption_key);
-		safe_free(udb_ctx->suffix);
-		safe_free(udb_ctx->nickserv_mask);
-		safe_free(udb_ctx->chanserv_mask);
-		safe_free(udb_ctx->ipserv_mask);
+		safe_free(ctx->quit_ips);
+		safe_free(ctx->quit_clones);
+		safe_free(ctx->encryption_key);
+		safe_free(ctx->suffix);
+		safe_free(ctx->nickserv_mask);
+		safe_free(ctx->chanserv_mask);
+		safe_free(ctx->ipserv_mask);
 	}
 	if (udb_cfg)
 	{
@@ -881,7 +882,7 @@ static void udb_settings_restore_flood(void)
 	udb_cfg->flood_period = udb_cfg->config_flood_period;
 }
 
-static int udb_settings_apply_record(UdbRecord *rec)
+static int udb_settings_apply_record(UdbContext *ctx, UdbRecord *rec)
 {
 	int attempts;
 	int period;
@@ -892,12 +893,12 @@ static int udb_settings_apply_record(UdbRecord *rec)
 	{
 		if (!udb_setting_string_valid(rec->data_str))
 			return 0;
-		udb_settings_replace(&udb_ctx->quit_ips, rec->data_str);
+		udb_settings_replace(&ctx->quit_ips, rec->data_str);
 	} else if (!strcmp(rec->key, SKEY_QUIT_CLONES))
 	{
 		if (!udb_setting_string_valid(rec->data_str))
 			return 0;
-		udb_settings_replace(&udb_ctx->quit_clones, rec->data_str);
+		udb_settings_replace(&ctx->quit_clones, rec->data_str);
 	} else if (!strcmp(rec->key, SKEY_FLOOD))
 	{
 		if (!udb_flood_valid(rec->data_str, &attempts, &period))
@@ -911,29 +912,29 @@ static int udb_settings_apply_record(UdbRecord *rec)
 	{
 		if (!udb_suffix_valid(rec->data_str))
 			return 0;
-		udb_settings_replace(&udb_ctx->suffix, rec->data_str);
+		udb_settings_replace(&ctx->suffix, rec->data_str);
 		udb_ip_refresh_derived_hosts();
 	} else if (!strcmp(rec->key, SKEY_CRYPT_KEY))
 	{
 		if (!udb_encryption_key_valid(rec->data_str))
 			return 0;
-		udb_settings_replace(&udb_ctx->encryption_key, rec->data_str);
+		udb_settings_replace(&ctx->encryption_key, rec->data_str);
 		udb_ip_refresh_derived_hosts();
 	} else if (!strcmp(rec->key, SKEY_NICKSERV))
 	{
 		if (!udb_service_mask_valid(rec->data_str))
 			return 0;
-		udb_settings_replace(&udb_ctx->nickserv_mask, rec->data_str);
+		udb_settings_replace(&ctx->nickserv_mask, rec->data_str);
 	} else if (!strcmp(rec->key, SKEY_CHANSERV))
 	{
 		if (!udb_service_mask_valid(rec->data_str))
 			return 0;
-		udb_settings_replace(&udb_ctx->chanserv_mask, rec->data_str);
+		udb_settings_replace(&ctx->chanserv_mask, rec->data_str);
 	} else if (!strcmp(rec->key, SKEY_IPSERV))
 	{
 		if (!udb_service_mask_valid(rec->data_str))
 			return 0;
-		udb_settings_replace(&udb_ctx->ipserv_mask, rec->data_str);
+		udb_settings_replace(&ctx->ipserv_mask, rec->data_str);
 	} else
 	{
 		return 0;
@@ -941,46 +942,46 @@ static int udb_settings_apply_record(UdbRecord *rec)
 	return 1;
 }
 
-static void udb_settings_remove_record(UdbRecord *rec)
+static void udb_settings_remove_record(UdbContext *ctx, UdbRecord *rec)
 {
 	if (!rec || !rec->key)
 		return;
 	if (!strcmp(rec->key, SKEY_QUIT_IPS))
-		udb_settings_replace(&udb_ctx->quit_ips, NULL);
+		udb_settings_replace(&ctx->quit_ips, NULL);
 	else if (!strcmp(rec->key, SKEY_QUIT_CLONES))
-		udb_settings_replace(&udb_ctx->quit_clones, NULL);
+		udb_settings_replace(&ctx->quit_clones, NULL);
 	else if (!strcmp(rec->key, SKEY_FLOOD))
 		udb_settings_restore_flood();
 	else if (!strcmp(rec->key, SKEY_SUFFIX))
 	{
-		udb_settings_replace(&udb_ctx->suffix, NULL);
+		udb_settings_replace(&ctx->suffix, NULL);
 		udb_ip_refresh_derived_hosts();
 	} else if (!strcmp(rec->key, SKEY_CRYPT_KEY))
 	{
-		udb_settings_replace(&udb_ctx->encryption_key, NULL);
+		udb_settings_replace(&ctx->encryption_key, NULL);
 		udb_ip_refresh_derived_hosts();
 	} else if (!strcmp(rec->key, SKEY_NICKSERV))
-		udb_settings_replace(&udb_ctx->nickserv_mask, NULL);
+		udb_settings_replace(&ctx->nickserv_mask, NULL);
 	else if (!strcmp(rec->key, SKEY_CHANSERV))
-		udb_settings_replace(&udb_ctx->chanserv_mask, NULL);
+		udb_settings_replace(&ctx->chanserv_mask, NULL);
 	else if (!strcmp(rec->key, SKEY_IPSERV))
-		udb_settings_replace(&udb_ctx->ipserv_mask, NULL);
+		udb_settings_replace(&ctx->ipserv_mask, NULL);
 }
 
-static void udb_link_apply_record(UdbRecord *rec)
+static void udb_link_apply_record(UdbContext *ctx, UdbRecord *rec)
 {
 	if (!rec || !rec->parent || !rec->key || strcmp(rec->key, LKEY_OPTIONS))
 		return;
-	udb_ctx->propagator = NULL;
+	ctx->propagator = NULL;
 	if (rec->data_str || (rec->data_num & ~(UDB_LNKOPT_DEBUG | UDB_LNKOPT_PROPAGATOR)))
 		udb_log(ULOG_WARNING, "UDB_LINK_OPTIONS", NULL,
 		        "Ignoring invalid L::options for $server", log_data_string("server", rec->parent->key));
 }
 
-static void udb_link_remove_record(UdbRecord *rec)
+static void udb_link_remove_record(UdbContext *ctx, UdbRecord *rec)
 {
 	if (rec && rec->key && !strcmp(rec->key, LKEY_OPTIONS))
-		udb_ctx->propagator = NULL;
+		ctx->propagator = NULL;
 }
 
 /* End of udb_config.c.inc */
@@ -1030,11 +1031,11 @@ static int udb_password_record_valid(UdbBlock *block, const char *path,
 	return 1;
 }
 
-static UdbRecord *udb_record_insert(UdbBlock *block, UdbRecord *parent, const char *key, const char *data_str, unsigned long data_num, int persist)
+static UdbRecord *udb_record_insert(UdbContext *ctx, UdbBlock *block, UdbRecord *parent, const char *key, const char *data_str, unsigned long data_num, int persist)
 {
 	if (!parent)
 		parent = block->tree;
-	UdbRecord *rec = udb_record_find(key, parent);
+	UdbRecord *rec = udb_record_find(ctx, key, parent);
 	if (!rec)
 	{
 		rec = udb_record_create(parent);
@@ -1060,10 +1061,10 @@ static UdbRecord *udb_record_insert(UdbBlock *block, UdbRecord *parent, const ch
 		}
 		if (parent == block->tree)
 		{
-			udb_hash_insert_record(rec, udb_block_letter_to_index(block->letter), key);
+			udb_hash_insert_record(ctx, rec, udb_block_letter_to_index(block->letter), key);
 		}
 		block->record_count++;
-		udb_ctx->total_records++;
+		ctx->total_records++;
 	}
 
 	if (rec->data_str)
@@ -1088,16 +1089,16 @@ static UdbRecord *udb_record_insert(UdbBlock *block, UdbRecord *parent, const ch
 
 	if (persist)
 	{
-		udb_file_save_block(block);
+		udb_file_save_block(ctx, block);
 	}
 
-	udb_apply_special_record(block, rec, 1);
+	udb_apply_special_record(ctx, block, rec, 1);
 
 	return rec;
 }
 
 
-static UdbRecord *udb_record_delete(UdbBlock *block, UdbRecord *rec, int persist)
+static UdbRecord *udb_record_delete(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int persist)
 {
 	UdbRecord *line_rec = NULL;
 	if (!rec)
@@ -1108,13 +1109,13 @@ static UdbRecord *udb_record_delete(UdbBlock *block, UdbRecord *rec, int persist
 	    rec->parent->parent != block->tree)
 		line_rec = rec->parent;
 
-	udb_remove_special_record(block, rec);
+	udb_remove_special_record(ctx, block, rec);
 
 	if (rec->parent)
 	{
 		if (rec->parent->parent == NULL)
 		{
-			udb_hash_remove_record(rec, udb_block_letter_to_index(block->letter), rec->key);
+			udb_hash_remove_record(ctx, rec, udb_block_letter_to_index(block->letter), rec->key);
 		}
 
 		UdbRecord *curr = rec->parent->child;
@@ -1136,8 +1137,8 @@ static UdbRecord *udb_record_delete(UdbBlock *block, UdbRecord *rec, int persist
 
 	if (block->record_count > 0)
 		block->record_count--;
-	if (udb_ctx->total_records > 0)
-		udb_ctx->total_records--;
+	if (ctx->total_records > 0)
+		ctx->total_records--;
 
 	udb_record_free_tree(rec);
 
@@ -1147,7 +1148,7 @@ static UdbRecord *udb_record_delete(UdbBlock *block, UdbRecord *rec, int persist
 
 	if (persist)
 	{
-		udb_file_save_block(block);
+		udb_file_save_block(ctx, block);
 	}
 	return NULL;
 }
@@ -1369,7 +1370,7 @@ static void udb_sync_session_free(UdbBlock *block)
 	block->syncing_from = NULL;
 }
 
-static int udb_block_commit_stage(UdbBlock *block, UdbSyncSession *session,
+static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSession *session,
                                   unsigned long checksum)
 {
 	UdbRecord *rec;
@@ -1378,15 +1379,15 @@ static int udb_block_commit_stage(UdbBlock *block, UdbSyncSession *session,
 	if (!block || !session || block->session != session)
 		return 0;
 	/* Persistence succeeded before this point; only now may active state move. */
-	udb_block_reset(block);
+	udb_block_reset(ctx, block);
 	udb_record_free_tree(block->tree);
 	block->tree = session->tree;
 	session->tree = NULL;
 	block->record_count = session->record_count;
-	udb_ctx->total_records += block->record_count;
+	ctx->total_records += block->record_count;
 	for (rec = block->tree->child; rec; rec = rec->sibling)
-		udb_hash_insert_record(rec, udb_block_letter_to_index(block->letter), rec->key);
-	udb_block_set_context_root(block);
+		udb_hash_insert_record(ctx, rec, udb_block_letter_to_index(block->letter), rec->key);
+	udb_block_set_context_root(ctx, block);
 	block->checksum = checksum;
 	block->modified_at = time(NULL);
 	if (stat(block->filepath, &st) == 0)
@@ -1396,9 +1397,9 @@ static int udb_block_commit_stage(UdbBlock *block, UdbSyncSession *session,
 	for (rec = block->tree->child; rec; rec = rec->sibling)
 	{
 		UdbRecord *child;
-		udb_apply_special_record(block, rec, 1);
+		udb_apply_special_record(ctx, block, rec, 1);
 		for (child = rec->child; child; child = child->sibling)
-			udb_apply_special_record(block, child, 1);
+			udb_apply_special_record(ctx, block, child, 1);
 	}
 	return 1;
 }
@@ -1406,7 +1407,7 @@ static int udb_block_commit_stage(UdbBlock *block, UdbSyncSession *session,
 /* ========================================================================
  * File I/O Operations
  * ======================================================================== */
-static UdbRecord *udb_file_parse_line(UdbBlock *block, char *line)
+static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *line)
 {
 	if (!line || !*line || *line == ';')
 		return NULL;
@@ -1441,7 +1442,7 @@ static UdbRecord *udb_file_parse_line(UdbBlock *block, char *line)
 			next += 2;
 		}
 
-		UdbRecord *rec = udb_record_find(p, parent);
+		UdbRecord *rec = udb_record_find(ctx, p, parent);
 		if (!rec)
 		{
 			rec = udb_record_create(parent);
@@ -1467,10 +1468,10 @@ static UdbRecord *udb_file_parse_line(UdbBlock *block, char *line)
 			}
 			if (parent == block->tree)
 			{
-				udb_hash_insert_record(rec, udb_block_letter_to_index(block->letter), p);
+				udb_hash_insert_record(ctx, rec, udb_block_letter_to_index(block->letter), p);
 			}
 			block->record_count++;
-			udb_ctx->total_records++;
+			ctx->total_records++;
 		}
 
 		if (!next)
@@ -1506,7 +1507,7 @@ static UdbRecord *udb_file_parse_line(UdbBlock *block, char *line)
 }
 
 
-static int udb_file_load_block(UdbBlock *block)
+static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 {
 	if (!block || !block->filepath)
 		return 0;
@@ -1527,7 +1528,7 @@ static int udb_file_load_block(UdbBlock *block)
 		if (line[0] == ';' || line[0] == '\0')
 			continue;
 
-		udb_file_parse_line(block, line);
+		udb_file_parse_line(ctx, block, line);
 	}
 	fclose(fp);
 
@@ -1537,10 +1538,10 @@ static int udb_file_load_block(UdbBlock *block)
 		UdbRecord *sub = curr->child;
 		while (sub)
 		{
-			udb_apply_special_record(block, sub, 1);
+			udb_apply_special_record(ctx, block, sub, 1);
 			sub = sub->sibling;
 		}
-		udb_apply_special_record(block, curr, 1);
+		udb_apply_special_record(ctx, block, curr, 1);
 		curr = curr->sibling;
 	}
 
@@ -1608,10 +1609,10 @@ static void udb_send_to_debugs(Client *source, const char *fmt, ...)
 		{
 			if (udb_ctx && udb_ctx->links)
 			{
-				UdbRecord *srv_rec = udb_record_find(client->name, udb_ctx->links);
+				UdbRecord *srv_rec = udb_record_find(udb_ctx, client->name, udb_ctx->links);
 				if (srv_rec)
 				{
-					UdbRecord *opt_rec = udb_record_find(LKEY_OPTIONS, srv_rec);
+					UdbRecord *opt_rec = udb_record_find(udb_ctx, LKEY_OPTIONS, srv_rec);
 					if (opt_rec && (opt_rec->data_num & UDB_LNKOPT_DEBUG))
 					{
 						sendto_one(client, NULL, ":%s NOTICE %s :[UDB Debug] %s", me.id, client->id, buf);
@@ -1624,10 +1625,10 @@ static void udb_send_to_debugs(Client *source, const char *fmt, ...)
 	// Also send to local opers if our own server has the debug option
 	if (udb_ctx && udb_ctx->links)
 	{
-		UdbRecord *me_rec = udb_record_find(me.name, udb_ctx->links);
+		UdbRecord *me_rec = udb_record_find(udb_ctx, me.name, udb_ctx->links);
 		if (me_rec)
 		{
-			UdbRecord *opt_rec = udb_record_find(LKEY_OPTIONS, me_rec);
+			UdbRecord *opt_rec = udb_record_find(udb_ctx, LKEY_OPTIONS, me_rec);
 			if (opt_rec && (opt_rec->data_num & UDB_LNKOPT_DEBUG))
 			{
 				unreal_log(ULOG_INFO, "udb", "UDB_DEBUG_OPER", source,
@@ -1649,7 +1650,7 @@ static void udb_send_to_debugs(Client *source, const char *fmt, ...)
  * and line effect implementations.
  */
 
-static int udb_apply_special_record(UdbBlock *block, UdbRecord *rec, int is_new)
+static int udb_apply_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new)
 {
 	if (!rec)
 		return 0;
@@ -1675,12 +1676,12 @@ static int udb_apply_special_record(UdbBlock *block, UdbRecord *rec, int is_new)
 		udb_ip_apply_record(ip_rec->key, ip_rec, rec->key, is_new);
 	} else if (block->letter == 'S')
 	{
-		if (!udb_settings_apply_record(rec))
+		if (!udb_settings_apply_record(ctx, rec))
 			udb_log(ULOG_WARNING, "UDB_SETTING_INVALID", NULL,
 			        "Ignoring invalid or unsupported S::$setting", log_data_string("setting", rec->key));
 	} else if (block->letter == 'L')
 	{
-		udb_link_apply_record(rec);
+		udb_link_apply_record(ctx, rec);
 	} else if (block->letter == 'K')
 	{
 		udb_line_apply_record(rec, is_new);
@@ -1688,7 +1689,7 @@ static int udb_apply_special_record(UdbBlock *block, UdbRecord *rec, int is_new)
 	return 1;
 }
 
-static void udb_remove_special_record(UdbBlock *block, UdbRecord *rec)
+static void udb_remove_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec)
 {
 	if (!rec)
 		return;
@@ -1712,7 +1713,7 @@ static void udb_remove_special_record(UdbBlock *block, UdbRecord *rec)
 				} else if (!strcmp(rec->key, NKEY_MODES))
 				{
 					long old_umodes = client->umodes & ALL_UMODES;
-					UdbRecord *mode_rec = udb_record_find(NKEY_MODES, nick_rec);
+					UdbRecord *mode_rec = udb_record_find(ctx, NKEY_MODES, nick_rec);
 					if (mode_rec && mode_rec->data_str)
 						client->umodes &= ~(set_usermode(mode_rec->data_str) & ~UMODE_OPER);
 					send_umode_out(client, 1, old_umodes);
@@ -1760,10 +1761,10 @@ static void udb_remove_special_record(UdbBlock *block, UdbRecord *rec)
 		}
 	} else if (block->letter == 'S')
 	{
-		udb_settings_remove_record(rec);
+		udb_settings_remove_record(ctx, rec);
 	} else if (block->letter == 'L')
 	{
-		udb_link_remove_record(rec);
+		udb_link_remove_record(ctx, rec);
 	} else if (block->letter == 'K')
 	{
 		udb_line_remove_record(rec);
@@ -1947,7 +1948,7 @@ EVENT(udb_sync_timeout_event)
 	}
 }
 
-static const char *udb_selected_propagator(void)
+static const char *udb_selected_propagator(UdbContext *ctx)
 {
 	const char *selected = NULL;
 	UdbRecord *link;
@@ -1958,11 +1959,11 @@ static const char *udb_selected_propagator(void)
 		selected = udb_cfg->propagator;
 		sources++;
 	}
-	if (udb_ctx && udb_ctx->links)
+	if (ctx && ctx->links)
 	{
-		for (link = udb_ctx->links->child; link; link = link->sibling)
+		for (link = ctx->links->child; link; link = link->sibling)
 		{
-			UdbRecord *options = udb_record_find(LKEY_OPTIONS, link);
+			UdbRecord *options = udb_record_find(ctx, LKEY_OPTIONS, link);
 			if (options && !options->data_str &&
 			    !(options->data_num & ~(UDB_LNKOPT_DEBUG | UDB_LNKOPT_PROPAGATOR)) &&
 			    (options->data_num & UDB_LNKOPT_PROPAGATOR))
@@ -1974,7 +1975,7 @@ static const char *udb_selected_propagator(void)
 	}
 	if (sources != 1)
 	{
-		udb_ctx->propagator = NULL;
+		ctx->propagator = NULL;
 		udb_send_to_debugs(NULL, "propagator selection rejected");
 		udb_log(ULOG_WARNING, "UDB_PROPAGATOR_SELECTION", NULL,
 		        "Rejecting UDB writes: exactly one propagator source is required");
@@ -1983,23 +1984,23 @@ static const char *udb_selected_propagator(void)
 	return selected;
 }
 
-static int udb_is_propagator(Client *server)
+static int udb_is_propagator(UdbContext *ctx, Client *server)
 {
 	const char *selected;
 
 	if (!server || !IsServer(server))
 		return 0;
-	selected = udb_selected_propagator();
+	selected = udb_selected_propagator(ctx);
 	if (selected && !strcasecmp(server->name, selected))
 	{
-		udb_ctx->propagator = server;
+		ctx->propagator = server;
 		return 1;
 	}
 	return 0;
 }
 
 /* Paths are passed to the file parser without the block prefix. */
-static UdbBlock *udb_protocol_path_block(const char *path)
+static UdbBlock *udb_protocol_path_block(UdbContext *ctx, const char *path)
 {
 	const char *component;
 	const char *separator;
@@ -2013,7 +2014,7 @@ static UdbBlock *udb_protocol_path_block(const char *path)
 	if (len < 4 || len >= 512 || path[1] != ':' || path[2] != ':' || !path[3])
 		return NULL;
 
-	block = udb_block_by_letter(path[0]);
+	block = udb_block_by_letter(ctx, path[0]);
 	if (!block)
 		return NULL;
 
@@ -2096,6 +2097,7 @@ CMD_FUNC(cmd_db)
 
 	const char *target = parv[1];
 	const char *subcmd = parv[2];
+	UdbContext *ctx = udb_ctx;
 	char logbuf[512];
 
 	if (!target || !*target || !subcmd || !*subcmd)
@@ -2159,7 +2161,7 @@ CMD_FUNC(cmd_db)
 					udb_protocol_params_error(client, subcmd);
 					return;
 				}
-				block = udb_block_by_letter(*parv[3]);
+				block = udb_block_by_letter(ctx, *parv[3]);
 				if (is_for_me)
 				{
 					if (block && block->session && block->session->peer == client)
@@ -2194,7 +2196,7 @@ CMD_FUNC(cmd_db)
 					udb_protocol_params_error(client, subcmd);
 					return;
 				}
-				block = udb_block_by_letter(*parv[3]);
+				block = udb_block_by_letter(ctx, *parv[3]);
 				if (is_for_me)
 				{
 					session = block ? block->session : NULL;
@@ -2234,7 +2236,7 @@ CMD_FUNC(cmd_db)
 					udb_protocol_params_error(client, subcmd);
 					return;
 				}
-				block = udb_block_by_letter(*parv[3]);
+				block = udb_block_by_letter(ctx, *parv[3]);
 				if (is_for_me)
 				{
 					session = block ? block->session : NULL;
@@ -2249,7 +2251,7 @@ CMD_FUNC(cmd_db)
 					digest = udb_compute_tree_checksum(session->tree);
 					if (digest != strtoul(parv[5], NULL, 16) ||
 					    !udb_stage_persist_block(block, session) ||
-					    !udb_block_commit_stage(block, session, digest))
+					    !udb_block_commit_stage(ctx, block, session, digest))
 					{
 						udb_sync_abort(block, "digest or persistence failure");
 						sendto_one(client, NULL, ":%s DB %s ERR END %d %c", me.id, client->id,
@@ -2312,7 +2314,7 @@ CMD_FUNC(cmd_db)
 				if (parc < 6)
 					return;
 				char letter = *parv[3];
-				UdbBlock *block = udb_block_by_letter(letter);
+				UdbBlock *block = udb_block_by_letter(ctx, letter);
 
 				if (is_for_me)
 				{
@@ -2347,7 +2349,7 @@ CMD_FUNC(cmd_db)
 				}
 				const char *path = parv[3];
 				const char *data = parv[4];
-				UdbBlock *block = udb_protocol_path_block(path);
+				UdbBlock *block = udb_protocol_path_block(ctx, path);
 				char letter = path && *path ? path[0] : '0';
 
 				if (!block)
@@ -2368,7 +2370,7 @@ CMD_FUNC(cmd_db)
 						sendto_one(client, NULL, ":%s DB %s ERR INS %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
 						return;
 					}
-					if (block->syncing_from != client && !udb_is_propagator(client))
+					if (block->syncing_from != client && !udb_is_propagator(ctx, client))
 					{
 						sendto_one(client, NULL, ":%s DB %s ERR INS %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 						return;
@@ -2377,15 +2379,15 @@ CMD_FUNC(cmd_db)
 					int len = strlen(path) + strlen(data) + 2;
 					char *line = safe_alloc(len);
 					snprintf(line, len, "%s %s", path + 3, data);
-					UdbRecord *rec = udb_file_parse_line(block, line);
+					UdbRecord *rec = udb_file_parse_line(ctx, block, line);
 					safe_free(line);
 
 					if (rec)
 					{
-						udb_apply_special_record(block, rec, 1);
+						udb_apply_special_record(ctx, block, rec, 1);
 					}
 					if (!block->syncing_from)
-						udb_file_save_block(block);
+						udb_file_save_block(ctx, block);
 
 					char logbuf[512];
 					snprintf(logbuf, sizeof(logbuf), "[UDB] Inserted record via S2S: %s -> %s", path, data);
@@ -2410,7 +2412,7 @@ CMD_FUNC(cmd_db)
 				if (parc < 4)
 					return;
 				char letter = *parv[3];
-				UdbBlock *block = udb_block_by_letter(letter);
+				UdbBlock *block = udb_block_by_letter(ctx, letter);
 
 				if (is_for_me)
 				{
@@ -2471,7 +2473,7 @@ CMD_FUNC(cmd_db)
 					return;
 				}
 				const char *path = parv[3];
-				UdbBlock *block = udb_protocol_path_block(path);
+				UdbBlock *block = udb_protocol_path_block(ctx, path);
 				char letter = path && *path ? path[0] : '0';
 
 				if (!block)
@@ -2494,16 +2496,16 @@ CMD_FUNC(cmd_db)
 							sendto_one(client, NULL, ":%s DB %s ERR DEL %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
 							return;
 						}
-					} else if (!udb_is_propagator(client))
+					} else if (!udb_is_propagator(ctx, client))
 					{
 						sendto_one(client, NULL, ":%s DB %s ERR DEL %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 						return;
 					}
 
-					UdbRecord *rec = udb_record_find_path(block, path + 3);
+					UdbRecord *rec = udb_record_find_path(ctx, block, path + 3);
 					if (rec)
 					{
-						udb_record_delete(block, rec, 1);
+						udb_record_delete(ctx, block, rec, 1);
 					}
 
 					if (udb_ctx->propagator && block->syncing_from == client)
@@ -2523,7 +2525,7 @@ CMD_FUNC(cmd_db)
 
 				if (is_for_me)
 				{
-					UdbBlock *block = udb_block_by_letter(letter);
+					UdbBlock *block = udb_block_by_letter(ctx, letter);
 					if (!block)
 					{
 						sendto_one(client, NULL, ":%s DB %s ERR DRP %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
@@ -2539,17 +2541,17 @@ CMD_FUNC(cmd_db)
 						sendto_one(client, NULL, ":%s DB %s ERR DRP %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
 						return;
 					}
-					if (!udb_is_propagator(client))
+					if (!udb_is_propagator(ctx, client))
 					{
 						sendto_one(client, NULL, ":%s DB %s ERR DRP %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 						return;
 					}
 
-					udb_block_reset(block);
+					udb_block_reset(ctx, block);
 					block->checksum = 0;
 					block->filesize = 0;
 					if (!block->syncing_from)
-						udb_file_save_block(block);
+						udb_file_save_block(ctx, block);
 
 					if (!is_broadcast)
 						return;
@@ -2567,7 +2569,7 @@ CMD_FUNC(cmd_db)
 
 				if (is_for_me)
 				{
-					UdbBlock *block = udb_block_by_letter(letter);
+					UdbBlock *block = udb_block_by_letter(ctx, letter);
 					if (!block)
 					{
 						sendto_one(client, NULL, ":%s DB %s ERR FDR %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
@@ -2586,7 +2588,7 @@ CMD_FUNC(cmd_db)
 						return;
 					}
 
-					udb_file_save_block(block);
+					udb_file_save_block(ctx, block);
 					block->syncing_from = NULL;
 
 					if (!is_broadcast)
@@ -2605,7 +2607,7 @@ CMD_FUNC(cmd_db)
 
 				if (is_for_me)
 				{
-					UdbBlock *block = udb_block_by_letter(letter);
+					UdbBlock *block = udb_block_by_letter(ctx, letter);
 					if (!block)
 					{
 						sendto_one(client, NULL, ":%s DB %s ERR OPT %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
@@ -2616,7 +2618,7 @@ CMD_FUNC(cmd_db)
 						sendto_one(client, NULL, ":%s DB %s ERR OPT %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
 						return;
 					}
-					if (!udb_is_propagator(client))
+					if (!udb_is_propagator(ctx, client))
 					{
 						sendto_one(client, NULL, ":%s DB %s ERR OPT %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 						return;
@@ -2625,7 +2627,7 @@ CMD_FUNC(cmd_db)
 					{
 						block->modified_at = atol(parv[4]);
 					}
-					udb_file_save_block(block);
+					udb_file_save_block(ctx, block);
 
 					if (!is_broadcast)
 						return;
@@ -2820,7 +2822,7 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync)
 	if (!client || !nick_rec)
 		return;
 
-	UdbRecord *forbid = udb_record_find(NKEY_FORBID, nick_rec);
+	UdbRecord *forbid = udb_record_find(udb_ctx, NKEY_FORBID, nick_rec);
 	if (forbid)
 	{
 		udb_nick_force_rename(client, nick_rec->key);
@@ -2832,7 +2834,7 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync)
 	{
 		if (!has_user_mode(client, 'r'))
 		{
-			UdbRecord *pass_rec = udb_record_find(NKEY_PASS, nick_rec);
+			UdbRecord *pass_rec = udb_record_find(udb_ctx, NKEY_PASS, nick_rec);
 			if (pass_rec)
 			{
 				udb_nick_force_rename(client, nick_rec->key);
@@ -2849,7 +2851,7 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync)
 	long old_umodes = client->umodes & ALL_UMODES;
 	client->umodes |= UMODE_REGNICK;
 
-	UdbRecord *susp = udb_record_find(NKEY_SUSPENDED, nick_rec);
+	UdbRecord *susp = udb_record_find(udb_ctx, NKEY_SUSPENDED, nick_rec);
 	if (susp)
 	{
 		client->umodes |= set_usermode("S");
@@ -2857,25 +2859,25 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync)
 
 	send_umode_out(client, 1, old_umodes);
 
-	UdbRecord *vhost_rec = udb_record_find(NKEY_VHOST, nick_rec);
+	UdbRecord *vhost_rec = udb_record_find(udb_ctx, NKEY_VHOST, nick_rec);
 	if (vhost_rec)
 		udb_nick_set_vhost(client, vhost_rec);
 
-	UdbRecord *oper_rec = udb_record_find(NKEY_OPER, nick_rec);
+	UdbRecord *oper_rec = udb_record_find(udb_ctx, NKEY_OPER, nick_rec);
 	if (oper_rec)
 		udb_nick_grant_oper(client, nick_rec, oper_rec);
 
-	UdbRecord *modes_rec = udb_record_find(NKEY_MODES, nick_rec);
+	UdbRecord *modes_rec = udb_record_find(udb_ctx, NKEY_MODES, nick_rec);
 	if (modes_rec && modes_rec->data_str)
 	{
 		udb_nick_set_modes(client, nick_rec, modes_rec, modes_rec->data_str);
 	}
 
-	UdbRecord *swhois_rec = udb_record_find(NKEY_SWHOIS, nick_rec);
+	UdbRecord *swhois_rec = udb_record_find(udb_ctx, NKEY_SWHOIS, nick_rec);
 	if (swhois_rec)
 		udb_nick_set_swhois(client, nick_rec, swhois_rec);
 
-	UdbRecord *sno_rec = udb_record_find(NKEY_SNOMASKS, nick_rec);
+	UdbRecord *sno_rec = udb_record_find(udb_ctx, NKEY_SNOMASKS, nick_rec);
 	if (sno_rec)
 		udb_nick_set_snomasks(client, nick_rec, sno_rec);
 }
@@ -2895,7 +2897,7 @@ static void udb_nick_strip(Client *client, UdbRecord *nick_rec)
 	long old_umodes = client->umodes & ALL_UMODES;
 	if (nick_rec)
 	{
-		UdbRecord *mode_rec = udb_record_find(NKEY_MODES, nick_rec);
+		UdbRecord *mode_rec = udb_record_find(udb_ctx, NKEY_MODES, nick_rec);
 		if (mode_rec && mode_rec->data_str)
 			client->umodes &= ~(set_usermode(mode_rec->data_str) & ~UMODE_OPER);
 	}
@@ -2909,7 +2911,7 @@ static void udb_nick_strip(Client *client, UdbRecord *nick_rec)
 
 	if (nick_rec)
 	{
-		UdbRecord *swhois_rec = udb_record_find(NKEY_SWHOIS, nick_rec);
+		UdbRecord *swhois_rec = udb_record_find(udb_ctx, NKEY_SWHOIS, nick_rec);
 		if (swhois_rec && swhois_rec->data_str)
 		{
 			swhois_delete(client, "udb", "*", &me, NULL);
@@ -3030,18 +3032,18 @@ static int udb_check_password(const char *pass, UdbRecord *profile_rec, Client *
 
 	if (!pass || !profile_rec || udb_password_flooded(profile_rec, client))
 		return 0;
-	pass_rec = udb_record_find(NKEY_PASS, profile_rec);
+	pass_rec = udb_record_find(udb_ctx, NKEY_PASS, profile_rec);
 	if (!pass_rec || BadPtr(pass_rec->data_str))
 	{
 		udb_password_failure_record(profile_rec, client, 0);
 		return 0;
 	}
-	chall_rec = udb_record_find(NKEY_CHALLENGE, profile_rec);
+	chall_rec = udb_record_find(udb_ctx, NKEY_CHALLENGE, profile_rec);
 	if (chall_rec && chall_rec->data_str)
 		challenge = chall_rec->data_str;
 	else if (udb_ctx && udb_ctx->settings)
 	{
-		UdbRecord *global = udb_record_find(SKEY_CHALLENGE, udb_ctx->settings);
+		UdbRecord *global = udb_record_find(udb_ctx, SKEY_CHALLENGE, udb_ctx->settings);
 		if (global && global->data_str)
 			challenge = global->data_str;
 	}
@@ -3109,7 +3111,7 @@ static int udb_cidr_matches(const char *ip, const char *cidr)
 
 static int udb_nick_access_allowed(Client *client, UdbRecord *nick_rec)
 {
-	UdbRecord *access_rec = udb_record_find(NKEY_ACCESS, nick_rec);
+	UdbRecord *access_rec = udb_record_find(udb_ctx, NKEY_ACCESS, nick_rec);
 	const char *p;
 
 	if (!access_rec)
@@ -3149,7 +3151,7 @@ CMD_FUNC(cmd_ghost)
 		return;
 	}
 
-	UdbRecord *nick_rec = udb_record_find(target_nick, udb_ctx->nicks);
+	UdbRecord *nick_rec = udb_record_find(udb_ctx, target_nick, udb_ctx->nicks);
 	if (!nick_rec)
 	{
 		sendnotice(client, "Nick %s is not registered.", target_nick);
@@ -3214,7 +3216,7 @@ CMD_OVERRIDE_FUNC(udb_override_nick)
 	if (client->local)
 		safe_strdup(client->local->passwd, pass);
 
-	UdbRecord *rec = (udb_ctx && udb_ctx->nicks) ? udb_record_find(clean_nick, udb_ctx->nicks) : NULL;
+	UdbRecord *rec = (udb_ctx && udb_ctx->nicks) ? udb_record_find(udb_ctx, clean_nick, udb_ctx->nicks) : NULL;
 
 	if (rec && udb_check_password(pass, rec, client) && udb_nick_access_allowed(client, rec))
 	{
@@ -3251,10 +3253,10 @@ static int udb_hook_can_use_nick(Client *client, const char *newnick, const char
 	if (!MyConnect(client))
 		return HOOK_CONTINUE;
 
-	UdbRecord *nick_rec = udb_record_find(newnick, udb_ctx->nicks);
+	UdbRecord *nick_rec = udb_record_find(udb_ctx, newnick, udb_ctx->nicks);
 	if (nick_rec)
 	{
-		UdbRecord *forbid = udb_record_find(NKEY_FORBID, nick_rec);
+		UdbRecord *forbid = udb_record_find(udb_ctx, NKEY_FORBID, nick_rec);
 		if (forbid)
 		{
 			*reject_reason = "This nick is forbidden.";
@@ -3287,8 +3289,8 @@ static int udb_hook_nick_change(Client *client, MessageTag *mtags, const char *n
 	if (!MyConnect(client))
 		return 0;
 
-	UdbRecord *old_rec = udb_record_find(client->name, udb_ctx->nicks);
-	UdbRecord *new_rec = udb_record_find(newnick, udb_ctx->nicks);
+	UdbRecord *old_rec = udb_record_find(udb_ctx, client->name, udb_ctx->nicks);
+	UdbRecord *new_rec = udb_record_find(udb_ctx, newnick, udb_ctx->nicks);
 
 	if (old_rec && old_rec != new_rec)
 	{
@@ -3305,7 +3307,7 @@ static int udb_hook_post_nick_change(Client *client, MessageTag *recv_mtags, con
 	if (!MyConnect(client))
 		return 0;
 
-	UdbRecord *new_rec = udb_record_find(client->name, udb_ctx->nicks);
+	UdbRecord *new_rec = udb_record_find(udb_ctx, client->name, udb_ctx->nicks);
 	if (new_rec)
 	{
 		udb_nick_apply(client, new_rec, 0);
@@ -3318,7 +3320,7 @@ static int udb_hook_local_connect(Client *client)
 	if (!udb_ctx || !udb_ctx->nicks)
 		return 0;
 
-	UdbRecord *nick_rec = udb_record_find(client->name, udb_ctx->nicks);
+	UdbRecord *nick_rec = udb_record_find(udb_ctx, client->name, udb_ctx->nicks);
 	if (nick_rec)
 	{
 		udb_nick_apply(client, nick_rec, 0);
@@ -3404,7 +3406,7 @@ static int udb_channel_is_identified_founder(Client *client, UdbRecord *chan_rec
 
 	if (!client || !chan_rec)
 		return 0;
-	founder_rec = udb_record_find(CKEY_FOUNDER, chan_rec);
+	founder_rec = udb_record_find(udb_ctx, CKEY_FOUNDER, chan_rec);
 	return founder_rec && founder_rec->data_str &&
 	       !strcasecmp(client->name, founder_rec->data_str) &&
 	       has_user_mode(client, 'r');
@@ -3746,7 +3748,7 @@ static int udb_channel_pending_auth_take(Client *client, Channel *channel)
 static void udb_channel_reconcile_founder(Channel *channel, UdbRecord *chan_rec)
 {
 	Member *member;
-	int suspended = chan_rec && udb_record_find(CKEY_SUSPENDED, chan_rec);
+	int suspended = chan_rec && udb_record_find(udb_ctx, CKEY_SUSPENDED, chan_rec);
 
 	for (member = channel->members; member; member = member->next)
 	{
@@ -3812,7 +3814,7 @@ static void udb_channel_clear_topic(Channel *channel)
 
 static void udb_channel_apply_record(Channel *channel, UdbRecord *chan_rec, const char *subkey, int is_new)
 {
-	UdbRecord *sub_rec = udb_record_find(subkey, chan_rec);
+	UdbRecord *sub_rec = udb_record_find(udb_ctx, subkey, chan_rec);
 	if (!sub_rec || !sub_rec->data_str)
 		return;
 
@@ -3851,7 +3853,7 @@ static void udb_channel_remove_record(Channel *channel, UdbRecord *chan_rec, con
 		udb_channel_reconcile_founder(channel, NULL);
 	} else if (!strcmp(subkey, CKEY_MODES))
 	{
-		UdbRecord *mode_rec = udb_record_find(CKEY_MODES, chan_rec);
+		UdbRecord *mode_rec = udb_record_find(udb_ctx, CKEY_MODES, chan_rec);
 		udb_channel_remove_modes(channel, mode_rec ? mode_rec->data_str : NULL);
 	} else if (!strcmp(subkey, CKEY_PERSISTENT))
 	{
@@ -3864,24 +3866,24 @@ static void udb_channel_remove_record(Channel *channel, UdbRecord *chan_rec, con
 		udb_channel_clear_topic(channel);
 	} else if (!strcasecmp(subkey, chan_rec->key))
 	{
-		UdbRecord *mode_rec = udb_record_find(CKEY_MODES, chan_rec);
+		UdbRecord *mode_rec = udb_record_find(udb_ctx, CKEY_MODES, chan_rec);
 		udb_channel_reconcile_founder(channel, NULL);
 		udb_channel_revoke_udb_admins(channel);
 		udb_channel_remove_modes(channel, mode_rec ? mode_rec->data_str : NULL);
 		udb_channel_set_persistent(channel, 0);
-		if (udb_record_find(CKEY_TOPIC, chan_rec))
+		if (udb_record_find(udb_ctx, CKEY_TOPIC, chan_rec))
 			udb_channel_clear_topic(channel);
 	}
 }
 
 static int udb_hook_pre_local_join(Client *client, Channel *channel, const char *key)
 {
-	UdbRecord *chan_rec = udb_record_find(channel->name, udb_ctx->channels);
+	UdbRecord *chan_rec = udb_record_find(udb_ctx, channel->name, udb_ctx->channels);
 	UdbRecord *pass_rec;
 	if (!chan_rec)
 		return HOOK_CONTINUE;
 
-	UdbRecord *forbid_rec = udb_record_find(CKEY_FORBID, chan_rec);
+	UdbRecord *forbid_rec = udb_record_find(udb_ctx, CKEY_FORBID, chan_rec);
 	if (forbid_rec)
 	{
 		return HOOK_CONTINUE; /* Let can_join handle the reject with proper numeric */
@@ -3892,7 +3894,7 @@ static int udb_hook_pre_local_join(Client *client, Channel *channel, const char 
 
 	/* CAN_JOIN already verified this credential. Record it only after all
      * regular join checks have succeeded, immediately before membership. */
-	pass_rec = udb_record_find(CKEY_PASS, chan_rec);
+	pass_rec = udb_record_find(udb_ctx, CKEY_PASS, chan_rec);
 	if (pass_rec && pass_rec->data_str && *pass_rec->data_str && key &&
 	    udb_check_password(key, chan_rec, client))
 	{
@@ -3909,11 +3911,11 @@ static int udb_hook_pre_local_join(Client *client, Channel *channel, const char 
 static int udb_hook_can_join(Client *client, Channel *channel, const char *key, char **errmsg)
 {
 	static char errbuf[512];
-	UdbRecord *chan_rec = udb_record_find(channel->name, udb_ctx->channels);
+	UdbRecord *chan_rec = udb_record_find(udb_ctx, channel->name, udb_ctx->channels);
 	if (!chan_rec)
 		return 0;
 
-	UdbRecord *forbid_rec = udb_record_find(CKEY_FORBID, chan_rec);
+	UdbRecord *forbid_rec = udb_record_find(udb_ctx, CKEY_FORBID, chan_rec);
 	if (forbid_rec)
 	{
 		snprintf(errbuf, sizeof(errbuf), "%%s :%s", forbid_rec->data_str ? forbid_rec->data_str : "Channel is forbidden");
@@ -3924,7 +3926,7 @@ static int udb_hook_can_join(Client *client, Channel *channel, const char *key, 
 	int is_founder = udb_channel_is_identified_founder(client, chan_rec);
 	int has_invite_grant = udb_channel_invite_grant_take(client, channel, 0);
 
-	UdbRecord *pass_rec = udb_record_find(CKEY_PASS, chan_rec);
+	UdbRecord *pass_rec = udb_record_find(udb_ctx, CKEY_PASS, chan_rec);
 	if (pass_rec && pass_rec->data_str && *pass_rec->data_str && !is_founder && !has_invite_grant)
 	{
 		if (!key || !udb_check_password(key, chan_rec, client))
@@ -3934,10 +3936,10 @@ static int udb_hook_can_join(Client *client, Channel *channel, const char *key, 
 		}
 	}
 
-	UdbRecord *access_rec = udb_record_find(CKEY_ACCESS, chan_rec);
+	UdbRecord *access_rec = udb_record_find(udb_ctx, CKEY_ACCESS, chan_rec);
 	if (access_rec && !is_founder)
 	{
-		UdbRecord *acc_entry = udb_record_find(client->name, access_rec);
+		UdbRecord *acc_entry = udb_record_find(udb_ctx, client->name, access_rec);
 		if (!acc_entry || !has_user_mode(client, 'r'))
 		{
 			snprintf(errbuf, sizeof(errbuf), "%%s :You must be authorized and identified to join this channel");
@@ -3950,7 +3952,7 @@ static int udb_hook_can_join(Client *client, Channel *channel, const char *key, 
 
 static void handle_join(Client *client, Channel *channel, MessageTag *mtags)
 {
-	UdbRecord *chan_rec = udb_record_find(channel->name, udb_ctx->channels);
+	UdbRecord *chan_rec = udb_record_find(udb_ctx, channel->name, udb_ctx->channels);
 	if (!chan_rec)
 		return;
 
@@ -3958,7 +3960,7 @@ static void handle_join(Client *client, Channel *channel, MessageTag *mtags)
 
 	if (channel->users == 1)
 	{
-		UdbRecord *susp_rec = udb_record_find(CKEY_SUSPENDED, chan_rec);
+		UdbRecord *susp_rec = udb_record_find(udb_ctx, CKEY_SUSPENDED, chan_rec);
 
 		/* A registered channel assigns founder authority exclusively as +q. */
 		if (!IsServer(client) && !IsULine(client))
@@ -3973,7 +3975,7 @@ static void handle_join(Client *client, Channel *channel, MessageTag *mtags)
 
 		udb_channel_apply_record(channel, chan_rec, CKEY_MODES, 0);
 		udb_channel_apply_record(channel, chan_rec, CKEY_TOPIC, 0);
-		if (udb_record_find(CKEY_PERSISTENT, chan_rec))
+		if (udb_record_find(udb_ctx, CKEY_PERSISTENT, chan_rec))
 			udb_channel_set_persistent(channel, 1);
 	}
 
@@ -4071,8 +4073,8 @@ CMD_OVERRIDE_FUNC(udb_override_invite)
 	}
 	channel = find_channel(parv[2]);
 	target = find_user(parv[1], NULL);
-	chan_rec = channel ? udb_record_find(channel->name, udb_ctx->channels) : NULL;
-	pass_rec = chan_rec ? udb_record_find(CKEY_PASS, chan_rec) : NULL;
+	chan_rec = channel ? udb_record_find(udb_ctx, channel->name, udb_ctx->channels) : NULL;
+	pass_rec = chan_rec ? udb_record_find(udb_ctx, CKEY_PASS, chan_rec) : NULL;
 	if (!pass_rec || !pass_rec->data_str || !*pass_rec->data_str)
 	{
 		CALL_NEXT_COMMAND_OVERRIDE();
@@ -4113,8 +4115,8 @@ CMD_OVERRIDE_FUNC(udb_override_mode)
 		return;
 	}
 	channel = find_channel(parv[1]);
-	chan_rec = (channel && udb_ctx && udb_ctx->channels) ? udb_record_find(channel->name, udb_ctx->channels) : NULL;
-	options_rec = chan_rec ? udb_record_find(CKEY_OPTIONS, chan_rec) : NULL;
+	chan_rec = (channel && udb_ctx && udb_ctx->channels) ? udb_record_find(udb_ctx, channel->name, udb_ctx->channels) : NULL;
+	options_rec = chan_rec ? udb_record_find(udb_ctx, CKEY_OPTIONS, chan_rec) : NULL;
 	if (!chan_rec)
 	{
 		CALL_NEXT_COMMAND_OVERRIDE();
@@ -4153,11 +4155,11 @@ static const char *udb_hook_pre_topic(Client *client, Channel *channel, const ch
 	if (IsServer(client))
 		return topic;
 
-	UdbRecord *chan_rec = udb_record_find(channel->name, udb_ctx->channels);
+	UdbRecord *chan_rec = udb_record_find(udb_ctx, channel->name, udb_ctx->channels);
 	if (!chan_rec)
 		return topic;
 
-	UdbRecord *topic_rec = udb_record_find(CKEY_TOPIC, chan_rec);
+	UdbRecord *topic_rec = udb_record_find(udb_ctx, CKEY_TOPIC, chan_rec);
 	if (topic_rec)
 	{
 		int is_founder = udb_channel_is_identified_founder(client, chan_rec);
@@ -4275,7 +4277,7 @@ static int udb_ip_tkl_is_owned(TKL *tkl)
 
 static int udb_ip_is_throttle_exempt(UdbRecord *ip_rec)
 {
-	UdbRecord *nolines = udb_record_find(IKEY_NOLINES, ip_rec);
+	UdbRecord *nolines = udb_record_find(udb_ctx, IKEY_NOLINES, ip_rec);
 
 	/* 'c' is UnrealIRCd's connect-flood exception type. */
 	return nolines && nolines->data_str &&
@@ -4329,10 +4331,10 @@ static const char *udb_ip_explicit_vhost(Client *client)
 
 	if (!client || !client->user || !udb_ctx || !udb_ctx->nicks)
 		return NULL;
-	nick_rec = udb_record_find(client->name, udb_ctx->nicks);
+	nick_rec = udb_record_find(udb_ctx, client->name, udb_ctx->nicks);
 	if (!nick_rec && strcmp(client->user->account, "*"))
-		nick_rec = udb_record_find(client->user->account, udb_ctx->nicks);
-	vhost_rec = nick_rec ? udb_record_find(NKEY_VHOST, nick_rec) : NULL;
+		nick_rec = udb_record_find(udb_ctx, client->user->account, udb_ctx->nicks);
+	vhost_rec = nick_rec ? udb_record_find(udb_ctx, NKEY_VHOST, nick_rec) : NULL;
 	return vhost_rec ? vhost_rec->data_str : NULL;
 }
 
@@ -4431,7 +4433,7 @@ static void udb_ip_apply_record(const char *ip_key, UdbRecord *ip_rec, const cha
 	(void)is_new;
 	if (!strcmp(subkey, IKEY_NOLINES))
 	{
-		UdbRecord *nolines = udb_record_find(IKEY_NOLINES, ip_rec);
+		UdbRecord *nolines = udb_record_find(udb_ctx, IKEY_NOLINES, ip_rec);
 		TKL *tkl = find_tkl_banexception(TKL_EXCEPTION, "*", ip_key, 0);
 
 		if (udb_ip_tkl_is_owned(tkl))
@@ -4447,7 +4449,7 @@ static void udb_ip_apply_record(const char *ip_key, UdbRecord *ip_rec, const cha
 		}
 	} else if (!strcmp(subkey, IKEY_HOST))
 	{
-		UdbRecord *host = udb_record_find(IKEY_HOST, ip_rec);
+		UdbRecord *host = udb_record_find(udb_ctx, IKEY_HOST, ip_rec);
 		if (host && host->data_str && *host->data_str)
 			udb_ip_reconcile_host(ip_key, host->data_str);
 	}
@@ -4479,19 +4481,19 @@ static int udb_hook_pre_connect(Client *client)
 		return 0;
 
 	/* Lookup IP or Host in UDB */
-	ip_rec = udb_hash_find(udb_block_letter_to_index('I'), client->ip);
+	ip_rec = udb_hash_find(udb_ctx, udb_block_letter_to_index('I'), client->ip);
 	if (!ip_rec && client->user)
-		ip_rec = udb_hash_find(udb_block_letter_to_index('I'), client->user->realhost);
+		ip_rec = udb_hash_find(udb_ctx, udb_block_letter_to_index('I'), client->user->realhost);
 
 	if (ip_rec)
 	{
 		/* Apply Clone Limit */
-		sub_rec = udb_record_find(IKEY_CLONES, ip_rec);
+		sub_rec = udb_record_find(udb_ctx, IKEY_CLONES, ip_rec);
 		if (sub_rec && sub_rec->data_num > 0)
 			limit = (int)sub_rec->data_num;
 
 		/* Apply Host Override */
-		sub_rec = udb_record_find(IKEY_HOST, ip_rec);
+		sub_rec = udb_record_find(udb_ctx, IKEY_HOST, ip_rec);
 		if (sub_rec && sub_rec->data_str && *sub_rec->data_str && client->user)
 			udb_ip_apply_host(client, ip_rec->key, sub_rec->data_str);
 
@@ -4503,7 +4505,7 @@ static int udb_hook_pre_connect(Client *client)
 	/* Fallback to global clones if no specific IP limit */
 	if (limit == 0 && udb_ctx && udb_ctx->settings)
 	{
-		UdbRecord *g_clones = udb_record_find(SKEY_CLONES, udb_ctx->settings);
+		UdbRecord *g_clones = udb_record_find(udb_ctx, SKEY_CLONES, udb_ctx->settings);
 		if (g_clones && g_clones->data_num > 0)
 			limit = (int)g_clones->data_num;
 	}
@@ -4755,7 +4757,7 @@ static void udb_line_apply_record(UdbRecord *rec, int is_new)
 	udb_line_remove_owned(type, pattern);
 
 	const char *reason = NULL;
-	raz = udb_record_find(KKEY_REASON, line_rec);
+	raz = udb_record_find(udb_ctx, KKEY_REASON, line_rec);
 	if (raz && raz->data_str)
 	{
 		reason = raz->data_str;
@@ -4767,13 +4769,13 @@ static void udb_line_apply_record(UdbRecord *rec, int is_new)
 	if (!reason)
 		return;
 
-	dur = udb_record_find(KKEY_DURATION, line_rec);
+	dur = udb_record_find(udb_ctx, KKEY_DURATION, line_rec);
 	expires = dur && dur->data_num ? TStime() + (time_t)dur->data_num : 0;
 
 	if (type == 'F')
 	{
-		UdbRecord *tip = udb_record_find(KKEY_TYPE, line_rec);
-		UdbRecord *acc = udb_record_find(KKEY_ACTION, line_rec);
+		UdbRecord *tip = udb_record_find(udb_ctx, KKEY_TYPE, line_rec);
+		UdbRecord *acc = udb_record_find(udb_ctx, KKEY_ACTION, line_rec);
 
 		if (tip && acc && tip->data_str && acc->data_str)
 		{
@@ -4902,7 +4904,7 @@ CMD_FUNC(cmd_dbq)
 		safe_strdup(query_str, parv[1]);
 	}
 
-	block = udb_block_by_letter(query_str[0]);
+	block = udb_block_by_letter(udb_ctx, query_str[0]);
 	if (!block)
 	{
 		sendto_one(client, NULL, ":%s 339 %s :Block %c does not exist.",
@@ -4938,12 +4940,12 @@ CMD_FUNC(cmd_dbq)
 	while ((ds = strstr(cur, "::")))
 	{
 		*ds = '\0';
-		rec = udb_record_find(cur, rec);
+		rec = udb_record_find(udb_ctx, cur, rec);
 		if (!rec)
 			goto notfound;
 		cur = ds + 2;
 	}
-	rec = udb_record_find(cur, rec);
+	rec = udb_record_find(udb_ctx, cur, rec);
 
 	if (!rec)
 	{
@@ -4999,7 +5001,7 @@ static void udb_query_init(ModuleInfo *modinfo)
 /* Inlined: udb_lifecycle.c.inc */
 /* UDB module and database lifecycle coordination. */
 
-static UdbBlock *udb_block_create(char letter, const char *name)
+static UdbBlock *udb_block_create(UdbContext *ctx, char letter, const char *name)
 {
 	UdbBlock *b = safe_alloc(sizeof(UdbBlock));
 	char path[512];
@@ -5015,41 +5017,41 @@ static UdbBlock *udb_block_create(char letter, const char *name)
 	safe_strdup(b->filepath, path);
 	convert_to_absolute_path(&b->filepath, PERMDATADIR);
 
-	udb_ctx->blocks[(unsigned char)letter] = b;
-	b->next = udb_ctx->block_list;
-	udb_ctx->block_list = b;
-	udb_ctx->block_count++;
+	ctx->blocks[(unsigned char)letter] = b;
+	b->next = ctx->block_list;
+	ctx->block_list = b;
+	ctx->block_count++;
 	return b;
 }
 
-static void udb_block_set_context_root(UdbBlock *block)
+static void udb_block_set_context_root(UdbContext *ctx, UdbBlock *block)
 {
-	if (!udb_ctx || !block)
+	if (!ctx || !block)
 		return;
 	switch (block->letter)
 	{
 		case 'N':
-			udb_ctx->nicks = block->tree;
+			ctx->nicks = block->tree;
 			break;
 		case 'C':
-			udb_ctx->channels = block->tree;
+			ctx->channels = block->tree;
 			break;
 		case 'I':
-			udb_ctx->ips = block->tree;
+			ctx->ips = block->tree;
 			break;
 		case 'S':
-			udb_ctx->settings = block->tree;
+			ctx->settings = block->tree;
 			break;
 		case 'L':
-			udb_ctx->links = block->tree;
+			ctx->links = block->tree;
 			break;
 		case 'K':
-			udb_ctx->lines = block->tree;
+			ctx->lines = block->tree;
 			break;
 	}
 }
 
-static void udb_block_reset(UdbBlock *block)
+static void udb_block_reset(UdbContext *ctx, UdbBlock *block)
 {
 	char *name = NULL;
 	int block_idx;
@@ -5070,7 +5072,7 @@ static void udb_block_reset(UdbBlock *block)
 	{
 		UdbRecord *rec;
 		for (rec = block->tree->child; rec; rec = rec->sibling)
-			udb_remove_special_record(block, rec);
+			udb_remove_special_record(ctx, block, rec);
 	}
 
 	if (block->tree && block->tree->key)
@@ -5080,13 +5082,13 @@ static void udb_block_reset(UdbBlock *block)
 	block_idx = udb_block_letter_to_index(block->letter);
 	if (block->tree)
 	{
-		if (udb_ctx->total_records >= block->record_count)
-			udb_ctx->total_records -= block->record_count;
+		if (ctx->total_records >= block->record_count)
+			ctx->total_records -= block->record_count;
 		else
-			udb_ctx->total_records = 0;
+			ctx->total_records = 0;
 		udb_record_free_tree(block->tree);
 	}
-	udb_hash_clear_block(block_idx);
+	udb_hash_clear_block(ctx, block_idx);
 
 	block->tree = udb_record_create(NULL);
 	block->tree->block_idx = (unsigned char)block_idx;
@@ -5094,17 +5096,18 @@ static void udb_block_reset(UdbBlock *block)
 	block->tree->is_dynamic_key = 1;
 	block->tree->data_num = 1;
 	block->record_count = 0;
-	udb_block_set_context_root(block);
+	udb_block_set_context_root(ctx, block);
 	safe_free(name);
 }
 
-static int udb_block_load(UdbBlock *block)
+static int udb_block_load(UdbContext *ctx, UdbBlock *block)
 {
-	return udb_file_load_block(block);
+	return udb_file_load_block(ctx, block);
 }
 
-static void udb_block_unload(UdbBlock *block)
+static void udb_block_unload(UdbContext *ctx, UdbBlock *block)
 {
+	(void)ctx;
 	if (block->tree)
 	{
 		udb_record_free_tree(block->tree);
@@ -5112,23 +5115,23 @@ static void udb_block_unload(UdbBlock *block)
 	}
 }
 
-static void udb_blocks_load_all(void)
+static void udb_blocks_load_all(UdbContext *ctx)
 {
 	UdbBlock *b;
-	for (b = udb_ctx->block_list; b; b = b->next)
-		udb_block_load(b);
+	for (b = ctx->block_list; b; b = b->next)
+		udb_block_load(ctx, b);
 }
 
-static void udb_blocks_save_all(void)
+static void udb_blocks_save_all(UdbContext *ctx)
 {
 	UdbBlock *b;
-	for (b = udb_ctx->block_list; b; b = b->next)
-		udb_file_save_block(b);
+	for (b = ctx->block_list; b; b = b->next)
+		udb_file_save_block(ctx, b);
 }
 
-static UdbBlock *udb_block_by_letter(char letter)
+static UdbBlock *udb_block_by_letter(UdbContext *ctx, char letter)
 {
-	return udb_ctx ? udb_ctx->blocks[(unsigned char)letter] : NULL;
+	return ctx ? ctx->blocks[(unsigned char)letter] : NULL;
 }
 
 static int udb_engine_init(void)
@@ -5137,25 +5140,25 @@ static int udb_engine_init(void)
 	const char *dir;
 
 	udb_ctx = safe_alloc(sizeof(UdbContext));
-	udb_hash_init();
+	udb_hash_init(udb_ctx);
 	/* Keep the existing directory check and block creation sequence. */
 	dir = udb_cfg && udb_cfg->db_directory ? udb_cfg->db_directory : "data/udb";
 	if (stat(dir, &st) == -1)
 		mkdir(dir, 0700);
 
-	udb_block_create('N', "Nicks");
-	udb_block_create('C', "Channels");
-	udb_block_create('I', "IPs");
-	udb_block_create('S', "Settings");
-	udb_block_create('L', "Links");
-	udb_block_create('K', "Lines");
-	udb_block_set_context_root(udb_ctx->blocks['N']);
-	udb_block_set_context_root(udb_ctx->blocks['C']);
-	udb_block_set_context_root(udb_ctx->blocks['I']);
-	udb_block_set_context_root(udb_ctx->blocks['S']);
-	udb_block_set_context_root(udb_ctx->blocks['L']);
-	udb_block_set_context_root(udb_ctx->blocks['K']);
-	udb_blocks_load_all();
+	udb_block_create(udb_ctx, 'N', "Nicks");
+	udb_block_create(udb_ctx, 'C', "Channels");
+	udb_block_create(udb_ctx, 'I', "IPs");
+	udb_block_create(udb_ctx, 'S', "Settings");
+	udb_block_create(udb_ctx, 'L', "Links");
+	udb_block_create(udb_ctx, 'K', "Lines");
+	udb_block_set_context_root(udb_ctx, udb_ctx->blocks['N']);
+	udb_block_set_context_root(udb_ctx, udb_ctx->blocks['C']);
+	udb_block_set_context_root(udb_ctx, udb_ctx->blocks['I']);
+	udb_block_set_context_root(udb_ctx, udb_ctx->blocks['S']);
+	udb_block_set_context_root(udb_ctx, udb_ctx->blocks['L']);
+	udb_block_set_context_root(udb_ctx, udb_ctx->blocks['K']);
+	udb_blocks_load_all(udb_ctx);
 	return 1;
 }
 
@@ -5165,19 +5168,19 @@ static void udb_engine_shutdown(void)
 
 	if (!udb_ctx)
 		return;
-	udb_blocks_save_all();
+	udb_blocks_save_all(udb_ctx);
 	udb_ips_shutdown();
 	for (b = udb_ctx->block_list; b;)
 	{
 		UdbBlock *next = b->next;
 		udb_sync_session_free(b);
-		udb_block_unload(b);
+		udb_block_unload(udb_ctx, b);
 		safe_free(b->filepath);
 		safe_free(b);
 		b = next;
 	}
-	udb_hash_destroy();
-	udb_config_free();
+	udb_hash_destroy(udb_ctx);
+	udb_config_free(udb_ctx);
 	safe_free(udb_ctx);
 	udb_ctx = NULL;
 }
@@ -5209,7 +5212,7 @@ static int udb_module_init(ModuleInfo *modinfo)
 
 static int udb_module_load(ModuleInfo *modinfo)
 {
-	udb_blocks_load_all();
+	udb_blocks_load_all(udb_ctx);
 	udb_nicks_load(modinfo);
 	udb_channels_load(modinfo);
 	unreal_log(ULOG_INFO, "udb", "UDB_LOADED", NULL,
@@ -5221,7 +5224,7 @@ static int udb_module_unload(void)
 {
 	unreal_log(ULOG_INFO, "udb", "UDB_UNLOADING", NULL,
 	           "[UDB] Saving databases and shutting down...");
-	udb_blocks_save_all();
+	udb_blocks_save_all(udb_ctx);
 	udb_engine_shutdown();
 	return MOD_SUCCESS;
 }

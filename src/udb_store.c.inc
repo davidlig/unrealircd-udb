@@ -29,30 +29,30 @@ static int udb_block_letter_to_index(char letter)
 	}
 }
 
-static void udb_hash_init(void)
+static void udb_hash_init(UdbContext *ctx)
 {
 	for (int i = 0; i < UDB_NUM_BLOCKS; i++)
-		udb_ctx->hash_table[i] = safe_alloc(sizeof(UdbRecord *) * UDB_HASH_SIZE);
+		ctx->hash_table[i] = safe_alloc(sizeof(UdbRecord *) * UDB_HASH_SIZE);
 }
 
-static void udb_hash_destroy(void)
+static void udb_hash_destroy(UdbContext *ctx)
 {
 	for (int i = 0; i < UDB_NUM_BLOCKS; i++)
 	{
-		if (udb_ctx->hash_table[i])
+		if (ctx->hash_table[i])
 		{
-			safe_free(udb_ctx->hash_table[i]);
-			udb_ctx->hash_table[i] = NULL;
+			safe_free(ctx->hash_table[i]);
+			ctx->hash_table[i] = NULL;
 		}
 	}
 }
 
-static void udb_hash_clear_block(int block_idx)
+static void udb_hash_clear_block(UdbContext *ctx, int block_idx)
 {
 	if (block_idx < 0 || block_idx >= UDB_NUM_BLOCKS)
 		return;
-	safe_free(udb_ctx->hash_table[block_idx]);
-	udb_ctx->hash_table[block_idx] = safe_alloc(sizeof(UdbRecord *) * UDB_HASH_SIZE);
+	safe_free(ctx->hash_table[block_idx]);
+	ctx->hash_table[block_idx] = safe_alloc(sizeof(UdbRecord *) * UDB_HASH_SIZE);
 }
 
 static unsigned int udb_hash_str(const char *str)
@@ -69,18 +69,18 @@ static unsigned int udb_hash_str(const char *str)
 	return hash & UDB_HASH_MASK;
 }
 
-static void udb_hash_insert_record(UdbRecord *rec, int block_idx, const char *key)
+static void udb_hash_insert_record(UdbContext *ctx, UdbRecord *rec, int block_idx, const char *key)
 {
 	unsigned int h = udb_hash_str(key);
 
-	rec->hash_next = udb_ctx->hash_table[block_idx][h];
-	udb_ctx->hash_table[block_idx][h] = rec;
+	rec->hash_next = ctx->hash_table[block_idx][h];
+	ctx->hash_table[block_idx][h] = rec;
 }
 
-static int udb_hash_remove_record(UdbRecord *rec, int block_idx, const char *key)
+static int udb_hash_remove_record(UdbContext *ctx, UdbRecord *rec, int block_idx, const char *key)
 {
 	unsigned int h = udb_hash_str(key);
-	UdbRecord *curr = udb_ctx->hash_table[block_idx][h];
+	UdbRecord *curr = ctx->hash_table[block_idx][h];
 	UdbRecord *prev = NULL;
 
 	while (curr)
@@ -90,7 +90,7 @@ static int udb_hash_remove_record(UdbRecord *rec, int block_idx, const char *key
 			if (prev)
 				prev->hash_next = curr->hash_next;
 			else
-				udb_ctx->hash_table[block_idx][h] = curr->hash_next;
+				ctx->hash_table[block_idx][h] = curr->hash_next;
 			return 1;
 		}
 		prev = curr;
@@ -99,7 +99,7 @@ static int udb_hash_remove_record(UdbRecord *rec, int block_idx, const char *key
 	return 0;
 }
 
-static UdbRecord *udb_hash_find(int block_idx, const char *key)
+static UdbRecord *udb_hash_find(UdbContext *ctx, int block_idx, const char *key)
 {
 	unsigned int h;
 	UdbRecord *curr;
@@ -107,7 +107,7 @@ static UdbRecord *udb_hash_find(int block_idx, const char *key)
 	if (!key)
 		return NULL;
 	h = udb_hash_str(key);
-	curr = udb_ctx->hash_table[block_idx][h];
+	curr = ctx->hash_table[block_idx][h];
 	while (curr)
 	{
 		if (!strcasecmp(curr->key, key))
@@ -149,21 +149,21 @@ static UdbRecord *udb_record_create(UdbRecord *parent)
 	return rec;
 }
 
-static UdbRecord *udb_record_find(const char *key, UdbRecord *parent)
+static UdbRecord *udb_record_find(UdbContext *ctx, const char *key, UdbRecord *parent)
 {
 	UdbRecord *child;
 
 	if (!parent)
 		return NULL;
-	if (parent->parent == NULL && udb_ctx)
-		return udb_hash_find(parent->block_idx, key);
+	if (parent->parent == NULL && ctx)
+		return udb_hash_find(ctx, parent->block_idx, key);
 	for (child = parent->child; child; child = child->sibling)
 		if (!strcasecmp(child->key, key))
 			return child;
 	return NULL;
 }
 
-static UdbRecord *udb_record_find_path(UdbBlock *block, const char *path)
+static UdbRecord *udb_record_find_path(UdbContext *ctx, UdbBlock *block, const char *path)
 {
 	char pathbuf[512];
 	char *cur;
@@ -178,12 +178,12 @@ static UdbRecord *udb_record_find_path(UdbBlock *block, const char *path)
 	while ((ds = strstr(cur, "::")))
 	{
 		*ds = '\0';
-		rec = udb_record_find(cur, rec);
+		rec = udb_record_find(ctx, cur, rec);
 		if (!rec)
 			return NULL;
 		cur = ds + 2;
 	}
-	return udb_record_find(cur, rec);
+	return udb_record_find(ctx, cur, rec);
 }
 
 static void udb_record_free_tree(UdbRecord *rec)
@@ -233,7 +233,7 @@ static void udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbu
 	pathbuf[old_len] = '\0';
 }
 
-static int udb_file_save_block(UdbBlock *block)
+static int udb_file_save_block(UdbContext *ctx, UdbBlock *block)
 {
 	char tmp_path[512];
 	char pathbuf[4096] = "";
@@ -255,6 +255,7 @@ static int udb_file_save_block(UdbBlock *block)
 			udb_serialize_tree(rec, 0, fp, pathbuf, sizeof(pathbuf));
 	fclose(fp);
 	rename(tmp_path, block->filepath);
+	(void)ctx;
 	block->checksum = udb_compute_block_checksum(block);
 	block->modified_at = time(NULL);
 	if (stat(block->filepath, &st) == 0)

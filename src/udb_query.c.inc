@@ -47,7 +47,7 @@ CMD_FUNC(cmd_dbq)
 		safe_strdup(query_str, parv[1]);
 	}
 
-	block = udb_block_by_letter(query_str[0]);
+	block = udb_block_by_letter(udb_ctx, query_str[0]);
 	if (!block)
 	{
 		sendto_one(client, NULL, ":%s 339 %s :Block %c does not exist.",
@@ -83,12 +83,12 @@ CMD_FUNC(cmd_dbq)
 	while ((ds = strstr(cur, "::")))
 	{
 		*ds = '\0';
-		rec = udb_record_find(cur, rec);
+		rec = udb_record_find(udb_ctx, cur, rec);
 		if (!rec)
 			goto notfound;
 		cur = ds + 2;
 	}
-	rec = udb_record_find(cur, rec);
+	rec = udb_record_find(udb_ctx, cur, rec);
 
 	if (!rec)
 	{
