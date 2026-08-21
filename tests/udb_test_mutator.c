@@ -12,6 +12,7 @@ ModuleHeader MOD_HEADER = {
 
 #define MUTATOR_PATH "N::udb-test-mutator"
 #define MUTATOR_TRIGGER "/home/davidlig/unrealircd/data/udb-test-mutator-go"
+#define OPT_TRIGGER "/home/davidlig/unrealircd/data/udb-test-mutator-opt-go"
 #define SETTLEMENT_DELAY 3
 
 static Client *mutator_peer;
@@ -49,7 +50,23 @@ static int mutator_server_quit(Client *client, MessageTag *mtags)
 EVENT(udb_test_mutator_event)
 {
     if (mutator_state < 0 || !mutator_peer || TStime() < mutator_deadline || access(MUTATOR_TRIGGER, F_OK))
+    {
+        if (mutator_state || access(OPT_TRIGGER, F_OK))
+            return;
+        if (!IsServer(mutator_peer) || !MyConnect(mutator_peer))
+        {
+            mutator_state = -1;
+            unreal_log(ULOG_WARNING, "udb-test-mutator", "UDB_TEST_MUTATOR", NULL,
+                       "[UDB_TEST_MUTATOR] peer disappeared before mutation", NULL);
+            return;
+        }
+        sendto_one(mutator_peer, NULL, ":%s DB %s OPT N %lld", me.id, mutator_peer->id,
+                   (long long)TStime());
+        mutator_state = 2;
+        unreal_log(ULOG_INFO, "udb-test-mutator", "UDB_TEST_MUTATOR", mutator_peer,
+                   "[UDB_TEST_MUTATOR] emitted authorized OPT", NULL);
         return;
+    }
     if (!IsServer(mutator_peer) || !MyConnect(mutator_peer))
     {
         mutator_state = -1;

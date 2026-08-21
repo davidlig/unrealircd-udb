@@ -55,6 +55,16 @@ The interposer is armed only after B has committed A's initial snapshot. B then
 receives the test mutator's authorized `INS`, fails its candidate snapshot
 rename, returns `ERR`, and must retain byte-identical durable and active data.
 
+To cover the transactional `OPT` failure path, run:
+
+```sh
+python3 src/modules/third/udb/tests/two_node_udb.py --runtime-opt-rename-failure
+```
+
+After staged synchronization, the armed interposer fails B's snapshot rename for
+an authorized `OPT`. The harness requires B's database bytes to remain unchanged,
+no temporary file, interposer evidence, and `ERR OPT 6` returned to A.
+
 `SKIP` (exit status 77) is deliberate, never a successful synchronization. It
 means the local installation could not provide the isolation or S2S conditions.
 Use `--keep` to retain the generated configs, data trees, and logs for

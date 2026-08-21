@@ -212,9 +212,12 @@ block's synchronization. They are rejected while that block has a staged
 transaction and are persisted and forwarded only to HEL-confirmed direct peers.
 For `INS`, `DEL`, and `DRP`, UDB first clones the active block and applies the
 change to that private candidate. It atomically writes and renames the candidate
-snapshot before changing active indexes, counters, or runtime effects. A write
-failure leaves the active tree and durable file unchanged, returns `ERR`, and
-does not forward the mutation.
+snapshot before changing active indexes, counters, or runtime effects. Replacing
+an existing `INS` record revokes its old runtime effects before applying the
+candidate, including an `N::<nick>::oper` downgrade. `OPT` likewise writes its
+snapshot before updating metadata or forwarding. A write failure leaves active
+state and the durable file unchanged, returns `ERR`, and does not forward the
+mutation.
 
 **DRP (Drop / Empty Block):**
 `:<sid> DB * DRP <block_letter>`

@@ -196,6 +196,9 @@ python3 src/modules/third/udb/tests/two_node_udb.py
 # Two nodes: prove a failed live INS snapshot leaves B unchanged.
 python3 src/modules/third/udb/tests/two_node_udb.py --runtime-rename-failure
 
+# Two nodes: prove a failed live OPT snapshot leaves B unchanged and returns ERR.
+python3 src/modules/third/udb/tests/two_node_udb.py --runtime-opt-rename-failure
+
 # Three nodes: prove A -> B commits before B -> C propagation.
 python3 src/modules/third/udb/tests/three_node_udb.py
 ```

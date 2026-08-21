@@ -92,19 +92,6 @@ static void udb_mutation_forward_del(Client *source, Client *except, const char 
 	udb_sendto_confirmed_servers(except, ":%s DB %s DEL %s", source->id, target, path);
 }
 
-static int udb_mutation_commit(UdbContext *ctx, UdbBlock *block, UdbRecord *tree)
-{
-	unsigned int record_count = udb_record_count_tree(tree);
-
-	if (!udb_file_write_snapshot(block, tree, record_count))
-	{
-		udb_record_free_tree(tree);
-		return 0;
-	}
-	udb_block_replace_tree(ctx, block, tree, record_count);
-	return 1;
-}
-
 static void udb_mutation_persist_error(Client *client, const char *subcmd, char letter)
 {
 	sendto_one(client, NULL, ":%s DB %s ERR %s %d %c", me.id, client->id,
@@ -134,15 +121,17 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 			sendto_one(client, NULL, ":%s DB %s ERR INS %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 			return;
 		}
+		UdbRecord *old_rec;
 		UdbRecord *tree;
-		UdbRecord *rec;
+		UdbRecord *rec = NULL;
 
 		if (!udb_password_record_valid(block, path + 3, data))
 		{
 			udb_protocol_params_error(client, "INS");
 			return;
 		}
-		tree = udb_record_clone_tree(block->tree, NULL, NULL);
+		old_rec = udb_record_find_path(ctx, block, path + 3);
+		tree = udb_record_clone_tree(block->tree, old_rec, &rec);
 		rec = udb_record_insert_path(tree, path + 3, data);
 		if (!rec)
 		{
@@ -150,11 +139,16 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 			udb_mutation_persist_error(client, "INS", letter);
 			return;
 		}
-		if (!udb_mutation_commit(ctx, block, tree))
+		if (!udb_file_write_snapshot(block, tree, udb_record_count_tree(tree)))
 		{
+			udb_record_free_tree(tree);
 			udb_mutation_persist_error(client, "INS", letter);
 			return;
 		}
+		/* Revoke the old value's effects while its records are still active. */
+		if (old_rec)
+			udb_remove_special_record(ctx, block, old_rec);
+		udb_block_replace_tree(ctx, block, tree, udb_record_count_tree(tree));
 		udb_apply_special_record(ctx, block, rec, 1);
 		char logbuf[512];
 		snprintf(logbuf, sizeof(logbuf), "[UDB] Inserted record via S2S: %s -> %s", path, data);
@@ -286,9 +280,11 @@ static void udb_mutation_opt(UdbContext *ctx, Client *client, const char *target
 			sendto_one(client, NULL, ":%s DB %s ERR OPT %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 			return;
 		}
-		if (modified_at)
-			block->modified_at = atol(modified_at);
-		udb_file_save_block(ctx, block);
+		if (!udb_file_save_block(ctx, block))
+		{
+			udb_mutation_persist_error(client, "OPT", letter);
+			return;
+		}
 		if (!is_broadcast)
 			return;
 	}
