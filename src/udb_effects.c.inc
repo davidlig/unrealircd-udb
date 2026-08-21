@@ -49,49 +49,7 @@ static void udb_remove_special_record(UdbContext *ctx, UdbBlock *block, UdbRecor
 		return;
 	if (block->letter == 'N')
 	{
-		if (rec->parent != block->tree)
-		{
-			UdbRecord *nick_rec = rec->parent;
-			Client *client = find_user(nick_rec->key, NULL);
-			if (client && MyUser(client))
-			{
-				if (!strcmp(rec->key, NKEY_VHOST))
-				{
-					udb_nick_remove_vhost(client);
-				} else if (!strcmp(rec->key, NKEY_OPER))
-				{
-					udb_nick_revoke_oper(client);
-				} else if (!strcmp(rec->key, NKEY_SWHOIS))
-				{
-					swhois_delete(client, "udb", "*", &me, NULL);
-				} else if (!strcmp(rec->key, NKEY_MODES))
-				{
-					long old_umodes = client->umodes & ALL_UMODES;
-					UdbRecord *mode_rec = udb_record_find(ctx, NKEY_MODES, nick_rec);
-					if (mode_rec && mode_rec->data_str)
-						client->umodes &= ~(set_usermode(mode_rec->data_str) & ~UMODE_OPER);
-					send_umode_out(client, 1, old_umodes);
-				} else if (!strcmp(rec->key, NKEY_SNOMASKS))
-				{
-					set_snomask(client, NULL);
-				} else if (!strcmp(rec->key, NKEY_SUSPENDED))
-				{
-					long old_umodes = client->umodes & ALL_UMODES;
-					client->umodes &= ~set_usermode("S");
-					send_umode_out(client, 1, old_umodes);
-				} else if (!strcmp(rec->key, NKEY_PASS))
-				{
-					udb_nick_strip(client, nick_rec);
-				}
-			}
-		} else
-		{
-			Client *client = find_user(rec->key, NULL);
-			if (client && MyUser(client))
-			{
-				udb_nick_strip(client, rec);
-			}
-		}
+		udb_nick_remove_record(block, rec);
 	} else if (block->letter == 'C')
 	{
 		UdbRecord *chan_rec = rec->parent == block->tree ? rec : rec->parent;

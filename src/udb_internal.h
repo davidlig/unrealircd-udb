@@ -153,6 +153,7 @@ static void udb_sync_to_server(Client *server);
 static int udb_is_propagator(UdbContext *ctx, Client *server);
 static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync);
 static void udb_nick_strip(Client *client, UdbRecord *nick_rec);
+static void udb_nick_remove_record(UdbBlock *block, UdbRecord *rec);
 static void udb_nick_revoke_oper(Client *client);
 static int udb_check_password(const char *pass, UdbRecord *profile_rec,
                               Client *client);
