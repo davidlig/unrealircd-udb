@@ -233,6 +233,12 @@ snapshot before updating metadata or forwarding. A write failure leaves active
 state and the durable file unchanged, returns `ERR`, and does not forward the
 mutation.
 
+Snapshots are created with exclusive creation and mode `0600`, independent of
+the process umask. Where the platform provides `O_NOFOLLOW`, it is used as an
+additional symlink safeguard. UDB aborts and removes its temporary snapshot on
+open, permission, stream, close, or rename failure; it does not change the
+configured database-directory behavior.
+
 **DRP (Drop / Empty Block):**
 `:<sid> DB * DRP <block_letter>`
 

@@ -223,6 +223,12 @@ escribe el snapshot antes de actualizar metadatos o reenviar. Si falla la
 persistencia, el estado y archivo activos no cambian, se devuelve `ERR` y la
 mutación no se reenvía.
 
+Los snapshots se crean de forma exclusiva con modo `0600`, independiente de la
+umask del proceso. Cuando la plataforma proporciona `O_NOFOLLOW`, se usa como
+protección adicional contra enlaces simbólicos. UDB aborta y elimina su snapshot
+temporal ante un fallo de apertura, permisos, flujo, cierre o renombrado; este
+cambio no modifica el comportamiento de `database-directory` configurado.
+
 **DRP (Drop / Vaciar Bloque):**
 `:<sid> DB * DRP <letra_bloque>`
 

@@ -738,6 +738,10 @@ static void udb_record_delete_tree(UdbRecord *rec)
 /* ========================================================================
  * File Persistence
  * ======================================================================== */
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 static void udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbuf, int pathlen)
 {
 	UdbRecord *child;
@@ -766,27 +770,56 @@ static int udb_file_write_snapshot(UdbBlock *block, UdbRecord *tree,
 {
 	char tmp_path[512];
 	char pathbuf[4096] = "";
-	FILE *fp;
+	FILE *fp = NULL;
 	UdbRecord *rec;
+	int fd = -1;
+	int flags = O_WRONLY | O_CREAT | O_EXCL;
+	int tmp_created = 0;
 
 	if (!block || !block->filepath)
 		return 0;
-	snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", block->filepath);
-	fp = fopen(tmp_path, "w");
-	if (!fp)
+	if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", block->filepath) >= sizeof(tmp_path))
 		return 0;
+
+#ifdef O_NOFOLLOW
+	flags |= O_NOFOLLOW;
+#endif
+	fd = open(tmp_path, flags, 0600);
+	if (fd < 0)
+		return 0;
+	tmp_created = 1;
+	if (fchmod(fd, 0600) != 0)
+		goto cleanup;
+	fp = fdopen(fd, "w");
+	if (!fp)
+		goto cleanup;
+	fd = -1;
 	fprintf(fp, "; UDB Block %c - Version %d\n", block->letter, block->version);
 	fprintf(fp, "; Saved: %ld\n", (long)time(NULL));
 	fprintf(fp, "; Records: %u\n", record_count);
 	if (tree)
 		for (rec = tree->child; rec; rec = rec->sibling)
 			udb_serialize_tree(rec, 0, fp, pathbuf, sizeof(pathbuf));
-	if (fclose(fp) != 0 || rename(tmp_path, block->filepath) != 0)
+	if (ferror(fp))
+		goto cleanup;
+	if (fclose(fp) != 0)
 	{
-		unlink(tmp_path);
-		return 0;
+		fp = NULL;
+		goto cleanup;
 	}
+	fp = NULL;
+	if (rename(tmp_path, block->filepath) != 0)
+		goto cleanup;
 	return 1;
+
+cleanup:
+	if (fp)
+		fclose(fp);
+	else if (fd >= 0)
+		close(fd);
+	if (tmp_created)
+		unlink(tmp_path);
+	return 0;
 }
 
 static int udb_file_save_block(UdbContext *ctx, UdbBlock *block)

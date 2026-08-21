@@ -13,6 +13,7 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -191,6 +192,10 @@ def db_contains(db, record):
     return record in db.read_text(errors="replace")
 
 
+def snapshot_is_private(db):
+    return stat.S_IMODE(db.stat().st_mode) == 0o600
+
+
 def mutator_insert_observed(b_log, b_db):
     return (ordered(udb_commands(b_log), ("INS",)) and db_contains(b_db, MUTATOR_RECORD) and
             "Inserted record via S2S: N::udb-test-mutator -> authorized-insert" in log_text(b_log))
@@ -351,7 +356,11 @@ def main():
                 not staged_snapshot_observed(logs[0], logs[1])):
             print_diagnostics(logs, b_db)
             return skip("S2S linked, but UDB staged N-block transfer was not observed; this is not a PASS")
-        print("PASS: UDB capability negotiation and staged N-block sync committed in node B")
+        if not snapshot_is_private(b_db):
+            print(f"FAIL: node B active UDB snapshot mode is {stat.S_IMODE(b_db.stat().st_mode):04o}, expected 0600",
+                  file=sys.stderr)
+            return 1
+        print("PASS: UDB capability negotiation and staged N-block sync committed a private 0600 snapshot in node B")
         if args.runtime_rename_failure or args.runtime_opt_rename_failure:
             b_baseline = b_db.read_bytes()
             (b / "data" / "udb-snapshot-rename-fail-go").touch()

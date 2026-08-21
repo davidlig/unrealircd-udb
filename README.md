@@ -178,6 +178,10 @@ Detailed technical documentation is available in the `doc/` directory:
 - Select exactly one UDB propagator source: either `udb::propagator` or one
   `L::<server>::options` record with the propagator bit. Zero or multiple sources
   reject remote UDB writes. Debug notices redact diagnostic detail.
+- UDB snapshots are created exclusively with mode `0600`, regardless of umask.
+  Platforms that provide `O_NOFOLLOW` also reject a symlink temporary snapshot.
+  Failed snapshot creation, writing, closing, or rename removes the temporary
+  file without changing the active database.
 
 
 ---
