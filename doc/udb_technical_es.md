@@ -214,6 +214,12 @@ confirmado.
 *   `8`: UDB_ERR_NO_SYNC (No se ha solicitado una sincronización)
 *   `9`: UDB_ERR_FORBIDDEN (Acción denegada por permisos)
 
+### 2.4 Redacción De Secretos En DBQ
+
+`DBQ` requiere privilegios de oper y nunca devuelve el valor de `pass`,
+`challenge` ni `encryption_key`. Las consultas directas y los listados de hijos
+muestran `<redacted>` para esos registros.
+
 ---
 
 ## 3. Créditos y Licencia

@@ -2,6 +2,11 @@
  * Implements the DBQ command to query the database manually.
  */
 
+static int udb_query_is_secret(const UdbRecord *rec)
+{
+	return rec && rec->key && (!strcmp(rec->key, NKEY_PASS) || !strcmp(rec->key, NKEY_CHALLENGE) || !strcmp(rec->key, SKEY_CRYPT_KEY));
+}
+
 CMD_FUNC(cmd_dbq)
 {
 	char *query_str = NULL;
@@ -98,7 +103,8 @@ CMD_FUNC(cmd_dbq)
 	if (rec->data_str)
 	{
 		sendto_one(client, NULL, ":%s 339 %s :DBQ %s %s",
-		           me.name, client->name, query_str, rec->data_str);
+		           me.name, client->name, query_str,
+		           udb_query_is_secret(rec) ? "<redacted>" : rec->data_str);
 	} else if (rec->data_num)
 	{
 		sendto_one(client, NULL, ":%s 339 %s :DBQ %s %lu",
@@ -110,7 +116,8 @@ CMD_FUNC(cmd_dbq)
 		{
 			if (child->data_str)
 				sendto_one(client, NULL, ":%s 339 %s :DBQ %s::%s %s",
-				           me.name, client->name, query_str, child->key, child->data_str);
+				           me.name, client->name, query_str, child->key,
+				           udb_query_is_secret(child) ? "<redacted>" : child->data_str);
 			else if (child->data_num)
 				sendto_one(client, NULL, ":%s 339 %s :DBQ %s::%s %lu",
 				           me.name, client->name, query_str, child->key, child->data_num);

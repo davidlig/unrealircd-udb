@@ -224,6 +224,12 @@ transaction and are persisted and forwarded only to HEL-confirmed direct peers.
 *   `8`: UDB_ERR_NO_SYNC (No synchronization was requested)
 *   `9`: UDB_ERR_FORBIDDEN (Action denied due to permissions)
 
+### 2.4 DBQ Secret Redaction
+
+`DBQ` requires oper privileges and never returns the value of `pass`,
+`challenge`, or `encryption_key`. Direct queries and child listings show
+`<redacted>` for those records.
+
 ---
 
 ## 3. Credits and License
