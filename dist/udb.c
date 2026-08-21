@@ -2483,6 +2483,19 @@ static void udb_mutation_forward_ins(Client *source, Client *except, const char 
 	udb_sendto_confirmed_servers(except, ":%s DB %s INS %s %s", source->id, target, path, data);
 }
 
+/* The stored value already equals the mutation payload, so no runtime effect
+ * may change: an identical INS must never revoke and re-apply effects. */
+static int udb_record_data_equals(UdbRecord *rec, const char *data)
+{
+	if (!rec || !data)
+		return 0;
+	if (*data == '*')
+		return !rec->data_str && rec->data_num == strtoul(data + 1, NULL, 10);
+	if (!rec->data_str)
+		return 0;
+	return !strcmp(rec->data_str, data);
+}
+
 static void udb_mutation_forward_del(Client *source, Client *except, const char *target,
                                      const char *path)
 {
@@ -2521,6 +2534,7 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 		UdbRecord *old_rec;
 		UdbRecord *tree;
 		UdbRecord *rec = NULL;
+		int unchanged;
 
 		if (!udb_password_record_valid(block, path + 3, data))
 		{
@@ -2528,6 +2542,7 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 			return;
 		}
 		old_rec = udb_record_find_path(ctx, block, path + 3);
+		unchanged = old_rec && udb_record_data_equals(old_rec, data);
 		tree = udb_record_clone_tree(block->tree, old_rec, &rec);
 		rec = udb_record_insert_path(tree, path + 3, data);
 		if (!rec)
@@ -2542,11 +2557,13 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 			udb_mutation_persist_error(client, "INS", letter);
 			return;
 		}
-		/* Revoke the old value's effects while its records are still active. */
-		if (old_rec)
+		/* Revoke the old value's effects only when the value actually changes:
+		 * an identical INS must not churn channel modes nor revoke +q ranks. */
+		if (old_rec && !unchanged)
 			udb_remove_special_record(ctx, block, old_rec);
 		udb_block_replace_tree(ctx, block, tree, udb_record_count_tree(tree));
-		udb_apply_special_record(ctx, block, rec, 1);
+		if (!unchanged)
+			udb_apply_special_record(ctx, block, rec, 1);
 		char logbuf[512];
 		snprintf(logbuf, sizeof(logbuf), "[UDB] Inserted record via S2S: %s -> %s", path, data);
 		unreal_log(ULOG_INFO, "udb", "UDB_INS_RECEIVED", client, "$msg", log_data_string("msg", logbuf));
@@ -4354,9 +4371,41 @@ static void udb_channel_clear_topic(Channel *channel)
 	}
 }
 
+static void udb_channel_apply_topic(Channel *channel, UdbRecord *topic_rec)
+{
+	if (!topic_rec || !topic_rec->data_str)
+		return;
+	if (channel->topic && !strcmp(channel->topic, topic_rec->data_str))
+		return;
+	safe_strdup(channel->topic, topic_rec->data_str);
+	channel->topic_time = TStime();
+	safe_strdup(channel->topic_nick, udb_get_bot_nick(SKEY_CHANSERV, 0));
+	if (channel->users > 0)
+	{
+		sendto_channel(channel, &me, NULL, 0, 0, SEND_LOCAL, NULL,
+		               ":%s TOPIC %s :%s", me.name, channel->name, channel->topic);
+	}
+}
+
 static void udb_channel_apply_subrecord(UdbContext *ctx, Channel *channel, UdbRecord *chan_rec,
                                         const char *subkey, int is_new)
 {
+	/* A channel-profile replacement revokes every UDB-owned channel state;
+	 * mirror that removal so the surviving profile restores it all. */
+	if (!strcasecmp(subkey, chan_rec->key))
+	{
+		UdbRecord *mode_rec = udb_record_find(ctx, CKEY_MODES, chan_rec);
+		UdbRecord *topic_rec = udb_record_find(ctx, CKEY_TOPIC, chan_rec);
+
+		udb_channel_reconcile_founder(channel, chan_rec);
+		if (mode_rec && mode_rec->data_str)
+			udb_channel_apply_modes(channel, mode_rec->data_str);
+		if (udb_record_find(ctx, CKEY_PERSISTENT, chan_rec))
+			udb_channel_set_persistent(channel, 1);
+		udb_channel_apply_topic(channel, topic_rec);
+		return;
+	}
+
 	UdbRecord *sub_rec = udb_record_find(ctx, subkey, chan_rec);
 	if (!sub_rec || !sub_rec->data_str)
 		return;
@@ -4375,17 +4424,7 @@ static void udb_channel_apply_subrecord(UdbContext *ctx, Channel *channel, UdbRe
 		udb_channel_revoke_udb_admins(channel);
 	} else if (!strcmp(subkey, CKEY_TOPIC))
 	{
-		if (!channel->topic || strcmp(channel->topic, sub_rec->data_str))
-		{
-			safe_strdup(channel->topic, sub_rec->data_str);
-			channel->topic_time = TStime();
-			safe_strdup(channel->topic_nick, udb_get_bot_nick(SKEY_CHANSERV, 0));
-			if (channel->users > 0)
-			{
-				sendto_channel(channel, &me, NULL, 0, 0, SEND_LOCAL, NULL,
-				               ":%s TOPIC %s :%s", me.name, channel->name, channel->topic);
-			}
-		}
+		udb_channel_apply_topic(channel, sub_rec);
 	}
 }
 

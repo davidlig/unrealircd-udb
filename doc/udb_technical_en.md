@@ -253,7 +253,12 @@ For `INS`, `DEL`, and `DRP`, UDB first clones the active block and applies the
 change to that private candidate. It atomically writes and renames the candidate
 snapshot before changing active indexes, counters, or runtime effects. Replacing
 an existing `INS` record revokes its old runtime effects before applying the
-candidate, including an `N::<nick>::oper` downgrade. `OPT` likewise writes its
+candidate, including an `N::<nick>::oper` downgrade. An `INS` whose value equals
+the stored value is idempotent: it is persisted without revoking or re-applying
+effects, so re-sending `C::<#channel>::modes` with the same value neither churns
+channel modes nor revokes the founder `+q`. Replacing a channel profile
+(`C::<#channel>`) restores the revoked effects from the surviving profile:
+founder, modes, `+P`, and topic. `OPT` likewise writes its
 snapshot before updating metadata or forwarding. A write failure leaves active
 state and the durable file unchanged, returns `ERR`, and does not forward the
 mutation.

@@ -462,9 +462,41 @@ static void udb_channel_clear_topic(Channel *channel)
 	}
 }
 
+static void udb_channel_apply_topic(Channel *channel, UdbRecord *topic_rec)
+{
+	if (!topic_rec || !topic_rec->data_str)
+		return;
+	if (channel->topic && !strcmp(channel->topic, topic_rec->data_str))
+		return;
+	safe_strdup(channel->topic, topic_rec->data_str);
+	channel->topic_time = TStime();
+	safe_strdup(channel->topic_nick, udb_get_bot_nick(SKEY_CHANSERV, 0));
+	if (channel->users > 0)
+	{
+		sendto_channel(channel, &me, NULL, 0, 0, SEND_LOCAL, NULL,
+		               ":%s TOPIC %s :%s", me.name, channel->name, channel->topic);
+	}
+}
+
 static void udb_channel_apply_subrecord(UdbContext *ctx, Channel *channel, UdbRecord *chan_rec,
                                         const char *subkey, int is_new)
 {
+	/* A channel-profile replacement revokes every UDB-owned channel state;
+	 * mirror that removal so the surviving profile restores it all. */
+	if (!strcasecmp(subkey, chan_rec->key))
+	{
+		UdbRecord *mode_rec = udb_record_find(ctx, CKEY_MODES, chan_rec);
+		UdbRecord *topic_rec = udb_record_find(ctx, CKEY_TOPIC, chan_rec);
+
+		udb_channel_reconcile_founder(channel, chan_rec);
+		if (mode_rec && mode_rec->data_str)
+			udb_channel_apply_modes(channel, mode_rec->data_str);
+		if (udb_record_find(ctx, CKEY_PERSISTENT, chan_rec))
+			udb_channel_set_persistent(channel, 1);
+		udb_channel_apply_topic(channel, topic_rec);
+		return;
+	}
+
 	UdbRecord *sub_rec = udb_record_find(ctx, subkey, chan_rec);
 	if (!sub_rec || !sub_rec->data_str)
 		return;
@@ -483,17 +515,7 @@ static void udb_channel_apply_subrecord(UdbContext *ctx, Channel *channel, UdbRe
 		udb_channel_revoke_udb_admins(channel);
 	} else if (!strcmp(subkey, CKEY_TOPIC))
 	{
-		if (!channel->topic || strcmp(channel->topic, sub_rec->data_str))
-		{
-			safe_strdup(channel->topic, sub_rec->data_str);
-			channel->topic_time = TStime();
-			safe_strdup(channel->topic_nick, udb_get_bot_nick(SKEY_CHANSERV, 0));
-			if (channel->users > 0)
-			{
-				sendto_channel(channel, &me, NULL, 0, 0, SEND_LOCAL, NULL,
-				               ":%s TOPIC %s :%s", me.name, channel->name, channel->topic);
-			}
-		}
+		udb_channel_apply_topic(channel, sub_rec);
 	}
 }
 

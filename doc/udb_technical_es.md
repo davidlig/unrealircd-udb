@@ -241,7 +241,12 @@ Para `INS`, `DEL` y `DRP`, UDB primero clona el bloque activo y aplica el
 cambio al candidato privado. Solo después de escribir y renombrar atómicamente
 su snapshot actualiza índices, contadores y efectos en tiempo real. Al reemplazar
 un registro mediante `INS`, primero revoca sus efectos anteriores y después
-aplica el candidato, incluida una degradación de `N::<nick>::oper`. `OPT` también
+aplica el candidato, incluida una degradación de `N::<nick>::oper`. Un `INS`
+cuyo valor es idéntico al ya almacenado es idempotente: se persiste sin revocar
+ni re-aplicar efectos, de modo que reenviar `C::<#canal>::modes` con el mismo
+valor no genera cambios de modos ni revoca el `+q` del fundador. Al sustituir el
+perfil de un canal (`C::<#canal>`), la revocación previa se restaura desde el
+perfil sobreviviente: fundador, modos, `+P` y topic. `OPT` también
 escribe el snapshot antes de actualizar metadatos o reenviar. Si falla la
 persistencia, el estado y archivo activos no cambian, se devuelve `ERR` y la
 mutación no se reenvía.
