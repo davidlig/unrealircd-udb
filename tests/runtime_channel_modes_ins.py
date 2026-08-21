@@ -381,6 +381,12 @@ def main():
             f"{CHANNEL}::challenge sha256\n"
             f"{CHANNEL}::modes +ntM\n",
             encoding="ascii")
+        residual_snapshot = data / "udb_C.db.tmp"
+        residual_snapshot.write_text(
+            "; UDB Block C - Version 1\n"
+            "; Records: 1\n"
+            f"{CHANNEL}::modes +nt\n",
+            encoding="ascii")
         port, server_port, tls_port = free_port(), free_port(), free_port()
         config = node / "unrealircd.conf"
         write_config(config, "udb-one.test", IRCD_SID, port, server_port, tls_port, args.module, data)
@@ -390,6 +396,10 @@ def main():
             process = subprocess.Popen(bwrap_command(node, args.ircd, config), stdout=output,
                                        stderr=subprocess.STDOUT, text=True)
         wait_for_daemon(process, (("127.0.0.1", port), ("127.0.0.1", server_port)), args.timeout)
+        require(not residual_snapshot.exists(),
+                f"el snapshot temporal residual no se limpió: {residual_snapshot}")
+        require(wait_for_file_content(data / "udb_C.db", f"{CHANNEL}::modes +ntM", 1),
+                "la limpieza del snapshot temporal alteró el snapshot activo")
         exercise("127.0.0.1", port, server_port, data / "udb_C.db")
         return 0
     except EnvironmentUnavailable as exc:

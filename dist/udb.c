@@ -773,6 +773,61 @@ static void udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbu
 	pathbuf[old_len] = '\0';
 }
 
+static int udb_file_cleanup_snapshot_temp(UdbBlock *block)
+{
+	char tmp_path[UDB_BLOCK_PATH_MAX];
+	struct stat st;
+	int saved_errno;
+
+	if (!block || !block->filepath)
+		return 1;
+	if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", block->filepath) >= sizeof(tmp_path))
+	{
+		udb_log(ULOG_WARNING, "UDB_SNAPSHOT_TEMP_CLEANUP", NULL,
+		        "Temporary snapshot path is too long for block $block",
+		        log_data_string("block", block->filepath));
+		return 0;
+	}
+
+	if (lstat(tmp_path, &st) != 0)
+	{
+		if (ENOENT == errno)
+			return 1;
+		saved_errno = errno;
+		udb_log(ULOG_WARNING, "UDB_SNAPSHOT_TEMP_CLEANUP", NULL,
+		        "Cannot inspect temporary snapshot $path: $error",
+		        log_data_string("path", tmp_path), log_data_string("error", strerror(saved_errno)));
+		return 0;
+	}
+	if (S_ISLNK(st.st_mode))
+	{
+		udb_log(ULOG_WARNING, "UDB_SNAPSHOT_TEMP_CLEANUP", NULL,
+		        "Refusing to remove symlink temporary snapshot $path",
+		        log_data_string("path", tmp_path));
+		return 0;
+	}
+	if (!S_ISREG(st.st_mode))
+	{
+		udb_log(ULOG_WARNING, "UDB_SNAPSHOT_TEMP_CLEANUP", NULL,
+		        "Refusing to remove non-regular temporary snapshot $path",
+		        log_data_string("path", tmp_path));
+		return 0;
+	}
+
+	if (unlink(tmp_path) != 0)
+	{
+		if (ENOENT == errno)
+			return 1;
+		saved_errno = errno;
+		udb_log(ULOG_WARNING, "UDB_SNAPSHOT_TEMP_CLEANUP", NULL,
+		        "Cannot remove temporary snapshot $path: $error",
+		        log_data_string("path", tmp_path), log_data_string("error", strerror(saved_errno)));
+		return 0;
+	}
+
+	return 1;
+}
+
 static int udb_file_write_snapshot(UdbBlock *block, UdbRecord *tree,
                                    unsigned int record_count)
 {
@@ -5764,6 +5819,8 @@ static void udb_block_reset(UdbContext *ctx, UdbBlock *block)
 
 static int udb_block_load(UdbContext *ctx, UdbBlock *block)
 {
+	(void)udb_file_cleanup_snapshot_temp(block);
+
 	return udb_file_load_block(ctx, block);
 }
 

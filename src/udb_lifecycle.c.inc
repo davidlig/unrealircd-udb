@@ -108,6 +108,8 @@ static void udb_block_reset(UdbContext *ctx, UdbBlock *block)
 
 static int udb_block_load(UdbContext *ctx, UdbBlock *block)
 {
+	(void)udb_file_cleanup_snapshot_temp(block);
+
 	return udb_file_load_block(ctx, block);
 }
 
