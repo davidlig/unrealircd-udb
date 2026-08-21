@@ -1,7 +1,6 @@
 /*
  * UDB Runtime Effects for UnrealIRCd 6
- * Routes special records to their concrete nick, channel, IP, setting, link,
- * and line effect implementations.
+ * Dispatches special records to their concrete per-block effect implementations.
  */
 
 static int udb_apply_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new)
@@ -18,12 +17,7 @@ static int udb_apply_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord 
 		}
 	} else if (block->letter == 'C')
 	{
-		UdbRecord *chan_rec = rec->parent == block->tree ? rec : rec->parent;
-		Channel *channel = find_channel(chan_rec->key);
-		if (channel)
-		{
-			udb_channel_apply_record(channel, chan_rec, rec->key, is_new);
-		}
+		udb_channel_apply_record(ctx, block, rec, is_new);
 	} else if (block->letter == 'I')
 	{
 		UdbRecord *ip_rec = rec->parent == block->tree ? rec : rec->parent;
@@ -52,12 +46,7 @@ static void udb_remove_special_record(UdbContext *ctx, UdbBlock *block, UdbRecor
 		udb_nick_remove_record(block, rec);
 	} else if (block->letter == 'C')
 	{
-		UdbRecord *chan_rec = rec->parent == block->tree ? rec : rec->parent;
-		Channel *channel = find_channel(chan_rec->key);
-		if (channel)
-		{
-			udb_channel_remove_record(channel, chan_rec, rec->key);
-		}
+		udb_channel_remove_record(ctx, block, rec);
 	} else if (block->letter == 'I')
 	{
 		UdbRecord *ip_rec = rec->parent == block->tree ? rec : rec->parent;

@@ -168,10 +168,9 @@ static void udb_nick_set_swhois(Client *client, UdbRecord *nick_rec,
                                 UdbRecord *swhois_rec);
 static void udb_nick_set_snomasks(Client *client, UdbRecord *nick_rec,
                                   UdbRecord *snomask_rec);
-static void udb_channel_apply_record(Channel *channel, UdbRecord *chan_rec,
-                                     const char *subkey, int is_new);
-static void udb_channel_remove_record(Channel *channel, UdbRecord *chan_rec,
-                                      const char *subkey);
+static void udb_channel_apply_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec,
+                                     int is_new);
+static void udb_channel_remove_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
 static int udb_channels_load(ModuleInfo *modinfo);
 static void udb_ip_apply_record(const char *ip_key, UdbRecord *ip_rec,
                                 const char *subkey, int is_new);

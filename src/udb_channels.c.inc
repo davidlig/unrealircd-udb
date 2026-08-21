@@ -462,9 +462,10 @@ static void udb_channel_clear_topic(Channel *channel)
 	}
 }
 
-static void udb_channel_apply_record(Channel *channel, UdbRecord *chan_rec, const char *subkey, int is_new)
+static void udb_channel_apply_subrecord(UdbContext *ctx, Channel *channel, UdbRecord *chan_rec,
+                                        const char *subkey, int is_new)
 {
-	UdbRecord *sub_rec = udb_record_find(udb_ctx, subkey, chan_rec);
+	UdbRecord *sub_rec = udb_record_find(ctx, subkey, chan_rec);
 	if (!sub_rec || !sub_rec->data_str)
 		return;
 
@@ -496,14 +497,15 @@ static void udb_channel_apply_record(Channel *channel, UdbRecord *chan_rec, cons
 	}
 }
 
-static void udb_channel_remove_record(Channel *channel, UdbRecord *chan_rec, const char *subkey)
+static void udb_channel_remove_subrecord(UdbContext *ctx, Channel *channel, UdbRecord *chan_rec,
+                                         const char *subkey)
 {
 	if (!strcmp(subkey, CKEY_FOUNDER))
 	{
 		udb_channel_reconcile_founder(channel, NULL);
 	} else if (!strcmp(subkey, CKEY_MODES))
 	{
-		UdbRecord *mode_rec = udb_record_find(udb_ctx, CKEY_MODES, chan_rec);
+		UdbRecord *mode_rec = udb_record_find(ctx, CKEY_MODES, chan_rec);
 		udb_channel_remove_modes(channel, mode_rec ? mode_rec->data_str : NULL);
 	} else if (!strcmp(subkey, CKEY_PERSISTENT))
 	{
@@ -516,14 +518,40 @@ static void udb_channel_remove_record(Channel *channel, UdbRecord *chan_rec, con
 		udb_channel_clear_topic(channel);
 	} else if (!strcasecmp(subkey, chan_rec->key))
 	{
-		UdbRecord *mode_rec = udb_record_find(udb_ctx, CKEY_MODES, chan_rec);
+		UdbRecord *mode_rec = udb_record_find(ctx, CKEY_MODES, chan_rec);
 		udb_channel_reconcile_founder(channel, NULL);
 		udb_channel_revoke_udb_admins(channel);
 		udb_channel_remove_modes(channel, mode_rec ? mode_rec->data_str : NULL);
 		udb_channel_set_persistent(channel, 0);
-		if (udb_record_find(udb_ctx, CKEY_TOPIC, chan_rec))
+		if (udb_record_find(ctx, CKEY_TOPIC, chan_rec))
 			udb_channel_clear_topic(channel);
 	}
+}
+
+static void udb_channel_apply_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new)
+{
+	UdbRecord *chan_rec;
+	Channel *channel;
+
+	if (!ctx || !block || !rec)
+		return;
+	chan_rec = rec->parent == block->tree ? rec : rec->parent;
+	channel = find_channel(chan_rec->key);
+	if (channel)
+		udb_channel_apply_subrecord(ctx, channel, chan_rec, rec->key, is_new);
+}
+
+static void udb_channel_remove_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec)
+{
+	UdbRecord *chan_rec;
+	Channel *channel;
+
+	if (!ctx || !block || !rec)
+		return;
+	chan_rec = rec->parent == block->tree ? rec : rec->parent;
+	channel = find_channel(chan_rec->key);
+	if (channel)
+		udb_channel_remove_subrecord(ctx, channel, chan_rec, rec->key);
 }
 
 static int udb_hook_pre_local_join(Client *client, Channel *channel, const char *key)
@@ -623,8 +651,8 @@ static void handle_join(Client *client, Channel *channel, MessageTag *mtags)
 			set_channel_mode(channel, mtags, "+r", "");
 		}
 
-		udb_channel_apply_record(channel, chan_rec, CKEY_MODES, 0);
-		udb_channel_apply_record(channel, chan_rec, CKEY_TOPIC, 0);
+		udb_channel_apply_subrecord(udb_ctx, channel, chan_rec, CKEY_MODES, 0);
+		udb_channel_apply_subrecord(udb_ctx, channel, chan_rec, CKEY_TOPIC, 0);
 		if (udb_record_find(udb_ctx, CKEY_PERSISTENT, chan_rec))
 			udb_channel_set_persistent(channel, 1);
 	}
