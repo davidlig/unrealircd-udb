@@ -140,10 +140,14 @@ reject remote writes. `prefix` and `allow_clients` are not supported settings.
 ## 2. S2S (Server-to-Server) Protocol
 
 The UDB protocol integrates into UnrealIRCd's native S2S traffic using the extended `DB` command.
-Only directly linked peers that explicitly complete the UDB HEL exchange are
-synchronized. Real-time mutations must originate from the configured
-`udb::propagator`; a peer that is actively serving a block synchronization may
-only send records for that block.
+Only directly linked peers that explicitly complete the UDB HEL exchange have
+the UDB V4 protocol capability. Capability does not authorize data access:
+staged `BEGIN`, `PUT`, and `END` imports, and `RES` requests and exports, are
+accepted only on the direct peer selected as the configured propagator. This
+permits edge-local A-to-B-to-C propagation when B selects A and C selects B.
+Real-time mutations must likewise originate from the configured
+`udb::propagator`; a peer that is actively serving an authorized block
+synchronization may only send records for that block.
 **General structure:**
 `:<source_sid> DB <target> <subcommand> <parameters>`
 
@@ -152,14 +156,18 @@ When a server connects to another, block states are verified using a CRC32 over
 the canonical logical records. The digest sorts serialized `path value` records,
 so save timestamps, comment headers, and sibling insertion order do not affect
 it. After `HOOKTYPE_SERVER_SYNC`, each directly linked peer receives one
-`HEL 4` request. Only the matching direct `HEL 4 ACK` confirms UDB V4 for that
+`HEL 4 <selected-propagator>` request. Only the matching direct `HEL 4 ACK` confirms UDB V4 for that
 link; no `INF`, staged frame, or forwarded UDB DB frame is sent first. A missing
 acknowledgement times out after 60 seconds and marks that link unsupported until
 it reconnects. `HEL` is the only DB frame accepted before confirmation and is
 never routed beyond the direct link.
 
 **HEL (Capability Negotiation):**
-`:<sid> DB <direct-peer-sid> HEL 4`
+`:<sid> DB <direct-peer-sid> HEL 4 <selected-propagator>`
+
+The selected propagator field is `-` when no unique source is configured. It
+lets the direct peer authorize outbound snapshots only when it is explicitly
+selected by the receiver.
 
 **HEL acknowledgement:**
 `:<sid> DB <direct-peer-sid> HEL 4 ACK`
@@ -179,6 +187,12 @@ For peers with the staged capability, `RES` is answered with a transaction:
 **END:** `:<sid> DB <target> END <block> <txid> <digest>`
 
 **ACK:** `:<sid> DB <target> ACK <block> <txid> <digest>`
+
+The requester and receiver of this transaction must be the selected direct
+propagator. A HEL-confirmed peer that is not selected receives
+`UDB_ERR_FORBIDDEN` for `RES`, `BEGIN`, `PUT`, and `END`; it cannot create or
+continue a staged session, trigger a block export, or cause those frames to be
+forwarded.
 
 `PUT` paths omit the block prefix because the block is an explicit parameter.
 The receiver builds an isolated tree per block and never applies its runtime

@@ -161,6 +161,7 @@ static int udb_block_letter_to_index(char letter);
 static void udb_sync_to_server(Client *server);
 static int udb_has_hello(Client *server);
 static int udb_has_staged_sync(Client *server);
+static int udb_peer_authorizes_us(Client *server);
 static void udb_sync_hello_start(Client *server);
 static int udb_sync_hello_ack(Client *server);
 static void udb_sync_abort(UdbBlock *block, const char *reason);
@@ -172,6 +173,8 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer,
 static void udb_sync_ack(Client *peer, const char *block);
 static void udb_sync_send_stage(Client *server, UdbBlock *block);
 static void udb_sync_server_quit(Client *client);
+static int udb_is_propagator(UdbContext *ctx, Client *server);
+static const char *udb_selected_propagator(UdbContext *ctx);
 static void udb_sendto_confirmed_servers(Client *except, const char *fmt, ...)
     __attribute__((format(printf, 2, 3)));
 static void udb_protocol_params_error(Client *client, const char *subcmd);

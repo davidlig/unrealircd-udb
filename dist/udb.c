@@ -318,6 +318,7 @@ static int udb_block_letter_to_index(char letter);
 static void udb_sync_to_server(Client *server);
 static int udb_has_hello(Client *server);
 static int udb_has_staged_sync(Client *server);
+static int udb_peer_authorizes_us(Client *server);
 static void udb_sync_hello_start(Client *server);
 static int udb_sync_hello_ack(Client *server);
 static void udb_sync_abort(UdbBlock *block, const char *reason);
@@ -329,6 +330,8 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer,
 static void udb_sync_ack(Client *peer, const char *block);
 static void udb_sync_send_stage(Client *server, UdbBlock *block);
 static void udb_sync_server_quit(Client *client);
+static int udb_is_propagator(UdbContext *ctx, Client *server);
+static const char *udb_selected_propagator(UdbContext *ctx);
 static void udb_sendto_confirmed_servers(Client *except, const char *fmt, ...)
     __attribute__((format(printf, 2, 3)));
 static void udb_protocol_params_error(Client *client, const char *subcmd);
@@ -1945,6 +1948,7 @@ struct UdbHelloPeer {
 	Client *peer;
 	time_t deadline;
 	int state;
+	int authorizes_us;
 	UdbHelloPeer *next;
 };
 
@@ -1983,9 +1987,17 @@ static int udb_has_staged_sync(Client *server)
 	return udb_has_hello(server);
 }
 
+static int udb_peer_authorizes_us(Client *server)
+{
+	UdbHelloPeer *peer = udb_hello_peer(server, 0);
+
+	return udb_has_hello(server) && peer->authorizes_us;
+}
+
 static void udb_sync_hello_start(Client *server)
 {
 	UdbHelloPeer *peer;
+	const char *propagator;
 
 	if (!server || !IsServer(server) || !MyConnect(server))
 		return;
@@ -1994,7 +2006,9 @@ static void udb_sync_hello_start(Client *server)
 		return;
 	peer->state = UDB_HEL_WAITING;
 	peer->deadline = time(NULL) + UDB_SYNC_TIMEOUT;
-	sendto_one(server, NULL, ":%s DB %s HEL 4", me.id, server->id);
+	propagator = udb_selected_propagator(udb_ctx);
+	sendto_one(server, NULL, ":%s DB %s HEL 4 %s", me.id, server->id,
+	           propagator ? propagator : "-");
 }
 
 static int udb_sync_hello_ack(Client *server)
@@ -2128,7 +2142,8 @@ static void udb_sync_send_stage(Client *server, UdbBlock *block)
 	char pathbuf[4096] = "";
 	UdbRecord *rec;
 
-	if (!udb_has_hello(server))
+	/* HEL confirms protocol support; snapshots require the selected data source. */
+	if (!udb_peer_authorizes_us(server))
 		return;
 	snprintf(txid, sizeof(txid), "%08lx", ++udb_sync_txid);
 	sendto_one(server, NULL, ":%s DB %s BEGIN %c %s %08lX", me.id, server->id,
@@ -2277,19 +2292,6 @@ static void udb_mutation_forward_del(Client *source, Client *except, const char 
 	udb_sendto_confirmed_servers(except, ":%s DB %s DEL %s", source->id, target, path);
 }
 
-static int udb_mutation_commit(UdbContext *ctx, UdbBlock *block, UdbRecord *tree)
-{
-	unsigned int record_count = udb_record_count_tree(tree);
-
-	if (!udb_file_write_snapshot(block, tree, record_count))
-	{
-		udb_record_free_tree(tree);
-		return 0;
-	}
-	udb_block_replace_tree(ctx, block, tree, record_count);
-	return 1;
-}
-
 static void udb_mutation_persist_error(Client *client, const char *subcmd, char letter)
 {
 	sendto_one(client, NULL, ":%s DB %s ERR %s %d %c", me.id, client->id,
@@ -2319,15 +2321,17 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 			sendto_one(client, NULL, ":%s DB %s ERR INS %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 			return;
 		}
+		UdbRecord *old_rec;
 		UdbRecord *tree;
-		UdbRecord *rec;
+		UdbRecord *rec = NULL;
 
 		if (!udb_password_record_valid(block, path + 3, data))
 		{
 			udb_protocol_params_error(client, "INS");
 			return;
 		}
-		tree = udb_record_clone_tree(block->tree, NULL, NULL);
+		old_rec = udb_record_find_path(ctx, block, path + 3);
+		tree = udb_record_clone_tree(block->tree, old_rec, &rec);
 		rec = udb_record_insert_path(tree, path + 3, data);
 		if (!rec)
 		{
@@ -2335,11 +2339,16 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 			udb_mutation_persist_error(client, "INS", letter);
 			return;
 		}
-		if (!udb_mutation_commit(ctx, block, tree))
+		if (!udb_file_write_snapshot(block, tree, udb_record_count_tree(tree)))
 		{
+			udb_record_free_tree(tree);
 			udb_mutation_persist_error(client, "INS", letter);
 			return;
 		}
+		/* Revoke the old value's effects while its records are still active. */
+		if (old_rec)
+			udb_remove_special_record(ctx, block, old_rec);
+		udb_block_replace_tree(ctx, block, tree, udb_record_count_tree(tree));
 		udb_apply_special_record(ctx, block, rec, 1);
 		char logbuf[512];
 		snprintf(logbuf, sizeof(logbuf), "[UDB] Inserted record via S2S: %s -> %s", path, data);
@@ -2471,9 +2480,11 @@ static void udb_mutation_opt(UdbContext *ctx, Client *client, const char *target
 			sendto_one(client, NULL, ":%s DB %s ERR OPT %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 			return;
 		}
-		if (modified_at)
-			block->modified_at = atol(modified_at);
-		udb_file_save_block(ctx, block);
+		if (!udb_file_save_block(ctx, block))
+		{
+			udb_mutation_persist_error(client, "OPT", letter);
+			return;
+		}
 		if (!is_broadcast)
 			return;
 	}
@@ -2577,8 +2588,12 @@ CMD_FUNC(cmd_db)
 			udb_sync_hello_ack(client);
 			return;
 		}
-		if (parc != 4)
+		if (parc != 5)
 			return;
+		udb_hello_peer(client, 1)->authorizes_us = !strcasecmp(parv[4], me.name);
+		udb_log(ULOG_INFO, "UDB_HEL_AUTHORIZATION", client,
+		        "Direct peer selected $propagator as its staged-sync source",
+		        log_data_string("propagator", parv[4]));
 		/* Each side sends its own request, so only an ACK confirms outbound data. */
 		if (!udb_has_hello(client))
 			udb_sync_hello_start(client);
@@ -2610,6 +2625,12 @@ CMD_FUNC(cmd_db)
 					udb_protocol_params_error(client, subcmd);
 					return;
 				}
+				if (!udb_is_propagator(ctx, client))
+				{
+					sendto_one(client, NULL, ":%s DB %s ERR BEGIN %d %c", me.id, client->id,
+					           UDB_ERR_FORBIDDEN, parv[3] ? *parv[3] : '0');
+					return;
+				}
 				block = udb_block_by_letter(ctx, *parv[3]);
 				if (is_for_me)
 				{
@@ -2635,6 +2656,12 @@ CMD_FUNC(cmd_db)
 				if (parc < 7 || !udb_has_staged_sync(client))
 				{
 					udb_protocol_params_error(client, subcmd);
+					return;
+				}
+				if (!udb_is_propagator(ctx, client))
+				{
+					sendto_one(client, NULL, ":%s DB %s ERR PUT %d %c", me.id, client->id,
+					           UDB_ERR_FORBIDDEN, parv[3] ? *parv[3] : '0');
 					return;
 				}
 				block = udb_block_by_letter(ctx, *parv[3]);
@@ -2664,6 +2691,12 @@ CMD_FUNC(cmd_db)
 				if (parc < 6 || !udb_has_staged_sync(client))
 				{
 					udb_protocol_params_error(client, subcmd);
+					return;
+				}
+				if (!udb_is_propagator(ctx, client))
+				{
+					sendto_one(client, NULL, ":%s DB %s ERR END %d %c", me.id, client->id,
+					           UDB_ERR_FORBIDDEN, parv[3] ? *parv[3] : '0');
 					return;
 				}
 				block = udb_block_by_letter(ctx, *parv[3]);
@@ -2774,6 +2807,12 @@ CMD_FUNC(cmd_db)
 					return;
 				char letter = *parv[3];
 				UdbBlock *block = udb_block_by_letter(ctx, letter);
+				if (!udb_peer_authorizes_us(client))
+				{
+					sendto_one(client, NULL, ":%s DB %s ERR RES %d %c", me.id, client->id,
+					           UDB_ERR_FORBIDDEN, letter);
+					return;
+				}
 
 				if (is_for_me)
 				{

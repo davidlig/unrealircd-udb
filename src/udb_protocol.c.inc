@@ -88,8 +88,12 @@ CMD_FUNC(cmd_db)
 			udb_sync_hello_ack(client);
 			return;
 		}
-		if (parc != 4)
+		if (parc != 5)
 			return;
+		udb_hello_peer(client, 1)->authorizes_us = !strcasecmp(parv[4], me.name);
+		udb_log(ULOG_INFO, "UDB_HEL_AUTHORIZATION", client,
+		        "Direct peer selected $propagator as its staged-sync source",
+		        log_data_string("propagator", parv[4]));
 		/* Each side sends its own request, so only an ACK confirms outbound data. */
 		if (!udb_has_hello(client))
 			udb_sync_hello_start(client);
@@ -121,6 +125,12 @@ CMD_FUNC(cmd_db)
 					udb_protocol_params_error(client, subcmd);
 					return;
 				}
+				if (!udb_is_propagator(ctx, client))
+				{
+					sendto_one(client, NULL, ":%s DB %s ERR BEGIN %d %c", me.id, client->id,
+					           UDB_ERR_FORBIDDEN, parv[3] ? *parv[3] : '0');
+					return;
+				}
 				block = udb_block_by_letter(ctx, *parv[3]);
 				if (is_for_me)
 				{
@@ -146,6 +156,12 @@ CMD_FUNC(cmd_db)
 				if (parc < 7 || !udb_has_staged_sync(client))
 				{
 					udb_protocol_params_error(client, subcmd);
+					return;
+				}
+				if (!udb_is_propagator(ctx, client))
+				{
+					sendto_one(client, NULL, ":%s DB %s ERR PUT %d %c", me.id, client->id,
+					           UDB_ERR_FORBIDDEN, parv[3] ? *parv[3] : '0');
 					return;
 				}
 				block = udb_block_by_letter(ctx, *parv[3]);
@@ -175,6 +191,12 @@ CMD_FUNC(cmd_db)
 				if (parc < 6 || !udb_has_staged_sync(client))
 				{
 					udb_protocol_params_error(client, subcmd);
+					return;
+				}
+				if (!udb_is_propagator(ctx, client))
+				{
+					sendto_one(client, NULL, ":%s DB %s ERR END %d %c", me.id, client->id,
+					           UDB_ERR_FORBIDDEN, parv[3] ? *parv[3] : '0');
 					return;
 				}
 				block = udb_block_by_letter(ctx, *parv[3]);
@@ -285,6 +307,12 @@ CMD_FUNC(cmd_db)
 					return;
 				char letter = *parv[3];
 				UdbBlock *block = udb_block_by_letter(ctx, letter);
+				if (!udb_peer_authorizes_us(client))
+				{
+					sendto_one(client, NULL, ":%s DB %s ERR RES %d %c", me.id, client->id,
+					           UDB_ERR_FORBIDDEN, letter);
+					return;
+				}
 
 				if (is_for_me)
 				{

@@ -12,7 +12,7 @@ each node. UDB is loaded on every node. Only A contains the `N`-block marker;
 B and C begin with empty, deliberately old block placeholders.
 
 It compiles the existing test-only `udb_test_mutator.c` fixture and loads it
-only on A and B from their isolated module trees. The generated configurations
+on A, B, and C from their isolated module trees. The generated configurations
 use edge-local propagators: B authorizes A for A-to-B mutations and C authorizes
 B for B-to-C mutations.
 
@@ -22,6 +22,9 @@ B's isolated data tree. Only then does it start C. The new B-C link must show
 link/sync evidence and the same staged-frame sequence in C before C's isolated
 tree contains the marker. This proves the record committed in B before B
 propagated it to C, rather than merely proving a three-node network converged.
+It then arms C's test-only fixture to send `BEGIN`, `PUT`, `END`, and `RES` to
+B. C has completed HEL but B selects A as its propagator, so B must reject all
+four frames, leave its database byte-identical, and send no staged export to C.
 Once the staged A-to-B-to-C path is complete, the harness arms the test-only
 fixture and requires an authorized `INS` and matching `DEL` on both direct
 edges: B must durably contain and then omit A's record, and C must durably

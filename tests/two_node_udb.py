@@ -45,7 +45,7 @@ def free_port():
 
 
 def write_config(path, name, sid, client_port, server_port, tls_port, peer, peer_port, module, dbdir,
-                 autoconnect, load_mutator=False):
+                 propagator, autoconnect, load_mutator=False):
     outgoing = (f'    outgoing {{ bind-ip "127.0.0.1"; hostname "127.0.0.1"; port {peer_port}; '
                 'options { autoconnect; } }\n') if autoconnect else ""
     path.write_text(f'''include "/home/davidlig/unrealircd/conf/modules.default.conf";
@@ -81,7 +81,7 @@ loadmodule "third/udb";
 {('loadmodule "third/udb_test_mutator";' if load_mutator else '')}
 udb {{
     database-directory "{dbdir}";
-    propagator "udb-a.test";
+    propagator "{propagator}";
 }}
 ''', encoding="ascii")
 
@@ -305,9 +305,10 @@ def main():
         a_client, a_server, a_tls, b_client, b_server, b_tls = (free_port() for _ in range(6))
         a_conf, b_conf = a / "unrealircd.conf", b / "unrealircd.conf"
         write_config(a_conf, "udb-a.test", "0A1", a_client, a_server, a_tls,
-                     "udb-b.test", b_server, args.module, a / "data", True, load_mutator=True)
+                     "udb-b.test", b_server, args.module, a / "data", "udb-b.test", True,
+                     load_mutator=True)
         write_config(b_conf, "udb-b.test", "0B1", b_client, b_server, b_tls,
-                     "udb-a.test", a_server, args.module, b / "data", False)
+                     "udb-a.test", a_server, args.module, b / "data", "udb-a.test", False)
         run_configtest(a, args.ircd, a_conf, args.module, MUTATOR_MODULE)
         run_configtest(b, args.ircd, b_conf, args.module)
 

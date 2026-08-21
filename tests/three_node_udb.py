@@ -25,6 +25,7 @@ MUTATOR_RECORDS = {
     "A-B": "udb-test-mutator authorized-insert",
     "B-C": "udb-test-mutator authorized-insert-b-c",
 }
+STAGED_AUTH_TRIGGER = "udb-test-mutator-staged-authorization-go"
 
 
 class EnvironmentUnavailable(Exception):
@@ -146,6 +147,10 @@ def udb_commands(log):
     return re.findall(r"\[UDB\] S2S DB received: .* subcmd=(\w+)", log_text(log))
 
 
+def udb_commands_text(text):
+    return re.findall(r"\[UDB\] S2S DB received: .* subcmd=(\w+)", text)
+
+
 def ordered(commands, expected):
     position = 0
     for command in commands:
@@ -194,6 +199,14 @@ def wait_for_mutation(receiver_log, db, record, deleted, timeout):
 def arm_mutators(nodes):
     for node in nodes:
         (node / "data" / "udb-test-mutator-go").touch()
+
+
+def staged_authorization_rejected(b_log, c_log, b_log_offset, c_log_offset, b_db, baseline):
+    b_commands = udb_commands_text(log_text(b_log)[b_log_offset:])
+    c_commands = udb_commands_text(log_text(c_log)[c_log_offset:])
+    return (all(command in b_commands for command in ("BEGIN", "PUT", "END", "RES")) and
+            c_commands.count("ERR") >= 4 and "BEGIN" not in c_commands and
+            b_db.read_bytes() == baseline)
 
 
 def print_diagnostics(stage, logs, dbs=()):
@@ -249,7 +262,7 @@ def main():
             (node / "tmp").mkdir()
             (node / "modules" / "third").mkdir(parents=True)
             shutil.copy2(args.module, node / "modules" / "third" / "udb.so")
-        for node in (a, b):
+        for node in (a, b, c):
             shutil.copy2(MUTATOR_MODULE, node / "modules" / "third" / "udb_test_mutator.so")
         a_db, b_db, c_db = (node / "data" / "udb_N.db" for node in (a, b, c))
         # Only A has a record. Empty, old placeholders make B and C request A's block.
@@ -263,7 +276,7 @@ def main():
         a_conf, b_conf, c_conf = (node / "unrealircd.conf" for node in (a, b, c))
         write_config(a_conf, "udb-a.test", "0A1", ports[0], (("udb-b.test", ports[1][1], True),), args.module, a / "data", "udb-b.test", True)
         write_config(b_conf, "udb-b.test", "0B1", ports[1], (("udb-a.test", ports[0][1], False), ("udb-c.test", ports[2][1], True)), args.module, b / "data", "udb-a.test", True)
-        write_config(c_conf, "udb-c.test", "0C1", ports[2], (("udb-b.test", ports[1][1], False),), args.module, c / "data", "udb-b.test")
+        write_config(c_conf, "udb-c.test", "0C1", ports[2], (("udb-b.test", ports[1][1], False),), args.module, c / "data", "udb-b.test", True)
         for node, config in ((a, a_conf), (b, b_conf), (c, c_conf)):
             run_configtest(node, args.ircd, config)
 
@@ -291,6 +304,23 @@ def main():
             print_diagnostics("B-to-C timeout", (("node B", logs["B"]), ("node C", logs["C"])))
             return skip("B-C linked, but A's record did not staged-sync from B into C; this is not a PASS")
         print("PASS: A's staged N-block committed in B before B synchronized it to C")
+        b_log_offset = len(log_text(logs["B"]))
+        c_log_offset = len(log_text(logs["C"]))
+        b_baseline = b_db.read_bytes()
+        (c / "data" / STAGED_AUTH_TRIGGER).touch()
+        deadline = time.monotonic() + args.timeout
+        while time.monotonic() < deadline:
+            if staged_authorization_rejected(logs["B"], logs["C"], b_log_offset, c_log_offset,
+                                             b_db, b_baseline):
+                break
+            time.sleep(0.25)
+        if not staged_authorization_rejected(logs["B"], logs["C"], b_log_offset, c_log_offset,
+                                             b_db, b_baseline):
+            print_diagnostics("non-propagator staged authorization", (("node B", logs["B"]),
+                                                                        ("node C", logs["C"])),
+                              (("node B", b_db),))
+            return 1
+        print("PASS: HEL-confirmed non-propagator C could not import a staged block from or request an export from B")
         arm_mutators((a, b))
         if not wait_for_mutation(logs["B"], b_db, MUTATOR_RECORDS["A-B"], False, args.timeout):
             print_diagnostics("A-to-B authorized INS timeout", (("node A", logs["A"]), ("node B", logs["B"])),

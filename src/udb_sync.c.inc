@@ -8,6 +8,7 @@ struct UdbHelloPeer {
 	Client *peer;
 	time_t deadline;
 	int state;
+	int authorizes_us;
 	UdbHelloPeer *next;
 };
 
@@ -46,9 +47,17 @@ static int udb_has_staged_sync(Client *server)
 	return udb_has_hello(server);
 }
 
+static int udb_peer_authorizes_us(Client *server)
+{
+	UdbHelloPeer *peer = udb_hello_peer(server, 0);
+
+	return udb_has_hello(server) && peer->authorizes_us;
+}
+
 static void udb_sync_hello_start(Client *server)
 {
 	UdbHelloPeer *peer;
+	const char *propagator;
 
 	if (!server || !IsServer(server) || !MyConnect(server))
 		return;
@@ -57,7 +66,9 @@ static void udb_sync_hello_start(Client *server)
 		return;
 	peer->state = UDB_HEL_WAITING;
 	peer->deadline = time(NULL) + UDB_SYNC_TIMEOUT;
-	sendto_one(server, NULL, ":%s DB %s HEL 4", me.id, server->id);
+	propagator = udb_selected_propagator(udb_ctx);
+	sendto_one(server, NULL, ":%s DB %s HEL 4 %s", me.id, server->id,
+	           propagator ? propagator : "-");
 }
 
 static int udb_sync_hello_ack(Client *server)
@@ -191,7 +202,8 @@ static void udb_sync_send_stage(Client *server, UdbBlock *block)
 	char pathbuf[4096] = "";
 	UdbRecord *rec;
 
-	if (!udb_has_hello(server))
+	/* HEL confirms protocol support; snapshots require the selected data source. */
+	if (!udb_peer_authorizes_us(server))
 		return;
 	snprintf(txid, sizeof(txid), "%08lx", ++udb_sync_txid);
 	sendto_one(server, NULL, ":%s DB %s BEGIN %c %s %08lX", me.id, server->id,
