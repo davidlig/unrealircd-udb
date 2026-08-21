@@ -31,6 +31,19 @@ It additionally requires node B to receive the fixture `INS` and `DEL`, persist
 the inserted record before deletion, and persist its absence after deletion.
 The fixture is test-only and does not alter the UDB production module.
 
+To cover the persistence-failure path deterministically, run:
+
+```sh
+python3 src/modules/third/udb/tests/two_node_udb.py --snapshot-rename-failure
+```
+
+This additionally builds a test-only `LD_PRELOAD` fixture and applies it only to
+node B. It returns `EIO` only when the configured `udb_N.db.tmp` is renamed to
+`udb_N.db`. The harness then requires B's original database bytes to remain
+unchanged, no `.tmp` file, no staged `ACK`/commit, and both the interposer and
+staged persistence-failure evidence in the logs. The normal invocation does not
+build or preload this fixture and retains its existing successful-sync checks.
+
 `SKIP` (exit status 77) is deliberate, never a successful synchronization. It
 means the local installation could not provide the isolation or S2S conditions.
 Use `--keep` to retain the generated configs, data trees, and logs for

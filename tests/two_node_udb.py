@@ -26,6 +26,9 @@ CLOAK_KEYS = ("aB3" * 30, "cD4" * 30, "eF5" * 30)
 MUTATOR_SOURCE = ROOT / "src/modules/third/udb/tests/udb_test_mutator.c"
 MUTATOR_MODULE = MUTATOR_SOURCE.with_suffix(".so")
 MUTATOR_RECORD = "udb-test-mutator authorized-insert"
+RENAME_FAIL_SOURCE = ROOT / "src/modules/third/udb/tests/udb_snapshot_rename_fail.c"
+RENAME_FAIL_MODULE = RENAME_FAIL_SOURCE.with_suffix(".so")
+RENAME_FAIL_TARGET = str(PERMDATADIR / "udb_N.db")
 
 
 def skip(message):
@@ -81,7 +84,7 @@ udb {{
 ''', encoding="ascii")
 
 
-def bwrap_command(node, ircd, config, module, mutator=None, configtest=False):
+def bwrap_command(node, ircd, config, module, mutator=None, configtest=False, rename_failure=False):
     # A read-only host root leaves dependencies and installed modules available.
     # Only this node's working directory and compiled data directory are writable.
     command = ["bwrap", "--die-with-parent", "--ro-bind", "/", "/",
@@ -89,8 +92,11 @@ def bwrap_command(node, ircd, config, module, mutator=None, configtest=False):
                "--bind", str(node / "data"), str(PERMDATADIR),
                "--bind", str(node / "tmp"), "/home/davidlig/unrealircd/tmp",
                "--ro-bind", str(node / "modules" / "third"), "/home/davidlig/unrealircd/modules/third",
-               "--dev-bind", "/dev", "/dev", "--proc", "/proc",
-               str(ircd), "-f", str(config)]
+               "--dev-bind", "/dev", "/dev", "--proc", "/proc"]
+    if rename_failure:
+        command.extend(("--setenv", "LD_PRELOAD", str(RENAME_FAIL_MODULE),
+                        "--setenv", "UDB_SNAPSHOT_RENAME_FAIL_TARGET", RENAME_FAIL_TARGET))
+    command.extend((str(ircd), "-f", str(config)))
     if configtest:
         command.append("-c")
     else:
@@ -113,6 +119,15 @@ def build_mutator():
     if result.returncode or not MUTATOR_MODULE.is_file():
         raise RuntimeError(f"test mutator build failed:\n{result.stdout}")
     print(f"PASS: built test-only mutator {MUTATOR_MODULE.name}")
+
+
+def build_rename_fail_interposer():
+    result = subprocess.run(["cc", "-shared", "-fPIC", "-o", str(RENAME_FAIL_MODULE),
+                             str(RENAME_FAIL_SOURCE), "-ldl"], cwd=ROOT, text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+    if result.returncode or not RENAME_FAIL_MODULE.is_file():
+        raise RuntimeError(f"snapshot rename-failure interposer build failed:\n{result.stdout}")
+    print(f"PASS: built test-only rename-failure interposer {RENAME_FAIL_MODULE.name}")
 
 
 def log_text(log):
@@ -153,9 +168,18 @@ def ordered(commands, expected):
 
 
 def staged_snapshot_observed(a_log, b_log):
-	# Both peers must confirm HEL before B receives the staged transaction.
+    # Both peers must confirm HEL before B receives the staged transaction.
     return (ordered(udb_commands(b_log), ("HEL", "INF", "BEGIN", "PUT", "END")) and
             ordered(udb_commands(a_log), ("HEL", "RES", "ACK")))
+
+
+def snapshot_rename_failure_observed(a_log, b_log, b_db, baseline):
+    return (ordered(udb_commands(b_log), ("HEL", "INF", "BEGIN", "PUT", "END")) and
+            "ERR" in udb_commands(a_log) and "ACK" not in udb_commands(a_log) and
+            b_db.read_bytes() == baseline and not b_db.with_suffix(".db.tmp").exists() and
+            "UDB_TEST_SNAPSHOT_RENAME_FAIL:" in log_text(b_log) and
+            "digest or persistence failure" in log_text(b_log) and
+            "cmd=END err=6" in log_text(a_log))
 
 
 def db_contains(db, record):
@@ -186,7 +210,7 @@ def print_diagnostics(logs, b_db=None):
     for label, log in zip(("node A", "node B"), logs):
         evidence = [line for line in log_text(log).splitlines()
                     if "Server linked:" in line or " is now synced" in line or "[UDB]" in line or
-                    "UDB_TEST_MUTATOR" in line or " ERR " in line]
+                    "UDB_TEST_MUTATOR" in line or "UDB_TEST_SNAPSHOT_RENAME_FAIL" in line or " ERR " in line]
         print(f"--- {label} relevant log lines ({log}) ---", file=sys.stderr)
         print("\n".join(evidence) or "(none)", file=sys.stderr)
     if b_db:
@@ -215,6 +239,8 @@ def main():
                         help="compiled UDB module to load")
     parser.add_argument("--timeout", type=int, default=15, help="S2S wait time in seconds")
     parser.add_argument("--keep", action="store_true", help="preserve temporary node directories")
+    parser.add_argument("--snapshot-rename-failure", action="store_true",
+                        help="fail node B's UDB N snapshot rename and verify staged-sync rollback")
     args = parser.parse_args()
 
     if not shutil.which("bwrap"):
@@ -232,6 +258,8 @@ def main():
     processes = []
     try:
         build_mutator()
+        if args.snapshot_rename_failure:
+            build_rename_fail_interposer()
         a, b = root / "node-a", root / "node-b"
         for node in (a, b):
             (node / "data").mkdir(parents=True)
@@ -246,6 +274,7 @@ def main():
         b_db = b / "data" / "udb_N.db"
         a_db.write_text("harness-a::marker synced\n", encoding="ascii")
         b_db.write_text("harness-b::marker prior\n", encoding="ascii")
+        b_baseline = b_db.read_bytes()
         # Make A authoritative even on filesystems with one-second mtime resolution.
         old_time = time.time() - 60
         os.utime(b_db, (old_time, old_time))
@@ -263,9 +292,10 @@ def main():
         for node, config, log in ((b, b_conf, logs[1]), (a, a_conf, logs[0])):
             with log.open("w") as output:
                 mutator = MUTATOR_MODULE if node == a else None
-                processes.append(subprocess.Popen(bwrap_command(node, args.ircd, config, args.module, mutator),
-                                                  stdout=output, stderr=subprocess.STDOUT,
-                                                  text=True))
+                processes.append(subprocess.Popen(bwrap_command(node, args.ircd, config, args.module, mutator,
+                                                                rename_failure=args.snapshot_rename_failure and node == b),
+                                                   stdout=output, stderr=subprocess.STDOUT,
+                                                   text=True))
         if not wait_for_link(processes, logs, args.timeout):
             details = "\n".join(f"--- {log.name} ---\n{log_text(log)}" for log in logs)
             print("SKIP: servers started/configtested, but an S2S link was not observed in both logs.")
@@ -274,6 +304,16 @@ def main():
             return 77
 
         deadline = time.monotonic() + args.timeout
+        if args.snapshot_rename_failure:
+            while time.monotonic() < deadline:
+                if snapshot_rename_failure_observed(logs[0], logs[1], b_db, b_baseline):
+                    break
+                time.sleep(0.25)
+            if not snapshot_rename_failure_observed(logs[0], logs[1], b_db, b_baseline):
+                print_diagnostics(logs, b_db)
+                return 1
+            print("PASS: failed N snapshot rename left node B baseline unchanged with no tmp or ACK/commit")
+            return 0
         while time.monotonic() < deadline:
             if ("harness-a::marker synced" in b_db.read_text(errors="replace") and
                     staged_snapshot_observed(logs[0], logs[1])):
