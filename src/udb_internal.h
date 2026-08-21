@@ -100,9 +100,12 @@ typedef struct UdbContext {
 } UdbContext;
 
 static UdbContext *udb_ctx = NULL;
-static UdbConfig *udb_cfg = NULL;
 static UdbPasswordFailure udb_password_failures[UDB_PASSWORD_FAILURE_SLOTS];
 
+static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs);
+static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type);
+static int udb_config_posttest(int *errs);
+static void udb_config_free(void);
 static int udb_engine_init(void);
 static void udb_engine_shutdown(void);
 static UdbBlock *udb_block_create(char letter, const char *name);

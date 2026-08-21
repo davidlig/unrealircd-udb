@@ -257,9 +257,12 @@ typedef struct UdbContext {
 } UdbContext;
 
 static UdbContext *udb_ctx = NULL;
-static UdbConfig *udb_cfg = NULL;
 static UdbPasswordFailure udb_password_failures[UDB_PASSWORD_FAILURE_SLOTS];
 
+static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs);
+static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type);
+static int udb_config_posttest(int *errs);
+static void udb_config_free(void);
 static int udb_engine_init(void);
 static void udb_engine_shutdown(void);
 static UdbBlock *udb_block_create(char letter, const char *name);
@@ -373,23 +376,411 @@ ModuleHeader MOD_HEADER = {
  * unit, so all functions are static and can call each other freely.
  * ======================================================================== */
 
-/* Core database engine: tree, hash, file I/O, record management */
-/* Inlined: udb_core.c.inc */
+/* Record store: tree, hash, path, and file persistence primitives */
+/* Inlined: udb_store.c.inc */
 /*
- * UDB Core Engine for UnrealIRCd 6
- * Implements the database structures, hash, file I/O, and record manipulation.
+ * UDB record store primitives.
+ *
+ * These helpers only manage record trees, indexes, paths, and on-disk
+ * serialization. Runtime effects remain in udb_core.c.inc.
  */
 
+/* ========================================================================
+ * Block Index and Hash Operations
+ * ======================================================================== */
+static int udb_block_letter_to_index(char letter)
+{
+	switch (letter)
+	{
+		case 'N':
+			return 0;
+		case 'C':
+			return 1;
+		case 'I':
+			return 2;
+		case 'S':
+			return 3;
+		case 'L':
+			return 4;
+		case 'K':
+			return 5;
+		default:
+			return 0;
+	}
+}
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <limits.h>
-#include <sys/stat.h>
-#include <sys/types.h>
+static void udb_hash_init(void)
+{
+	for (int i = 0; i < UDB_NUM_BLOCKS; i++)
+		udb_ctx->hash_table[i] = safe_alloc(sizeof(UdbRecord *) * UDB_HASH_SIZE);
+}
 
-/* Local helper declared before its later definition. */
-static void udb_block_set_context_root(UdbBlock *block);
+static void udb_hash_destroy(void)
+{
+	for (int i = 0; i < UDB_NUM_BLOCKS; i++)
+	{
+		if (udb_ctx->hash_table[i])
+		{
+			safe_free(udb_ctx->hash_table[i]);
+			udb_ctx->hash_table[i] = NULL;
+		}
+	}
+}
+
+static void udb_hash_clear_block(int block_idx)
+{
+	if (block_idx < 0 || block_idx >= UDB_NUM_BLOCKS)
+		return;
+	safe_free(udb_ctx->hash_table[block_idx]);
+	udb_ctx->hash_table[block_idx] = safe_alloc(sizeof(UdbRecord *) * UDB_HASH_SIZE);
+}
+
+static unsigned int udb_hash_str(const char *str)
+{
+	unsigned int hash = 5381;
+	int c;
+
+	while ((c = *str++))
+	{
+		if (c >= 'A' && c <= 'Z')
+			c += ('a' - 'A');
+		hash = ((hash << 5) + hash) + c; // djb2
+	}
+	return hash & UDB_HASH_MASK;
+}
+
+static void udb_hash_insert_record(UdbRecord *rec, int block_idx, const char *key)
+{
+	unsigned int h = udb_hash_str(key);
+
+	rec->hash_next = udb_ctx->hash_table[block_idx][h];
+	udb_ctx->hash_table[block_idx][h] = rec;
+}
+
+static int udb_hash_remove_record(UdbRecord *rec, int block_idx, const char *key)
+{
+	unsigned int h = udb_hash_str(key);
+	UdbRecord *curr = udb_ctx->hash_table[block_idx][h];
+	UdbRecord *prev = NULL;
+
+	while (curr)
+	{
+		if (curr == rec)
+		{
+			if (prev)
+				prev->hash_next = curr->hash_next;
+			else
+				udb_ctx->hash_table[block_idx][h] = curr->hash_next;
+			return 1;
+		}
+		prev = curr;
+		curr = curr->hash_next;
+	}
+	return 0;
+}
+
+static UdbRecord *udb_hash_find(int block_idx, const char *key)
+{
+	unsigned int h;
+	UdbRecord *curr;
+
+	if (!key)
+		return NULL;
+	h = udb_hash_str(key);
+	curr = udb_ctx->hash_table[block_idx][h];
+	while (curr)
+	{
+		if (!strcasecmp(curr->key, key))
+			return curr;
+		curr = curr->hash_next;
+	}
+	return NULL;
+}
+
+/* ========================================================================
+ * Record Tree and Path Operations
+ * ======================================================================== */
+static const char *udb_get_shared_subkey(const char *key)
+{
+	static const char *known_keys[] = {
+	    "pass", "vhost", "oper", "swhois", "snomasks", "modes",
+	    "access", "forbid", "suspended", "challenge", "founder", "topic",
+	    "options", "clones", "nolines", "host", "encryption_key", "suffix",
+	    "nickserv", "chanserv", "ipserv", "quit_ips", "quit_clones", "flood",
+	    "type", "action", "duration", "reason", NULL};
+
+	for (int i = 0; known_keys[i]; i++)
+		if (!strcasecmp(known_keys[i], key))
+			return known_keys[i];
+	return NULL;
+}
+
+static UdbRecord *udb_record_create(UdbRecord *parent)
+{
+	UdbRecord *rec = safe_alloc(sizeof(UdbRecord));
+
+	rec->parent = parent;
+	if (parent)
+	{
+		rec->block_idx = parent->block_idx;
+		rec->sibling = parent->child;
+		parent->child = rec;
+	}
+	return rec;
+}
+
+static UdbRecord *udb_record_find(const char *key, UdbRecord *parent)
+{
+	UdbRecord *child;
+
+	if (!parent)
+		return NULL;
+	if (parent->parent == NULL && udb_ctx)
+		return udb_hash_find(parent->block_idx, key);
+	for (child = parent->child; child; child = child->sibling)
+		if (!strcasecmp(child->key, key))
+			return child;
+	return NULL;
+}
+
+static UdbRecord *udb_record_find_path(UdbBlock *block, const char *path)
+{
+	char pathbuf[512];
+	char *cur;
+	char *ds;
+	UdbRecord *rec;
+
+	if (!block || !block->tree || !path)
+		return NULL;
+	strlcpy(pathbuf, path, sizeof(pathbuf));
+	cur = pathbuf;
+	rec = block->tree;
+	while ((ds = strstr(cur, "::")))
+	{
+		*ds = '\0';
+		rec = udb_record_find(cur, rec);
+		if (!rec)
+			return NULL;
+		cur = ds + 2;
+	}
+	return udb_record_find(cur, rec);
+}
+
+static void udb_record_free_tree(UdbRecord *rec)
+{
+	UdbRecord *child;
+
+	if (!rec)
+		return;
+	child = rec->child;
+	while (child)
+	{
+		UdbRecord *next = child->sibling;
+
+		udb_record_free_tree(child);
+		child = next;
+	}
+	if (rec->key && rec->is_dynamic_key)
+		safe_free(rec->key);
+	if (rec->data_str)
+		safe_free(rec->data_str);
+	safe_free(rec);
+}
+
+/* ========================================================================
+ * File Persistence
+ * ======================================================================== */
+static void udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbuf, int pathlen)
+{
+	UdbRecord *child;
+	size_t old_len;
+
+	if (!rec)
+		return;
+	old_len = strlen(pathbuf);
+	if (depth > 0)
+		strlcat(pathbuf, "::", pathlen);
+	strlcat(pathbuf, rec->key, pathlen);
+	if (rec->data_str || rec->data_num > 0 || !rec->child)
+	{
+		if (rec->data_str)
+			fprintf(fp, "%s %s\n", pathbuf, rec->data_str);
+		else if (rec->data_num > 0 || !rec->child)
+			fprintf(fp, "%s *%lu\n", pathbuf, rec->data_num);
+	}
+	for (child = rec->child; child; child = child->sibling)
+		udb_serialize_tree(child, depth + 1, fp, pathbuf, pathlen);
+	pathbuf[old_len] = '\0';
+}
+
+static int udb_file_save_block(UdbBlock *block)
+{
+	char tmp_path[512];
+	char pathbuf[4096] = "";
+	FILE *fp;
+	struct stat st;
+	UdbRecord *rec;
+
+	if (!block || !block->filepath)
+		return 0;
+	snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", block->filepath);
+	fp = fopen(tmp_path, "w");
+	if (!fp)
+		return 0;
+	fprintf(fp, "; UDB Block %c - Version %d\n", block->letter, block->version);
+	fprintf(fp, "; Saved: %ld\n", (long)time(NULL));
+	fprintf(fp, "; Records: %u\n", block->record_count);
+	if (block->tree)
+		for (rec = block->tree->child; rec; rec = rec->sibling)
+			udb_serialize_tree(rec, 0, fp, pathbuf, sizeof(pathbuf));
+	fclose(fp);
+	rename(tmp_path, block->filepath);
+	block->checksum = udb_compute_block_checksum(block);
+	block->modified_at = time(NULL);
+	if (stat(block->filepath, &st) == 0)
+		block->filesize = st.st_size;
+	return 1;
+}
+
+/* End of udb_store.c.inc */
+
+/* Configuration: daemon block parsing and UDB settings state */
+/* Inlined: udb_config.c.inc */
+/* UDB configuration and settings state. */
+
+static UdbConfig *udb_cfg = NULL;
+
+static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
+{
+	int errors = 0;
+	ConfigEntry *cep;
+
+	/* We only handle CONFIG_MAIN blocks named "udb" */
+	if (type != CONFIG_MAIN)
+		return 0;
+	if (!ce || !ce->name || strcmp(ce->name, "udb"))
+		return 0;
+
+	for (cep = ce->items; cep; cep = cep->next)
+	{
+		if (!strcmp(cep->name, "database-directory"))
+		{
+			if (!cep->value || !*cep->value)
+			{
+				config_error("%s:%i: udb::database-directory requires a value",
+				             cep->file->filename, cep->line_number);
+				errors++;
+			}
+		} else if (!strcmp(cep->name, "propagator"))
+		{
+			if (!cep->value || !*cep->value)
+			{
+				config_error("%s:%i: udb::propagator requires a server name",
+				             cep->file->filename, cep->line_number);
+				errors++;
+			}
+		} else if (!strcmp(cep->name, "max-global-clones"))
+		{
+			if (!cep->value || atoi(cep->value) < 0)
+			{
+				config_error("%s:%i: udb::max-global-clones requires a non-negative integer",
+				             cep->file->filename, cep->line_number);
+				errors++;
+			}
+		} else if (!strcmp(cep->name, "password-flood"))
+		{
+			if (!cep->value || !strchr(cep->value, ':'))
+			{
+				config_error("%s:%i: udb::password-flood requires format attempts:seconds (e.g. 5:30)",
+				             cep->file->filename, cep->line_number);
+				errors++;
+			}
+		} else
+		{
+			config_error("%s:%i: unknown directive udb::%s",
+			             cep->file->filename, cep->line_number, cep->name);
+			errors++;
+		}
+	}
+
+	*errs = errors;
+	return errors ? -1 : 1;
+}
+
+static int udb_config_posttest(int *errs)
+{
+	/* Could validate that propagator is a known link, etc. */
+	return 0;
+}
+
+static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
+{
+	ConfigEntry *cep;
+
+	if (type != CONFIG_MAIN)
+		return 0;
+	if (!ce || !ce->name || strcmp(ce->name, "udb"))
+		return 0;
+
+	/* Allocate config if needed */
+	if (!udb_cfg)
+		udb_cfg = safe_alloc(sizeof(UdbConfig));
+
+	for (cep = ce->items; cep; cep = cep->next)
+	{
+		if (!strcmp(cep->name, "database-directory"))
+		{
+			safe_strdup(udb_cfg->db_directory, cep->value);
+		} else if (!strcmp(cep->name, "propagator"))
+		{
+			safe_strdup(udb_cfg->propagator, cep->value);
+		} else if (!strcmp(cep->name, "max-global-clones"))
+		{
+			udb_cfg->max_global_clones = atoi(cep->value);
+		} else if (!strcmp(cep->name, "password-flood"))
+		{
+			const char *colon = strchr(cep->value, ':');
+			if (colon)
+			{
+				udb_cfg->flood_attempts = atoi(cep->value);
+				udb_cfg->flood_period = atoi(colon + 1);
+			}
+		}
+	}
+
+	/* Set defaults if not configured */
+	if (!udb_cfg->db_directory)
+		safe_strdup(udb_cfg->db_directory, UDB_DB_SUBDIR);
+	if (udb_cfg->flood_attempts == 0)
+		udb_cfg->flood_attempts = 5;
+	if (udb_cfg->flood_period == 0)
+		udb_cfg->flood_period = 60;
+	udb_cfg->config_flood_attempts = udb_cfg->flood_attempts;
+	udb_cfg->config_flood_period = udb_cfg->flood_period;
+
+	return 1;
+}
+
+static void udb_config_free(void)
+{
+	if (udb_ctx)
+	{
+		safe_free(udb_ctx->quit_ips);
+		safe_free(udb_ctx->quit_clones);
+		safe_free(udb_ctx->encryption_key);
+		safe_free(udb_ctx->suffix);
+		safe_free(udb_ctx->nickserv_mask);
+		safe_free(udb_ctx->chanserv_mask);
+		safe_free(udb_ctx->ipserv_mask);
+	}
+	if (udb_cfg)
+	{
+		safe_free(udb_cfg->db_directory);
+		safe_free(udb_cfg->propagator);
+		safe_free(udb_cfg);
+		udb_cfg = NULL;
+	}
+}
 
 static int udb_setting_string_valid(const char *value)
 {
@@ -466,36 +857,6 @@ static int udb_flood_valid(const char *value, int *attempts, int *period)
 		return 0;
 	*attempts = (int)parsed_attempts;
 	*period = (int)parsed_period;
-	return 1;
-}
-
-static int udb_password_record_valid(UdbBlock *block, const char *path,
-                                     const char *value)
-{
-	const char *leaf;
-	size_t i;
-
-	if (!block || (block->letter != 'N' && block->letter != 'C') || !path)
-		return 1;
-	leaf = strrchr(path, ':');
-	leaf = leaf ? leaf + 1 : path;
-	if (!strcasecmp(leaf, NKEY_CHALLENGE))
-		return value && (!strcasecmp(value, "argon2id") ||
-		                 !strcasecmp(value, "sha256") ||
-		                 !strcasecmp(value, "crypt"));
-	if (strcasecmp(leaf, NKEY_PASS))
-		return 1;
-	if (!value)
-		return 0;
-	if (!strncmp(value, "argon2id:$argon2id$", 19))
-		return 1;
-	if (!strncmp(value, "crypt:", 6))
-		return value[6] != '\0';
-	if (strncmp(value, "sha256:", 7) || strlen(value + 7) != 64)
-		return 0;
-	for (i = 7; value[i]; i++)
-		if (!isxdigit((unsigned char)value[i]))
-			return 0;
 	return 1;
 }
 
@@ -616,191 +977,54 @@ static void udb_link_remove_record(UdbRecord *rec)
 		udb_ctx->propagator = NULL;
 }
 
-/* ========================================================================
- * Block Index Helpers
- * ======================================================================== */
-static int udb_block_letter_to_index(char letter)
+/* End of udb_config.c.inc */
+
+/* Core database engine: runtime effects, sync staging, and lifecycle */
+/* Inlined: udb_core.c.inc */
+/*
+ * UDB Core Engine for UnrealIRCd 6
+ * Implements the database structures, hash, file I/O, and record manipulation.
+ */
+
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <limits.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+
+/* Local helper declared before its later definition. */
+static void udb_block_set_context_root(UdbBlock *block);
+
+static int udb_password_record_valid(UdbBlock *block, const char *path,
+                                     const char *value)
 {
-	switch (letter)
-	{
-		case 'N':
+	const char *leaf;
+	size_t i;
+
+	if (!block || (block->letter != 'N' && block->letter != 'C') || !path)
+		return 1;
+	leaf = strrchr(path, ':');
+	leaf = leaf ? leaf + 1 : path;
+	if (!strcasecmp(leaf, NKEY_CHALLENGE))
+		return value && (!strcasecmp(value, "argon2id") ||
+		                 !strcasecmp(value, "sha256") ||
+		                 !strcasecmp(value, "crypt"));
+	if (strcasecmp(leaf, NKEY_PASS))
+		return 1;
+	if (!value)
+		return 0;
+	if (!strncmp(value, "argon2id:$argon2id$", 19))
+		return 1;
+	if (!strncmp(value, "crypt:", 6))
+		return value[6] != '\0';
+	if (strncmp(value, "sha256:", 7) || strlen(value + 7) != 64)
+		return 0;
+	for (i = 7; value[i]; i++)
+		if (!isxdigit((unsigned char)value[i]))
 			return 0;
-		case 'C':
-			return 1;
-		case 'I':
-			return 2;
-		case 'S':
-			return 3;
-		case 'L':
-			return 4;
-		case 'K':
-			return 5;
-		default:
-			return 0;
-	}
-}
-
-/* ========================================================================
- * Hash Operations
- * ======================================================================== */
-static void udb_hash_init(void)
-{
-	for (int i = 0; i < UDB_NUM_BLOCKS; i++)
-	{
-		udb_ctx->hash_table[i] = safe_alloc(sizeof(UdbRecord *) * UDB_HASH_SIZE);
-	}
-}
-
-static void udb_hash_destroy(void)
-{
-	for (int i = 0; i < UDB_NUM_BLOCKS; i++)
-	{
-		if (udb_ctx->hash_table[i])
-		{
-			safe_free(udb_ctx->hash_table[i]);
-			udb_ctx->hash_table[i] = NULL;
-		}
-	}
-}
-
-static void udb_hash_clear_block(int block_idx)
-{
-	if (block_idx < 0 || block_idx >= UDB_NUM_BLOCKS)
-		return;
-	safe_free(udb_ctx->hash_table[block_idx]);
-	udb_ctx->hash_table[block_idx] = safe_alloc(sizeof(UdbRecord *) * UDB_HASH_SIZE);
-}
-
-static unsigned int udb_hash_str(const char *str)
-{
-	unsigned int hash = 5381;
-	int c;
-	while ((c = *str++))
-	{
-		if (c >= 'A' && c <= 'Z')
-			c += ('a' - 'A');
-		hash = ((hash << 5) + hash) + c; // djb2
-	}
-	return hash & UDB_HASH_MASK;
-}
-
-static void udb_hash_insert_record(UdbRecord *rec, int block_idx, const char *key)
-{
-	unsigned int h = udb_hash_str(key);
-	rec->hash_next = udb_ctx->hash_table[block_idx][h];
-	udb_ctx->hash_table[block_idx][h] = rec;
-}
-
-static int udb_hash_remove_record(UdbRecord *rec, int block_idx, const char *key)
-{
-	unsigned int h = udb_hash_str(key);
-	UdbRecord *curr = udb_ctx->hash_table[block_idx][h];
-	UdbRecord *prev = NULL;
-
-	while (curr)
-	{
-		if (curr == rec)
-		{
-			if (prev)
-				prev->hash_next = curr->hash_next;
-			else
-				udb_ctx->hash_table[block_idx][h] = curr->hash_next;
-			return 1;
-		}
-		prev = curr;
-		curr = curr->hash_next;
-	}
-	return 0;
-}
-
-static UdbRecord *udb_hash_find(int block_idx, const char *key)
-{
-	if (!key)
-		return NULL;
-	unsigned int h = udb_hash_str(key);
-	UdbRecord *curr = udb_ctx->hash_table[block_idx][h];
-	while (curr)
-	{
-		if (!strcasecmp(curr->key, key))
-			return curr;
-		curr = curr->hash_next;
-	}
-	return NULL;
-}
-
-/* ========================================================================
- * Record Operations
- * ======================================================================== */
-static const char *udb_get_shared_subkey(const char *key)
-{
-	static const char *known_keys[] = {
-	    "pass", "vhost", "oper", "swhois", "snomasks", "modes", "access",
-	    "forbid", "suspended", "challenge", "founder", "topic", "options",
-	    "clones", "nolines", "host", "encryption_key", "suffix", "nickserv",
-	    "chanserv", "ipserv", "quit_ips", "quit_clones", "flood",
-	    "type", "action", "duration", "reason", NULL};
-	for (int i = 0; known_keys[i]; i++)
-	{
-		if (!strcasecmp(known_keys[i], key))
-			return known_keys[i];
-	}
-	return NULL;
-}
-
-static UdbRecord *udb_record_create(UdbRecord *parent)
-{
-	UdbRecord *rec = safe_alloc(sizeof(UdbRecord));
-	rec->parent = parent;
-
-	if (parent)
-	{
-		rec->block_idx = parent->block_idx;
-		rec->sibling = parent->child;
-		parent->child = rec;
-	}
-	return rec;
-}
-
-static UdbRecord *udb_record_find(const char *key, UdbRecord *parent)
-{
-	if (!parent)
-		return NULL;
-
-	if (parent->parent == NULL && udb_ctx)
-	{
-		return udb_hash_find(parent->block_idx, key);
-	}
-
-	UdbRecord *child = parent->child;
-	while (child)
-	{
-		if (!strcasecmp(child->key, key))
-		{
-			return child;
-		}
-		child = child->sibling;
-	}
-	return NULL;
-}
-
-static UdbRecord *udb_record_find_path(UdbBlock *block, const char *path)
-{
-	if (!block || !block->tree || !path)
-		return NULL;
-	char pathbuf[512];
-	strlcpy(pathbuf, path, sizeof(pathbuf));
-	char *cur = pathbuf;
-	char *ds;
-	UdbRecord *rec = block->tree;
-	while ((ds = strstr(cur, "::")))
-	{
-		*ds = '\0';
-		rec = udb_record_find(cur, rec);
-		if (!rec)
-			return NULL;
-		cur = ds + 2;
-	}
-	return udb_record_find(cur, rec);
+	return 1;
 }
 
 static UdbRecord *udb_record_insert(UdbBlock *block, UdbRecord *parent, const char *key, const char *data_str, unsigned long data_num, int persist)
@@ -869,25 +1093,6 @@ static UdbRecord *udb_record_insert(UdbBlock *block, UdbRecord *parent, const ch
 	return rec;
 }
 
-static void udb_record_free_tree(UdbRecord *rec)
-{
-	if (!rec)
-		return;
-
-	UdbRecord *child = rec->child;
-	while (child)
-	{
-		UdbRecord *next = child->sibling;
-		udb_record_free_tree(child);
-		child = next;
-	}
-
-	if (rec->key && rec->is_dynamic_key)
-		safe_free(rec->key);
-	if (rec->data_str)
-		safe_free(rec->data_str);
-	safe_free(rec);
-}
 
 static UdbRecord *udb_record_delete(UdbBlock *block, UdbRecord *rec, int persist)
 {
@@ -1297,86 +1502,6 @@ static UdbRecord *udb_file_parse_line(UdbBlock *block, char *line)
 	return leaf_rec;
 }
 
-static void udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbuf, int pathlen)
-{
-	if (!rec)
-		return;
-
-	size_t old_len = strlen(pathbuf);
-
-	if (depth > 0)
-	{
-		strlcat(pathbuf, "::", pathlen);
-	}
-	strlcat(pathbuf, rec->key, pathlen);
-
-	if (rec->data_str || rec->data_num > 0 || !rec->child)
-	{
-		if (rec->data_str)
-		{
-			fprintf(fp, "%s %s\n", pathbuf, rec->data_str);
-		} else if (rec->data_num > 0 || !rec->child)
-		{
-			fprintf(fp, "%s *%lu\n", pathbuf, rec->data_num);
-		}
-	}
-
-	if (rec->child)
-	{
-		UdbRecord *child = rec->child;
-		while (child)
-		{
-			udb_serialize_tree(child, depth + 1, fp, pathbuf, pathlen);
-			child = child->sibling;
-		}
-	}
-
-	// Restore pathbuf
-	pathbuf[old_len] = '\0';
-}
-
-static int udb_file_save_block(UdbBlock *block)
-{
-	if (!block || !block->filepath)
-		return 0;
-
-	char tmp_path[512];
-	snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", block->filepath);
-	FILE *fp = fopen(tmp_path, "w");
-	if (!fp)
-		return 0;
-
-	fprintf(fp, "; UDB Block %c - Version %d\n", block->letter, block->version);
-	fprintf(fp, "; Saved: %ld\n", (long)time(NULL));
-	fprintf(fp, "; Records: %u\n", block->record_count);
-
-	char pathbuf[4096];
-	pathbuf[0] = '\0';
-
-	if (block->tree)
-	{
-		UdbRecord *rec = block->tree->child;
-		while (rec)
-		{
-			udb_serialize_tree(rec, 0, fp, pathbuf, sizeof(pathbuf));
-			rec = rec->sibling;
-		}
-	}
-
-	fclose(fp);
-
-	rename(tmp_path, block->filepath);
-	block->checksum = udb_compute_block_checksum(block);
-	block->modified_at = time(NULL);
-
-	struct stat st;
-	if (stat(block->filepath, &st) == 0)
-	{
-		block->filesize = st.st_size;
-	}
-
-	return 1;
-}
 
 static int udb_file_load_block(UdbBlock *block)
 {
@@ -1627,13 +1752,7 @@ static void udb_engine_shutdown(void)
 	}
 
 	udb_hash_destroy();
-	safe_free(udb_ctx->quit_ips);
-	safe_free(udb_ctx->quit_clones);
-	safe_free(udb_ctx->encryption_key);
-	safe_free(udb_ctx->suffix);
-	safe_free(udb_ctx->nickserv_mask);
-	safe_free(udb_ctx->chanserv_mask);
-	safe_free(udb_ctx->ipserv_mask);
+	udb_config_free();
 	safe_free(udb_ctx);
 	udb_ctx = NULL;
 }
@@ -5070,10 +5189,6 @@ static void udb_query_init(ModuleInfo *modinfo)
  * Validates the udb { } configuration block at config load time.
  * ======================================================================== */
 
-static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs);
-static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type);
-static int udb_config_posttest(int *errs);
-
 MOD_TEST()
 {
 	HookAdd(modinfo->handle, HOOKTYPE_CONFIGTEST, 0, udb_config_test);
@@ -5149,128 +5264,4 @@ MOD_UNLOAD()
 	udb_engine_shutdown();
 
 	return MOD_SUCCESS;
-}
-
-/* ========================================================================
- * Configuration: udb { } block
- *
- * Example configuration:
- *
- *   udb {
- *       database-directory "data/udb";
- *       propagator "services.mynetwork.org";
- *       max-global-clones 3;
- *       password-flood 5:30;
- *   };
- * ======================================================================== */
-
-static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
-{
-	int errors = 0;
-	ConfigEntry *cep;
-
-	/* We only handle CONFIG_MAIN blocks named "udb" */
-	if (type != CONFIG_MAIN)
-		return 0;
-	if (!ce || !ce->name || strcmp(ce->name, "udb"))
-		return 0;
-
-	for (cep = ce->items; cep; cep = cep->next)
-	{
-		if (!strcmp(cep->name, "database-directory"))
-		{
-			if (!cep->value || !*cep->value)
-			{
-				config_error("%s:%i: udb::database-directory requires a value",
-				             cep->file->filename, cep->line_number);
-				errors++;
-			}
-		} else if (!strcmp(cep->name, "propagator"))
-		{
-			if (!cep->value || !*cep->value)
-			{
-				config_error("%s:%i: udb::propagator requires a server name",
-				             cep->file->filename, cep->line_number);
-				errors++;
-			}
-		} else if (!strcmp(cep->name, "max-global-clones"))
-		{
-			if (!cep->value || atoi(cep->value) < 0)
-			{
-				config_error("%s:%i: udb::max-global-clones requires a non-negative integer",
-				             cep->file->filename, cep->line_number);
-				errors++;
-			}
-		} else if (!strcmp(cep->name, "password-flood"))
-		{
-			if (!cep->value || !strchr(cep->value, ':'))
-			{
-				config_error("%s:%i: udb::password-flood requires format attempts:seconds (e.g. 5:30)",
-				             cep->file->filename, cep->line_number);
-				errors++;
-			}
-		} else
-		{
-			config_error("%s:%i: unknown directive udb::%s",
-			             cep->file->filename, cep->line_number, cep->name);
-			errors++;
-		}
-	}
-
-	*errs = errors;
-	return errors ? -1 : 1;
-}
-
-static int udb_config_posttest(int *errs)
-{
-	/* Could validate that propagator is a known link, etc. */
-	return 0;
-}
-
-static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
-{
-	ConfigEntry *cep;
-
-	if (type != CONFIG_MAIN)
-		return 0;
-	if (!ce || !ce->name || strcmp(ce->name, "udb"))
-		return 0;
-
-	/* Allocate config if needed */
-	if (!udb_cfg)
-		udb_cfg = safe_alloc(sizeof(UdbConfig));
-
-	for (cep = ce->items; cep; cep = cep->next)
-	{
-		if (!strcmp(cep->name, "database-directory"))
-		{
-			safe_strdup(udb_cfg->db_directory, cep->value);
-		} else if (!strcmp(cep->name, "propagator"))
-		{
-			safe_strdup(udb_cfg->propagator, cep->value);
-		} else if (!strcmp(cep->name, "max-global-clones"))
-		{
-			udb_cfg->max_global_clones = atoi(cep->value);
-		} else if (!strcmp(cep->name, "password-flood"))
-		{
-			const char *colon = strchr(cep->value, ':');
-			if (colon)
-			{
-				udb_cfg->flood_attempts = atoi(cep->value);
-				udb_cfg->flood_period = atoi(colon + 1);
-			}
-		}
-	}
-
-	/* Set defaults if not configured */
-	if (!udb_cfg->db_directory)
-		safe_strdup(udb_cfg->db_directory, UDB_DB_SUBDIR);
-	if (udb_cfg->flood_attempts == 0)
-		udb_cfg->flood_attempts = 5;
-	if (udb_cfg->flood_period == 0)
-		udb_cfg->flood_period = 60;
-	udb_cfg->config_flood_attempts = udb_cfg->flood_attempts;
-	udb_cfg->config_flood_period = udb_cfg->flood_period;
-
-	return 1;
 }

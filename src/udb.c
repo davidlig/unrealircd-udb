@@ -36,7 +36,13 @@ ModuleHeader MOD_HEADER = {
  * unit, so all functions are static and can call each other freely.
  * ======================================================================== */
 
-/* Core database engine: tree, hash, file I/O, record management */
+/* Record store: tree, hash, path, and file persistence primitives */
+#include "udb_store.c.inc"
+
+/* Configuration: daemon block parsing and UDB settings state */
+#include "udb_config.c.inc"
+
+/* Core database engine: runtime effects, sync staging, and lifecycle */
 #include "udb_core.c.inc"
 
 /* S2S protocol handler: DB command, server sync */
@@ -62,10 +68,6 @@ ModuleHeader MOD_HEADER = {
  *
  * Validates the udb { } configuration block at config load time.
  * ======================================================================== */
-
-static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs);
-static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type);
-static int udb_config_posttest(int *errs);
 
 MOD_TEST()
 {
@@ -142,128 +144,4 @@ MOD_UNLOAD()
 	udb_engine_shutdown();
 
 	return MOD_SUCCESS;
-}
-
-/* ========================================================================
- * Configuration: udb { } block
- *
- * Example configuration:
- *
- *   udb {
- *       database-directory "data/udb";
- *       propagator "services.mynetwork.org";
- *       max-global-clones 3;
- *       password-flood 5:30;
- *   };
- * ======================================================================== */
-
-static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
-{
-	int errors = 0;
-	ConfigEntry *cep;
-
-	/* We only handle CONFIG_MAIN blocks named "udb" */
-	if (type != CONFIG_MAIN)
-		return 0;
-	if (!ce || !ce->name || strcmp(ce->name, "udb"))
-		return 0;
-
-	for (cep = ce->items; cep; cep = cep->next)
-	{
-		if (!strcmp(cep->name, "database-directory"))
-		{
-			if (!cep->value || !*cep->value)
-			{
-				config_error("%s:%i: udb::database-directory requires a value",
-				             cep->file->filename, cep->line_number);
-				errors++;
-			}
-		} else if (!strcmp(cep->name, "propagator"))
-		{
-			if (!cep->value || !*cep->value)
-			{
-				config_error("%s:%i: udb::propagator requires a server name",
-				             cep->file->filename, cep->line_number);
-				errors++;
-			}
-		} else if (!strcmp(cep->name, "max-global-clones"))
-		{
-			if (!cep->value || atoi(cep->value) < 0)
-			{
-				config_error("%s:%i: udb::max-global-clones requires a non-negative integer",
-				             cep->file->filename, cep->line_number);
-				errors++;
-			}
-		} else if (!strcmp(cep->name, "password-flood"))
-		{
-			if (!cep->value || !strchr(cep->value, ':'))
-			{
-				config_error("%s:%i: udb::password-flood requires format attempts:seconds (e.g. 5:30)",
-				             cep->file->filename, cep->line_number);
-				errors++;
-			}
-		} else
-		{
-			config_error("%s:%i: unknown directive udb::%s",
-			             cep->file->filename, cep->line_number, cep->name);
-			errors++;
-		}
-	}
-
-	*errs = errors;
-	return errors ? -1 : 1;
-}
-
-static int udb_config_posttest(int *errs)
-{
-	/* Could validate that propagator is a known link, etc. */
-	return 0;
-}
-
-static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
-{
-	ConfigEntry *cep;
-
-	if (type != CONFIG_MAIN)
-		return 0;
-	if (!ce || !ce->name || strcmp(ce->name, "udb"))
-		return 0;
-
-	/* Allocate config if needed */
-	if (!udb_cfg)
-		udb_cfg = safe_alloc(sizeof(UdbConfig));
-
-	for (cep = ce->items; cep; cep = cep->next)
-	{
-		if (!strcmp(cep->name, "database-directory"))
-		{
-			safe_strdup(udb_cfg->db_directory, cep->value);
-		} else if (!strcmp(cep->name, "propagator"))
-		{
-			safe_strdup(udb_cfg->propagator, cep->value);
-		} else if (!strcmp(cep->name, "max-global-clones"))
-		{
-			udb_cfg->max_global_clones = atoi(cep->value);
-		} else if (!strcmp(cep->name, "password-flood"))
-		{
-			const char *colon = strchr(cep->value, ':');
-			if (colon)
-			{
-				udb_cfg->flood_attempts = atoi(cep->value);
-				udb_cfg->flood_period = atoi(colon + 1);
-			}
-		}
-	}
-
-	/* Set defaults if not configured */
-	if (!udb_cfg->db_directory)
-		safe_strdup(udb_cfg->db_directory, UDB_DB_SUBDIR);
-	if (udb_cfg->flood_attempts == 0)
-		udb_cfg->flood_attempts = 5;
-	if (udb_cfg->flood_period == 0)
-		udb_cfg->flood_period = 60;
-	udb_cfg->config_flood_attempts = udb_cfg->flood_attempts;
-	udb_cfg->config_flood_period = udb_cfg->flood_period;
-
-	return 1;
 }

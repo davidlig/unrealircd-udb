@@ -69,7 +69,7 @@ def bundle_sources():
         r'#include\s+"udb_internal\.h"', udb_internal_h_content, clean_udb_c
     )
 
-    # Function to replace #include "udb_*.c.inc" with actual file content
+    # Recursively inline implementation includes while preserving their order.
     def replace_inc(match):
         filename = match.group(1)
         inc_path = os.path.join(SRC_DIR, filename)
@@ -77,6 +77,7 @@ def bundle_sources():
             with open(inc_path, "r", encoding="utf-8") as inc_file:
                 inc_text = inc_file.read()
                 inc_text = re.sub(r'#include\s+"udb\.h"', '', inc_text)
+                inc_text = re.sub(r'#include\s+"([^\"]+\.c\.inc)"', replace_inc, inc_text)
                 return f"/* Inlined: {filename} */\n" + inc_text + f"\n/* End of {filename} */"
         else:
             raise FileNotFoundError(f"Included file not found: {inc_path}")
