@@ -2,6 +2,20 @@
 
 static UdbConfig *udb_cfg = NULL;
 
+static int udb_database_directory_valid(const char *value)
+{
+	char *path = NULL;
+	int valid;
+
+	if (!value || !*value || strstr(value, "://") || strpbrk(value, "\r\n"))
+		return 0;
+	safe_strdup(path, value);
+	convert_to_absolute_path(&path, PERMDATADIR);
+	valid = strlen(path) + sizeof("/udb_N.db") <= UDB_BLOCK_PATH_MAX;
+	safe_free(path);
+	return valid;
+}
+
 static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
 {
 	int errors = 0;
@@ -17,9 +31,9 @@ static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
 	{
 		if (!strcmp(cep->name, "database-directory"))
 		{
-			if (!cep->value || !*cep->value)
+			if (!udb_database_directory_valid(cep->value))
 			{
-				config_error("%s:%i: udb::database-directory requires a value",
+				config_error("%s:%i: udb::database-directory must be a local path that leaves room for UDB block files",
 				             cep->file->filename, cep->line_number);
 				errors++;
 			}
@@ -102,7 +116,8 @@ static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
 
 	/* Set defaults if not configured */
 	if (!udb_cfg->db_directory)
-		safe_strdup(udb_cfg->db_directory, UDB_DB_SUBDIR);
+		safe_strdup(udb_cfg->db_directory, UDB_DEFAULT_DB_DIRECTORY);
+	convert_to_absolute_path(&udb_cfg->db_directory, PERMDATADIR);
 	if (udb_cfg->flood_attempts == 0)
 		udb_cfg->flood_attempts = 5;
 	if (udb_cfg->flood_period == 0)

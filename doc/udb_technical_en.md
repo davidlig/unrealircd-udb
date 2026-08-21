@@ -22,7 +22,17 @@ davidlig::oper *4
 *   An asterisk `*` prefix in the value indicates that the data is numeric (integer).
 *   The absence of `*` indicates that the data is a text string.
 
-### 1.2 Supported Blocks and Their Options
+### 1.2 Database Directory
+`udb::database-directory` selects the directory containing every block file:
+`udb_N.db`, `udb_C.db`, `udb_I.db`, `udb_S.db`, `udb_L.db`, and `udb_K.db`.
+Absolute local paths are used as written. Relative paths resolve beneath
+UnrealIRCd's `PERMDATADIR`. The setting rejects URLs, line breaks, and paths
+that cannot safely contain a block filename. UDB creates the final directory
+with mode `0700` when needed and refuses to start if it is not a directory or
+cannot be created. Omitting the setting preserves the legacy location:
+`PERMDATADIR` itself.
+
+### 1.3 Supported Blocks and Their Options
 
 #### Block N (Nicks - Users)
 Stores configurations for registered users.
@@ -245,8 +255,8 @@ mutation.
 Snapshots are created with exclusive creation and mode `0600`, independent of
 the process umask. Where the platform provides `O_NOFOLLOW`, it is used as an
 additional symlink safeguard. UDB aborts and removes its temporary snapshot on
-open, permission, stream, close, or rename failure; it does not change the
-configured database-directory behavior.
+open, permission, stream, close, or rename failure; snapshots and active block
+files always remain beneath the configured database directory.
 
 **DRP (Drop / Empty Block):**
 `:<sid> DB * DRP <block_letter>`

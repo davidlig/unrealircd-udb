@@ -22,7 +22,17 @@ davidlig::oper *4
 *   Un prefijo `*` en el valor indica que el dato es numérico (entero).
 *   La ausencia de `*` indica que el dato es una cadena de texto (String).
 
-### 1.2 Bloques Soportados y sus Opciones
+### 1.2 Directorio de la Base de Datos
+`udb::database-directory` selecciona el directorio que contiene todos los
+archivos de bloque: `udb_N.db`, `udb_C.db`, `udb_I.db`, `udb_S.db`, `udb_L.db` y
+`udb_K.db`. Las rutas locales absolutas se usan tal cual. Las rutas relativas se
+resuelven bajo `PERMDATADIR` de UnrealIRCd. La opción rechaza URLs, saltos de
+línea y rutas que no pueden contener de forma segura un nombre de bloque. UDB
+crea el directorio final con modo `0700` cuando es necesario y rechaza iniciar
+si no es un directorio o no puede crearlo. Si se omite, se conserva la ubicación
+heredada: el propio `PERMDATADIR`.
+
+### 1.3 Bloques Soportados y sus Opciones
 
 #### Bloque N (Nicks - Usuarios)
 Almacena configuraciones para usuarios registrados.
@@ -233,8 +243,9 @@ mutación no se reenvía.
 Los snapshots se crean de forma exclusiva con modo `0600`, independiente de la
 umask del proceso. Cuando la plataforma proporciona `O_NOFOLLOW`, se usa como
 protección adicional contra enlaces simbólicos. UDB aborta y elimina su snapshot
-temporal ante un fallo de apertura, permisos, flujo, cierre o renombrado; este
-cambio no modifica el comportamiento de `database-directory` configurado.
+temporal ante un fallo de apertura, permisos, flujo, cierre o renombrado; los
+snapshots y bloques activos siempre permanecen bajo el directorio de base de
+datos configurado.
 
 **DRP (Drop / Vaciar Bloque):**
 `:<sid> DB * DRP <letra_bloque>`

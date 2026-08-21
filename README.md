@@ -88,8 +88,16 @@ loadmodule "third/udb";
 
 udb {
     propagator "ares-services.yournetwork.net";
+    // Optional: UDB stores udb_N.db, udb_C.db, etc. in this directory.
+    database-directory "/var/lib/unrealircd/udb";
 };
 ```
+
+`database-directory` accepts a local absolute path or a path relative to
+UnrealIRCd's permanent data directory. UDB creates the final directory if it
+does not exist and stores every block file directly beneath it. If omitted, UDB
+keeps the legacy default of storing block files in UnrealIRCd's permanent data
+directory.
 
 ---
 

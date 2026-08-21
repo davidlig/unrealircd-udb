@@ -9,17 +9,26 @@ ModuleHeader MOD_HEADER = {
     "UnrealIRCd UDB tests",
     "unrealircd-6"};
 
-#define MUTATOR_PATH        "N::udb-test-mutator"
-#define MUTATOR_TRIGGER     "/home/davidlig/unrealircd/data/udb-test-mutator-go"
-#define OPT_TRIGGER         "/home/davidlig/unrealircd/data/udb-test-mutator-opt-go"
-#define STAGED_AUTH_TRIGGER "/home/davidlig/unrealircd/data/udb-test-mutator-staged-authorization-go"
-#define SETTLEMENT_DELAY    3
+#define MUTATOR_PATH      "N::udb-test-mutator"
+#define MUTATOR_DIRECTORY "UDB_TEST_MUTATOR_DIRECTORY"
+#define SETTLEMENT_DELAY  3
 
 static Client *mutator_peer;
 static const char *mutator_value;
 static time_t mutator_deadline;
 static int mutator_state;
 static int mutator_staged_authorization_test;
+
+static int mutator_trigger_exists(const char *name)
+{
+	const char *directory = getenv(MUTATOR_DIRECTORY);
+	char path[512];
+
+	if (!directory || !*directory ||
+	    snprintf(path, sizeof(path), "%s/%s", directory, name) >= (int)sizeof(path))
+		return 0;
+	return access(path, F_OK) == 0;
+}
 
 static int mutator_server_synced(Client *client)
 {
@@ -54,7 +63,7 @@ EVENT(udb_test_mutator_event)
 {
 	if (mutator_staged_authorization_test)
 	{
-		if (mutator_state || !mutator_peer || access(STAGED_AUTH_TRIGGER, F_OK))
+		if (mutator_state || !mutator_peer || !mutator_trigger_exists("udb-test-mutator-staged-authorization-go"))
 			return;
 		if (!IsServer(mutator_peer) || !MyConnect(mutator_peer))
 		{
@@ -72,9 +81,10 @@ EVENT(udb_test_mutator_event)
 		           "[UDB_TEST_MUTATOR] emitted unauthorized staged-sync and RES frames", NULL);
 		return;
 	}
-	if (mutator_state < 0 || !mutator_peer || TStime() < mutator_deadline || access(MUTATOR_TRIGGER, F_OK))
+	if (mutator_state < 0 || !mutator_peer || TStime() < mutator_deadline ||
+	    !mutator_trigger_exists("udb-test-mutator-go"))
 	{
-		if (mutator_state || access(OPT_TRIGGER, F_OK))
+		if (mutator_state || !mutator_trigger_exists("udb-test-mutator-opt-go"))
 			return;
 		if (!IsServer(mutator_peer) || !MyConnect(mutator_peer))
 		{

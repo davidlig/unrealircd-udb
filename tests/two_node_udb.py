@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Isolated two-node UDB integration harness.
-
-Each server runs in a separate bubblewrap mount namespace.  This is necessary
-because UDB block files currently resolve below UnrealIRCd's compiled
-PERMDATADIR, rather than udb::database-directory.
-"""
+"""Isolated two-node UDB integration harness."""
 
 import argparse
 import os
@@ -21,16 +16,14 @@ import time
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[5]
-DEFAULT_IRCD = pathlib.Path("/home/davidlig/unrealircd/bin/unrealircd")
-PERMDATADIR = pathlib.Path("/home/davidlig/unrealircd/data")
+RUNTIME_ROOT = pathlib.Path(os.environ.get("UDB_TEST_IRCD_ROOT", pathlib.Path.home() / "unrealircd"))
+DEFAULT_IRCD = RUNTIME_ROOT / "bin/unrealircd"
 CLOAK_KEYS = ("aB3" * 30, "cD4" * 30, "eF5" * 30)
 MUTATOR_SOURCE = ROOT / "src/modules/third/udb/tests/udb_test_mutator.c"
 MUTATOR_MODULE = MUTATOR_SOURCE.with_suffix(".so")
 MUTATOR_RECORD = "udb-test-mutator authorized-insert"
 RENAME_FAIL_SOURCE = ROOT / "src/modules/third/udb/tests/udb_snapshot_rename_fail.c"
 RENAME_FAIL_MODULE = RENAME_FAIL_SOURCE.with_suffix(".so")
-RENAME_FAIL_TARGET = str(PERMDATADIR / "udb_N.db")
-RENAME_FAIL_ARM = str(PERMDATADIR / "udb-snapshot-rename-fail-go")
 MUTATOR_OPT_TRIGGER = "udb-test-mutator-opt-go"
 K_STAGED_RECORD = "G::*@udb-staged.test::reason staged-sync-k-effect"
 
@@ -50,8 +43,8 @@ def write_config(path, name, sid, client_port, server_port, tls_port, peer, peer
                  propagator, autoconnect, load_mutator=False):
     outgoing = (f'    outgoing {{ bind-ip "127.0.0.1"; hostname "127.0.0.1"; port {peer_port}; '
                 'options { autoconnect; } }\n') if autoconnect else ""
-    path.write_text(f'''include "/home/davidlig/unrealircd/conf/modules.default.conf";
-include "/home/davidlig/unrealircd/conf/snomasks.default.conf";
+    path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
+include "{RUNTIME_ROOT}/conf/snomasks.default.conf";
 
 me {{
     name "{name}";
@@ -91,18 +84,20 @@ udb {{
 def bwrap_command(node, ircd, config, module, mutator=None, configtest=False, rename_failure=False,
                   rename_failure_arm=False):
     # A read-only host root leaves dependencies and installed modules available.
-    # Only this node's working directory and compiled data directory are writable.
+    # The runtime data mount isolates UnrealIRCd's control socket; UDB uses data/.
     command = ["bwrap", "--die-with-parent", "--ro-bind", "/", "/",
-               "--bind", str(node), str(node),
-               "--bind", str(node / "data"), str(PERMDATADIR),
-               "--bind", str(node / "tmp"), "/home/davidlig/unrealircd/tmp",
-               "--ro-bind", str(node / "modules" / "third"), "/home/davidlig/unrealircd/modules/third",
-               "--dev-bind", "/dev", "/dev", "--proc", "/proc"]
+                "--bind", str(node), str(node),
+                "--bind", str(node / "runtime-data"), str(RUNTIME_ROOT / "data"),
+                "--bind", str(node / "tmp"), str(RUNTIME_ROOT / "tmp"),
+                "--ro-bind", str(node / "modules" / "third"), str(RUNTIME_ROOT / "modules/third"),
+                "--dev-bind", "/dev", "/dev", "--proc", "/proc",
+                "--setenv", "UDB_TEST_MUTATOR_DIRECTORY", str(node / "data")]
     if rename_failure:
         command.extend(("--setenv", "LD_PRELOAD", str(RENAME_FAIL_MODULE),
-                        "--setenv", "UDB_SNAPSHOT_RENAME_FAIL_TARGET", RENAME_FAIL_TARGET))
+                        "--setenv", "UDB_SNAPSHOT_RENAME_FAIL_TARGET", str(node / "data" / "udb_N.db")))
         if rename_failure_arm:
-            command.extend(("--setenv", "UDB_SNAPSHOT_RENAME_FAIL_ARM", RENAME_FAIL_ARM))
+            command.extend(("--setenv", "UDB_SNAPSHOT_RENAME_FAIL_ARM",
+                            str(node / "data" / "udb-snapshot-rename-fail-go")))
     command.extend((str(ircd), "-f", str(config)))
     if configtest:
         command.append("-c")
@@ -206,6 +201,14 @@ def snapshot_is_private(db):
     return stat.S_IMODE(db.stat().st_mode) == 0o600
 
 
+def db_loaded_from(log, db):
+    return db_loaded_from_text(log_text(log), db)
+
+
+def db_loaded_from_text(text, db):
+    return f"Loaded block {db.stem[-1]} from {db} (" in text
+
+
 def mutator_insert_observed(b_log, b_db):
     return (ordered(udb_commands(b_log), ("INS",)) and db_contains(b_db, MUTATOR_RECORD) and
             "Inserted record via S2S: N::udb-test-mutator -> authorized-insert" in log_text(b_log))
@@ -287,7 +290,7 @@ def main():
         return skip(f"UnrealIRCd binary is unavailable: {args.ircd}")
     if not args.module.is_file():
         return skip(f"compiled UDB module is unavailable: {args.module}")
-    if not pathlib.Path("/home/davidlig/unrealircd/conf/modules.default.conf").is_file():
+    if not (RUNTIME_ROOT / "conf/modules.default.conf").is_file():
         return skip("installed modules.default.conf is unavailable; see two_node_udb.md")
 
     # Do not use TemporaryDirectory here: its finalizer still removes the tree
@@ -301,6 +304,7 @@ def main():
         a, b = root / "node-a", root / "node-b"
         for node in (a, b):
             (node / "data").mkdir(parents=True)
+            (node / "runtime-data").mkdir()
             (node / "tmp").mkdir()
             third_modules = node / "modules" / "third"
             third_modules.mkdir(parents=True)
@@ -350,6 +354,11 @@ def main():
             print("This is not a PASS. Check link prerequisites in two_node_udb.md.")
             print(details, file=sys.stderr)
             return 77
+        if not all(db_loaded_from(log, db) for log, db in
+                   ((logs[0], a_db), (logs[1], b_db), (logs[0], a_k_db), (logs[1], b_k_db))):
+            print_diagnostics(logs, a_db)
+            return 1
+        print("PASS: each node loaded its seeded N/K blocks from its configured temporary database directory")
 
         deadline = time.monotonic() + args.timeout
         if args.snapshot_rename_failure:
@@ -420,6 +429,23 @@ def main():
             print_diagnostics(logs, b_db)
             return skip("S2S linked, but node B did not durably apply the authorized mutator DEL")
         print("PASS: node B observed and durably persisted the authorized propagator DEL")
+        restart_offset = len(log_text(logs[1]))
+        stop((processes[0],))
+        processes.pop(0)
+        with logs[1].open("a") as output:
+            processes.insert(0, subprocess.Popen(bwrap_command(b, args.ircd, b_conf, args.module),
+                                                  stdout=output, stderr=subprocess.STDOUT, text=True))
+        deadline = time.monotonic() + args.timeout
+        while time.monotonic() < deadline:
+            if processes[0].poll() is not None:
+                break
+            if db_loaded_from_text(log_text(logs[1])[restart_offset:], b_db):
+                break
+            time.sleep(0.25)
+        if processes[0].poll() is not None or not db_loaded_from_text(log_text(logs[1])[restart_offset:], b_db):
+            print_diagnostics(logs, b_db)
+            return 1
+        print("PASS: restarted node B loaded its persisted N block from its configured temporary database directory")
         return 0
     except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)

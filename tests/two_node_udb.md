@@ -7,12 +7,12 @@ python3 src/modules/third/udb/tests/two_node_udb.py
 ```
 
 The harness creates two temporary configs, two independent UDB data trees, and
-four loopback ports. It loads the supplied compiled UDB module on both nodes.
-`bwrap` gives each node a distinct mount at UnrealIRCd's compiled data path,
-which is required because UDB block files currently use `PERMDATADIR` despite
-the `udb::database-directory` setting. The host filesystem is read-only inside
-each node except for its temporary directory, data mount, and module-cache
-mount (`/home/davidlig/unrealircd/tmp`).
+four loopback ports. Each config sets `udb::database-directory` to its node's
+temporary data tree. It loads the supplied compiled UDB module on both nodes.
+`bwrap` keeps the host root read-only while each node directory, including its
+configured database directory, remains writable. Its separate runtime-data
+mount is only for UnrealIRCd's control socket; UDB does not use that mount. The
+module-cache mount (`$HOME/unrealircd/tmp`) is also writable.
 
 It compiles `udb_test_mutator.c` with the normal `make custommodule` target,
 bind-mounts it only into node A, and configtests both generated configurations.
@@ -28,8 +28,11 @@ defined winner. The harness requires one `RES` per divergent block, followed by 
 `END`, and `ACK`, and verifies B's `N` block plus nested `K` line commit in A.
 A `PASS` therefore proves real module loading, negotiated UDB capability,
 deterministic equal-timestamp resolution, and no reciprocal snapshot exchange.
-It additionally requires node B to receive the fixture `INS` and `DEL`, persist
-the inserted record before deletion, and persist its absence after deletion.
+It additionally requires both nodes to log loading their seeded N/K blocks from
+their configured temporary database directories. Node B must receive the fixture
+`INS` and `DEL`, persist the inserted record before deletion, and persist its
+absence after deletion. The normal mode then restarts B and requires a fresh
+load-log entry for B's persisted N block in that same configured directory.
 The fixture is test-only and does not alter the UDB production module.
 
 To cover the persistence-failure path deterministically, run:
@@ -82,12 +85,14 @@ diagnostic evidence, not a pass.
 ## Prerequisites
 
 - A non-root account that can run `bwrap`; user namespaces must be enabled.
-- An installed UnrealIRCd 6 runtime at `/home/davidlig/unrealircd`, including
+- An installed UnrealIRCd 6 runtime at `$HOME/unrealircd`, including
   `bin/unrealircd` and `conf/modules.default.conf`. Override the binary with
-  `--ircd`; the installed module configuration currently remains required.
+  `--ircd`. Set `UDB_TEST_IRCD_ROOT` to use a different runtime root; the
+  installed module configuration currently remains required.
 - A compiled UDB module at `src/modules/third/udb/src/udb.so`, or pass
   `--module /absolute/path/to/udb.so`.
 - Loopback TCP connections and six available ephemeral ports.
 
-If bubblewrap is prohibited by the host, do not run two direct instances: their
-compiled `PERMDATADIR` would overlap and invalidate the staged-sync assertion.
+If bubblewrap is prohibited by the host, the harness skips because it uses its
+read-only module/runtime mount layout. The generated configurations themselves
+keep UDB data isolated through distinct absolute `database-directory` paths.

@@ -347,7 +347,7 @@ static void udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbu
 static int udb_file_write_snapshot(UdbBlock *block, UdbRecord *tree,
                                    unsigned int record_count)
 {
-	char tmp_path[512];
+	char tmp_path[UDB_BLOCK_PATH_MAX];
 	char pathbuf[4096] = "";
 	FILE *fp = NULL;
 	UdbRecord *rec;

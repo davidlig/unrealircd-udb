@@ -7,18 +7,21 @@ python3 src/modules/third/udb/tests/three_node_udb.py
 ```
 
 The harness creates an A-B-C topology with nine loopback ports and a separate
-Bubblewrap mount namespace, temporary directory, and `PERMDATADIR` data tree for
-each node. UDB is loaded on every node. Only A contains the `N`-block marker;
-B and C begin with empty, deliberately old block placeholders.
+Bubblewrap mount namespace, temporary directory, and configured UDB database
+directory for each node. UDB is loaded on every node. Only A contains the
+`N`-block marker; B and C begin with empty, deliberately old block placeholders.
+The separate runtime-data mount is used only for UnrealIRCd's control socket;
+UDB uses each configured database directory instead.
 
 It compiles the existing test-only `udb_test_mutator.c` fixture and loads it
 on A, B, and C from their isolated module trees. The generated configurations
 use edge-local propagators: B authorizes A for A-to-B mutations and C authorizes
 B for B-to-C mutations.
 
-It starts B and A, requires A-B link/sync evidence, and requires the complete
-received staged sequence `HEL`, `INF`, `BEGIN`, `PUT`, `END` plus A's marker in
-B's isolated data tree. Only then does it start C. The new B-C link must show
+It starts B and A, requires A-B link/sync evidence and load-log evidence that
+both read their seeded blocks from their configured temporary directories, and
+requires the complete received staged sequence `HEL`, `INF`, `BEGIN`, `PUT`,
+`END` plus A's marker in B's isolated data tree. Only then does it start C. The new B-C link must show
 link/sync evidence and the same staged-frame sequence in C before C's isolated
 tree contains the marker. This proves the record committed in B before B
 propagated it to C, rather than merely proving a three-node network converged.
@@ -46,12 +49,13 @@ directory after stopping all three processes.
 ## Prerequisites
 
 - A non-root account that can run `bwrap`; user namespaces must be enabled.
-- An installed UnrealIRCd runtime at `/home/davidlig/unrealircd`, including
+- An installed UnrealIRCd runtime at `$HOME/unrealircd`, including
   `bin/unrealircd` and `conf/modules.default.conf`. Use `--ircd` to override the
-  binary.
+  binary or set `UDB_TEST_IRCD_ROOT` to select a different runtime root.
 - A compiled module at `src/modules/third/udb/src/udb.so`, or pass
   `--module /absolute/path/to/udb.so`.
 - Loopback TCP connectivity and nine available ephemeral ports.
 
-Do not replace Bubblewrap with three direct instances: their compiled
-`PERMDATADIR` paths would overlap and invalidate the isolation assertions.
+The generated configurations isolate UDB through distinct absolute
+`database-directory` paths. Bubblewrap remains required by this harness for its
+read-only module/runtime mount layout.

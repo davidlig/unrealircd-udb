@@ -3,7 +3,6 @@
 static UdbBlock *udb_block_create(UdbContext *ctx, char letter, const char *name)
 {
 	UdbBlock *b = safe_alloc(sizeof(UdbBlock));
-	char path[512];
 
 	b->letter = letter;
 	b->version = 1;
@@ -12,15 +11,38 @@ static UdbBlock *udb_block_create(UdbContext *ctx, char letter, const char *name
 	safe_strdup(b->tree->key, name);
 	b->tree->data_num = 1;
 
-	snprintf(path, sizeof(path), "udb_%c.db", letter);
-	safe_strdup(b->filepath, path);
-	convert_to_absolute_path(&b->filepath, PERMDATADIR);
+	b->filepath = udb_block_filepath(letter);
+	if (!b->filepath)
+	{
+		udb_record_free_tree(b->tree);
+		safe_free(b);
+		return NULL;
+	}
 
 	ctx->blocks[(unsigned char)letter] = b;
 	b->next = ctx->block_list;
 	ctx->block_list = b;
 	ctx->block_count++;
 	return b;
+}
+
+static char *udb_block_filepath(char letter)
+{
+	const char *directory = udb_cfg ? udb_cfg->db_directory : NULL;
+	char *path;
+	size_t directory_length;
+	size_t path_length;
+
+	if (!directory || !*directory)
+		return NULL;
+	directory_length = strlen(directory);
+	path_length = directory_length + sizeof("/udb_N.db");
+	if (path_length > UDB_BLOCK_PATH_MAX)
+		return NULL;
+	path = safe_alloc(path_length);
+	snprintf(path, path_length, "%s%sudb_%c.db", directory,
+	         directory[directory_length - 1] == '/' ? "" : "/", letter);
+	return path;
 }
 
 static void udb_block_set_context_root(UdbContext *ctx, UdbBlock *block)
@@ -123,19 +145,38 @@ static int udb_engine_init(void)
 	struct stat st = {0};
 	const char *dir;
 
+	if (!udb_cfg)
+		udb_cfg = safe_alloc(sizeof(UdbConfig));
+	if (!udb_cfg->db_directory)
+		safe_strdup(udb_cfg->db_directory, UDB_DEFAULT_DB_DIRECTORY);
 	udb_ctx = safe_alloc(sizeof(UdbContext));
 	udb_hash_init(udb_ctx);
-	/* Keep the existing directory check and block creation sequence. */
-	dir = udb_cfg && udb_cfg->db_directory ? udb_cfg->db_directory : "data/udb";
+	dir = udb_cfg && udb_cfg->db_directory ? udb_cfg->db_directory : NULL;
+	if (!dir)
+		return 0;
 	if (stat(dir, &st) == -1)
-		mkdir(dir, 0700);
+	{
+		if (mkdir(dir, 0700) != 0)
+		{
+			udb_log(ULOG_ERROR, "UDB_DIRECTORY_CREATE_FAILED", NULL,
+			        "Cannot create database directory $directory: $error",
+			        log_data_string("directory", dir), log_data_string("error", strerror(errno)));
+			return 0;
+		}
+	} else if (!S_ISDIR(st.st_mode))
+	{
+		udb_log(ULOG_ERROR, "UDB_DIRECTORY_INVALID", NULL,
+		        "Database directory $directory is not a directory", log_data_string("directory", dir));
+		return 0;
+	}
 
-	udb_block_create(udb_ctx, 'N', "Nicks");
-	udb_block_create(udb_ctx, 'C', "Channels");
-	udb_block_create(udb_ctx, 'I', "IPs");
-	udb_block_create(udb_ctx, 'S', "Settings");
-	udb_block_create(udb_ctx, 'L', "Links");
-	udb_block_create(udb_ctx, 'K', "Lines");
+	if (!udb_block_create(udb_ctx, 'N', "Nicks") || !udb_block_create(udb_ctx, 'C', "Channels") ||
+	    !udb_block_create(udb_ctx, 'I', "IPs") || !udb_block_create(udb_ctx, 'S', "Settings") ||
+	    !udb_block_create(udb_ctx, 'L', "Links") || !udb_block_create(udb_ctx, 'K', "Lines"))
+	{
+		udb_engine_shutdown();
+		return 0;
+	}
 	udb_block_set_context_root(udb_ctx, udb_ctx->blocks['N']);
 	udb_block_set_context_root(udb_ctx, udb_ctx->blocks['C']);
 	udb_block_set_context_root(udb_ctx, udb_ctx->blocks['I']);
@@ -179,11 +220,6 @@ static int udb_module_test(ModuleInfo *modinfo)
 static int udb_module_init(ModuleInfo *modinfo)
 {
 	HookAdd(modinfo->handle, HOOKTYPE_CONFIGRUN, 0, udb_config_run);
-	if (udb_engine_init() == 0)
-	{
-		config_error("[UDB] Failed to initialize database engine");
-		return MOD_FAILED;
-	}
 	udb_protocol_init(modinfo);
 	udb_nicks_init(modinfo);
 	udb_channels_init(modinfo);
@@ -196,7 +232,11 @@ static int udb_module_init(ModuleInfo *modinfo)
 
 static int udb_module_load(ModuleInfo *modinfo)
 {
-	udb_blocks_load_all(udb_ctx);
+	if (udb_engine_init() == 0)
+	{
+		config_error("[UDB] Failed to initialize database engine");
+		return MOD_FAILED;
+	}
 	udb_nicks_load(modinfo);
 	udb_channels_load(modinfo);
 	unreal_log(ULOG_INFO, "udb", "UDB_LOADED", NULL,

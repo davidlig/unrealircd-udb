@@ -15,8 +15,8 @@ import time
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[5]
-DEFAULT_IRCD = pathlib.Path("/home/davidlig/unrealircd/bin/unrealircd")
-PERMDATADIR = pathlib.Path("/home/davidlig/unrealircd/data")
+RUNTIME_ROOT = pathlib.Path(os.environ.get("UDB_TEST_IRCD_ROOT", pathlib.Path.home() / "unrealircd"))
+DEFAULT_IRCD = RUNTIME_ROOT / "bin/unrealircd"
 CLOAK_KEYS = ("aB3" * 30, "cD4" * 30, "eF5" * 30)
 N_MARKER = "harness-a::marker propagated\n"
 MUTATOR_SOURCE = ROOT / "src/modules/third/udb/tests/udb_test_mutator.c"
@@ -54,8 +54,8 @@ def write_config(path, name, sid, ports, links, module, dbdir, propagator, load_
     class servers;
 }}
 '''
-    path.write_text(f'''include "/home/davidlig/unrealircd/conf/modules.default.conf";
-include "/home/davidlig/unrealircd/conf/snomasks.default.conf";
+    path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
+include "{RUNTIME_ROOT}/conf/snomasks.default.conf";
 
 me {{
     name "{name}";
@@ -88,11 +88,13 @@ udb {{
 
 def bwrap_command(node, ircd, config, configtest=False):
     command = ["bwrap", "--die-with-parent", "--ro-bind", "/", "/",
-               "--bind", str(node), str(node),
-               "--bind", str(node / "data"), str(PERMDATADIR),
-               "--bind", str(node / "tmp"), "/home/davidlig/unrealircd/tmp",
-               "--ro-bind", str(node / "modules" / "third"), "/home/davidlig/unrealircd/modules/third",
-               "--dev-bind", "/dev", "/dev", "--proc", "/proc", str(ircd), "-f", str(config)]
+                "--bind", str(node), str(node),
+                "--bind", str(node / "runtime-data"), str(RUNTIME_ROOT / "data"),
+                "--bind", str(node / "tmp"), str(RUNTIME_ROOT / "tmp"),
+                "--ro-bind", str(node / "modules" / "third"), str(RUNTIME_ROOT / "modules/third"),
+                "--dev-bind", "/dev", "/dev", "--proc", "/proc",
+                "--setenv", "UDB_TEST_MUTATOR_DIRECTORY", str(node / "data"),
+                str(ircd), "-f", str(config)]
     command.append("-c" if configtest else "-F")
     return command
 
@@ -178,6 +180,10 @@ def db_contains(db, record):
     return record in db.read_text(errors="replace")
 
 
+def db_loaded_from(log, db):
+    return f"Loaded block {db.stem[-1]} from {db} (" in log_text(log)
+
+
 def mutator_insert_observed(receiver_log, db, record):
     return "INS" in udb_commands(receiver_log) and db_contains(db, record)
 
@@ -249,7 +255,7 @@ def main():
         return skip(f"UnrealIRCd binary is unavailable: {args.ircd}")
     if not args.module.is_file():
         return skip(f"compiled UDB module is unavailable: {args.module}")
-    if not pathlib.Path("/home/davidlig/unrealircd/conf/modules.default.conf").is_file():
+    if not (RUNTIME_ROOT / "conf/modules.default.conf").is_file():
         return skip("installed modules.default.conf is unavailable; see three_node_udb.md")
 
     root = pathlib.Path(tempfile.mkdtemp(prefix="udb-three-node-"))
@@ -259,6 +265,7 @@ def main():
         a, b, c = root / "node-a", root / "node-b", root / "node-c"
         for node in (a, b, c):
             (node / "data").mkdir(parents=True)
+            (node / "runtime-data").mkdir()
             (node / "tmp").mkdir()
             (node / "modules" / "third").mkdir(parents=True)
             shutil.copy2(args.module, node / "modules" / "third" / "udb.so")
@@ -293,6 +300,11 @@ def main():
         if not wait_for_links(processes, ((logs["A"], 1), (logs["B"], 1)), args.timeout):
             print_diagnostics("A-B link timeout", (("node A", logs["A"]), ("node B", logs["B"])))
             return skip("A-B S2S link was not observed before timeout; this is not a PASS")
+        if not all(db_loaded_from(logs[label], db) for label, db in (("A", a_db), ("B", b_db))):
+            print_diagnostics("A-B database load", (("node A", logs["A"]), ("node B", logs["B"])),
+                              (("node A", a_db), ("node B", b_db)))
+            return 1
+        print("PASS: A and B loaded their seeded N blocks from configured temporary database directories")
         if not wait_for_snapshot(b_db, logs["B"], args.timeout):
             print_diagnostics("A-to-B timeout", (("node A", logs["A"]), ("node B", logs["B"])))
             return skip("A-B linked, but A's staged N-block did not commit in B; this is not a PASS")
@@ -300,6 +312,10 @@ def main():
         if not wait_for_links(processes, ((logs["B"], 2), (logs["C"], 1)), args.timeout):
             print_diagnostics("B-C link timeout", (("node B", logs["B"]), ("node C", logs["C"])))
             return skip("B-C S2S link was not observed before timeout; this is not a PASS")
+        if not db_loaded_from(logs["C"], c_db):
+            print_diagnostics("C database load", (("node C", logs["C"]),), (("node C", c_db),))
+            return 1
+        print("PASS: C loaded its seeded N block from its configured temporary database directory")
         if not wait_for_snapshot(c_db, logs["C"], args.timeout):
             print_diagnostics("B-to-C timeout", (("node B", logs["B"]), ("node C", logs["C"])))
             return skip("B-C linked, but A's record did not staged-sync from B into C; this is not a PASS")

@@ -12,7 +12,8 @@
 #include "unrealircd.h"
 #include <openssl/hmac.h>
 
-#define UDB_DB_SUBDIR              "data"
+#define UDB_DEFAULT_DB_DIRECTORY   PERMDATADIR
+#define UDB_BLOCK_PATH_MAX         512
 #define UDB_SYNC_TIMEOUT           60
 #define UDB_HASH_SIZE              2048
 #define UDB_HASH_MASK              (UDB_HASH_SIZE - 1)
@@ -106,6 +107,8 @@ static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
 static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type);
 static int udb_config_posttest(int *errs);
 static void udb_config_free(UdbContext *ctx);
+static int udb_database_directory_valid(const char *value);
+static char *udb_block_filepath(char letter);
 static int udb_module_test(ModuleInfo *modinfo);
 static int udb_module_init(ModuleInfo *modinfo);
 static int udb_module_load(ModuleInfo *modinfo);
