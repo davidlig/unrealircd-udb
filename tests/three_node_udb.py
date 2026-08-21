@@ -1,0 +1,330 @@
+#!/usr/bin/env python3
+"""Isolated three-node A-B-C UDB staged-sync integration harness."""
+
+import argparse
+import os
+import pathlib
+import re
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+
+
+ROOT = pathlib.Path(__file__).resolve().parents[5]
+DEFAULT_IRCD = pathlib.Path("/home/davidlig/unrealircd/bin/unrealircd")
+PERMDATADIR = pathlib.Path("/home/davidlig/unrealircd/data")
+CLOAK_KEYS = ("aB3" * 30, "cD4" * 30, "eF5" * 30)
+N_MARKER = "harness-a::marker propagated\n"
+MUTATOR_SOURCE = ROOT / "src/modules/third/udb/tests/udb_test_mutator.c"
+MUTATOR_MODULE = MUTATOR_SOURCE.with_suffix(".so")
+MUTATOR_RECORDS = {
+    "A-B": "udb-test-mutator authorized-insert",
+    "B-C": "udb-test-mutator authorized-insert-b-c",
+}
+
+
+class EnvironmentUnavailable(Exception):
+    pass
+
+
+def skip(message):
+    print(f"SKIP: {message}")
+    return 77
+
+
+def free_port():
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def write_config(path, name, sid, ports, links, module, dbdir, propagator, load_mutator=False):
+    link_text = ""
+    for peer, peer_port, autoconnect in links:
+        outgoing = (f'    outgoing {{ bind-ip "127.0.0.1"; hostname "127.0.0.1"; port {peer_port}; '
+                    'options { autoconnect; } }\n') if autoconnect else ""
+        link_text += f'''link {peer} {{
+    incoming {{ mask "127.0.0.1"; }}
+{outgoing}    password "udb-harness-link";
+    class servers;
+}}
+'''
+    path.write_text(f'''include "/home/davidlig/unrealircd/conf/modules.default.conf";
+include "/home/davidlig/unrealircd/conf/snomasks.default.conf";
+
+me {{
+    name "{name}";
+    info "UDB isolated integration node";
+    sid "{sid}";
+}}
+admin {{ "UDB harness"; "udb"; "udb@example.invalid"; }}
+set {{
+    kline-address "udb@example.invalid";
+    default-server "{name}";
+    network-name "UDB Harness";
+    help-channel "#help";
+    cloak-keys {{ "{CLOAK_KEYS[0]}"; "{CLOAK_KEYS[1]}"; "{CLOAK_KEYS[2]}"; }}
+}}
+class clients {{ pingfreq 60; maxclients 20; sendq 1M; recvq 8000; }}
+class servers {{ pingfreq 60; connfreq 6; maxclients 4; sendq 20M; }}
+allow {{ mask "127.0.0.1"; class clients; maxperip 20; }}
+listen {{ ip "127.0.0.1"; port {ports[0]}; }}
+listen {{ ip "127.0.0.1"; port {ports[1]}; options {{ serversonly; }} }}
+listen {{ ip "127.0.0.1"; port {ports[2]}; options {{ tls; }} }}
+{link_text}loadmodule "cloak_sha256";
+loadmodule "third/udb";
+{('loadmodule "third/udb_test_mutator";' if load_mutator else '')}
+udb {{
+    database-directory "{dbdir}";
+    propagator "{propagator}";
+}}
+''', encoding="ascii")
+
+
+def bwrap_command(node, ircd, config, configtest=False):
+    command = ["bwrap", "--die-with-parent", "--ro-bind", "/", "/",
+               "--bind", str(node), str(node),
+               "--bind", str(node / "data"), str(PERMDATADIR),
+               "--bind", str(node / "tmp"), "/home/davidlig/unrealircd/tmp",
+               "--ro-bind", str(node / "modules" / "third"), "/home/davidlig/unrealircd/modules/third",
+               "--dev-bind", "/dev", "/dev", "--proc", "/proc", str(ircd), "-f", str(config)]
+    command.append("-c" if configtest else "-F")
+    return command
+
+
+def bwrap_unavailable(output):
+    return any(text in output for text in ("Creating new namespace failed", "Operation not permitted",
+                                            "No permissions to create a new namespace", "bwrap: "))
+
+
+def run_configtest(node, ircd, config):
+    result = subprocess.run(bwrap_command(node, ircd, config, configtest=True), text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+    if result.returncode:
+        if bwrap_unavailable(result.stdout):
+            raise EnvironmentUnavailable(result.stdout.strip())
+        raise RuntimeError(f"configtest failed for {config}:\n{result.stdout}")
+    print(f"PASS: configtest {config.name} (generated config loads UDB)")
+
+
+def build_mutator():
+    result = subprocess.run(["make", "custommodule", "MODULEFILE=udb/tests/udb_test_mutator"], cwd=ROOT,
+                            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+    if result.returncode or not MUTATOR_MODULE.is_file():
+        raise RuntimeError(f"test mutator build failed:\n{result.stdout}")
+    print(f"PASS: built test-only mutator {MUTATOR_MODULE.name}")
+
+
+def log_text(log):
+    try:
+        return log.read_text(errors="replace")
+    except FileNotFoundError:
+        return ""
+
+
+def link_observed(log, count=1):
+    text = log_text(log)
+    return text.count("Server linked:") >= count and text.count(" is now synced") >= count
+
+
+def wait_for_links(processes, checks, timeout):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if any(process.poll() is not None for process in processes):
+            return False
+        if all(link_observed(log, count) for log, count in checks):
+            return True
+        time.sleep(0.25)
+    return False
+
+
+def udb_commands(log):
+    return re.findall(r"\[UDB\] S2S DB received: .* subcmd=(\w+)", log_text(log))
+
+
+def ordered(commands, expected):
+    position = 0
+    for command in commands:
+        if command == expected[position]:
+            position += 1
+            if position == len(expected):
+                return True
+    return False
+
+
+def staged_snapshot_observed(receiver_log):
+    return ordered(udb_commands(receiver_log), ("HEL", "INF", "BEGIN", "PUT", "END"))
+
+
+def wait_for_snapshot(db, receiver_log, timeout):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if N_MARKER in db.read_text(errors="replace") and staged_snapshot_observed(receiver_log):
+            return True
+        time.sleep(0.25)
+    return False
+
+
+def db_contains(db, record):
+    return record in db.read_text(errors="replace")
+
+
+def mutator_insert_observed(receiver_log, db, record):
+    return "INS" in udb_commands(receiver_log) and db_contains(db, record)
+
+
+def mutator_delete_observed(receiver_log, db, record):
+    return ordered(udb_commands(receiver_log), ("INS", "DEL")) and not db_contains(db, record)
+
+
+def wait_for_mutation(receiver_log, db, record, deleted, timeout):
+    deadline = time.monotonic() + timeout
+    observed = mutator_delete_observed if deleted else mutator_insert_observed
+    while time.monotonic() < deadline:
+        if observed(receiver_log, db, record):
+            return True
+        time.sleep(0.25)
+    return False
+
+
+def arm_mutators(nodes):
+    for node in nodes:
+        (node / "data" / "udb-test-mutator-go").touch()
+
+
+def print_diagnostics(stage, logs, dbs=()):
+    print(f"DIAGNOSTIC: {stage} did not produce the required UDB evidence.", file=sys.stderr)
+    for label, log in logs:
+        commands = ", ".join(udb_commands(log)) or "(none)"
+        print(f"DIAGNOSTIC: {label} received UDB commands: {commands}", file=sys.stderr)
+        evidence = [line for line in log_text(log).splitlines()
+                    if "Server linked:" in line or " is now synced" in line or "[UDB]" in line]
+        print(f"--- {label} link/frame evidence ({log}) ---", file=sys.stderr)
+        print("\n".join(evidence) or "(none)", file=sys.stderr)
+    for label, db in dbs:
+        print(f"--- {label} database ({db}) ---", file=sys.stderr)
+        print(db.read_text(errors="replace") if db.exists() else "(missing)", file=sys.stderr)
+
+
+def stop(processes):
+    for process in processes:
+        if process.poll() is None:
+            process.send_signal(signal.SIGTERM)
+    for process in processes:
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--ircd", type=pathlib.Path, default=DEFAULT_IRCD)
+    parser.add_argument("--module", type=pathlib.Path, default=ROOT / "src/modules/third/udb/src/udb.so")
+    parser.add_argument("--timeout", type=int, default=15, help="per-link and per-stage wait in seconds")
+    parser.add_argument("--keep", action="store_true", help="preserve temporary node directories")
+    args = parser.parse_args()
+
+    if not shutil.which("bwrap"):
+        return skip("bwrap is required for separate PERMDATADIR mount namespaces; see three_node_udb.md")
+    if not args.ircd.is_file() or not os.access(args.ircd, os.X_OK):
+        return skip(f"UnrealIRCd binary is unavailable: {args.ircd}")
+    if not args.module.is_file():
+        return skip(f"compiled UDB module is unavailable: {args.module}")
+    if not pathlib.Path("/home/davidlig/unrealircd/conf/modules.default.conf").is_file():
+        return skip("installed modules.default.conf is unavailable; see three_node_udb.md")
+
+    root = pathlib.Path(tempfile.mkdtemp(prefix="udb-three-node-"))
+    processes = []
+    try:
+        build_mutator()
+        a, b, c = root / "node-a", root / "node-b", root / "node-c"
+        for node in (a, b, c):
+            (node / "data").mkdir(parents=True)
+            (node / "tmp").mkdir()
+            (node / "modules" / "third").mkdir(parents=True)
+            shutil.copy2(args.module, node / "modules" / "third" / "udb.so")
+        for node in (a, b):
+            shutil.copy2(MUTATOR_MODULE, node / "modules" / "third" / "udb_test_mutator.so")
+        a_db, b_db, c_db = (node / "data" / "udb_N.db" for node in (a, b, c))
+        # Only A has a record. Empty, old placeholders make B and C request A's block.
+        a_db.write_text(N_MARKER, encoding="ascii")
+        for db in (b_db, c_db):
+            db.touch()
+            old_time = time.time() - 60
+            os.utime(db, (old_time, old_time))
+
+        ports = [tuple(free_port() for _ in range(3)) for _ in range(3)]
+        a_conf, b_conf, c_conf = (node / "unrealircd.conf" for node in (a, b, c))
+        write_config(a_conf, "udb-a.test", "0A1", ports[0], (("udb-b.test", ports[1][1], True),), args.module, a / "data", "udb-b.test", True)
+        write_config(b_conf, "udb-b.test", "0B1", ports[1], (("udb-a.test", ports[0][1], False), ("udb-c.test", ports[2][1], True)), args.module, b / "data", "udb-a.test", True)
+        write_config(c_conf, "udb-c.test", "0C1", ports[2], (("udb-b.test", ports[1][1], False),), args.module, c / "data", "udb-b.test")
+        for node, config in ((a, a_conf), (b, b_conf), (c, c_conf)):
+            run_configtest(node, args.ircd, config)
+
+        logs = {label: node / "ircd.log" for label, node in (("A", a), ("B", b), ("C", c))}
+        def start(label, node, config):
+            with logs[label].open("w") as output:
+                processes.append(subprocess.Popen(bwrap_command(node, args.ircd, config), stdout=output,
+                                                  stderr=subprocess.STDOUT, text=True))
+
+        # C stays down until B has committed A's record, forcing B's later link
+        # synchronization to be the observed B-to-C propagation path.
+        start("B", b, b_conf)
+        start("A", a, a_conf)
+        if not wait_for_links(processes, ((logs["A"], 1), (logs["B"], 1)), args.timeout):
+            print_diagnostics("A-B link timeout", (("node A", logs["A"]), ("node B", logs["B"])))
+            return skip("A-B S2S link was not observed before timeout; this is not a PASS")
+        if not wait_for_snapshot(b_db, logs["B"], args.timeout):
+            print_diagnostics("A-to-B timeout", (("node A", logs["A"]), ("node B", logs["B"])))
+            return skip("A-B linked, but A's staged N-block did not commit in B; this is not a PASS")
+        start("C", c, c_conf)
+        if not wait_for_links(processes, ((logs["B"], 2), (logs["C"], 1)), args.timeout):
+            print_diagnostics("B-C link timeout", (("node B", logs["B"]), ("node C", logs["C"])))
+            return skip("B-C S2S link was not observed before timeout; this is not a PASS")
+        if not wait_for_snapshot(c_db, logs["C"], args.timeout):
+            print_diagnostics("B-to-C timeout", (("node B", logs["B"]), ("node C", logs["C"])))
+            return skip("B-C linked, but A's record did not staged-sync from B into C; this is not a PASS")
+        print("PASS: A's staged N-block committed in B before B synchronized it to C")
+        arm_mutators((a, b))
+        if not wait_for_mutation(logs["B"], b_db, MUTATOR_RECORDS["A-B"], False, args.timeout):
+            print_diagnostics("A-to-B authorized INS timeout", (("node A", logs["A"]), ("node B", logs["B"])),
+                              (("node B", b_db),))
+            return skip("A-B-C staged-sync completed, but B did not durably apply the authorized A-to-B INS")
+        print("PASS: B durably applied the authorized A-to-B INS")
+        if not wait_for_mutation(logs["B"], b_db, MUTATOR_RECORDS["A-B"], True, args.timeout):
+            print_diagnostics("A-to-B authorized DEL timeout", (("node A", logs["A"]), ("node B", logs["B"])),
+                              (("node B", b_db),))
+            return skip("A-B-C staged-sync completed, but B did not durably apply the authorized A-to-B DEL")
+        print("PASS: B durably applied the authorized A-to-B DEL")
+        if not wait_for_mutation(logs["C"], c_db, MUTATOR_RECORDS["B-C"], False, args.timeout):
+            print_diagnostics("B-to-C authorized INS timeout", (("node B", logs["B"]), ("node C", logs["C"])),
+                              (("node C", c_db),))
+            return skip("B-C staged-sync completed, but C did not durably apply the authorized B-to-C INS")
+        print("PASS: C durably applied the authorized B-to-C INS")
+        if not wait_for_mutation(logs["C"], c_db, MUTATOR_RECORDS["B-C"], True, args.timeout):
+            print_diagnostics("B-to-C authorized DEL timeout", (("node B", logs["B"]), ("node C", logs["C"])),
+                              (("node C", c_db),))
+            return skip("B-C staged-sync completed, but C did not durably apply the authorized B-to-C DEL")
+        print("PASS: C durably applied the authorized B-to-C DEL")
+        return 0
+    except EnvironmentUnavailable as exc:
+        return skip(f"bubblewrap isolation is unavailable: {exc}")
+    except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        stop(processes)
+        if args.keep:
+            print(f"Temporary files retained at: {root}")
+        else:
+            shutil.rmtree(root, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

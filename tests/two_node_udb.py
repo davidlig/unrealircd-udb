@@ -9,6 +9,7 @@ PERMDATADIR, rather than udb::database-directory.
 import argparse
 import os
 import pathlib
+import re
 import shutil
 import signal
 import socket
@@ -22,6 +23,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[5]
 DEFAULT_IRCD = pathlib.Path("/home/davidlig/unrealircd/bin/unrealircd")
 PERMDATADIR = pathlib.Path("/home/davidlig/unrealircd/data")
 CLOAK_KEYS = ("aB3" * 30, "cD4" * 30, "eF5" * 30)
+MUTATOR_SOURCE = ROOT / "src/modules/third/udb/tests/udb_test_mutator.c"
+MUTATOR_MODULE = MUTATOR_SOURCE.with_suffix(".so")
+MUTATOR_RECORD = "udb-test-mutator authorized-insert"
 
 
 def skip(message):
@@ -35,7 +39,8 @@ def free_port():
         return sock.getsockname()[1]
 
 
-def write_config(path, name, sid, client_port, server_port, tls_port, peer, peer_port, module, dbdir, autoconnect):
+def write_config(path, name, sid, client_port, server_port, tls_port, peer, peer_port, module, dbdir,
+                 autoconnect, load_mutator=False):
     outgoing = (f'    outgoing {{ bind-ip "127.0.0.1"; hostname "127.0.0.1"; port {peer_port}; '
                 'options { autoconnect; } }\n') if autoconnect else ""
     path.write_text(f'''include "/home/davidlig/unrealircd/conf/modules.default.conf";
@@ -68,6 +73,7 @@ link {peer} {{
 }}
 loadmodule "cloak_sha256";
 loadmodule "third/udb";
+{('loadmodule "third/udb_test_mutator";' if load_mutator else '')}
 udb {{
     database-directory "{dbdir}";
     propagator "udb-a.test";
@@ -75,14 +81,14 @@ udb {{
 ''', encoding="ascii")
 
 
-def bwrap_command(node, ircd, config, module, configtest=False):
+def bwrap_command(node, ircd, config, module, mutator=None, configtest=False):
     # A read-only host root leaves dependencies and installed modules available.
     # Only this node's working directory and compiled data directory are writable.
     command = ["bwrap", "--die-with-parent", "--ro-bind", "/", "/",
                "--bind", str(node), str(node),
                "--bind", str(node / "data"), str(PERMDATADIR),
                "--bind", str(node / "tmp"), "/home/davidlig/unrealircd/tmp",
-               "--ro-bind", str(module), "/home/davidlig/unrealircd/modules/third/udb.so",
+               "--ro-bind", str(node / "modules" / "third"), "/home/davidlig/unrealircd/modules/third",
                "--dev-bind", "/dev", "/dev", "--proc", "/proc",
                str(ircd), "-f", str(config)]
     if configtest:
@@ -92,8 +98,8 @@ def bwrap_command(node, ircd, config, module, configtest=False):
     return command
 
 
-def run_configtest(node, ircd, config, module):
-    result = subprocess.run(bwrap_command(node, ircd, config, module, configtest=True),
+def run_configtest(node, ircd, config, module, mutator=None):
+    result = subprocess.run(bwrap_command(node, ircd, config, module, mutator, configtest=True),
                             text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             timeout=30)
     if result.returncode:
@@ -101,13 +107,91 @@ def run_configtest(node, ircd, config, module):
     print(f"PASS: configtest {config.name} (generated config loads UDB)")
 
 
+def build_mutator():
+    result = subprocess.run(["make", "custommodule", "MODULEFILE=udb/tests/udb_test_mutator"], cwd=ROOT,
+                            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+    if result.returncode or not MUTATOR_MODULE.is_file():
+        raise RuntimeError(f"test mutator build failed:\n{result.stdout}")
+    print(f"PASS: built test-only mutator {MUTATOR_MODULE.name}")
+
+
+def log_text(log):
+    try:
+        return log.read_text(errors="replace")
+    except FileNotFoundError:
+        return ""
+
+
+def link_established(logs):
+    return all("Server linked:" in log_text(log) and " is now synced" in log_text(log)
+               for log in logs)
+
+
 def wait_for_link(processes, logs, timeout):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if any(proc.poll() is not None for proc in processes):
             return False
+        if link_established(logs):
+            return True
         time.sleep(0.25)
-    return True
+    return False
+
+
+def udb_commands(log):
+    return re.findall(r"\[UDB\] S2S DB received: .* subcmd=(\w+)", log_text(log))
+
+
+def ordered(commands, expected):
+    position = 0
+    for command in commands:
+        if command == expected[position]:
+            position += 1
+            if position == len(expected):
+                return True
+    return False
+
+
+def staged_snapshot_observed(a_log, b_log):
+	# Both peers must confirm HEL before B receives the staged transaction.
+    return (ordered(udb_commands(b_log), ("HEL", "INF", "BEGIN", "PUT", "END")) and
+            ordered(udb_commands(a_log), ("HEL", "RES", "ACK")))
+
+
+def db_contains(db, record):
+    return record in db.read_text(errors="replace")
+
+
+def mutator_insert_observed(b_log, b_db):
+    return (ordered(udb_commands(b_log), ("INS",)) and db_contains(b_db, MUTATOR_RECORD) and
+            "Inserted record via S2S: N::udb-test-mutator -> authorized-insert" in log_text(b_log))
+
+
+def mutator_delete_observed(b_log, b_db):
+    return ordered(udb_commands(b_log), ("INS", "DEL")) and not db_contains(b_db, MUTATOR_RECORD)
+
+
+def print_diagnostics(logs, b_db=None):
+    commands = [udb_commands(log) for log in logs]
+    print("DIAGNOSTIC: S2S link evidence was observed, but staged UDB snapshot evidence was not.",
+          file=sys.stderr)
+    print(f"DIAGNOSTIC: node A received UDB commands: {', '.join(commands[0]) or '(none)'}",
+          file=sys.stderr)
+    print(f"DIAGNOSTIC: node B received UDB commands: {', '.join(commands[1]) or '(none)'}",
+          file=sys.stderr)
+    if not any(commands):
+        print("DIAGNOSTIC: no UDB DB frames were received after both links synced. "
+              "udb_hook_server_sync should first send HEL 4 and emit INF only after its HEL ACK; "
+              "this run provides no evidence that either step occurred.", file=sys.stderr)
+    for label, log in zip(("node A", "node B"), logs):
+        evidence = [line for line in log_text(log).splitlines()
+                    if "Server linked:" in line or " is now synced" in line or "[UDB]" in line or
+                    "UDB_TEST_MUTATOR" in line or " ERR " in line]
+        print(f"--- {label} relevant log lines ({log}) ---", file=sys.stderr)
+        print("\n".join(evidence) or "(none)", file=sys.stderr)
+    if b_db:
+        print(f"--- node B database ({b_db}) ---", file=sys.stderr)
+        print(b_db.read_text(errors="replace") if b_db.exists() else "(missing)", file=sys.stderr)
 
 
 def stop(processes):
@@ -142,48 +226,80 @@ def main():
     if not pathlib.Path("/home/davidlig/unrealircd/conf/modules.default.conf").is_file():
         return skip("installed modules.default.conf is unavailable; see two_node_udb.md")
 
-    temporary = tempfile.TemporaryDirectory(prefix="udb-two-node-")
-    root = pathlib.Path(temporary.name)
+    # Do not use TemporaryDirectory here: its finalizer still removes the tree
+    # after a replaced cleanup method, making --keep ineffective.
+    root = pathlib.Path(tempfile.mkdtemp(prefix="udb-two-node-"))
     processes = []
     try:
+        build_mutator()
         a, b = root / "node-a", root / "node-b"
         for node in (a, b):
             (node / "data").mkdir(parents=True)
             (node / "tmp").mkdir()
+            third_modules = node / "modules" / "third"
+            third_modules.mkdir(parents=True)
+            shutil.copy2(args.module, third_modules / "udb.so")
+        shutil.copy2(MUTATOR_MODULE, a / "modules" / "third" / "udb_test_mutator.so")
         # Seed only node A. A successful staged sync must make this record appear
         # in node B's separately mounted PERMDATADIR.
-        (a / "data" / "udb_N.db").write_text("harness-a::marker synced\n", encoding="ascii")
-        (b / "data" / "udb_N.db").write_text("harness-b::marker prior\n", encoding="ascii")
+        a_db = a / "data" / "udb_N.db"
+        b_db = b / "data" / "udb_N.db"
+        a_db.write_text("harness-a::marker synced\n", encoding="ascii")
+        b_db.write_text("harness-b::marker prior\n", encoding="ascii")
+        # Make A authoritative even on filesystems with one-second mtime resolution.
+        old_time = time.time() - 60
+        os.utime(b_db, (old_time, old_time))
 
         a_client, a_server, a_tls, b_client, b_server, b_tls = (free_port() for _ in range(6))
         a_conf, b_conf = a / "unrealircd.conf", b / "unrealircd.conf"
         write_config(a_conf, "udb-a.test", "0A1", a_client, a_server, a_tls,
-                     "udb-b.test", b_server, args.module, a / "data", True)
+                     "udb-b.test", b_server, args.module, a / "data", True, load_mutator=True)
         write_config(b_conf, "udb-b.test", "0B1", b_client, b_server, b_tls,
                      "udb-a.test", a_server, args.module, b / "data", False)
-        run_configtest(a, args.ircd, a_conf, args.module)
+        run_configtest(a, args.ircd, a_conf, args.module, MUTATOR_MODULE)
         run_configtest(b, args.ircd, b_conf, args.module)
 
         logs = [a / "ircd.log", b / "ircd.log"]
         for node, config, log in ((b, b_conf, logs[1]), (a, a_conf, logs[0])):
             with log.open("w") as output:
-                processes.append(subprocess.Popen(bwrap_command(node, args.ircd, config, args.module),
+                mutator = MUTATOR_MODULE if node == a else None
+                processes.append(subprocess.Popen(bwrap_command(node, args.ircd, config, args.module, mutator),
                                                   stdout=output, stderr=subprocess.STDOUT,
                                                   text=True))
         if not wait_for_link(processes, logs, args.timeout):
-            details = "\n".join(f"--- {log.name} ---\n{log.read_text(errors='replace')}" for log in logs)
-            print("SKIP: servers started/configtested, but an S2S link could not be established.")
+            details = "\n".join(f"--- {log.name} ---\n{log_text(log)}" for log in logs)
+            print("SKIP: servers started/configtested, but an S2S link was not observed in both logs.")
             print("This is not a PASS. Check link prerequisites in two_node_udb.md.")
             print(details, file=sys.stderr)
             return 77
 
         deadline = time.monotonic() + args.timeout
-        b_db = b / "data" / "udb_N.db"
-        while time.monotonic() < deadline and "harness-a::marker synced" not in b_db.read_text(errors="replace"):
+        while time.monotonic() < deadline:
+            if ("harness-a::marker synced" in b_db.read_text(errors="replace") and
+                    staged_snapshot_observed(logs[0], logs[1])):
+                break
             time.sleep(0.25)
-        if "harness-a::marker synced" not in b_db.read_text(errors="replace"):
-            return skip("nodes remained available for S2S, but UDB capability negotiation/staged N-block transfer was not observed; this is not a PASS")
+        if ("harness-a::marker synced" not in b_db.read_text(errors="replace") or
+                not staged_snapshot_observed(logs[0], logs[1])):
+            print_diagnostics(logs, b_db)
+            return skip("S2S linked, but UDB staged N-block transfer was not observed; this is not a PASS")
         print("PASS: UDB capability negotiation and staged N-block sync committed in node B")
+        (a / "data" / "udb-test-mutator-go").touch()
+        deadline = time.monotonic() + args.timeout
+        while time.monotonic() < deadline and not mutator_insert_observed(logs[1], b_db):
+            time.sleep(0.25)
+        if not mutator_insert_observed(logs[1], b_db):
+            print_diagnostics(logs, b_db)
+            return skip("S2S linked, but node B did not durably apply the authorized mutator INS")
+        print("PASS: node B observed and durably persisted the authorized propagator INS")
+
+        deadline = time.monotonic() + args.timeout
+        while time.monotonic() < deadline and not mutator_delete_observed(logs[1], b_db):
+            time.sleep(0.25)
+        if not mutator_delete_observed(logs[1], b_db):
+            print_diagnostics(logs, b_db)
+            return skip("S2S linked, but node B did not durably apply the authorized mutator DEL")
+        print("PASS: node B observed and durably persisted the authorized propagator DEL")
         return 0
     except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
@@ -192,8 +308,8 @@ def main():
         stop(processes)
         if args.keep:
             print(f"Temporary files retained at: {root}")
-            temporary.cleanup = lambda: None
-        temporary.cleanup()
+        else:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 if __name__ == "__main__":

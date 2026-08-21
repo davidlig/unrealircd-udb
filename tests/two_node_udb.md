@@ -14,14 +14,35 @@ the `udb::database-directory` setting. The host filesystem is read-only inside
 each node except for its temporary directory, data mount, and module-cache
 mount (`/home/davidlig/unrealircd/tmp`).
 
-It configtests both generated configurations, seeds different `N` blocks,
-starts node B and then node A, and requires both evidence of UDB DB traffic and
-the staged `N` block from A to be committed in B. A `PASS` therefore means real
-module loading, negotiated UDB capability, and staged synchronization occurred.
+It compiles `udb_test_mutator.c` with the normal `make custommodule` target,
+bind-mounts it only into node A, and configtests both generated configurations.
+The fixture runs only after A sees B's post-EOS sync hook and after the harness
+creates its test-only arm file following staged-sync settlement. It then waits
+three seconds, emits an `INS` as the configured propagator, holds it for three
+seconds, and emits its matching `DEL`.
+
+The harness seeds different `N` blocks (with
+node B deliberately older), starts node B and then node A, and waits for both
+logs to report a linked and synced S2S connection. It then requires the staged
+`HEL`, `INF`, `RES`, `BEGIN`, `PUT`, `END`, and `ACK` exchange and the `N` block from A
+to be committed in B. A `PASS` therefore means real module loading, link
+establishment, negotiated UDB capability, and staged synchronization occurred.
+It additionally requires node B to receive the fixture `INS` and `DEL`, persist
+the inserted record before deletion, and persist its absence after deletion.
+The fixture is test-only and does not alter the UDB production module.
 
 `SKIP` (exit status 77) is deliberate, never a successful synchronization. It
 means the local installation could not provide the isolation or S2S conditions.
-Use `--keep` to retain the generated configs and logs for diagnosis.
+Use `--keep` to retain the generated configs, data trees, and logs for
+diagnosis. The retained path is printed at exit and is not cleaned up.
+
+When an S2S link is confirmed but a snapshot or fixture mutation is missing, the
+harness prints the received UDB command sequence for each node, fixture and UDB
+log lines (including protocol errors), and node B's database contents. In
+particular, no received `HEL` after both links sync points to the current
+`HOOKTYPE_SERVER_SYNC` path not starting capability negotiation. An observed
+`HEL` without `INF` means its explicit acknowledgement was not accepted; this is
+diagnostic evidence, not a pass.
 
 ## Prerequisites
 
@@ -31,7 +52,7 @@ Use `--keep` to retain the generated configs and logs for diagnosis.
   `--ircd`; the installed module configuration currently remains required.
 - A compiled UDB module at `src/modules/third/udb/src/udb.so`, or pass
   `--module /absolute/path/to/udb.so`.
-- Loopback TCP connections and four available ephemeral ports.
+- Loopback TCP connections and six available ephemeral ports.
 
 If bubblewrap is prohibited by the host, do not run two direct instances: their
 compiled `PERMDATADIR` would overlap and invalidate the staged-sync assertion.

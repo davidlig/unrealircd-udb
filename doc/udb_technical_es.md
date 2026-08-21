@@ -26,7 +26,11 @@ davidlig::oper *4
 
 #### Bloque N (Nicks - Usuarios)
 Almacena configuraciones para usuarios registrados.
-*   **pass**: Contraseña del usuario (texto plano o hash como `sha256:hash`).
+*   **pass**: Hash de contraseña. Solo se aceptan Argon2id (`$argon2id$...`),
+     `sha256:` y `crypt:`; texto plano, MD5, bcrypt y valores desconocidos fallan cerrados.
+*   **access**: Lista opcional de CIDR IPv4/IPv6 separada por comas o espacios.
+    Una comprobación correcta de contraseña para NICK o GHOST también debe
+    coincidir con esta lista.
 *   **vhost**: Host virtual personalizado a aplicar al conectar.
 *   **oper**: Nivel de IRCop (`*1` = Helper, `*2` = Admin, `*4` = Root).
 *   **swhois**: Línea extra en el /WHOIS del usuario.
@@ -43,7 +47,8 @@ Almacena configuraciones para usuarios registrados.
 *   **pass** y **challenge**: Credencial de autenticación de administrador del canal.
 *   **persistent**: Activa el `+P` nativo cuando está cargado el manejador de canales permanentes.
 *   **options**: Opciones numéricas: `*1` protege los bans locales y `*2`
-    bloquea cambios de modo salvo para el fundador identificado.
+     bloquea cualquier cambio local de `MODE` o `SAMODE` salvo para el fundador
+     identificado.
 
 ### 1.3 Reconciliación De Canales En Caliente
 
@@ -64,14 +69,24 @@ omite la contraseña de UDB y nunca concede `+a`; una contraseña enviada en
 `JOIN` sigue concediendo `+a`. Los INVITE con contraseña para destinos remotos
 se rechazan porque el permiso de un solo uso es local y no se transmite por S2S.
 
+Las credenciales UDB solo admiten `challenge` `argon2id`, `sha256` o `crypt`.
+Los intentos fallidos se limitan por perfil e IP con `S::flood` o
+`udb::password-flood`.
+
 UDB usa overrides de `MODE` y `SAMODE`, no inspección de texto crudo. Con la
 opción `*1`, los `+b` añadidos localmente se asocian a su autor y otro usuario
 local no puede eliminarlos, salvo un fundador identificado o un oper.
+La opción `*2` rechaza todo cambio local de modos de quien no sea el fundador;
+no se limita a los modos guardados en `C::<#canal>::modes`.
 
 #### Bloque I (IPs y Hosts)
 *   **clones**: Límite numérico de conexiones simultáneas (`*<numero>`).
-*   **host**: Override de host aplicado antes de completar una conexión local.
-*   **nolines**: Letras de exención de sanciones (ej. `GZT` para eximir de G-Lines, Z-Lines, etc.).
+*   **host**: Override explícito para clientes locales coincidentes. UDB guarda
+    el host real, cloaked, virtual y sus modos, y los restaura al sustituir o
+    borrar el registro, o al descargar el módulo.
+*   **nolines**: Letras de excepción de sanciones que se pasan a UnrealIRCd
+    (por ejemplo, `GZQSTmc`). UDB solo elimina las excepciones que creó; `c`
+    también exime a la IP/host del throttle de clones de UDB.
 
 #### Bloque K (Líneas y Sanciones)
 Define las sanciones activas en la red.
@@ -84,24 +99,39 @@ Define las sanciones activas en la red.
 
 #### Bloque S (Global / Setup)
 Ajustes globales de la red y comportamientos de UDB.
-*   **clones**: Límite numérico global para IPs no especificadas en el bloque I.
-*   **challenge**: Tipo de hash por defecto para contraseñas.
-*   **quit_clones**: Mensaje de salida (quit message) para conexiones expulsadas por límite.
-*   **bot_nick**: NickName virtual para mensajes del sistema UDB (ej. `UDB-Bot`).
-*   **bot_mask**: Máscara virtual para el bot del sistema (ej. `servicios@red.com`).
+Solo se admiten `quit_ips`, `quit_clones`, `flood`, `encryption_key`, `suffix`,
+`nickserv`, `chanserv` e `ipserv`.
+*   **flood**: Límite de fallos de contraseña `<intentos>:<segundos>`. Sustituye
+    a `udb::password-flood`; al borrarlo se recupera el valor de configuración.
+*   **encryption_key** y **suffix**: Una clave HMAC de 64 caracteres hex y un
+    sufijo de hostname con puntos, válido e iniciado por `.` habilitan vhosts
+    deterministas. UDB calcula HMAC-SHA-256 sobre
+    `UDB-vhost-v1|<ip-original>|<host-original>`, convierte los primeros 16
+    bytes en 32 hexadecimales minúsculos y añade el sufijo. Ambos registros son
+    necesarios; sustituir o borrar uno reconcilia inmediatamente los clientes
+    locales conectados. `N::<nick>::vhost` e `I::<ip>::host` explícito tienen
+    prioridad sobre el vhost derivado.
+*   **nickserv**, **chanserv**, **ipserv**: Máscaras de servicio en formato
+    `nick!user@host`.
+*   **quit_ips** y **quit_clones**: Estado validado para mensajes de expulsión;
+    el hook de clones consume `quit_clones`.
 
 #### Bloque L (Enlaces S2S)
-*   **options**: Opciones numéricas mediante máscara de bits (`*1` habilita logs S2S de depuración).
+Solo se admite `L::<servidor>::options`. Su máscara numérica usa `*1` para
+notices de depuración UDB y `*2` para seleccionar el propagador. Debe existir
+exactamente una fuente: `udb::propagator` o un registro `L` con `*2`; cero o
+más de una rechazan escrituras remotas. `prefix` y `allow_clients` no son
+ajustes UDB soportados.
 
 ---
 
 ## 2. Protocolo S2S (Server-to-Server)
 
 El protocolo UDB se integra en el tráfico S2S nativo de UnrealIRCd utilizando el comando extendido `DB`.
-Solo se sincronizan peers que anuncian la capacidad del módulo UDB. Las
-mutaciones en caliente deben proceder del `udb::propagator` configurado; un
-peer que sirve una sincronización activa solo puede enviar registros de ese
-bloque.
+Solo se sincronizan peers directamente enlazados que completan explícitamente
+el intercambio HEL de UDB. Las mutaciones en caliente deben proceder del
+`udb::propagator` configurado; un peer que sirve una sincronización activa solo
+puede enviar registros de ese bloque.
 **Estructura general:**
 `:<sid_origen> DB <destino> <subcomando> <parametros>`
 
@@ -109,8 +139,18 @@ bloque.
 Cuando un servidor se conecta a otro, se verifica el estado de los bloques con
 un CRC32 de los registros lógicos canónicos. El digest ordena los registros
 serializados `ruta valor`, por lo que los encabezados, timestamps de guardado y
-el orden de inserción no lo afectan. El valor `2` de ModData de UDB negocia la
-capacidad de transferencia V4 por etapas.
+el orden de inserción no lo afectan. Tras `HOOKTYPE_SERVER_SYNC`, cada peer
+directamente enlazado recibe una petición `HEL 4`. Solo el `HEL 4 ACK` directo
+correspondiente confirma UDB V4 para ese enlace; antes no se envían `INF`, frames
+staged ni frames DB UDB reenviados. Si no llega el acuse en 60 segundos, el enlace
+queda marcado como no compatible hasta reconectar. `HEL` es el único frame DB
+aceptado antes de confirmar y nunca se reenvía fuera del enlace directo.
+
+**HEL (Negociación de capacidad):**
+`:<sid> DB <sid-peer-directo> HEL 4`
+
+**Acuse HEL:**
+`:<sid> DB <sid-peer-directo> HEL 4 ACK`
 
 **INF (Información del Bloque):**
 `:<sid> DB <destino> INF <letra_bloque> <crc32_hex> <timestamp>`
@@ -140,9 +180,8 @@ Mientras exista una transacción staged, `INS`, `DEL`, `DRP` y `OPT` se rechazan
 con `UDB_ERR_SYNC_ACTIVE`, incluso desde el propagador. Fuera de una transacción
 esas mutaciones siguen requiriendo el propagador configurado.
 
-`FDR` se conserva solo para peers pre-V4 (ModData `1`). No forma parte del
-protocolo staged y mantiene la transferencia legacy in-place; una red mixta no
-obtiene aislamiento V4 en ese enlace legacy.
+`FDR` no se emite por el protocolo HEL 4 y no forma parte de la transferencia
+staged.
 
 ### 2.2 Modificación de Datos en Tiempo Real
 Para inyectar o eliminar registros en caliente, se usan los siguientes comandos (generalmente con destino `*` para broadcast).
@@ -155,6 +194,12 @@ Para inyectar o eliminar registros en caliente, se usan los siguientes comandos 
 Elimina un nodo en cascada.
 `:<sid> DB * DEL <letra_bloque>::<clave>[::<subclave>]`
 *Ejemplo:* `:<sid> DB * DEL C::#opers::topic`
+
+Tras confirmar HEL 4, `INS` y `DEL` en tiempo real solo se aceptan del
+propagador seleccionado, salvo frames del peer que está sirviendo la
+sincronización de ese bloque. Se rechazan mientras el bloque tenga una
+transacción staged y solo se persisten y reenvían a peers directos con HEL
+confirmado.
 
 **DRP (Drop / Vaciar Bloque):**
 `:<sid> DB * DRP <letra_bloque>`

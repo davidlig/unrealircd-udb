@@ -2,31 +2,77 @@
  * Protocol implementation (S2S DB command and sync)
  */
 
-static ModDataInfo *udb_server_md = NULL;
 static unsigned long udb_sync_txid = 0;
 
-static const char *udb_md_serialize(ModData *m)
+typedef struct UdbHelloPeer UdbHelloPeer;
+
+struct UdbHelloPeer {
+	Client *peer;
+	time_t deadline;
+	int state;
+	UdbHelloPeer *next;
+};
+
+#define UDB_HEL_WAITING     1
+#define UDB_HEL_CONFIRMED   2
+#define UDB_HEL_UNSUPPORTED 3
+
+static UdbHelloPeer *udb_hello_peers = NULL;
+
+static UdbHelloPeer *udb_hello_peer(Client *server, int create)
 {
-	return m->i ? "2" : NULL;
+	UdbHelloPeer *peer;
+
+	for (peer = udb_hello_peers; peer; peer = peer->next)
+		if (peer->peer == server)
+			return peer;
+	if (!create)
+		return NULL;
+	peer = safe_alloc(sizeof(*peer));
+	peer->peer = server;
+	peer->next = udb_hello_peers;
+	udb_hello_peers = peer;
+	return peer;
 }
 
-static void udb_md_unserialize(const char *str, ModData *m)
+static int udb_has_hello(Client *server)
 {
-	m->i = (str && *str >= '1' && *str <= '9') ? (*str - '0') : 0;
+	UdbHelloPeer *peer = udb_hello_peer(server, 0);
+
+	return server && IsServer(server) && MyConnect(server) && peer &&
+	       peer->state == UDB_HEL_CONFIRMED;
 }
 
-static int udb_is_udb_server(Client *server)
-{
-	if (!server || !IsServer(server))
-		return 0;
-	return udb_server_md && moddata_client(server, udb_server_md).i;
-}
-
-/* ModData is synchronized during the server handshake and is our UDB feature
- * negotiation: value 2 advertises the staged V4 DB transfer frames. */
 static int udb_has_staged_sync(Client *server)
 {
-	return udb_is_udb_server(server) && moddata_client(server, udb_server_md).i >= 2;
+	return udb_has_hello(server);
+}
+
+static void udb_hello_start(Client *server)
+{
+	UdbHelloPeer *peer;
+
+	if (!server || !IsServer(server) || !MyConnect(server))
+		return;
+	peer = udb_hello_peer(server, 1);
+	if (peer->state)
+		return;
+	peer->state = UDB_HEL_WAITING;
+	peer->deadline = time(NULL) + UDB_SYNC_TIMEOUT;
+	sendto_one(server, NULL, ":%s DB %s HEL 4", me.id, server->id);
+}
+
+static void udb_sendto_confirmed_servers(Client *except, const char *fmt, ...)
+{
+	Client *server;
+	char line[4096];
+	va_list args;
+
+	va_start(args, fmt);
+	vsnprintf(line, sizeof(line), fmt, args);
+	va_end(args);
+	list_for_each_entry(server, &client_list, client_node) if (server != except && IsServer(server) && MyConnect(server) && udb_has_hello(server))
+	    sendto_one(server, NULL, "%s", line);
 }
 
 static void udb_sync_abort(UdbBlock *block, const char *reason)
@@ -93,6 +139,8 @@ static void udb_sync_send_stage(Client *server, UdbBlock *block)
 	char pathbuf[4096] = "";
 	UdbRecord *rec;
 
+	if (!udb_has_hello(server))
+		return;
 	snprintf(txid, sizeof(txid), "%08lx", ++udb_sync_txid);
 	sendto_one(server, NULL, ":%s DB %s BEGIN %c %s %08lX", me.id, server->id,
 	           block->letter, txid, block->checksum);
@@ -105,11 +153,22 @@ static void udb_sync_send_stage(Client *server, UdbBlock *block)
 EVENT(udb_sync_timeout_event)
 {
 	UdbBlock *block;
+	UdbHelloPeer *peer;
 	time_t now = time(NULL);
 
 	for (block = udb_ctx ? udb_ctx->block_list : NULL; block; block = block->next)
 		if (block->session && block->session->deadline <= now)
 			udb_sync_abort(block, "timeout");
+
+	for (peer = udb_hello_peers; peer; peer = peer->next)
+	{
+		if (peer->state == UDB_HEL_WAITING && peer->deadline <= now)
+		{
+			peer->state = UDB_HEL_UNSUPPORTED;
+			udb_log(ULOG_INFO, "UDB_HEL_TIMEOUT", peer->peer,
+			        "No UDB HEL 4 acknowledgement from directly linked server; capability disabled for this link");
+		}
+	}
 }
 
 static const char *udb_selected_propagator(void)
@@ -202,6 +261,8 @@ static void udb_protocol_params_error(Client *client, const char *subcmd)
 static void udb_sync_to_server(Client *server)
 {
 	UdbBlock *block = udb_ctx->block_list;
+	if (!udb_has_hello(server))
+		return;
 	while (block)
 	{
 		sendto_one(server, NULL, ":%s DB %s INF %c %lX %lu",
@@ -212,22 +273,30 @@ static void udb_sync_to_server(Client *server)
 
 static int udb_hook_server_sync(Client *client)
 {
-	if (udb_is_udb_server(client))
-	{
-		udb_sync_to_server(client);
-	}
+	if (!client || !IsServer(client) || !MyConnect(client))
+		return 0;
+	udb_hello_start(client);
 	return 0;
 }
 
 static int udb_hook_server_quit(Client *client, MessageTag *mtags)
 {
 	UdbBlock *block;
+	UdbHelloPeer **peer;
 
 	if (!udb_ctx || !client)
 		return 0;
 
 	if (udb_ctx->propagator == client)
 		udb_ctx->propagator = NULL;
+	for (peer = &udb_hello_peers; *peer; peer = &(*peer)->next)
+		if ((*peer)->peer == client)
+		{
+			UdbHelloPeer *old = *peer;
+			*peer = old->next;
+			safe_free(old);
+			break;
+		}
 
 	for (block = udb_ctx->block_list; block; block = block->next)
 	{
@@ -251,6 +320,7 @@ CMD_FUNC(cmd_db)
 
 	const char *target = parv[1];
 	const char *subcmd = parv[2];
+	char logbuf[512];
 
 	if (!target || !*target || !subcmd || !*subcmd)
 	{
@@ -258,14 +328,44 @@ CMD_FUNC(cmd_db)
 		return;
 	}
 
-	if (!udb_is_udb_server(client))
+	/* HEL is the sole DB frame accepted before UDB capability confirmation. */
+	if (!strcasecmp(subcmd, "HEL"))
+	{
+		UdbHelloPeer *peer;
+
+		if (!IsServer(client) || !MyConnect(client) ||
+		    (strcmp(target, me.id) && strcmp(target, me.name)) ||
+		    parc < 4 || strcmp(parv[3], "4"))
+			return;
+		snprintf(logbuf, sizeof(logbuf), "[UDB] S2S DB received: parc=%d target=%s subcmd=%s", parc, target, subcmd);
+		unreal_log(ULOG_INFO, "udb", "UDB_CMD_DB", client, "$msg", log_data_string("msg", logbuf));
+		peer = udb_hello_peer(client, 1);
+		if (parc == 5 && !strcasecmp(parv[4], "ACK"))
+		{
+			if (peer->state != UDB_HEL_WAITING)
+				return;
+			peer->state = UDB_HEL_CONFIRMED;
+			udb_log(ULOG_INFO, "UDB_HEL_CONFIRMED", client,
+			        "UDB HEL 4 capability confirmed for directly linked server");
+			udb_sync_to_server(client);
+			return;
+		}
+		if (parc != 4)
+			return;
+		/* Each side sends its own request, so only an ACK confirms outbound data. */
+		if (!peer->state)
+			udb_hello_start(client);
+		sendto_one(client, NULL, ":%s DB %s HEL 4 ACK", me.id, client->id);
+		return;
+	}
+
+	if (!udb_has_hello(client))
 	{
 		sendto_one(client, NULL, ":%s DB %s ERR %s %d 0", me.id, client->id,
 		           subcmd, UDB_ERR_FORBIDDEN);
 		return;
 	}
 
-	char logbuf[512];
 	snprintf(logbuf, sizeof(logbuf), "[UDB] S2S DB received: parc=%d target=%s subcmd=%s", parc, target, subcmd);
 	unreal_log(ULOG_INFO, "udb", "UDB_CMD_DB", client, "$msg", log_data_string("msg", logbuf));
 
@@ -302,8 +402,8 @@ CMD_FUNC(cmd_db)
 					if (!is_broadcast)
 						return;
 				}
-				sendto_server(client, 0, 0, NULL, ":%s DB %s BEGIN %s %s %s", client->id,
-				              target, parv[3], parv[4], parv[5]);
+				udb_sendto_confirmed_servers(client, ":%s DB %s BEGIN %s %s %s", client->id,
+				                             target, parv[3], parv[4], parv[5]);
 			}
 			break;
 
@@ -342,8 +442,8 @@ CMD_FUNC(cmd_db)
 					if (!is_broadcast)
 						return;
 				}
-				sendto_server(client, 0, 0, NULL, ":%s DB %s PUT %s %s %s :%s", client->id,
-				              target, parv[3], parv[4], parv[5], parv[6]);
+				udb_sendto_confirmed_servers(client, ":%s DB %s PUT %s %s %s :%s", client->id,
+				                             target, parv[3], parv[4], parv[5], parv[6]);
 			}
 			break;
 
@@ -385,8 +485,8 @@ CMD_FUNC(cmd_db)
 					if (!is_broadcast)
 						return;
 				}
-				sendto_server(client, 0, 0, NULL, ":%s DB %s END %s %s %s", client->id,
-				              target, parv[3], parv[4], parv[5]);
+				udb_sendto_confirmed_servers(client, ":%s DB %s END %s %s %s", client->id,
+				                             target, parv[3], parv[4], parv[5]);
 			} else if (!strcasecmp(subcmd, "ERR"))
 			{
 				if (parc < 5)
@@ -401,10 +501,10 @@ CMD_FUNC(cmd_db)
 				}
 				if (parc >= 6)
 				{
-					sendto_server(client, 0, 0, NULL, ":%s DB %s ERR %s %s %s", client->id, target, parv[3], parv[4], parv[5]);
+					udb_sendto_confirmed_servers(client, ":%s DB %s ERR %s %s %s", client->id, target, parv[3], parv[4], parv[5]);
 				} else
 				{
-					sendto_server(client, 0, 0, NULL, ":%s DB %s ERR %s %s", client->id, target, parv[3], parv[4]);
+					udb_sendto_confirmed_servers(client, ":%s DB %s ERR %s %s", client->id, target, parv[3], parv[4]);
 				}
 			}
 			break;
@@ -425,8 +525,8 @@ CMD_FUNC(cmd_db)
 					if (!is_broadcast)
 						return;
 				}
-				sendto_server(client, 0, 0, NULL, ":%s DB %s ACK %s %s %s", client->id,
-				              target, parv[3], parv[4], parv[5]);
+				udb_sendto_confirmed_servers(client, ":%s DB %s ACK %s %s %s", client->id,
+				                             target, parv[3], parv[4], parv[5]);
 			}
 			break;
 
@@ -461,7 +561,7 @@ CMD_FUNC(cmd_db)
 					if (!is_broadcast)
 						return;
 				}
-				sendto_server(client, 0, 0, NULL, ":%s DB %s INF %c %s %s", client->id, target, letter, parv[4], parv[5]);
+				udb_sendto_confirmed_servers(client, ":%s DB %s INF %c %s %s", client->id, target, letter, parv[4], parv[5]);
 			} else if (!strcasecmp(subcmd, "INS"))
 			{
 				if (parc < 5)
@@ -517,14 +617,14 @@ CMD_FUNC(cmd_db)
 
 					if (udb_ctx->propagator && block->syncing_from == client)
 					{
-						sendto_server(client, 0, 0, NULL, ":%s DB %s INS %s %s", udb_ctx->propagator->id, target, path, data);
+						udb_sendto_confirmed_servers(client, ":%s DB %s INS %s %s", udb_ctx->propagator->id, target, path, data);
 						return;
 					}
 
 					if (!is_broadcast)
 						return;
 				}
-				sendto_server(client, 0, 0, NULL, ":%s DB %s INS %s %s", client->id, target, path, data);
+				udb_sendto_confirmed_servers(client, ":%s DB %s INS %s %s", client->id, target, path, data);
 			}
 			break;
 
@@ -582,7 +682,7 @@ CMD_FUNC(cmd_db)
 					if (!is_broadcast)
 						return;
 				}
-				sendto_server(client, 0, 0, NULL, ":%s DB %s RES %c", client->id, target, letter);
+				udb_sendto_confirmed_servers(client, ":%s DB %s RES %c", client->id, target, letter);
 			}
 			break;
 
@@ -632,13 +732,13 @@ CMD_FUNC(cmd_db)
 
 					if (udb_ctx->propagator && block->syncing_from == client)
 					{
-						sendto_server(client, 0, 0, NULL, ":%s DB %s DEL %s", udb_ctx->propagator->id, target, path);
+						udb_sendto_confirmed_servers(client, ":%s DB %s DEL %s", udb_ctx->propagator->id, target, path);
 						return;
 					}
 					if (!is_broadcast)
 						return;
 				}
-				sendto_server(client, 0, 0, NULL, ":%s DB %s DEL %s", client->id, target, path);
+				udb_sendto_confirmed_servers(client, ":%s DB %s DEL %s", client->id, target, path);
 			} else if (!strcasecmp(subcmd, "DRP"))
 			{
 				if (parc < 4)
@@ -678,7 +778,7 @@ CMD_FUNC(cmd_db)
 					if (!is_broadcast)
 						return;
 				}
-				sendto_server(client, 0, 0, NULL, ":%s DB %s DRP %c", client->id, target, *parv[3]);
+				udb_sendto_confirmed_servers(client, ":%s DB %s DRP %c", client->id, target, *parv[3]);
 			}
 			break;
 
@@ -716,7 +816,7 @@ CMD_FUNC(cmd_db)
 					if (!is_broadcast)
 						return;
 				}
-				sendto_server(client, 0, 0, NULL, ":%s DB %s FDR %c", client->id, target, *parv[3]);
+				udb_sendto_confirmed_servers(client, ":%s DB %s FDR %c", client->id, target, *parv[3]);
 			}
 			break;
 
@@ -755,9 +855,9 @@ CMD_FUNC(cmd_db)
 						return;
 				}
 				if (parc >= 5)
-					sendto_server(client, 0, 0, NULL, ":%s DB %s OPT %c %s", client->id, target, *parv[3], parv[4]);
+					udb_sendto_confirmed_servers(client, ":%s DB %s OPT %c %s", client->id, target, *parv[3], parv[4]);
 				else
-					sendto_server(client, 0, 0, NULL, ":%s DB %s OPT %c", client->id, target, *parv[3]);
+					udb_sendto_confirmed_servers(client, ":%s DB %s OPT %c", client->id, target, *parv[3]);
 			}
 			break;
 	}
@@ -765,24 +865,6 @@ CMD_FUNC(cmd_db)
 
 static int udb_protocol_init(ModuleInfo *modinfo)
 {
-	ModDataInfo mreq;
-	memset(&mreq, 0, sizeof(mreq));
-	mreq.name = "udb_server";
-	mreq.type = MODDATATYPE_CLIENT;
-	mreq.serialize = udb_md_serialize;
-	mreq.unserialize = udb_md_unserialize;
-	mreq.sync = MODDATA_SYNC_NORMAL;
-	mreq.self_write = 1;
-	udb_server_md = ModDataAdd(modinfo->handle, mreq);
-
-	if (!udb_server_md)
-	{
-		return -1; // Failed to register ModData
-	}
-
-	// Mark ourselves as a UDB server
-	moddata_client((&me), udb_server_md).i = 2;
-
 	CommandAdd(modinfo->handle, "DB", cmd_db, MAXPARA, CMD_SERVER);
 	HookAdd(modinfo->handle, HOOKTYPE_SERVER_SYNC, 0, udb_hook_server_sync);
 	HookAdd(modinfo->handle, HOOKTYPE_SERVER_QUIT, 0, udb_hook_server_quit);

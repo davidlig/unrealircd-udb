@@ -324,7 +324,6 @@ static int udb_block_letter_to_index(char letter);
  * Protocol API (udb_protocol.inc.c)
  * ======================================================================== */
 static void udb_sync_to_server(Client *server);
-static int udb_is_udb_server(Client *server);
 static int udb_is_propagator(Client *server);
 
 /* ========================================================================

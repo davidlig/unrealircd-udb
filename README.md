@@ -118,10 +118,9 @@ Detailed technical documentation is available in the `doc/` directory:
 ### Channel Authentication
 
 - UDB accepts only Argon2id (`$argon2id$...`, optionally prefixed with
-  `argon2id:`) and bcrypt (`$2a$`, `$2b$`, or `$2y$`, optionally prefixed with
-  `bcrypt:`). Configure a matching `challenge` as `argon2id` (or `argon2`) or
-  `bcrypt`. Plaintext, MD5, SHA-256, Unix crypt, and unrecognized challenge
-  names are rejected, including existing stored credentials.
+  `argon2id:`), `sha256:` and `crypt:` hashes. Configure a matching challenge
+  as `argon2id`, `sha256`, or `crypt`. Plaintext, MD5, bcrypt, and unrecognized
+  challenge names are rejected, including existing stored credentials.
 - Failed credential checks are rate-limited per UDB profile and source IP using
   `S::flood` or `udb::password-flood`; the in-memory tracker is bounded.
 - `N::<nick>::access` may contain one or more comma- or whitespace-separated
@@ -142,6 +141,9 @@ Detailed technical documentation is available in the `doc/` directory:
   loaded. UDB does not emulate persistence if that handler is unavailable.
 - `C::<#channel>::options *1` protects locally-added `+b` entries from removal
   by anyone other than their recorded owner, an identified founder, or an oper.
+- `C::<#channel>::options *2` rejects every local `MODE` and `SAMODE` change
+  from anyone other than the identified founder. UDB mode locks are command
+  overrides, not a textual MODE parser.
 
 ### IP Policies
 
@@ -168,12 +170,41 @@ Detailed technical documentation is available in the `doc/` directory:
   Suffixes must be valid dotted hostnames and leave room for the 32-character label.
 - Service settings (`nickserv`, `chanserv`, and `ipserv`) must be masks in
   `nick!user@host` form. They drive the corresponding service identity helpers.
+- The only supported `S` values are `quit_ips`, `quit_clones`, `flood`,
+  `encryption_key`, `suffix`, `nickserv`, `chanserv`, and `ipserv`.
+- The only supported `L` child is `L::<server>::options`: `*1` enables UDB
+  debug notices and `*2` selects that server as propagator. `prefix` and
+  `allow_clients` are not supported UDB settings.
 - Select exactly one UDB propagator source: either `udb::propagator` or one
   `L::<server>::options` record with the propagator bit. Zero or multiple sources
   reject remote UDB writes. Debug notices redact diagnostic detail.
 
 
 ---
+
+## Tests
+
+Run these from the UnrealIRCd source root after building `udb.so`:
+
+```bash
+# One node: runtime nick/channel reconciliation against a prepared server.
+python3 src/modules/third/udb/tests/runtime_channel_nick.py
+
+# Two nodes: HEL 4, staged synchronization, and authorized real-time INS/DEL.
+python3 src/modules/third/udb/tests/two_node_udb.py
+
+# Three nodes: prove A -> B commits before B -> C propagation.
+python3 src/modules/third/udb/tests/three_node_udb.py
+```
+
+The one-node smoke test is a client fixture: preload its isolated server with
+only Argon2id, SHA-256, or crypt credentials and set `UDB_TEST_HOST` /
+`UDB_TEST_PORT` if needed. The two-node harness builds and loads the test-only
+mutator on authoritative node A; it emits authorized `INS` then `DEL` to node
+B after HEL and the staged snapshot settle. The three-node harness has no
+mutator: A is the sole seeded source, B must commit A's marker, and only then
+does C start so the B-to-C staged path is observable. See the matching files in
+`tests/` for isolation prerequisites, `--timeout`, and `--keep`.
 
 ## Testing Server
 

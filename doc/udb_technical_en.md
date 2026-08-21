@@ -26,10 +26,9 @@ davidlig::oper *4
 
 #### Block N (Nicks - Users)
 Stores configurations for registered users.
-*   **pass**: User password hash. Only Argon2id (`$argon2id$...`) and bcrypt
-    (`$2a$`, `$2b$`, or `$2y$`) are accepted; optional `argon2id:` and
-    `bcrypt:` prefixes are supported. Plaintext and legacy digest values fail
-    closed.
+*   **pass**: User password hash. Only Argon2id (`$argon2id$...`), `sha256:`,
+    and `crypt:` values are accepted. Plaintext, MD5, bcrypt, and unknown
+    values fail closed.
 *   **access**: Optional comma- or whitespace-separated IPv4/IPv6 CIDR list.
     A successful NICK or GHOST credential check must also match this list.
 *   **vhost**: Custom virtual host applied on connect.
@@ -48,7 +47,8 @@ Stores configurations for registered users.
 *   **pass** and **challenge**: Channel-admin authentication credential.
 *   **persistent**: Sets native `+P` when the permanent-channel mode handler is loaded.
 *   **options**: Numeric channel options: `*1` protects locally-added bans,
-    and `*2` locks mode changes to the identified founder.
+    and `*2` locks every local `MODE` and `SAMODE` change to the identified
+    founder.
 
 ### 1.3 Live Channel Reconciliation
 
@@ -69,22 +69,25 @@ password check and never grants `+a`; a password supplied directly to `JOIN`
 continues to grant `+a`. Password-bearing INVITEs to remote targets are rejected
 because the one-use grant is intentionally local and is not sent over S2S.
 
-All UDB credential checks accept only `challenge` values `argon2id` (`argon2`
-is an alias) and `bcrypt`, and use UnrealIRCd's native authentication API. A
-missing challenge is accepted only when the stored hash has an unambiguous
-Argon2id or bcrypt prefix. Plaintext, MD5, SHA-256, Unix crypt, and unsupported
-challenge names fail closed. Failed checks are bounded and rate-limited by the
-active `S::flood` or `udb::password-flood` setting per profile and source IP.
+All UDB credential checks accept only `challenge` values `argon2id`, `sha256`,
+and `crypt`. Plaintext, MD5, bcrypt, and unsupported challenge names fail
+closed. Failed checks are bounded and rate-limited by the active `S::flood` or
+`udb::password-flood` setting per profile and source IP.
 
 UDB uses command overrides for `MODE` and `SAMODE`, rather than raw command
 text inspection. With channel option `*1`, locally-added `+b` masks are tracked
 with their setter and cannot be removed by another local user, except an
-identified founder or an oper.
+identified founder or an oper. Option `*2` rejects any local mode change by a
+non-founder; it is not limited to the modes stored in `C::<#channel>::modes`.
 
 #### Block I (IPs and Hosts)
 *   **clones**: Numeric limit of simultaneous connections (`*<number>`).
-*   **host**: Host override applied before a local connection completes.
-*   **nolines**: Sanction exemption letters (e.g., `GZT` to exempt from G-Lines, Z-Lines, etc.).
+*   **host**: Explicit host override for matching local clients. UDB preserves
+    the original real host, cloak host, virtual host, and host modes, then
+    restores them when the record is replaced, deleted, or UDB unloads.
+*   **nolines**: Ban-exception type letters passed to UnrealIRCd (for example,
+    `GZQSTmc`). UDB removes only exceptions it created. `c` additionally
+    exempts the matching IP/host from UDB's clone throttle.
 
 #### Block K (Lines and Bans)
 Defines active network sanctions.
@@ -110,23 +113,37 @@ encoded patterns are rejected and never compiled or installed.
 
 #### Block S (Global / Setup)
 Global network settings and UDB behavior.
-*   **clones**: Global numeric clone limit for IPs not specified in Block I.
-*   **challenge**: Default hash type for passwords.
-*   **quit_clones**: Quit message for connections dropped due to clone limits.
-*   **bot_nick**: Virtual NickName for UDB system messages (e.g., `UDB-Bot`).
-*   **bot_mask**: Virtual mask for the system bot (e.g., `services@network.com`).
+Only these values are supported: `quit_ips`, `quit_clones`, `flood`,
+`encryption_key`, `suffix`, `nickserv`, `chanserv`, and `ipserv`.
+*   **flood**: `<attempts>:<seconds>` password-failure limit. It overrides
+    `udb::password-flood`; deleting it restores that configured value.
+*   **encryption_key** and **suffix**: A 64-hex-character HMAC key and a valid
+    dotted suffix (starting with `.`) enable deterministic derived vhosts.
+    UDB HMAC-SHA-256s `UDB-vhost-v1|<original-ip>|<original-host>`, uses the
+    first 16 bytes as 32 lowercase hex characters, and appends the suffix.
+    Both records are required; changing or deleting either reconciles connected
+    local clients. `N::<nick>::vhost` and explicit `I::<ip>::host` take
+    precedence over a derived vhost.
+*   **nickserv**, **chanserv**, **ipserv**: Service masks in `nick!user@host`
+    form.
+*   **quit_ips** and **quit_clones**: Validated disconnect-message state; the
+    clone hook consumes `quit_clones`.
 
 #### Block L (S2S Links)
-*   **options**: Numeric options via bitmask (`*1` enables S2S debug logs).
+Only `L::<server>::options` is supported. Its numeric bitmask is `*1` for UDB
+debug notices and `*2` for the propagator source. Select exactly one source:
+either `udb::propagator` or one `L` record with `*2`; zero or multiple sources
+reject remote writes. `prefix` and `allow_clients` are not supported settings.
 
 ---
 
 ## 2. S2S (Server-to-Server) Protocol
 
 The UDB protocol integrates into UnrealIRCd's native S2S traffic using the extended `DB` command.
-Only peers advertising the UDB module capability are synchronized. Real-time
-mutations must originate from the configured `udb::propagator`; a peer that is
-actively serving a block synchronization may only send records for that block.
+Only directly linked peers that explicitly complete the UDB HEL exchange are
+synchronized. Real-time mutations must originate from the configured
+`udb::propagator`; a peer that is actively serving a block synchronization may
+only send records for that block.
 **General structure:**
 `:<source_sid> DB <target> <subcommand> <parameters>`
 
@@ -134,7 +151,18 @@ actively serving a block synchronization may only send records for that block.
 When a server connects to another, block states are verified using a CRC32 over
 the canonical logical records. The digest sorts serialized `path value` records,
 so save timestamps, comment headers, and sibling insertion order do not affect
-it. UDB module ModData value `2` negotiates the staged V4 transfer capability.
+it. After `HOOKTYPE_SERVER_SYNC`, each directly linked peer receives one
+`HEL 4` request. Only the matching direct `HEL 4 ACK` confirms UDB V4 for that
+link; no `INF`, staged frame, or forwarded UDB DB frame is sent first. A missing
+acknowledgement times out after 60 seconds and marks that link unsupported until
+it reconnects. `HEL` is the only DB frame accepted before confirmation and is
+never routed beyond the direct link.
+
+**HEL (Capability Negotiation):**
+`:<sid> DB <direct-peer-sid> HEL 4`
+
+**HEL acknowledgement:**
+`:<sid> DB <direct-peer-sid> HEL 4 ACK`
 
 **INF (Block Information):**
 `:<sid> DB <target> INF <block_letter> <crc32_hex> <timestamp>`
@@ -164,9 +192,7 @@ While a block has a staged transaction, real-time `INS`, `DEL`, `DRP`, and `OPT`
 are rejected with `UDB_ERR_SYNC_ACTIVE`, including requests from the propagator.
 Outside a transaction those mutations still require the configured propagator.
 
-`FDR` remains only for pre-V4 peers (ModData value `1`). It is not part of the
-staged protocol and retains the legacy in-place transfer behavior; mixed V4 and
-legacy networks therefore do not get V4 isolation on the legacy link.
+`FDR` is not emitted by the HEL 4 protocol and is not part of staged transfer.
 
 ### 2.2 Real-time Data Modification
 To inject or delete records on the fly, the following commands are used (usually with target `*` for broadcast).
@@ -179,6 +205,11 @@ To inject or delete records on the fly, the following commands are used (usually
 Deletes a node and cascades to children.
 `:<sid> DB * DEL <block_letter>::<key>[::<subkey>]`
 *Example:* `:<sid> DB * DEL C::#opers::topic`
+
+After HEL 4 confirmation, real-time `INS` and `DEL` are accepted only from the
+selected propagator, except frames belonging to the peer currently serving that
+block's synchronization. They are rejected while that block has a staged
+transaction and are persisted and forwarded only to HEL-confirmed direct peers.
 
 **DRP (Drop / Empty Block):**
 `:<sid> DB * DRP <block_letter>`
