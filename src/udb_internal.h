@@ -177,10 +177,8 @@ static void udb_ips_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *re
 static void udb_ips_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
 static void udb_ip_refresh_derived_hosts(void);
 static void udb_ips_shutdown(void);
-static int udb_settings_apply_record(UdbContext *ctx, UdbRecord *rec);
-static void udb_settings_remove_record(UdbContext *ctx, UdbRecord *rec);
-static void udb_link_apply_record(UdbContext *ctx, UdbRecord *rec);
-static void udb_link_remove_record(UdbContext *ctx, UdbRecord *rec);
+static void udb_config_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
+static void udb_config_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
 static void udb_lines_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec,
                                    int is_new);
 static void udb_lines_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);

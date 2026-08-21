@@ -334,10 +334,8 @@ static void udb_ips_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *re
 static void udb_ips_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
 static void udb_ip_refresh_derived_hosts(void);
 static void udb_ips_shutdown(void);
-static int udb_settings_apply_record(UdbContext *ctx, UdbRecord *rec);
-static void udb_settings_remove_record(UdbContext *ctx, UdbRecord *rec);
-static void udb_link_apply_record(UdbContext *ctx, UdbRecord *rec);
-static void udb_link_remove_record(UdbContext *ctx, UdbRecord *rec);
+static void udb_config_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
+static void udb_config_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
 static void udb_lines_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec,
                                    int is_new);
 static void udb_lines_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
@@ -982,6 +980,27 @@ static void udb_link_remove_record(UdbContext *ctx, UdbRecord *rec)
 {
 	if (rec && rec->key && !strcmp(rec->key, LKEY_OPTIONS))
 		ctx->propagator = NULL;
+}
+
+static void udb_config_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec)
+{
+	if (block->letter == 'S')
+	{
+		if (!udb_settings_apply_record(ctx, rec))
+			udb_log(ULOG_WARNING, "UDB_SETTING_INVALID", NULL,
+			        "Ignoring invalid or unsupported S::$setting", log_data_string("setting", rec->key));
+	} else if (block->letter == 'L')
+	{
+		udb_link_apply_record(ctx, rec);
+	}
+}
+
+static void udb_config_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec)
+{
+	if (block->letter == 'S')
+		udb_settings_remove_record(ctx, rec);
+	else if (block->letter == 'L')
+		udb_link_remove_record(ctx, rec);
 }
 
 /* End of udb_config.c.inc */
@@ -1667,14 +1686,9 @@ static int udb_apply_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord 
 	} else if (block->letter == 'I')
 	{
 		udb_ips_apply_effect(ctx, block, rec, is_new);
-	} else if (block->letter == 'S')
+	} else if (block->letter == 'S' || block->letter == 'L')
 	{
-		if (!udb_settings_apply_record(ctx, rec))
-			udb_log(ULOG_WARNING, "UDB_SETTING_INVALID", NULL,
-			        "Ignoring invalid or unsupported S::$setting", log_data_string("setting", rec->key));
-	} else if (block->letter == 'L')
-	{
-		udb_link_apply_record(ctx, rec);
+		udb_config_apply_effect(ctx, block, rec);
 	} else if (block->letter == 'K')
 	{
 		udb_lines_apply_effect(ctx, block, rec, is_new);
@@ -1695,12 +1709,9 @@ static void udb_remove_special_record(UdbContext *ctx, UdbBlock *block, UdbRecor
 	} else if (block->letter == 'I')
 	{
 		udb_ips_remove_effect(ctx, block, rec);
-	} else if (block->letter == 'S')
+	} else if (block->letter == 'S' || block->letter == 'L')
 	{
-		udb_settings_remove_record(ctx, rec);
-	} else if (block->letter == 'L')
-	{
-		udb_link_remove_record(ctx, rec);
+		udb_config_remove_effect(ctx, block, rec);
 	} else if (block->letter == 'K')
 	{
 		udb_lines_remove_effect(ctx, block, rec);

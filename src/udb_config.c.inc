@@ -328,3 +328,24 @@ static void udb_link_remove_record(UdbContext *ctx, UdbRecord *rec)
 	if (rec && rec->key && !strcmp(rec->key, LKEY_OPTIONS))
 		ctx->propagator = NULL;
 }
+
+static void udb_config_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec)
+{
+	if (block->letter == 'S')
+	{
+		if (!udb_settings_apply_record(ctx, rec))
+			udb_log(ULOG_WARNING, "UDB_SETTING_INVALID", NULL,
+			        "Ignoring invalid or unsupported S::$setting", log_data_string("setting", rec->key));
+	} else if (block->letter == 'L')
+	{
+		udb_link_apply_record(ctx, rec);
+	}
+}
+
+static void udb_config_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec)
+{
+	if (block->letter == 'S')
+		udb_settings_remove_record(ctx, rec);
+	else if (block->letter == 'L')
+		udb_link_remove_record(ctx, rec);
+}
