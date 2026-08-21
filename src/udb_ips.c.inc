@@ -245,6 +245,37 @@ static void udb_ip_remove_record(const char *ip_key, UdbRecord *ip_rec, const ch
 	}
 }
 
+static void udb_ips_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec,
+                                 int is_new)
+{
+	UdbRecord *ip_rec;
+
+	if (!ctx || !block || !rec)
+		return;
+	ip_rec = rec->parent == block->tree ? rec : rec->parent;
+	udb_ip_apply_record(ip_rec->key, ip_rec, rec->key, is_new);
+}
+
+static void udb_ips_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec)
+{
+	UdbRecord *ip_rec;
+
+	if (!ctx || !block || !rec)
+		return;
+	ip_rec = rec->parent == block->tree ? rec : rec->parent;
+	if (rec->parent == block->tree)
+	{
+		/* Deleting I::<key> must remove effects owned by every child. */
+		UdbRecord *child;
+
+		for (child = ip_rec->child; child; child = child->sibling)
+			udb_ip_remove_record(ip_rec->key, ip_rec, child->key);
+	} else
+	{
+		udb_ip_remove_record(ip_rec->key, ip_rec, rec->key);
+	}
+}
+
 static int udb_hook_pre_connect(Client *client)
 {
 	UdbRecord *ip_rec;

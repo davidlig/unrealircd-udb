@@ -172,18 +172,18 @@ static void udb_channel_apply_record(UdbContext *ctx, UdbBlock *block, UdbRecord
                                      int is_new);
 static void udb_channel_remove_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
 static int udb_channels_load(ModuleInfo *modinfo);
-static void udb_ip_apply_record(const char *ip_key, UdbRecord *ip_rec,
-                                const char *subkey, int is_new);
-static void udb_ip_remove_record(const char *ip_key, UdbRecord *ip_rec,
-                                 const char *subkey);
+static void udb_ips_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec,
+                                 int is_new);
+static void udb_ips_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
 static void udb_ip_refresh_derived_hosts(void);
 static void udb_ips_shutdown(void);
 static int udb_settings_apply_record(UdbContext *ctx, UdbRecord *rec);
 static void udb_settings_remove_record(UdbContext *ctx, UdbRecord *rec);
 static void udb_link_apply_record(UdbContext *ctx, UdbRecord *rec);
 static void udb_link_remove_record(UdbContext *ctx, UdbRecord *rec);
-static void udb_line_apply_record(UdbRecord *line_rec, int is_new);
-static void udb_line_remove_record(UdbRecord *line_rec);
+static void udb_lines_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec,
+                                   int is_new);
+static void udb_lines_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
 static const char *udb_get_bot_nick(const char *service_key, int force_default);
 static const char *udb_get_bot_mask(const char *service_key, int force_default);
 /* Runtime dispatcher; concrete per-block effects stay in their own modules. */

@@ -154,7 +154,7 @@ static UdbRecord *udb_record_delete(UdbContext *ctx, UdbBlock *block, UdbRecord 
 
 	/* Rebuild a surviving K pattern after one of its properties was removed. */
 	if (line_rec)
-		udb_line_apply_record(line_rec, 0);
+		udb_lines_apply_effect(ctx, block, line_rec, 0);
 
 	if (persist)
 	{

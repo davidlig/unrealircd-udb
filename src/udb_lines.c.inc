@@ -257,6 +257,21 @@ static void udb_line_remove_record(UdbRecord *rec)
 	udb_line_remove_owned(type, pattern);
 }
 
+static void udb_lines_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec,
+                                   int is_new)
+{
+	if (!ctx || !block || !rec)
+		return;
+	udb_line_apply_record(rec, is_new);
+}
+
+static void udb_lines_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec)
+{
+	if (!ctx || !block || !rec)
+		return;
+	udb_line_remove_record(rec);
+}
+
 static void udb_lines_init(ModuleInfo *modinfo)
 {
 	/* TKL system handles network bans automatically, no hooks required here */

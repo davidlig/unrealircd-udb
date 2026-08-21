@@ -45,7 +45,7 @@ ModuleHeader MOD_HEADER = {
 /* Core database engine: records, checksums, sync staging, and file I/O */
 #include "udb_core.c.inc"
 
-/* Runtime effects: special-record dispatch and per-block routing */
+/* Runtime effects: special-record dispatch only */
 #include "udb_effects.c.inc"
 
 /* S2S protocol handler: DB command, server sync */

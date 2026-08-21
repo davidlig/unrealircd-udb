@@ -329,18 +329,18 @@ static void udb_channel_apply_record(UdbContext *ctx, UdbBlock *block, UdbRecord
                                      int is_new);
 static void udb_channel_remove_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
 static int udb_channels_load(ModuleInfo *modinfo);
-static void udb_ip_apply_record(const char *ip_key, UdbRecord *ip_rec,
-                                const char *subkey, int is_new);
-static void udb_ip_remove_record(const char *ip_key, UdbRecord *ip_rec,
-                                 const char *subkey);
+static void udb_ips_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec,
+                                 int is_new);
+static void udb_ips_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
 static void udb_ip_refresh_derived_hosts(void);
 static void udb_ips_shutdown(void);
 static int udb_settings_apply_record(UdbContext *ctx, UdbRecord *rec);
 static void udb_settings_remove_record(UdbContext *ctx, UdbRecord *rec);
 static void udb_link_apply_record(UdbContext *ctx, UdbRecord *rec);
 static void udb_link_remove_record(UdbContext *ctx, UdbRecord *rec);
-static void udb_line_apply_record(UdbRecord *line_rec, int is_new);
-static void udb_line_remove_record(UdbRecord *line_rec);
+static void udb_lines_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec,
+                                   int is_new);
+static void udb_lines_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
 static const char *udb_get_bot_nick(const char *service_key, int force_default);
 static const char *udb_get_bot_mask(const char *service_key, int force_default);
 /* Runtime dispatcher; concrete per-block effects stay in their own modules. */
@@ -1144,7 +1144,7 @@ static UdbRecord *udb_record_delete(UdbContext *ctx, UdbBlock *block, UdbRecord 
 
 	/* Rebuild a surviving K pattern after one of its properties was removed. */
 	if (line_rec)
-		udb_line_apply_record(line_rec, 0);
+		udb_lines_apply_effect(ctx, block, line_rec, 0);
 
 	if (persist)
 	{
@@ -1642,7 +1642,7 @@ static void udb_send_to_debugs(Client *source, const char *fmt, ...)
 
 /* End of udb_core.c.inc */
 
-/* Runtime effects: special-record dispatch and per-block routing */
+/* Runtime effects: special-record dispatch only */
 /* Inlined: udb_effects.c.inc */
 /*
  * UDB Runtime Effects for UnrealIRCd 6
@@ -1666,8 +1666,7 @@ static int udb_apply_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord 
 		udb_channel_apply_record(ctx, block, rec, is_new);
 	} else if (block->letter == 'I')
 	{
-		UdbRecord *ip_rec = rec->parent == block->tree ? rec : rec->parent;
-		udb_ip_apply_record(ip_rec->key, ip_rec, rec->key, is_new);
+		udb_ips_apply_effect(ctx, block, rec, is_new);
 	} else if (block->letter == 'S')
 	{
 		if (!udb_settings_apply_record(ctx, rec))
@@ -1678,7 +1677,7 @@ static int udb_apply_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord 
 		udb_link_apply_record(ctx, rec);
 	} else if (block->letter == 'K')
 	{
-		udb_line_apply_record(rec, is_new);
+		udb_lines_apply_effect(ctx, block, rec, is_new);
 	}
 	return 1;
 }
@@ -1695,17 +1694,7 @@ static void udb_remove_special_record(UdbContext *ctx, UdbBlock *block, UdbRecor
 		udb_channel_remove_record(ctx, block, rec);
 	} else if (block->letter == 'I')
 	{
-		UdbRecord *ip_rec = rec->parent == block->tree ? rec : rec->parent;
-		if (rec->parent == block->tree)
-		{
-			/* Deleting I::<key> must remove effects owned by every child. */
-			UdbRecord *child;
-			for (child = ip_rec->child; child; child = child->sibling)
-				udb_ip_remove_record(ip_rec->key, ip_rec, child->key);
-		} else
-		{
-			udb_ip_remove_record(ip_rec->key, ip_rec, rec->key);
-		}
+		udb_ips_remove_effect(ctx, block, rec);
 	} else if (block->letter == 'S')
 	{
 		udb_settings_remove_record(ctx, rec);
@@ -1714,7 +1703,7 @@ static void udb_remove_special_record(UdbContext *ctx, UdbBlock *block, UdbRecor
 		udb_link_remove_record(ctx, rec);
 	} else if (block->letter == 'K')
 	{
-		udb_line_remove_record(rec);
+		udb_lines_remove_effect(ctx, block, rec);
 	}
 }
 
@@ -4493,6 +4482,37 @@ static void udb_ip_remove_record(const char *ip_key, UdbRecord *ip_rec, const ch
 	}
 }
 
+static void udb_ips_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec,
+                                 int is_new)
+{
+	UdbRecord *ip_rec;
+
+	if (!ctx || !block || !rec)
+		return;
+	ip_rec = rec->parent == block->tree ? rec : rec->parent;
+	udb_ip_apply_record(ip_rec->key, ip_rec, rec->key, is_new);
+}
+
+static void udb_ips_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec)
+{
+	UdbRecord *ip_rec;
+
+	if (!ctx || !block || !rec)
+		return;
+	ip_rec = rec->parent == block->tree ? rec : rec->parent;
+	if (rec->parent == block->tree)
+	{
+		/* Deleting I::<key> must remove effects owned by every child. */
+		UdbRecord *child;
+
+		for (child = ip_rec->child; child; child = child->sibling)
+			udb_ip_remove_record(ip_rec->key, ip_rec, child->key);
+	} else
+	{
+		udb_ip_remove_record(ip_rec->key, ip_rec, rec->key);
+	}
+}
+
 static int udb_hook_pre_connect(Client *client)
 {
 	UdbRecord *ip_rec;
@@ -4866,6 +4886,21 @@ static void udb_line_remove_record(UdbRecord *rec)
 		strlcpy(pattern, line_rec->key, sizeof(pattern));
 	}
 	udb_line_remove_owned(type, pattern);
+}
+
+static void udb_lines_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec,
+                                   int is_new)
+{
+	if (!ctx || !block || !rec)
+		return;
+	udb_line_apply_record(rec, is_new);
+}
+
+static void udb_lines_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec)
+{
+	if (!ctx || !block || !rec)
+		return;
+	udb_line_remove_record(rec);
 }
 
 static void udb_lines_init(ModuleInfo *modinfo)
