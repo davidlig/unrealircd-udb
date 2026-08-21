@@ -471,6 +471,27 @@ static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSessi
 /* ========================================================================
  * File I/O Operations
  * ======================================================================== */
+static int udb_record_path_valid(const char *path)
+{
+	const char *component;
+	const char *p;
+
+	if (!path || !*path || strlen(path) >= UDB_RECORD_PATH_MAX)
+		return 0;
+	component = path;
+	for (p = path; *p; p++)
+	{
+		if (*p == ':')
+		{
+			if (p == component || p[1] != ':' || !p[2])
+				return 0;
+			p++;
+			component = p + 1;
+		}
+	}
+	return 1;
+}
+
 static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *line)
 {
 	if (!line || !*line || *line == ';')
@@ -491,6 +512,9 @@ static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *li
 			data_str = value;
 		}
 	}
+	/* Validate before lookup/allocation: an empty component would leave rec->key NULL. */
+	if (!udb_record_path_valid(line))
+		return NULL;
 	if (!udb_password_record_valid(block, line, data_str))
 		return NULL;
 
@@ -580,8 +604,24 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 		return 0;
 
 	char line[4096];
+	unsigned int line_number = 0;
 	while (fgets(line, sizeof(line), fp))
 	{
+		int overlong = !strchr(line, '\n') && !feof(fp);
+		line_number++;
+		if (overlong)
+		{
+			int ch;
+			char logbuf[512];
+			while ((ch = fgetc(fp)) != '\n' && ch != EOF)
+				;
+			snprintf(logbuf, sizeof(logbuf),
+			         "[UDB] Skipping overlong persisted record in block %c at line %u",
+			         block->letter, line_number);
+			unreal_log(ULOG_WARNING, "udb", "UDB_FILE_LINE_REJECTED", NULL,
+			           "$msg", log_data_string("msg", logbuf));
+			continue;
+		}
 		char *p = strchr(line, '\n');
 		if (p)
 			*p = '\0';
@@ -592,7 +632,15 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 		if (line[0] == ';' || line[0] == '\0')
 			continue;
 
-		udb_file_parse_line(ctx, block, line);
+		if (!udb_file_parse_line(ctx, block, line))
+		{
+			char logbuf[512];
+			snprintf(logbuf, sizeof(logbuf),
+			         "[UDB] Skipping malformed persisted record in block %c at line %u",
+			         block->letter, line_number);
+			unreal_log(ULOG_WARNING, "udb", "UDB_FILE_LINE_REJECTED", NULL,
+			           "$msg", log_data_string("msg", logbuf));
+		}
 	}
 	fclose(fp);
 

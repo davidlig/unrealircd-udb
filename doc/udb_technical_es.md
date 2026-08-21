@@ -200,12 +200,18 @@ continuar una sesión staged, provocar una exportación de bloque ni hacer que
 esos frames se reenvíen.
 
 Las rutas de `PUT` omiten el prefijo del bloque porque el bloque es un parámetro
-explícito. El receptor construye un árbol aislado por bloque y no aplica efectos
+explícito. Los registros persistidos deben tener componentes de ruta `::` no
+vacíos y caber en el límite de ruta. UDB registra y omite líneas persistidas
+malformadas o demasiado largas y continúa cargando el resto del bloque. El
+receptor construye un árbol aislado por bloque y no aplica efectos
 en tiempo real durante la transferencia. En `END` valida el digest canónico,
 persiste el árbol staged atómicamente en el archivo temporal y solo entonces
 reemplaza el árbol activo. Una desconexión del peer, 60 segundos sin actividad,
 un `PUT` inválido, un txid inesperado o un digest incorrecto descarta solo el
 árbol staged; el árbol activo y durable anterior no cambian.
+Un digest de `END` solo es válido si todo su campo no vacío es hexadecimal y
+cabe en `unsigned long`; se rechazan entradas parciales y desbordamientos,
+incluso cuando un árbol staged vacío tiene digest cero.
 
 Mientras exista una transacción staged, `INS`, `DEL`, `DRP` y `OPT` se rechazan
 con `UDB_ERR_SYNC_ACTIVE`, incluso desde el propagador. Fuera de una transacción

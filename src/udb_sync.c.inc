@@ -142,10 +142,27 @@ static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid,
 	return 0;
 }
 
+static int udb_checksum_parse(const char *input, unsigned long *checksum)
+{
+	char *end;
+	const char *p;
+
+	if (!input || !*input)
+		return 0;
+	for (p = input; *p; p++)
+		if (!((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f') ||
+		      (*p >= 'A' && *p <= 'F')))
+			return 0;
+	errno = 0;
+	*checksum = strtoul(input, &end, 16);
+	return errno != ERANGE && *end == '\0';
+}
+
 static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer,
                         const char *txid, const char *checksum, unsigned long *digest)
 {
 	UdbSyncSession *session = block ? block->session : NULL;
+	unsigned long received_digest;
 
 	if (!session || session->peer != peer || strcmp(session->txid, txid))
 	{
@@ -154,7 +171,8 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer,
 		return UDB_ERR_NO_SYNC;
 	}
 	*digest = udb_compute_tree_checksum(session->tree);
-	if (*digest != strtoul(checksum, NULL, 16) ||
+	if (!udb_checksum_parse(checksum, &received_digest) ||
+	    *digest != received_digest ||
 	    !udb_file_write_snapshot(block, session->tree, session->record_count) ||
 	    !udb_block_commit_stage(ctx, block, session, *digest))
 	{

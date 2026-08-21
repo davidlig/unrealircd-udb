@@ -167,10 +167,12 @@ module
 
 
  #include "unrealircd.h"
+ #include <errno.h>
  #include <openssl/hmac.h>
 
  #define UDB_DEFAULT_DB_DIRECTORY   PERMDATADIR
  #define UDB_BLOCK_PATH_MAX         512
+ #define UDB_RECORD_PATH_MAX        4096
  #define UDB_SYNC_TIMEOUT           60
  #define UDB_HASH_SIZE              2048
  #define UDB_HASH_MASK              (UDB_HASH_SIZE - 1)
@@ -1721,6 +1723,27 @@ static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSessi
 /* ========================================================================
  * File I/O Operations
  * ======================================================================== */
+static int udb_record_path_valid(const char *path)
+{
+	const char *component;
+	const char *p;
+
+	if (!path || !*path || strlen(path) >= UDB_RECORD_PATH_MAX)
+		return 0;
+	component = path;
+	for (p = path; *p; p++)
+	{
+		if (*p == ':')
+		{
+			if (p == component || p[1] != ':' || !p[2])
+				return 0;
+			p++;
+			component = p + 1;
+		}
+	}
+	return 1;
+}
+
 static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *line)
 {
 	if (!line || !*line || *line == ';')
@@ -1741,6 +1764,9 @@ static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *li
 			data_str = value;
 		}
 	}
+	/* Validate before lookup/allocation: an empty component would leave rec->key NULL. */
+	if (!udb_record_path_valid(line))
+		return NULL;
 	if (!udb_password_record_valid(block, line, data_str))
 		return NULL;
 
@@ -1830,8 +1856,24 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 		return 0;
 
 	char line[4096];
+	unsigned int line_number = 0;
 	while (fgets(line, sizeof(line), fp))
 	{
+		int overlong = !strchr(line, '\n') && !feof(fp);
+		line_number++;
+		if (overlong)
+		{
+			int ch;
+			char logbuf[512];
+			while ((ch = fgetc(fp)) != '\n' && ch != EOF)
+				;
+			snprintf(logbuf, sizeof(logbuf),
+			         "[UDB] Skipping overlong persisted record in block %c at line %u",
+			         block->letter, line_number);
+			unreal_log(ULOG_WARNING, "udb", "UDB_FILE_LINE_REJECTED", NULL,
+			           "$msg", log_data_string("msg", logbuf));
+			continue;
+		}
 		char *p = strchr(line, '\n');
 		if (p)
 			*p = '\0';
@@ -1842,7 +1884,15 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 		if (line[0] == ';' || line[0] == '\0')
 			continue;
 
-		udb_file_parse_line(ctx, block, line);
+		if (!udb_file_parse_line(ctx, block, line))
+		{
+			char logbuf[512];
+			snprintf(logbuf, sizeof(logbuf),
+			         "[UDB] Skipping malformed persisted record in block %c at line %u",
+			         block->letter, line_number);
+			unreal_log(ULOG_WARNING, "udb", "UDB_FILE_LINE_REJECTED", NULL,
+			           "$msg", log_data_string("msg", logbuf));
+		}
 	}
 	fclose(fp);
 
@@ -2211,10 +2261,27 @@ static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid,
 	return 0;
 }
 
+static int udb_checksum_parse(const char *input, unsigned long *checksum)
+{
+	char *end;
+	const char *p;
+
+	if (!input || !*input)
+		return 0;
+	for (p = input; *p; p++)
+		if (!((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f') ||
+		      (*p >= 'A' && *p <= 'F')))
+			return 0;
+	errno = 0;
+	*checksum = strtoul(input, &end, 16);
+	return errno != ERANGE && *end == '\0';
+}
+
 static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer,
                         const char *txid, const char *checksum, unsigned long *digest)
 {
 	UdbSyncSession *session = block ? block->session : NULL;
+	unsigned long received_digest;
 
 	if (!session || session->peer != peer || strcmp(session->txid, txid))
 	{
@@ -2223,7 +2290,8 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer,
 		return UDB_ERR_NO_SYNC;
 	}
 	*digest = udb_compute_tree_checksum(session->tree);
-	if (*digest != strtoul(checksum, NULL, 16) ||
+	if (!udb_checksum_parse(checksum, &received_digest) ||
+	    *digest != received_digest ||
 	    !udb_file_write_snapshot(block, session->tree, session->record_count) ||
 	    !udb_block_commit_stage(ctx, block, session, *digest))
 	{

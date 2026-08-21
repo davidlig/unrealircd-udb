@@ -211,6 +211,9 @@ continue a staged session, trigger a block export, or cause those frames to be
 forwarded.
 
 `PUT` paths omit the block prefix because the block is an explicit parameter.
+Persisted records must have non-empty `::` path components and fit the record
+path limit. UDB logs and skips malformed or overlong persisted lines while
+continuing to load the remaining records in that block.
 The receiver builds an isolated tree per block and never applies its runtime
 effects during transfer. On `END`, it verifies the canonical digest, writes the
 staged tree atomically via the block temporary file, removes every runtime
@@ -220,6 +223,9 @@ I, S/L, and K state, so nested K patterns are installed after commit without
 duplicate application. A peer quit, 60-second inactivity
 timeout, malformed `PUT`, unexpected transaction ID, or bad digest discards the
 staged tree only. The prior active and durable tree remain in use.
+An `END` digest is valid only when its entire non-empty field is hexadecimal and
+fits in `unsigned long`; partial input and overflow are rejected even when an
+empty staged tree has digest zero.
 
 While a block has a staged transaction, real-time `INS`, `DEL`, `DRP`, and `OPT`
 are rejected with `UDB_ERR_SYNC_ACTIVE`, including requests from the propagator.

@@ -10,10 +10,12 @@
 #include "udb.h"
 
 #include "unrealircd.h"
+#include <errno.h>
 #include <openssl/hmac.h>
 
 #define UDB_DEFAULT_DB_DIRECTORY   PERMDATADIR
 #define UDB_BLOCK_PATH_MAX         512
+#define UDB_RECORD_PATH_MAX        4096
 #define UDB_SYNC_TIMEOUT           60
 #define UDB_HASH_SIZE              2048
 #define UDB_HASH_MASK              (UDB_HASH_SIZE - 1)
