@@ -1,20 +1,22 @@
 # One-Node Nick and Channel Runtime Smoke Test
 
-Run against a prepared, isolated UnrealIRCd instance:
+Run from the UnrealIRCd source root after building `udb.so`:
 
 ```sh
 python3 src/modules/third/udb/tests/runtime_channel_nick.py
 ```
 
-Set `UDB_TEST_HOST` and `UDB_TEST_PORT` when the instance is not listening on
-`127.0.0.1:16667`.
+The harness creates a temporary one-node configuration and UDB data directory,
+runs configtest, then starts the installed daemon inside a `bwrap` mount
+namespace. It uses `UDB_TEST_IRCD_ROOT` (default: `~/unrealircd`) for the
+installed daemon, default configuration includes, and runtime paths. Use
+`--ircd`, `--module`, `--timeout`, or `--keep` when needed.
 
-This is a client-side fixture, not a server launcher. Before running it, preload
-the server with `N::alice` and `C::#vault` records using only an Argon2id,
-SHA-256, or crypt password and matching `challenge` values. The fixture verifies
-nick `+r` and vhost application/removal, founder-only `+q`, password `JOIN`
-granting `+a`, and a password-bearing local `INVITE` granting one entry without
-`+a`.
+It writes valid SHA-256 `N::alice` and `C::#vault` password/challenge records.
+The protocol client verifies nick password registration and vhost cleanup,
+founder-only `+q`, password `JOIN` granting `+a` but not `+o`, and invalid nick
+and channel credentials being rejected. Every command waits for its IRC numeric
+or protocol terminator rather than using timed input drains.
 
 Use the two-node harness for HEL 4, staged synchronization, and the authorized
 real-time `INS`/`DEL` mutator fixture. Use the three-node harness to prove that

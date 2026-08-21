@@ -12,6 +12,11 @@ ModuleHeader MOD_HEADER = {
 #define MUTATOR_PATH      "N::udb-test-mutator"
 #define MUTATOR_DIRECTORY "UDB_TEST_MUTATOR_DIRECTORY"
 #define SETTLEMENT_DELAY  3
+#define MUTATOR_GO        "udb-test-mutator-go"
+#define MUTATOR_INS_GO    "udb-test-mutator-ins-go"
+#define MUTATOR_DEL_GO    "udb-test-mutator-del-go"
+#define MUTATOR_DRP_GO    "udb-test-mutator-drp-go"
+#define MUTATOR_OPT_GO    "udb-test-mutator-opt-go"
 
 static Client *mutator_peer;
 static const char *mutator_value;
@@ -81,11 +86,23 @@ EVENT(udb_test_mutator_event)
 		           "[UDB_TEST_MUTATOR] emitted unauthorized staged-sync and RES frames", NULL);
 		return;
 	}
-	if (mutator_state < 0 || !mutator_peer || TStime() < mutator_deadline ||
-	    !mutator_trigger_exists("udb-test-mutator-go"))
+	if (mutator_state < 0 || !mutator_peer || TStime() < mutator_deadline)
+		return;
+	if (mutator_state == 0 && mutator_trigger_exists(MUTATOR_DRP_GO))
 	{
-		if (mutator_state || !mutator_trigger_exists("udb-test-mutator-opt-go"))
+		if (!IsServer(mutator_peer) || !MyConnect(mutator_peer))
+		{
+			mutator_state = -1;
 			return;
+		}
+		sendto_one(mutator_peer, NULL, ":%s DB %s DRP N", me.id, mutator_peer->id);
+		mutator_state = 2;
+		unreal_log(ULOG_INFO, "udb-test-mutator", "UDB_TEST_MUTATOR", mutator_peer,
+		           "[UDB_TEST_MUTATOR] emitted authorized DRP", NULL);
+		return;
+	}
+	if (mutator_state == 0 && mutator_trigger_exists(MUTATOR_OPT_GO))
+	{
 		if (!IsServer(mutator_peer) || !MyConnect(mutator_peer))
 		{
 			mutator_state = -1;
@@ -100,6 +117,23 @@ EVENT(udb_test_mutator_event)
 		           "[UDB_TEST_MUTATOR] emitted authorized OPT", NULL);
 		return;
 	}
+	if (mutator_state == 1 &&
+	    (mutator_trigger_exists(MUTATOR_GO) || mutator_trigger_exists(MUTATOR_DEL_GO)))
+	{
+		if (!IsServer(mutator_peer) || !MyConnect(mutator_peer))
+		{
+			mutator_state = -1;
+			return;
+		}
+		sendto_one(mutator_peer, NULL, ":%s DB %s DEL " MUTATOR_PATH, me.id, mutator_peer->id);
+		mutator_state = 2;
+		unreal_log(ULOG_INFO, "udb-test-mutator", "UDB_TEST_MUTATOR", mutator_peer,
+		           "[UDB_TEST_MUTATOR] emitted authorized DEL", NULL);
+		return;
+	}
+	if (mutator_state != 0 ||
+	    !(mutator_trigger_exists(MUTATOR_GO) || mutator_trigger_exists(MUTATOR_INS_GO)))
+		return;
 	if (!IsServer(mutator_peer) || !MyConnect(mutator_peer))
 	{
 		mutator_state = -1;
@@ -108,24 +142,12 @@ EVENT(udb_test_mutator_event)
 		return;
 	}
 
-	if (mutator_state == 0)
-	{
-		sendto_one(mutator_peer, NULL, ":%s DB %s INS " MUTATOR_PATH " %s",
-		           me.id, mutator_peer->id, mutator_value);
-		mutator_state = 1;
-		mutator_deadline = TStime() + SETTLEMENT_DELAY;
-		unreal_log(ULOG_INFO, "udb-test-mutator", "UDB_TEST_MUTATOR", mutator_peer,
-		           "[UDB_TEST_MUTATOR] emitted authorized INS", NULL);
-		return;
-	}
-
-	if (mutator_state == 1)
-	{
-		sendto_one(mutator_peer, NULL, ":%s DB %s DEL " MUTATOR_PATH, me.id, mutator_peer->id);
-		mutator_state = 2;
-		unreal_log(ULOG_INFO, "udb-test-mutator", "UDB_TEST_MUTATOR", mutator_peer,
-		           "[UDB_TEST_MUTATOR] emitted authorized DEL", NULL);
-	}
+	sendto_one(mutator_peer, NULL, ":%s DB %s INS " MUTATOR_PATH " %s",
+	           me.id, mutator_peer->id, mutator_value);
+	mutator_state = 1;
+	mutator_deadline = TStime() + SETTLEMENT_DELAY;
+	unreal_log(ULOG_INFO, "udb-test-mutator", "UDB_TEST_MUTATOR", mutator_peer,
+	           "[UDB_TEST_MUTATOR] emitted authorized INS", NULL);
 }
 
 MOD_INIT()

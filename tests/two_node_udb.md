@@ -48,6 +48,17 @@ unchanged, no `.tmp` file, no staged N-block `ACK`/commit, and both the interpos
 staged persistence-failure evidence in the logs. The normal invocation does not
 build or preload this fixture and retains its existing successful-sync checks.
 
+To cover the temporary-file durability barrier deterministically, run:
+
+```sh
+python3 src/modules/third/udb/tests/two_node_udb.py --snapshot-fsync-failure
+```
+
+The same test-only fixture returns `EIO` only for `fsync` on node A's configured
+`udb_N.db.tmp`. The harness requires the original database bytes, no `.tmp`
+file, no staged N-block `ACK`/commit, and both the interposer and persistence
+failure evidence in the logs.
+
 To exercise the equivalent live-mutation rollback after staged synchronization
 has succeeded, run:
 
@@ -68,6 +79,20 @@ python3 src/modules/third/udb/tests/two_node_udb.py --runtime-opt-rename-failure
 After staged synchronization, the armed interposer fails B's snapshot rename for
 an authorized `OPT`. The harness requires B's database bytes to remain unchanged,
 no temporary file, interposer evidence, and `ERR OPT 6` returned to A.
+
+To cover active record deletion and block-drop rollback, run either mode:
+
+```sh
+python3 src/modules/third/udb/tests/two_node_udb.py --runtime-del-rename-failure
+python3 src/modules/third/udb/tests/two_node_udb.py --runtime-drp-rename-failure
+```
+
+The mutator arms `INS`, `DEL`, `DRP`, and `OPT` independently for failure modes;
+the default `udb-test-mutator-go` trigger continues to emit its existing `INS`
+then `DEL` sequence. The DEL mode first persists its fixture record, then arms
+the interposer before sending DEL. DRP operates on B's seeded N records. Both
+modes require the sender to receive `ERR`, no temporary snapshot, byte-identical
+persisted data, and retained active records after the failed rename.
 
 `SKIP` (exit status 77) is deliberate, never a successful synchronization. It
 means the local installation could not provide the isolation or S2S conditions.

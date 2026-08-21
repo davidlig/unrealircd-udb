@@ -188,8 +188,11 @@ Detailed technical documentation is available in the `doc/` directory:
   reject remote UDB writes. Debug notices redact diagnostic detail.
 - UDB snapshots are created exclusively with mode `0600`, regardless of umask.
   Platforms that provide `O_NOFOLLOW` also reject a symlink temporary snapshot.
-  Failed snapshot creation, writing, closing, or rename removes the temporary
-  file without changing the active database.
+  UDB flushes and `fsync`s the temporary file before rename, then `fsync`s its
+  containing directory after rename. Failed creation, writing, file sync,
+  closing, or rename removes the temporary file without changing the active
+  database. A directory-sync failure is reported after the rename has occurred,
+  so the replacement is visible but not confirmed crash-durable.
 
 
 ---
@@ -199,11 +202,14 @@ Detailed technical documentation is available in the `doc/` directory:
 Run these from the UnrealIRCd source root after building `udb.so`:
 
 ```bash
-# One node: runtime nick/channel reconciliation against a prepared server.
+# One node: isolated nick/channel runtime harness (requires bwrap).
 python3 src/modules/third/udb/tests/runtime_channel_nick.py
 
 # Two nodes: deterministic equal-timestamp conflict resolution, staged N/K records, and authorized INS/DEL.
 python3 src/modules/third/udb/tests/two_node_udb.py
+
+# Two nodes: staged snapshots revoke a live UDB oper and apply loopback K-line effects.
+python3 src/modules/third/udb/tests/staged_runtime_effects.py
 
 # Two nodes: prove a failed live INS snapshot leaves B unchanged.
 python3 src/modules/third/udb/tests/two_node_udb.py --runtime-rename-failure
@@ -211,20 +217,33 @@ python3 src/modules/third/udb/tests/two_node_udb.py --runtime-rename-failure
 # Two nodes: prove a failed live OPT snapshot leaves B unchanged and returns ERR.
 python3 src/modules/third/udb/tests/two_node_udb.py --runtime-opt-rename-failure
 
+# Two nodes: prove a failed temporary snapshot fsync leaves A unchanged.
+python3 src/modules/third/udb/tests/two_node_udb.py --snapshot-fsync-failure
+
+# Two nodes: prove failed live DEL and DRP snapshots retain B's records.
+python3 src/modules/third/udb/tests/two_node_udb.py --runtime-del-rename-failure
+python3 src/modules/third/udb/tests/two_node_udb.py --runtime-drp-rename-failure
+
 # Three nodes: prove A -> B commits before B -> C propagation.
 python3 src/modules/third/udb/tests/three_node_udb.py
 ```
 
-The one-node smoke test is a client fixture: preload its isolated server with
-only Argon2id, SHA-256, or crypt credentials and set `UDB_TEST_HOST` /
-`UDB_TEST_PORT` if needed. The two-node harness builds and loads the test-only
-mutator on authoritative node A; it emits authorized `INS` then `DEL` to node
-B after HEL and the staged snapshot settle. The two-node harness seeds divergent
+The one-node harness creates its own temporary configuration and UDB data with
+valid SHA-256 nick and channel credentials, configtests it, then runs the
+installed daemon under `bwrap`. It uses `UDB_TEST_IRCD_ROOT` (default:
+`~/unrealircd`) and supports `--ircd`, `--module`, `--timeout`, and `--keep`.
+The two-node harness builds and loads the test-only mutator on authoritative
+node A; it emits authorized `INS` then `DEL` to node B after HEL and the staged
+snapshot settle. The two-node harness seeds divergent
 equal-mtime blocks and verifies that the lexicographically higher server SID
 wins with one `RES` per divergent block, including a nested K-line replacement. The three-node harness has no
 mutator: A is the sole seeded source, B must commit A's marker, and only then
 does C start so the B-to-C staged path is observable. See the matching files in
 `tests/` for isolation prerequisites, `--timeout`, and `--keep`.
+
+The DEL and DRP rename-failure modes use the test-only `LD_PRELOAD` interposer.
+They independently arm the mutator command, require an `ERR` reply, no temporary
+snapshot, byte-identical persisted N data, and retained active records.
 
 ## Testing Server
 
