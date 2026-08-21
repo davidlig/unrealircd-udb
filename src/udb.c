@@ -42,8 +42,11 @@ ModuleHeader MOD_HEADER = {
 /* Configuration: daemon block parsing and UDB settings state */
 #include "udb_config.c.inc"
 
-/* Core database engine: runtime effects, sync staging, and lifecycle */
+/* Core database engine: records, checksums, sync staging, and file I/O */
 #include "udb_core.c.inc"
+
+/* Runtime effects: special-record dispatch and per-block routing */
+#include "udb_effects.c.inc"
 
 /* S2S protocol handler: DB command, server sync */
 #include "udb_protocol.c.inc"
@@ -63,6 +66,9 @@ ModuleHeader MOD_HEADER = {
 /* DBQ query command for users and opers */
 #include "udb_query.c.inc"
 
+/* Engine, block, configuration, and module lifecycle coordination */
+#include "udb_lifecycle.c.inc"
+
 /* ========================================================================
  * Configuration Test (MOD_TEST)
  *
@@ -71,9 +77,7 @@ ModuleHeader MOD_HEADER = {
 
 MOD_TEST()
 {
-	HookAdd(modinfo->handle, HOOKTYPE_CONFIGTEST, 0, udb_config_test);
-	HookAdd(modinfo->handle, HOOKTYPE_CONFIGPOSTTEST, 0, udb_config_posttest);
-	return MOD_SUCCESS;
+	return udb_module_test(modinfo);
 }
 
 /* ========================================================================
@@ -84,28 +88,7 @@ MOD_TEST()
 
 MOD_INIT()
 {
-	/* Configuration */
-	HookAdd(modinfo->handle, HOOKTYPE_CONFIGRUN, 0, udb_config_run);
-
-	/* Initialize the database engine */
-	if (udb_engine_init() == 0)
-	{
-		config_error("[UDB] Failed to initialize database engine");
-		return MOD_FAILED;
-	}
-
-	/* Register subsystem hooks and commands */
-	udb_protocol_init(modinfo);
-	udb_nicks_init(modinfo);
-	udb_channels_init(modinfo);
-	udb_ips_init(modinfo);
-	udb_lines_init(modinfo);
-	udb_query_init(modinfo);
-
-	/* Mark as global: all servers in the network should load this module */
-	MARK_AS_GLOBAL_MODULE(modinfo);
-
-	return MOD_SUCCESS;
+	return udb_module_init(modinfo);
 }
 
 /* ========================================================================
@@ -116,14 +99,7 @@ MOD_INIT()
 
 MOD_LOAD()
 {
-	udb_blocks_load_all();
-	udb_nicks_load(modinfo);
-	udb_channels_load(modinfo);
-
-	unreal_log(ULOG_INFO, "udb", "UDB_LOADED", NULL,
-	           "[UDB] Unreal Database System v" UDB_VERSION " loaded successfully");
-
-	return MOD_SUCCESS;
+	return udb_module_load(modinfo);
 }
 
 /* ========================================================================
@@ -134,14 +110,5 @@ MOD_LOAD()
 
 MOD_UNLOAD()
 {
-	unreal_log(ULOG_INFO, "udb", "UDB_UNLOADING", NULL,
-	           "[UDB] Saving databases and shutting down...");
-
-	/* Save all blocks to disk before unloading */
-	udb_blocks_save_all();
-
-	/* Free all memory */
-	udb_engine_shutdown();
-
-	return MOD_SUCCESS;
+	return udb_module_unload();
 }

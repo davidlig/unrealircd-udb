@@ -1,0 +1,228 @@
+/* UDB module and database lifecycle coordination. */
+
+static UdbBlock *udb_block_create(char letter, const char *name)
+{
+	UdbBlock *b = safe_alloc(sizeof(UdbBlock));
+	char path[512];
+
+	b->letter = letter;
+	b->version = 1;
+	b->tree = udb_record_create(NULL);
+	b->tree->block_idx = (unsigned char)udb_block_letter_to_index(letter);
+	safe_strdup(b->tree->key, name);
+	b->tree->data_num = 1;
+
+	snprintf(path, sizeof(path), "udb_%c.db", letter);
+	safe_strdup(b->filepath, path);
+	convert_to_absolute_path(&b->filepath, PERMDATADIR);
+
+	udb_ctx->blocks[(unsigned char)letter] = b;
+	b->next = udb_ctx->block_list;
+	udb_ctx->block_list = b;
+	udb_ctx->block_count++;
+	return b;
+}
+
+static void udb_block_set_context_root(UdbBlock *block)
+{
+	if (!udb_ctx || !block)
+		return;
+	switch (block->letter)
+	{
+		case 'N':
+			udb_ctx->nicks = block->tree;
+			break;
+		case 'C':
+			udb_ctx->channels = block->tree;
+			break;
+		case 'I':
+			udb_ctx->ips = block->tree;
+			break;
+		case 'S':
+			udb_ctx->settings = block->tree;
+			break;
+		case 'L':
+			udb_ctx->links = block->tree;
+			break;
+		case 'K':
+			udb_ctx->lines = block->tree;
+			break;
+	}
+}
+
+static void udb_block_reset(UdbBlock *block)
+{
+	char *name = NULL;
+	int block_idx;
+
+	if (!block)
+		return;
+	if (block->letter == 'I' && block->tree)
+	{
+		UdbRecord *rec;
+		for (rec = block->tree->child; rec; rec = rec->sibling)
+		{
+			UdbRecord *child;
+			for (child = rec->child; child; child = child->sibling)
+				udb_ip_remove_record(rec->key, rec, child->key);
+		}
+	}
+	if ((block->letter == 'S' || block->letter == 'L') && block->tree)
+	{
+		UdbRecord *rec;
+		for (rec = block->tree->child; rec; rec = rec->sibling)
+			udb_remove_special_record(block, rec);
+	}
+
+	if (block->tree && block->tree->key)
+		safe_strdup(name, block->tree->key);
+	else
+		safe_strdup(name, "UDB");
+	block_idx = udb_block_letter_to_index(block->letter);
+	if (block->tree)
+	{
+		if (udb_ctx->total_records >= block->record_count)
+			udb_ctx->total_records -= block->record_count;
+		else
+			udb_ctx->total_records = 0;
+		udb_record_free_tree(block->tree);
+	}
+	udb_hash_clear_block(block_idx);
+
+	block->tree = udb_record_create(NULL);
+	block->tree->block_idx = (unsigned char)block_idx;
+	safe_strdup(block->tree->key, name);
+	block->tree->is_dynamic_key = 1;
+	block->tree->data_num = 1;
+	block->record_count = 0;
+	udb_block_set_context_root(block);
+	safe_free(name);
+}
+
+static int udb_block_load(UdbBlock *block)
+{
+	return udb_file_load_block(block);
+}
+
+static void udb_block_unload(UdbBlock *block)
+{
+	if (block->tree)
+	{
+		udb_record_free_tree(block->tree);
+		block->tree = NULL;
+	}
+}
+
+static void udb_blocks_load_all(void)
+{
+	UdbBlock *b;
+	for (b = udb_ctx->block_list; b; b = b->next)
+		udb_block_load(b);
+}
+
+static void udb_blocks_save_all(void)
+{
+	UdbBlock *b;
+	for (b = udb_ctx->block_list; b; b = b->next)
+		udb_file_save_block(b);
+}
+
+static UdbBlock *udb_block_by_letter(char letter)
+{
+	return udb_ctx ? udb_ctx->blocks[(unsigned char)letter] : NULL;
+}
+
+static int udb_engine_init(void)
+{
+	struct stat st = {0};
+	const char *dir;
+
+	udb_ctx = safe_alloc(sizeof(UdbContext));
+	udb_hash_init();
+	/* Keep the existing directory check and block creation sequence. */
+	dir = udb_cfg && udb_cfg->db_directory ? udb_cfg->db_directory : "data/udb";
+	if (stat(dir, &st) == -1)
+		mkdir(dir, 0700);
+
+	udb_block_create('N', "Nicks");
+	udb_block_create('C', "Channels");
+	udb_block_create('I', "IPs");
+	udb_block_create('S', "Settings");
+	udb_block_create('L', "Links");
+	udb_block_create('K', "Lines");
+	udb_block_set_context_root(udb_ctx->blocks['N']);
+	udb_block_set_context_root(udb_ctx->blocks['C']);
+	udb_block_set_context_root(udb_ctx->blocks['I']);
+	udb_block_set_context_root(udb_ctx->blocks['S']);
+	udb_block_set_context_root(udb_ctx->blocks['L']);
+	udb_block_set_context_root(udb_ctx->blocks['K']);
+	udb_blocks_load_all();
+	return 1;
+}
+
+static void udb_engine_shutdown(void)
+{
+	UdbBlock *b;
+
+	if (!udb_ctx)
+		return;
+	udb_blocks_save_all();
+	udb_ips_shutdown();
+	for (b = udb_ctx->block_list; b;)
+	{
+		UdbBlock *next = b->next;
+		udb_sync_session_free(b);
+		udb_block_unload(b);
+		safe_free(b->filepath);
+		safe_free(b);
+		b = next;
+	}
+	udb_hash_destroy();
+	udb_config_free();
+	safe_free(udb_ctx);
+	udb_ctx = NULL;
+}
+
+static int udb_module_test(ModuleInfo *modinfo)
+{
+	HookAdd(modinfo->handle, HOOKTYPE_CONFIGTEST, 0, udb_config_test);
+	HookAdd(modinfo->handle, HOOKTYPE_CONFIGPOSTTEST, 0, udb_config_posttest);
+	return MOD_SUCCESS;
+}
+
+static int udb_module_init(ModuleInfo *modinfo)
+{
+	HookAdd(modinfo->handle, HOOKTYPE_CONFIGRUN, 0, udb_config_run);
+	if (udb_engine_init() == 0)
+	{
+		config_error("[UDB] Failed to initialize database engine");
+		return MOD_FAILED;
+	}
+	udb_protocol_init(modinfo);
+	udb_nicks_init(modinfo);
+	udb_channels_init(modinfo);
+	udb_ips_init(modinfo);
+	udb_lines_init(modinfo);
+	udb_query_init(modinfo);
+	MARK_AS_GLOBAL_MODULE(modinfo);
+	return MOD_SUCCESS;
+}
+
+static int udb_module_load(ModuleInfo *modinfo)
+{
+	udb_blocks_load_all();
+	udb_nicks_load(modinfo);
+	udb_channels_load(modinfo);
+	unreal_log(ULOG_INFO, "udb", "UDB_LOADED", NULL,
+	           "[UDB] Unreal Database System v" UDB_VERSION " loaded successfully");
+	return MOD_SUCCESS;
+}
+
+static int udb_module_unload(void)
+{
+	unreal_log(ULOG_INFO, "udb", "UDB_UNLOADING", NULL,
+	           "[UDB] Saving databases and shutting down...");
+	udb_blocks_save_all();
+	udb_engine_shutdown();
+	return MOD_SUCCESS;
+}

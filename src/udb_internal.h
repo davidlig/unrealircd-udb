@@ -106,9 +106,14 @@ static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
 static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type);
 static int udb_config_posttest(int *errs);
 static void udb_config_free(void);
+static int udb_module_test(ModuleInfo *modinfo);
+static int udb_module_init(ModuleInfo *modinfo);
+static int udb_module_load(ModuleInfo *modinfo);
+static int udb_module_unload(void);
 static int udb_engine_init(void);
 static void udb_engine_shutdown(void);
 static UdbBlock *udb_block_create(char letter, const char *name);
+static void udb_block_set_context_root(UdbBlock *block);
 static int udb_block_load(UdbBlock *block);
 static void udb_block_unload(UdbBlock *block);
 static void udb_block_reset(UdbBlock *block);
@@ -181,6 +186,7 @@ static void udb_line_apply_record(UdbRecord *line_rec, int is_new);
 static void udb_line_remove_record(UdbRecord *line_rec);
 static const char *udb_get_bot_nick(const char *service_key, int force_default);
 static const char *udb_get_bot_mask(const char *service_key, int force_default);
+/* Runtime dispatcher; concrete per-block effects stay in their own modules. */
 static int udb_apply_special_record(UdbBlock *block, UdbRecord *rec, int is_new);
 static void udb_remove_special_record(UdbBlock *block, UdbRecord *rec);
 static void udb_send_to_debugs(Client *source, const char *fmt, ...)

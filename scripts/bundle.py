@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
 UDB Bundle Script
-Combines modular UDB sources (udb.c, udb.h, udb_internal.h, udb_*.c.inc) into a single,
-self-contained files/udb.c and generates modules.list for UnrealIRCd Module Manager.
+Combines modular UDB sources (udb.c, udb.h, udb_internal.h, and ordered
+udb_*.c.inc implementation units, including lifecycle coordination) into a
+single, self-contained files/udb.c and generates modules.list for UnrealIRCd
+Module Manager.
 """
 
 import os

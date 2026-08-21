@@ -263,9 +263,14 @@ static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
 static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type);
 static int udb_config_posttest(int *errs);
 static void udb_config_free(void);
+static int udb_module_test(ModuleInfo *modinfo);
+static int udb_module_init(ModuleInfo *modinfo);
+static int udb_module_load(ModuleInfo *modinfo);
+static int udb_module_unload(void);
 static int udb_engine_init(void);
 static void udb_engine_shutdown(void);
 static UdbBlock *udb_block_create(char letter, const char *name);
+static void udb_block_set_context_root(UdbBlock *block);
 static int udb_block_load(UdbBlock *block);
 static void udb_block_unload(UdbBlock *block);
 static void udb_block_reset(UdbBlock *block);
@@ -338,6 +343,7 @@ static void udb_line_apply_record(UdbRecord *line_rec, int is_new);
 static void udb_line_remove_record(UdbRecord *line_rec);
 static const char *udb_get_bot_nick(const char *service_key, int force_default);
 static const char *udb_get_bot_mask(const char *service_key, int force_default);
+/* Runtime dispatcher; concrete per-block effects stay in their own modules. */
 static int udb_apply_special_record(UdbBlock *block, UdbRecord *rec, int is_new);
 static void udb_remove_special_record(UdbBlock *block, UdbRecord *rec);
 static void udb_send_to_debugs(Client *source, const char *fmt, ...)
@@ -979,11 +985,11 @@ static void udb_link_remove_record(UdbRecord *rec)
 
 /* End of udb_config.c.inc */
 
-/* Core database engine: runtime effects, sync staging, and lifecycle */
+/* Core database engine: records, checksums, sync staging, and file I/O */
 /* Inlined: udb_core.c.inc */
 /*
  * UDB Core Engine for UnrealIRCd 6
- * Implements the database structures, hash, file I/O, and record manipulation.
+ * Implements the database lifecycle, checksums, sync staging, and record manipulation.
  */
 
 
@@ -993,9 +999,6 @@ static void udb_link_remove_record(UdbRecord *rec)
 #include <limits.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-
-/* Local helper declared before its later definition. */
-static void udb_block_set_context_root(UdbBlock *block);
 
 static int udb_password_record_valid(UdbBlock *block, const char *path,
                                      const char *value)
@@ -1557,207 +1560,6 @@ static int udb_file_load_block(UdbBlock *block)
 }
 
 /* ========================================================================
- * Block Management
- * ======================================================================== */
-static UdbBlock *udb_block_create(char letter, const char *name)
-{
-	UdbBlock *b = safe_alloc(sizeof(UdbBlock));
-	b->letter = letter;
-	b->version = 1;
-	b->tree = udb_record_create(NULL);
-	b->tree->block_idx = (unsigned char)udb_block_letter_to_index(letter);
-	safe_strdup(b->tree->key, name);
-	b->tree->data_num = 1;
-
-	char path[512];
-	snprintf(path, sizeof(path), "udb_%c.db", letter);
-	safe_strdup(b->filepath, path);
-	convert_to_absolute_path(&b->filepath, PERMDATADIR);
-
-	udb_ctx->blocks[(unsigned char)letter] = b;
-	b->next = udb_ctx->block_list;
-	udb_ctx->block_list = b;
-
-	udb_ctx->block_count++;
-	return b;
-}
-
-static void udb_block_set_context_root(UdbBlock *block)
-{
-	if (!udb_ctx || !block)
-		return;
-	switch (block->letter)
-	{
-		case 'N':
-			udb_ctx->nicks = block->tree;
-			break;
-		case 'C':
-			udb_ctx->channels = block->tree;
-			break;
-		case 'I':
-			udb_ctx->ips = block->tree;
-			break;
-		case 'S':
-			udb_ctx->settings = block->tree;
-			break;
-		case 'L':
-			udb_ctx->links = block->tree;
-			break;
-		case 'K':
-			udb_ctx->lines = block->tree;
-			break;
-	}
-}
-
-static void udb_block_reset(UdbBlock *block)
-{
-	char *name = NULL;
-	int block_idx;
-
-	if (!block)
-		return;
-
-	if (block->letter == 'I' && block->tree)
-	{
-		UdbRecord *rec;
-		for (rec = block->tree->child; rec; rec = rec->sibling)
-		{
-			UdbRecord *child;
-			for (child = rec->child; child; child = child->sibling)
-				udb_ip_remove_record(rec->key, rec, child->key);
-		}
-	}
-	if ((block->letter == 'S' || block->letter == 'L') && block->tree)
-	{
-		UdbRecord *rec;
-		for (rec = block->tree->child; rec; rec = rec->sibling)
-			udb_remove_special_record(block, rec);
-	}
-
-	if (block->tree && block->tree->key)
-		safe_strdup(name, block->tree->key);
-	else
-		safe_strdup(name, "UDB");
-	block_idx = udb_block_letter_to_index(block->letter);
-
-	if (block->tree)
-	{
-		if (udb_ctx->total_records >= block->record_count)
-			udb_ctx->total_records -= block->record_count;
-		else
-			udb_ctx->total_records = 0;
-		udb_record_free_tree(block->tree);
-	}
-	udb_hash_clear_block(block_idx);
-
-	block->tree = udb_record_create(NULL);
-	block->tree->block_idx = (unsigned char)block_idx;
-	safe_strdup(block->tree->key, name);
-	block->tree->is_dynamic_key = 1;
-	block->tree->data_num = 1;
-	block->record_count = 0;
-	udb_block_set_context_root(block);
-	safe_free(name);
-}
-
-static int udb_block_load(UdbBlock *block)
-{
-	return udb_file_load_block(block);
-}
-
-static void udb_block_unload(UdbBlock *block)
-{
-	if (block->tree)
-	{
-		udb_record_free_tree(block->tree);
-		block->tree = NULL;
-	}
-}
-
-static void udb_blocks_load_all(void)
-{
-	UdbBlock *b = udb_ctx->block_list;
-	while (b)
-	{
-		udb_block_load(b);
-		b = b->next;
-	}
-}
-
-static void udb_blocks_save_all(void)
-{
-	UdbBlock *b = udb_ctx->block_list;
-	while (b)
-	{
-		udb_file_save_block(b);
-		b = b->next;
-	}
-}
-
-static UdbBlock *udb_block_by_letter(char letter)
-{
-	return udb_ctx ? udb_ctx->blocks[(unsigned char)letter] : NULL;
-}
-
-/* ========================================================================
- * Initialization and Shutdown
- * ======================================================================== */
-static int udb_engine_init(void)
-{
-	udb_ctx = safe_alloc(sizeof(UdbContext));
-	udb_hash_init();
-
-	struct stat st = {0};
-	const char *dir = udb_cfg && udb_cfg->db_directory ? udb_cfg->db_directory : "data/udb";
-	if (stat(dir, &st) == -1)
-	{
-		mkdir(dir, 0700);
-	}
-
-	udb_block_create('N', "Nicks");
-	udb_block_create('C', "Channels");
-	udb_block_create('I', "IPs");
-	udb_block_create('S', "Settings");
-	udb_block_create('L', "Links");
-	udb_block_create('K', "Lines");
-
-	udb_ctx->nicks = udb_ctx->blocks['N']->tree;
-	udb_ctx->channels = udb_ctx->blocks['C']->tree;
-	udb_ctx->ips = udb_ctx->blocks['I']->tree;
-	udb_ctx->settings = udb_ctx->blocks['S']->tree;
-	udb_ctx->links = udb_ctx->blocks['L']->tree;
-	udb_ctx->lines = udb_ctx->blocks['K']->tree;
-
-	udb_blocks_load_all();
-	return 1;
-}
-
-static void udb_engine_shutdown(void)
-{
-	if (!udb_ctx)
-		return;
-
-	udb_blocks_save_all();
-	udb_ips_shutdown();
-
-	UdbBlock *b = udb_ctx->block_list;
-	while (b)
-	{
-		UdbBlock *next = b->next;
-		udb_sync_session_free(b);
-		udb_block_unload(b);
-		safe_free(b->filepath);
-		safe_free(b);
-		b = next;
-	}
-
-	udb_hash_destroy();
-	udb_config_free();
-	safe_free(udb_ctx);
-	udb_ctx = NULL;
-}
-
-/* ========================================================================
  * Utility Functions
  * ======================================================================== */
 static const char *udb_get_bot_nick(const char *service_key, int force_default)
@@ -1792,6 +1594,60 @@ static const char *udb_get_bot_mask(const char *service_key, int force_default)
 		return "IpServ!*@*";
 	return "UDB!*@*";
 }
+
+static void udb_send_to_debugs(Client *source, const char *fmt, ...)
+{
+	const char *buf = "diagnostic detail redacted";
+
+	(void)fmt;
+
+	Client *client;
+	list_for_each_entry(client, &client_list, client_node)
+	{
+		if (IsServer(client) && client != source)
+		{
+			if (udb_ctx && udb_ctx->links)
+			{
+				UdbRecord *srv_rec = udb_record_find(client->name, udb_ctx->links);
+				if (srv_rec)
+				{
+					UdbRecord *opt_rec = udb_record_find(LKEY_OPTIONS, srv_rec);
+					if (opt_rec && (opt_rec->data_num & UDB_LNKOPT_DEBUG))
+					{
+						sendto_one(client, NULL, ":%s NOTICE %s :[UDB Debug] %s", me.id, client->id, buf);
+					}
+				}
+			}
+		}
+	}
+
+	// Also send to local opers if our own server has the debug option
+	if (udb_ctx && udb_ctx->links)
+	{
+		UdbRecord *me_rec = udb_record_find(me.name, udb_ctx->links);
+		if (me_rec)
+		{
+			UdbRecord *opt_rec = udb_record_find(LKEY_OPTIONS, me_rec);
+			if (opt_rec && (opt_rec->data_num & UDB_LNKOPT_DEBUG))
+			{
+				unreal_log(ULOG_INFO, "udb", "UDB_DEBUG_OPER", source,
+				           "[UDB Debug] $msg", log_data_string("msg", buf));
+			}
+		}
+	}
+
+	unreal_log(ULOG_DEBUG, "udb", "UDB_DEBUG", source, "[UDB Debug] $msg", log_data_string("msg", buf));
+}
+
+/* End of udb_core.c.inc */
+
+/* Runtime effects: special-record dispatch and per-block routing */
+/* Inlined: udb_effects.c.inc */
+/*
+ * UDB Runtime Effects for UnrealIRCd 6
+ * Routes special records to their concrete nick, channel, IP, setting, link,
+ * and line effect implementations.
+ */
 
 static int udb_apply_special_record(UdbBlock *block, UdbRecord *rec, int is_new)
 {
@@ -1914,51 +1770,7 @@ static void udb_remove_special_record(UdbBlock *block, UdbRecord *rec)
 	}
 }
 
-static void udb_send_to_debugs(Client *source, const char *fmt, ...)
-{
-	const char *buf = "diagnostic detail redacted";
-
-	(void)fmt;
-
-	Client *client;
-	list_for_each_entry(client, &client_list, client_node)
-	{
-		if (IsServer(client) && client != source)
-		{
-			if (udb_ctx && udb_ctx->links)
-			{
-				UdbRecord *srv_rec = udb_record_find(client->name, udb_ctx->links);
-				if (srv_rec)
-				{
-					UdbRecord *opt_rec = udb_record_find(LKEY_OPTIONS, srv_rec);
-					if (opt_rec && (opt_rec->data_num & UDB_LNKOPT_DEBUG))
-					{
-						sendto_one(client, NULL, ":%s NOTICE %s :[UDB Debug] %s", me.id, client->id, buf);
-					}
-				}
-			}
-		}
-	}
-
-	// Also send to local opers if our own server has the debug option
-	if (udb_ctx && udb_ctx->links)
-	{
-		UdbRecord *me_rec = udb_record_find(me.name, udb_ctx->links);
-		if (me_rec)
-		{
-			UdbRecord *opt_rec = udb_record_find(LKEY_OPTIONS, me_rec);
-			if (opt_rec && (opt_rec->data_num & UDB_LNKOPT_DEBUG))
-			{
-				unreal_log(ULOG_INFO, "udb", "UDB_DEBUG_OPER", source,
-				           "[UDB Debug] $msg", log_data_string("msg", buf));
-			}
-		}
-	}
-
-	unreal_log(ULOG_DEBUG, "udb", "UDB_DEBUG", source, "[UDB Debug] $msg", log_data_string("msg", buf));
-}
-
-/* End of udb_core.c.inc */
+/* End of udb_effects.c.inc */
 
 /* S2S protocol handler: DB command, server sync */
 /* Inlined: udb_protocol.c.inc */
@@ -5183,6 +4995,239 @@ static void udb_query_init(ModuleInfo *modinfo)
 
 /* End of udb_query.c.inc */
 
+/* Engine, block, configuration, and module lifecycle coordination */
+/* Inlined: udb_lifecycle.c.inc */
+/* UDB module and database lifecycle coordination. */
+
+static UdbBlock *udb_block_create(char letter, const char *name)
+{
+	UdbBlock *b = safe_alloc(sizeof(UdbBlock));
+	char path[512];
+
+	b->letter = letter;
+	b->version = 1;
+	b->tree = udb_record_create(NULL);
+	b->tree->block_idx = (unsigned char)udb_block_letter_to_index(letter);
+	safe_strdup(b->tree->key, name);
+	b->tree->data_num = 1;
+
+	snprintf(path, sizeof(path), "udb_%c.db", letter);
+	safe_strdup(b->filepath, path);
+	convert_to_absolute_path(&b->filepath, PERMDATADIR);
+
+	udb_ctx->blocks[(unsigned char)letter] = b;
+	b->next = udb_ctx->block_list;
+	udb_ctx->block_list = b;
+	udb_ctx->block_count++;
+	return b;
+}
+
+static void udb_block_set_context_root(UdbBlock *block)
+{
+	if (!udb_ctx || !block)
+		return;
+	switch (block->letter)
+	{
+		case 'N':
+			udb_ctx->nicks = block->tree;
+			break;
+		case 'C':
+			udb_ctx->channels = block->tree;
+			break;
+		case 'I':
+			udb_ctx->ips = block->tree;
+			break;
+		case 'S':
+			udb_ctx->settings = block->tree;
+			break;
+		case 'L':
+			udb_ctx->links = block->tree;
+			break;
+		case 'K':
+			udb_ctx->lines = block->tree;
+			break;
+	}
+}
+
+static void udb_block_reset(UdbBlock *block)
+{
+	char *name = NULL;
+	int block_idx;
+
+	if (!block)
+		return;
+	if (block->letter == 'I' && block->tree)
+	{
+		UdbRecord *rec;
+		for (rec = block->tree->child; rec; rec = rec->sibling)
+		{
+			UdbRecord *child;
+			for (child = rec->child; child; child = child->sibling)
+				udb_ip_remove_record(rec->key, rec, child->key);
+		}
+	}
+	if ((block->letter == 'S' || block->letter == 'L') && block->tree)
+	{
+		UdbRecord *rec;
+		for (rec = block->tree->child; rec; rec = rec->sibling)
+			udb_remove_special_record(block, rec);
+	}
+
+	if (block->tree && block->tree->key)
+		safe_strdup(name, block->tree->key);
+	else
+		safe_strdup(name, "UDB");
+	block_idx = udb_block_letter_to_index(block->letter);
+	if (block->tree)
+	{
+		if (udb_ctx->total_records >= block->record_count)
+			udb_ctx->total_records -= block->record_count;
+		else
+			udb_ctx->total_records = 0;
+		udb_record_free_tree(block->tree);
+	}
+	udb_hash_clear_block(block_idx);
+
+	block->tree = udb_record_create(NULL);
+	block->tree->block_idx = (unsigned char)block_idx;
+	safe_strdup(block->tree->key, name);
+	block->tree->is_dynamic_key = 1;
+	block->tree->data_num = 1;
+	block->record_count = 0;
+	udb_block_set_context_root(block);
+	safe_free(name);
+}
+
+static int udb_block_load(UdbBlock *block)
+{
+	return udb_file_load_block(block);
+}
+
+static void udb_block_unload(UdbBlock *block)
+{
+	if (block->tree)
+	{
+		udb_record_free_tree(block->tree);
+		block->tree = NULL;
+	}
+}
+
+static void udb_blocks_load_all(void)
+{
+	UdbBlock *b;
+	for (b = udb_ctx->block_list; b; b = b->next)
+		udb_block_load(b);
+}
+
+static void udb_blocks_save_all(void)
+{
+	UdbBlock *b;
+	for (b = udb_ctx->block_list; b; b = b->next)
+		udb_file_save_block(b);
+}
+
+static UdbBlock *udb_block_by_letter(char letter)
+{
+	return udb_ctx ? udb_ctx->blocks[(unsigned char)letter] : NULL;
+}
+
+static int udb_engine_init(void)
+{
+	struct stat st = {0};
+	const char *dir;
+
+	udb_ctx = safe_alloc(sizeof(UdbContext));
+	udb_hash_init();
+	/* Keep the existing directory check and block creation sequence. */
+	dir = udb_cfg && udb_cfg->db_directory ? udb_cfg->db_directory : "data/udb";
+	if (stat(dir, &st) == -1)
+		mkdir(dir, 0700);
+
+	udb_block_create('N', "Nicks");
+	udb_block_create('C', "Channels");
+	udb_block_create('I', "IPs");
+	udb_block_create('S', "Settings");
+	udb_block_create('L', "Links");
+	udb_block_create('K', "Lines");
+	udb_block_set_context_root(udb_ctx->blocks['N']);
+	udb_block_set_context_root(udb_ctx->blocks['C']);
+	udb_block_set_context_root(udb_ctx->blocks['I']);
+	udb_block_set_context_root(udb_ctx->blocks['S']);
+	udb_block_set_context_root(udb_ctx->blocks['L']);
+	udb_block_set_context_root(udb_ctx->blocks['K']);
+	udb_blocks_load_all();
+	return 1;
+}
+
+static void udb_engine_shutdown(void)
+{
+	UdbBlock *b;
+
+	if (!udb_ctx)
+		return;
+	udb_blocks_save_all();
+	udb_ips_shutdown();
+	for (b = udb_ctx->block_list; b;)
+	{
+		UdbBlock *next = b->next;
+		udb_sync_session_free(b);
+		udb_block_unload(b);
+		safe_free(b->filepath);
+		safe_free(b);
+		b = next;
+	}
+	udb_hash_destroy();
+	udb_config_free();
+	safe_free(udb_ctx);
+	udb_ctx = NULL;
+}
+
+static int udb_module_test(ModuleInfo *modinfo)
+{
+	HookAdd(modinfo->handle, HOOKTYPE_CONFIGTEST, 0, udb_config_test);
+	HookAdd(modinfo->handle, HOOKTYPE_CONFIGPOSTTEST, 0, udb_config_posttest);
+	return MOD_SUCCESS;
+}
+
+static int udb_module_init(ModuleInfo *modinfo)
+{
+	HookAdd(modinfo->handle, HOOKTYPE_CONFIGRUN, 0, udb_config_run);
+	if (udb_engine_init() == 0)
+	{
+		config_error("[UDB] Failed to initialize database engine");
+		return MOD_FAILED;
+	}
+	udb_protocol_init(modinfo);
+	udb_nicks_init(modinfo);
+	udb_channels_init(modinfo);
+	udb_ips_init(modinfo);
+	udb_lines_init(modinfo);
+	udb_query_init(modinfo);
+	MARK_AS_GLOBAL_MODULE(modinfo);
+	return MOD_SUCCESS;
+}
+
+static int udb_module_load(ModuleInfo *modinfo)
+{
+	udb_blocks_load_all();
+	udb_nicks_load(modinfo);
+	udb_channels_load(modinfo);
+	unreal_log(ULOG_INFO, "udb", "UDB_LOADED", NULL,
+	           "[UDB] Unreal Database System v" UDB_VERSION " loaded successfully");
+	return MOD_SUCCESS;
+}
+
+static int udb_module_unload(void)
+{
+	unreal_log(ULOG_INFO, "udb", "UDB_UNLOADING", NULL,
+	           "[UDB] Saving databases and shutting down...");
+	udb_blocks_save_all();
+	udb_engine_shutdown();
+	return MOD_SUCCESS;
+}
+
+/* End of udb_lifecycle.c.inc */
+
 /* ========================================================================
  * Configuration Test (MOD_TEST)
  *
@@ -5191,9 +5236,7 @@ static void udb_query_init(ModuleInfo *modinfo)
 
 MOD_TEST()
 {
-	HookAdd(modinfo->handle, HOOKTYPE_CONFIGTEST, 0, udb_config_test);
-	HookAdd(modinfo->handle, HOOKTYPE_CONFIGPOSTTEST, 0, udb_config_posttest);
-	return MOD_SUCCESS;
+	return udb_module_test(modinfo);
 }
 
 /* ========================================================================
@@ -5204,28 +5247,7 @@ MOD_TEST()
 
 MOD_INIT()
 {
-	/* Configuration */
-	HookAdd(modinfo->handle, HOOKTYPE_CONFIGRUN, 0, udb_config_run);
-
-	/* Initialize the database engine */
-	if (udb_engine_init() == 0)
-	{
-		config_error("[UDB] Failed to initialize database engine");
-		return MOD_FAILED;
-	}
-
-	/* Register subsystem hooks and commands */
-	udb_protocol_init(modinfo);
-	udb_nicks_init(modinfo);
-	udb_channels_init(modinfo);
-	udb_ips_init(modinfo);
-	udb_lines_init(modinfo);
-	udb_query_init(modinfo);
-
-	/* Mark as global: all servers in the network should load this module */
-	MARK_AS_GLOBAL_MODULE(modinfo);
-
-	return MOD_SUCCESS;
+	return udb_module_init(modinfo);
 }
 
 /* ========================================================================
@@ -5236,14 +5258,7 @@ MOD_INIT()
 
 MOD_LOAD()
 {
-	udb_blocks_load_all();
-	udb_nicks_load(modinfo);
-	udb_channels_load(modinfo);
-
-	unreal_log(ULOG_INFO, "udb", "UDB_LOADED", NULL,
-	           "[UDB] Unreal Database System v" UDB_VERSION " loaded successfully");
-
-	return MOD_SUCCESS;
+	return udb_module_load(modinfo);
 }
 
 /* ========================================================================
@@ -5254,14 +5269,5 @@ MOD_LOAD()
 
 MOD_UNLOAD()
 {
-	unreal_log(ULOG_INFO, "udb", "UDB_UNLOADING", NULL,
-	           "[UDB] Saving databases and shutting down...");
-
-	/* Save all blocks to disk before unloading */
-	udb_blocks_save_all();
-
-	/* Free all memory */
-	udb_engine_shutdown();
-
-	return MOD_SUCCESS;
+	return udb_module_unload();
 }
