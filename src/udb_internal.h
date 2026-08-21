@@ -133,6 +133,8 @@ static void udb_hash_destroy(UdbContext *ctx);
 static void udb_hash_insert_record(UdbContext *ctx, UdbRecord *rec, int block_idx, const char *key);
 static int udb_hash_remove_record(UdbContext *ctx, UdbRecord *rec, int block_idx, const char *key);
 static UdbRecord *udb_hash_find(UdbContext *ctx, int block_idx, const char *key);
+static int udb_file_write_snapshot(UdbBlock *block, UdbRecord *tree,
+                                   unsigned int record_count);
 static int udb_file_save_block(UdbContext *ctx, UdbBlock *block);
 static int udb_file_load_block(UdbContext *ctx, UdbBlock *block);
 static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *line);
@@ -143,7 +145,6 @@ static unsigned long udb_compute_block_checksum(UdbBlock *block);
 static unsigned long udb_compute_tree_checksum(UdbRecord *tree);
 static int udb_stage_parse_line(UdbBlock *block, UdbSyncSession *session,
                                 const char *line);
-static int udb_stage_persist_block(UdbBlock *block, UdbSyncSession *session);
 static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSession *session,
                                   unsigned long checksum);
 static void udb_sync_session_free(UdbBlock *block);

@@ -347,29 +347,6 @@ static int udb_stage_parse_line(UdbBlock *block, UdbSyncSession *session, const 
 	return 1;
 }
 
-static int udb_stage_persist_block(UdbBlock *block, UdbSyncSession *session)
-{
-	char tmp_path[512];
-	char pathbuf[4096] = "";
-	FILE *fp;
-	UdbRecord *rec;
-
-	if (!block || !session || !session->tree || !block->filepath)
-		return 0;
-	snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", block->filepath);
-	fp = fopen(tmp_path, "w");
-	if (!fp)
-		return 0;
-	fprintf(fp, "; UDB Block %c - Version %d\n", block->letter, block->version);
-	fprintf(fp, "; Saved: %ld\n", (long)time(NULL));
-	fprintf(fp, "; Records: %u\n", session->record_count);
-	for (rec = session->tree->child; rec; rec = rec->sibling)
-		udb_serialize_tree(rec, 0, fp, pathbuf, sizeof(pathbuf));
-	if (fclose(fp) != 0 || rename(tmp_path, block->filepath) != 0)
-		return 0;
-	return 1;
-}
-
 static void udb_sync_session_free(UdbBlock *block)
 {
 	if (!block || !block->session)

@@ -290,6 +290,8 @@ static void udb_hash_destroy(UdbContext *ctx);
 static void udb_hash_insert_record(UdbContext *ctx, UdbRecord *rec, int block_idx, const char *key);
 static int udb_hash_remove_record(UdbContext *ctx, UdbRecord *rec, int block_idx, const char *key);
 static UdbRecord *udb_hash_find(UdbContext *ctx, int block_idx, const char *key);
+static int udb_file_write_snapshot(UdbBlock *block, UdbRecord *tree,
+                                   unsigned int record_count);
 static int udb_file_save_block(UdbContext *ctx, UdbBlock *block);
 static int udb_file_load_block(UdbContext *ctx, UdbBlock *block);
 static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *line);
@@ -300,7 +302,6 @@ static unsigned long udb_compute_block_checksum(UdbBlock *block);
 static unsigned long udb_compute_tree_checksum(UdbRecord *tree);
 static int udb_stage_parse_line(UdbBlock *block, UdbSyncSession *session,
                                 const char *line);
-static int udb_stage_persist_block(UdbBlock *block, UdbSyncSession *session);
 static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSession *session,
                                   unsigned long checksum);
 static void udb_sync_session_free(UdbBlock *block);
@@ -642,12 +643,12 @@ static void udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbu
 	pathbuf[old_len] = '\0';
 }
 
-static int udb_file_save_block(UdbContext *ctx, UdbBlock *block)
+static int udb_file_write_snapshot(UdbBlock *block, UdbRecord *tree,
+                                   unsigned int record_count)
 {
 	char tmp_path[512];
 	char pathbuf[4096] = "";
 	FILE *fp;
-	struct stat st;
 	UdbRecord *rec;
 
 	if (!block || !block->filepath)
@@ -658,12 +659,24 @@ static int udb_file_save_block(UdbContext *ctx, UdbBlock *block)
 		return 0;
 	fprintf(fp, "; UDB Block %c - Version %d\n", block->letter, block->version);
 	fprintf(fp, "; Saved: %ld\n", (long)time(NULL));
-	fprintf(fp, "; Records: %u\n", block->record_count);
-	if (block->tree)
-		for (rec = block->tree->child; rec; rec = rec->sibling)
+	fprintf(fp, "; Records: %u\n", record_count);
+	if (tree)
+		for (rec = tree->child; rec; rec = rec->sibling)
 			udb_serialize_tree(rec, 0, fp, pathbuf, sizeof(pathbuf));
-	fclose(fp);
-	rename(tmp_path, block->filepath);
+	if (fclose(fp) != 0 || rename(tmp_path, block->filepath) != 0)
+	{
+		unlink(tmp_path);
+		return 0;
+	}
+	return 1;
+}
+
+static int udb_file_save_block(UdbContext *ctx, UdbBlock *block)
+{
+	struct stat st;
+
+	if (!block || !udb_file_write_snapshot(block, block->tree, block->record_count))
+		return 0;
 	(void)ctx;
 	block->checksum = udb_compute_block_checksum(block);
 	block->modified_at = time(NULL);
@@ -1381,29 +1394,6 @@ static int udb_stage_parse_line(UdbBlock *block, UdbSyncSession *session, const 
 	return 1;
 }
 
-static int udb_stage_persist_block(UdbBlock *block, UdbSyncSession *session)
-{
-	char tmp_path[512];
-	char pathbuf[4096] = "";
-	FILE *fp;
-	UdbRecord *rec;
-
-	if (!block || !session || !session->tree || !block->filepath)
-		return 0;
-	snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", block->filepath);
-	fp = fopen(tmp_path, "w");
-	if (!fp)
-		return 0;
-	fprintf(fp, "; UDB Block %c - Version %d\n", block->letter, block->version);
-	fprintf(fp, "; Saved: %ld\n", (long)time(NULL));
-	fprintf(fp, "; Records: %u\n", session->record_count);
-	for (rec = session->tree->child; rec; rec = rec->sibling)
-		udb_serialize_tree(rec, 0, fp, pathbuf, sizeof(pathbuf));
-	if (fclose(fp) != 0 || rename(tmp_path, block->filepath) != 0)
-		return 0;
-	return 1;
-}
-
 static void udb_sync_session_free(UdbBlock *block)
 {
 	if (!block || !block->session)
@@ -1893,7 +1883,7 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer,
 	}
 	*digest = udb_compute_tree_checksum(session->tree);
 	if (*digest != strtoul(checksum, NULL, 16) ||
-	    !udb_stage_persist_block(block, session) ||
+	    !udb_file_write_snapshot(block, session->tree, session->record_count) ||
 	    !udb_block_commit_stage(ctx, block, session, *digest))
 	{
 		udb_sync_abort(block, "digest or persistence failure");

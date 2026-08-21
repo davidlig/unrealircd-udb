@@ -233,12 +233,12 @@ static void udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbu
 	pathbuf[old_len] = '\0';
 }
 
-static int udb_file_save_block(UdbContext *ctx, UdbBlock *block)
+static int udb_file_write_snapshot(UdbBlock *block, UdbRecord *tree,
+                                   unsigned int record_count)
 {
 	char tmp_path[512];
 	char pathbuf[4096] = "";
 	FILE *fp;
-	struct stat st;
 	UdbRecord *rec;
 
 	if (!block || !block->filepath)
@@ -249,12 +249,24 @@ static int udb_file_save_block(UdbContext *ctx, UdbBlock *block)
 		return 0;
 	fprintf(fp, "; UDB Block %c - Version %d\n", block->letter, block->version);
 	fprintf(fp, "; Saved: %ld\n", (long)time(NULL));
-	fprintf(fp, "; Records: %u\n", block->record_count);
-	if (block->tree)
-		for (rec = block->tree->child; rec; rec = rec->sibling)
+	fprintf(fp, "; Records: %u\n", record_count);
+	if (tree)
+		for (rec = tree->child; rec; rec = rec->sibling)
 			udb_serialize_tree(rec, 0, fp, pathbuf, sizeof(pathbuf));
-	fclose(fp);
-	rename(tmp_path, block->filepath);
+	if (fclose(fp) != 0 || rename(tmp_path, block->filepath) != 0)
+	{
+		unlink(tmp_path);
+		return 0;
+	}
+	return 1;
+}
+
+static int udb_file_save_block(UdbContext *ctx, UdbBlock *block)
+{
+	struct stat st;
+
+	if (!block || !udb_file_write_snapshot(block, block->tree, block->record_count))
+		return 0;
 	(void)ctx;
 	block->checksum = udb_compute_block_checksum(block);
 	block->modified_at = time(NULL);

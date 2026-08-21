@@ -144,7 +144,7 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer,
 	}
 	*digest = udb_compute_tree_checksum(session->tree);
 	if (*digest != strtoul(checksum, NULL, 16) ||
-	    !udb_stage_persist_block(block, session) ||
+	    !udb_file_write_snapshot(block, session->tree, session->record_count) ||
 	    !udb_block_commit_stage(ctx, block, session, *digest))
 	{
 		udb_sync_abort(block, "digest or persistence failure");
