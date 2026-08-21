@@ -207,6 +207,113 @@ static void udb_record_free_tree(UdbRecord *rec)
 	safe_free(rec);
 }
 
+/* Candidate trees are deliberately unindexed: they are private until persisted. */
+static UdbRecord *udb_record_clone_tree(UdbRecord *rec, UdbRecord *needle,
+                                        UdbRecord **needle_clone)
+{
+	UdbRecord *copy;
+	UdbRecord **child;
+	UdbRecord *source_child;
+
+	if (!rec)
+		return NULL;
+	copy = safe_alloc(sizeof(*copy));
+	if (rec->key)
+	{
+		safe_strdup(copy->key, rec->key);
+		copy->is_dynamic_key = 1;
+	}
+	if (rec->data_str)
+		safe_strdup(copy->data_str, rec->data_str);
+	copy->id = rec->id;
+	copy->data_num = rec->data_num;
+	copy->block_idx = rec->block_idx;
+	copy->is_b64 = rec->is_b64;
+	if (rec == needle && needle_clone)
+		*needle_clone = copy;
+	child = &copy->child;
+	for (source_child = rec->child; source_child; source_child = source_child->sibling)
+	{
+		*child = udb_record_clone_tree(source_child, needle, needle_clone);
+		(*child)->parent = copy;
+		child = &(*child)->sibling;
+	}
+	return copy;
+}
+
+static unsigned int udb_record_count_tree(UdbRecord *rec)
+{
+	unsigned int count = 0;
+	UdbRecord *child;
+
+	if (!rec)
+		return 0;
+	for (child = rec->child; child; child = child->sibling)
+		count += 1 + udb_record_count_tree(child);
+	return count;
+}
+
+static UdbRecord *udb_record_insert_path(UdbRecord *tree, const char *path,
+                                         const char *data)
+{
+	char pathbuf[512];
+	char *part;
+	char *next;
+	UdbRecord *parent = tree;
+
+	if (!tree || !path || !*path || strlen(path) >= sizeof(pathbuf))
+		return NULL;
+	strlcpy(pathbuf, path, sizeof(pathbuf));
+	for (part = pathbuf; part; part = next)
+	{
+		next = strstr(part, "::");
+		if (next)
+		{
+			*next = '\0';
+			next += 2;
+			if (!*next)
+				return NULL;
+		}
+		if (!*part)
+			return NULL;
+		UdbRecord *rec = udb_record_find(NULL, part, parent);
+		if (!rec)
+		{
+			rec = udb_record_create(parent);
+			safe_strdup(rec->key, part);
+			rec->is_dynamic_key = 1;
+		}
+		parent = rec;
+	}
+	if (parent->data_str)
+		safe_free(parent->data_str);
+	if (data && *data == '*')
+	{
+		parent->data_num = strtoul(data + 1, NULL, 10);
+		parent->data_str = NULL;
+	} else if (data)
+	{
+		safe_strdup(parent->data_str, data);
+		parent->data_num = 0;
+	}
+	return parent;
+}
+
+static void udb_record_delete_tree(UdbRecord *rec)
+{
+	UdbRecord **link;
+
+	if (!rec || !rec->parent)
+		return;
+	for (link = &rec->parent->child; *link; link = &(*link)->sibling)
+		if (*link == rec)
+		{
+			*link = rec->sibling;
+			udb_record_free_tree(rec);
+			return;
+		}
+}
+
 /* ========================================================================
  * File Persistence
  * ======================================================================== */

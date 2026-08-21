@@ -210,6 +210,11 @@ After HEL 4 confirmation, real-time `INS` and `DEL` are accepted only from the
 selected propagator, except frames belonging to the peer currently serving that
 block's synchronization. They are rejected while that block has a staged
 transaction and are persisted and forwarded only to HEL-confirmed direct peers.
+For `INS`, `DEL`, and `DRP`, UDB first clones the active block and applies the
+change to that private candidate. It atomically writes and renames the candidate
+snapshot before changing active indexes, counters, or runtime effects. A write
+failure leaves the active tree and durable file unchanged, returns `ERR`, and
+does not forward the mutation.
 
 **DRP (Drop / Empty Block):**
 `:<sid> DB * DRP <block_letter>`

@@ -44,6 +44,17 @@ unchanged, no `.tmp` file, no staged `ACK`/commit, and both the interposer and
 staged persistence-failure evidence in the logs. The normal invocation does not
 build or preload this fixture and retains its existing successful-sync checks.
 
+To exercise the equivalent live-mutation rollback after staged synchronization
+has succeeded, run:
+
+```sh
+python3 src/modules/third/udb/tests/two_node_udb.py --runtime-rename-failure
+```
+
+The interposer is armed only after B has committed A's initial snapshot. B then
+receives the test mutator's authorized `INS`, fails its candidate snapshot
+rename, returns `ERR`, and must retain byte-identical durable and active data.
+
 `SKIP` (exit status 77) is deliberate, never a successful synchronization. It
 means the local installation could not provide the isolation or S2S conditions.
 Use `--keep` to retain the generated configs, data trees, and logs for

@@ -128,6 +128,12 @@ static UdbRecord *udb_record_insert(UdbContext *ctx, UdbBlock *block, UdbRecord 
 static UdbRecord *udb_record_find_path(UdbContext *ctx, UdbBlock *block, const char *path);
 static UdbRecord *udb_record_delete(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int persist);
 static void udb_record_free_tree(UdbRecord *rec);
+static UdbRecord *udb_record_clone_tree(UdbRecord *rec, UdbRecord *needle,
+                                        UdbRecord **needle_clone);
+static unsigned int udb_record_count_tree(UdbRecord *rec);
+static UdbRecord *udb_record_insert_path(UdbRecord *tree, const char *path,
+                                         const char *data);
+static void udb_record_delete_tree(UdbRecord *rec);
 static void udb_hash_init(UdbContext *ctx);
 static void udb_hash_destroy(UdbContext *ctx);
 static void udb_hash_insert_record(UdbContext *ctx, UdbRecord *rec, int block_idx, const char *key);
@@ -136,6 +142,8 @@ static UdbRecord *udb_hash_find(UdbContext *ctx, int block_idx, const char *key)
 static int udb_file_write_snapshot(UdbBlock *block, UdbRecord *tree,
                                    unsigned int record_count);
 static int udb_file_save_block(UdbContext *ctx, UdbBlock *block);
+static void udb_block_replace_tree(UdbContext *ctx, UdbBlock *block,
+                                   UdbRecord *tree, unsigned int record_count);
 static int udb_file_load_block(UdbContext *ctx, UdbBlock *block);
 static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *line);
 static void udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbuf,

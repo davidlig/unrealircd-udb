@@ -285,6 +285,12 @@ static UdbRecord *udb_record_insert(UdbContext *ctx, UdbBlock *block, UdbRecord 
 static UdbRecord *udb_record_find_path(UdbContext *ctx, UdbBlock *block, const char *path);
 static UdbRecord *udb_record_delete(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int persist);
 static void udb_record_free_tree(UdbRecord *rec);
+static UdbRecord *udb_record_clone_tree(UdbRecord *rec, UdbRecord *needle,
+                                        UdbRecord **needle_clone);
+static unsigned int udb_record_count_tree(UdbRecord *rec);
+static UdbRecord *udb_record_insert_path(UdbRecord *tree, const char *path,
+                                         const char *data);
+static void udb_record_delete_tree(UdbRecord *rec);
 static void udb_hash_init(UdbContext *ctx);
 static void udb_hash_destroy(UdbContext *ctx);
 static void udb_hash_insert_record(UdbContext *ctx, UdbRecord *rec, int block_idx, const char *key);
@@ -293,6 +299,8 @@ static UdbRecord *udb_hash_find(UdbContext *ctx, int block_idx, const char *key)
 static int udb_file_write_snapshot(UdbBlock *block, UdbRecord *tree,
                                    unsigned int record_count);
 static int udb_file_save_block(UdbContext *ctx, UdbBlock *block);
+static void udb_block_replace_tree(UdbContext *ctx, UdbBlock *block,
+                                   UdbRecord *tree, unsigned int record_count);
 static int udb_file_load_block(UdbContext *ctx, UdbBlock *block);
 static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *line);
 static void udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbuf,
@@ -615,6 +623,113 @@ static void udb_record_free_tree(UdbRecord *rec)
 	if (rec->data_str)
 		safe_free(rec->data_str);
 	safe_free(rec);
+}
+
+/* Candidate trees are deliberately unindexed: they are private until persisted. */
+static UdbRecord *udb_record_clone_tree(UdbRecord *rec, UdbRecord *needle,
+                                        UdbRecord **needle_clone)
+{
+	UdbRecord *copy;
+	UdbRecord **child;
+	UdbRecord *source_child;
+
+	if (!rec)
+		return NULL;
+	copy = safe_alloc(sizeof(*copy));
+	if (rec->key)
+	{
+		safe_strdup(copy->key, rec->key);
+		copy->is_dynamic_key = 1;
+	}
+	if (rec->data_str)
+		safe_strdup(copy->data_str, rec->data_str);
+	copy->id = rec->id;
+	copy->data_num = rec->data_num;
+	copy->block_idx = rec->block_idx;
+	copy->is_b64 = rec->is_b64;
+	if (rec == needle && needle_clone)
+		*needle_clone = copy;
+	child = &copy->child;
+	for (source_child = rec->child; source_child; source_child = source_child->sibling)
+	{
+		*child = udb_record_clone_tree(source_child, needle, needle_clone);
+		(*child)->parent = copy;
+		child = &(*child)->sibling;
+	}
+	return copy;
+}
+
+static unsigned int udb_record_count_tree(UdbRecord *rec)
+{
+	unsigned int count = 0;
+	UdbRecord *child;
+
+	if (!rec)
+		return 0;
+	for (child = rec->child; child; child = child->sibling)
+		count += 1 + udb_record_count_tree(child);
+	return count;
+}
+
+static UdbRecord *udb_record_insert_path(UdbRecord *tree, const char *path,
+                                         const char *data)
+{
+	char pathbuf[512];
+	char *part;
+	char *next;
+	UdbRecord *parent = tree;
+
+	if (!tree || !path || !*path || strlen(path) >= sizeof(pathbuf))
+		return NULL;
+	strlcpy(pathbuf, path, sizeof(pathbuf));
+	for (part = pathbuf; part; part = next)
+	{
+		next = strstr(part, "::");
+		if (next)
+		{
+			*next = '\0';
+			next += 2;
+			if (!*next)
+				return NULL;
+		}
+		if (!*part)
+			return NULL;
+		UdbRecord *rec = udb_record_find(NULL, part, parent);
+		if (!rec)
+		{
+			rec = udb_record_create(parent);
+			safe_strdup(rec->key, part);
+			rec->is_dynamic_key = 1;
+		}
+		parent = rec;
+	}
+	if (parent->data_str)
+		safe_free(parent->data_str);
+	if (data && *data == '*')
+	{
+		parent->data_num = strtoul(data + 1, NULL, 10);
+		parent->data_str = NULL;
+	} else if (data)
+	{
+		safe_strdup(parent->data_str, data);
+		parent->data_num = 0;
+	}
+	return parent;
+}
+
+static void udb_record_delete_tree(UdbRecord *rec)
+{
+	UdbRecord **link;
+
+	if (!rec || !rec->parent)
+		return;
+	for (link = &rec->parent->child; *link; link = &(*link)->sibling)
+		if (*link == rec)
+		{
+			*link = rec->sibling;
+			udb_record_free_tree(rec);
+			return;
+		}
 }
 
 /* ========================================================================
@@ -1088,8 +1203,75 @@ static int udb_password_record_valid(UdbBlock *block, const char *path,
 	return 1;
 }
 
+static void udb_block_replace_tree(UdbContext *ctx, UdbBlock *block,
+                                   UdbRecord *tree, unsigned int record_count)
+{
+	UdbRecord *rec;
+	struct stat st;
+
+	if (ctx->total_records >= block->record_count)
+		ctx->total_records -= block->record_count;
+	else
+		ctx->total_records = 0;
+	udb_record_free_tree(block->tree);
+	udb_hash_clear_block(ctx, udb_block_letter_to_index(block->letter));
+	block->tree = tree;
+	block->record_count = record_count;
+	ctx->total_records += record_count;
+	for (rec = tree->child; rec; rec = rec->sibling)
+		udb_hash_insert_record(ctx, rec, udb_block_letter_to_index(block->letter), rec->key);
+	udb_block_set_context_root(ctx, block);
+	block->checksum = udb_compute_block_checksum(block);
+	block->modified_at = time(NULL);
+	if (stat(block->filepath, &st) == 0)
+		block->filesize = st.st_size;
+}
+
 static UdbRecord *udb_record_insert(UdbContext *ctx, UdbBlock *block, UdbRecord *parent, const char *key, const char *data_str, unsigned long data_num, int persist)
 {
+	if (persist)
+	{
+		UdbRecord *candidate_parent = NULL;
+		UdbRecord *candidate;
+		char value[32];
+
+		if (!parent)
+			parent = block->tree;
+		candidate = udb_record_clone_tree(block->tree, parent, &candidate_parent);
+		if (!data_str)
+		{
+			snprintf(value, sizeof(value), "*%lu", data_num);
+			data_str = value;
+		}
+		if (!candidate_parent)
+			candidate_parent = candidate;
+		UdbRecord *rec = udb_record_find(NULL, key, candidate_parent);
+		if (!rec)
+		{
+			rec = udb_record_create(candidate_parent);
+			safe_strdup(rec->key, key);
+			rec->is_dynamic_key = 1;
+		}
+		if (rec->data_str)
+			safe_free(rec->data_str);
+		if (*data_str == '*')
+		{
+			rec->data_num = strtoul(data_str + 1, NULL, 10);
+			rec->data_str = NULL;
+		} else
+		{
+			safe_strdup(rec->data_str, data_str);
+			rec->data_num = 0;
+		}
+		if (!udb_file_write_snapshot(block, candidate, udb_record_count_tree(candidate)))
+		{
+			udb_record_free_tree(candidate);
+			return NULL;
+		}
+		udb_block_replace_tree(ctx, block, candidate, udb_record_count_tree(candidate));
+		udb_apply_special_record(ctx, block, rec, 1);
+		return rec;
+	}
 	if (!parent)
 		parent = block->tree;
 	UdbRecord *rec = udb_record_find(ctx, key, parent);
@@ -1144,11 +1326,6 @@ static UdbRecord *udb_record_insert(UdbContext *ctx, UdbBlock *block, UdbRecord 
 		rec->data_num = data_num;
 	}
 
-	if (persist)
-	{
-		udb_file_save_block(ctx, block);
-	}
-
 	udb_apply_special_record(ctx, block, rec, 1);
 
 	return rec;
@@ -1160,6 +1337,31 @@ static UdbRecord *udb_record_delete(UdbContext *ctx, UdbBlock *block, UdbRecord 
 	UdbRecord *line_rec = NULL;
 	if (!rec)
 		return NULL;
+	if (persist)
+	{
+		UdbRecord *candidate_rec = NULL;
+		UdbRecord *candidate_line = NULL;
+		UdbRecord *candidate = udb_record_clone_tree(block->tree, rec, &candidate_rec);
+		if (!candidate_rec)
+		{
+			udb_record_free_tree(candidate);
+			return rec;
+		}
+		if (block->letter == 'K' && candidate_rec->parent && candidate_rec->parent->parent &&
+		    candidate_rec->parent->parent != candidate)
+			candidate_line = candidate_rec->parent;
+		udb_record_delete_tree(candidate_rec);
+		if (!udb_file_write_snapshot(block, candidate, udb_record_count_tree(candidate)))
+		{
+			udb_record_free_tree(candidate);
+			return rec;
+		}
+		udb_remove_special_record(ctx, block, rec);
+		udb_block_replace_tree(ctx, block, candidate, udb_record_count_tree(candidate));
+		if (candidate_line)
+			udb_lines_apply_effect(ctx, block, candidate_line, 0);
+		return NULL;
+	}
 
 	/* A K property deletion changes its owning pattern, not a line of its own. */
 	if (block->letter == 'K' && rec->parent && rec->parent->parent &&
@@ -1203,10 +1405,6 @@ static UdbRecord *udb_record_delete(UdbContext *ctx, UdbBlock *block, UdbRecord 
 	if (line_rec)
 		udb_lines_apply_effect(ctx, block, line_rec, 0);
 
-	if (persist)
-	{
-		udb_file_save_block(ctx, block);
-	}
 	return NULL;
 }
 
@@ -2079,6 +2277,25 @@ static void udb_mutation_forward_del(Client *source, Client *except, const char 
 	udb_sendto_confirmed_servers(except, ":%s DB %s DEL %s", source->id, target, path);
 }
 
+static int udb_mutation_commit(UdbContext *ctx, UdbBlock *block, UdbRecord *tree)
+{
+	unsigned int record_count = udb_record_count_tree(tree);
+
+	if (!udb_file_write_snapshot(block, tree, record_count))
+	{
+		udb_record_free_tree(tree);
+		return 0;
+	}
+	udb_block_replace_tree(ctx, block, tree, record_count);
+	return 1;
+}
+
+static void udb_mutation_persist_error(Client *client, const char *subcmd, char letter)
+{
+	sendto_one(client, NULL, ":%s DB %s ERR %s %d %c", me.id, client->id,
+	           subcmd, UDB_ERR_FATAL, letter);
+}
+
 static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target,
                              const char *path, const char *data, int is_for_me, int is_broadcast)
 {
@@ -2102,15 +2319,28 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 			sendto_one(client, NULL, ":%s DB %s ERR INS %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 			return;
 		}
-		int len = strlen(path) + strlen(data) + 2;
-		char *line = safe_alloc(len);
-		snprintf(line, len, "%s %s", path + 3, data);
-		UdbRecord *rec = udb_file_parse_line(ctx, block, line);
-		safe_free(line);
-		if (rec)
-			udb_apply_special_record(ctx, block, rec, 1);
-		if (!block->syncing_from)
-			udb_file_save_block(ctx, block);
+		UdbRecord *tree;
+		UdbRecord *rec;
+
+		if (!udb_password_record_valid(block, path + 3, data))
+		{
+			udb_protocol_params_error(client, "INS");
+			return;
+		}
+		tree = udb_record_clone_tree(block->tree, NULL, NULL);
+		rec = udb_record_insert_path(tree, path + 3, data);
+		if (!rec)
+		{
+			udb_record_free_tree(tree);
+			udb_mutation_persist_error(client, "INS", letter);
+			return;
+		}
+		if (!udb_mutation_commit(ctx, block, tree))
+		{
+			udb_mutation_persist_error(client, "INS", letter);
+			return;
+		}
+		udb_apply_special_record(ctx, block, rec, 1);
 		char logbuf[512];
 		snprintf(logbuf, sizeof(logbuf), "[UDB] Inserted record via S2S: %s -> %s", path, data);
 		unreal_log(ULOG_INFO, "udb", "UDB_INS_RECEIVED", client, "$msg", log_data_string("msg", logbuf));
@@ -2148,9 +2378,28 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, const char *target
 			sendto_one(client, NULL, ":%s DB %s ERR DEL %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 			return;
 		}
-		UdbRecord *rec = udb_record_find_path(ctx, block, path + 3);
-		if (rec)
-			udb_record_delete(ctx, block, rec, 1);
+		UdbRecord *old_rec = udb_record_find_path(ctx, block, path + 3);
+		UdbRecord *candidate_rec = NULL;
+		UdbRecord *candidate_line = NULL;
+		UdbRecord *tree = udb_record_clone_tree(block->tree, old_rec, &candidate_rec);
+		unsigned int record_count;
+		if (block->letter == 'K' && candidate_rec && candidate_rec->parent &&
+		    candidate_rec->parent->parent && candidate_rec->parent->parent != tree)
+			candidate_line = candidate_rec->parent;
+		if (candidate_rec)
+			udb_record_delete_tree(candidate_rec);
+		record_count = udb_record_count_tree(tree);
+		if (!udb_file_write_snapshot(block, tree, record_count))
+		{
+			udb_record_free_tree(tree);
+			udb_mutation_persist_error(client, "DEL", letter);
+			return;
+		}
+		if (old_rec)
+			udb_remove_special_record(ctx, block, old_rec);
+		udb_block_replace_tree(ctx, block, tree, record_count);
+		if (candidate_line)
+			udb_lines_apply_effect(ctx, block, candidate_line, 0);
 		if (ctx->propagator && block->syncing_from == client)
 		{
 			udb_mutation_forward_del(ctx->propagator, client, target, path);
@@ -2183,11 +2432,18 @@ static void udb_mutation_drp(UdbContext *ctx, Client *client, const char *target
 			sendto_one(client, NULL, ":%s DB %s ERR DRP %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 			return;
 		}
+		UdbRecord *tree = udb_record_clone_tree(block->tree, NULL, NULL);
+		while (tree->child)
+			udb_record_delete_tree(tree->child);
+		if (!udb_file_write_snapshot(block, tree, 0))
+		{
+			udb_record_free_tree(tree);
+			udb_mutation_persist_error(client, "DRP", letter);
+			return;
+		}
+		/* Reset removes the old block's runtime effects only after persistence. */
 		udb_block_reset(ctx, block);
-		block->checksum = 0;
-		block->filesize = 0;
-		if (!block->syncing_from)
-			udb_file_save_block(ctx, block);
+		udb_block_replace_tree(ctx, block, tree, 0);
 		if (!is_broadcast)
 			return;
 	}

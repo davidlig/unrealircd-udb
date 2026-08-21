@@ -200,6 +200,11 @@ propagador seleccionado, salvo frames del peer que está sirviendo la
 sincronización de ese bloque. Se rechazan mientras el bloque tenga una
 transacción staged y solo se persisten y reenvían a peers directos con HEL
 confirmado.
+Para `INS`, `DEL` y `DRP`, UDB primero clona el bloque activo y aplica el
+cambio al candidato privado. Solo después de escribir y renombrar atómicamente
+su snapshot actualiza índices, contadores y efectos en tiempo real. Si falla la
+persistencia, el árbol y archivo activos no cambian, se devuelve `ERR` y la
+mutación no se reenvía.
 
 **DRP (Drop / Vaciar Bloque):**
 `:<sid> DB * DRP <letra_bloque>`

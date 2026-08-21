@@ -29,6 +29,7 @@ MUTATOR_RECORD = "udb-test-mutator authorized-insert"
 RENAME_FAIL_SOURCE = ROOT / "src/modules/third/udb/tests/udb_snapshot_rename_fail.c"
 RENAME_FAIL_MODULE = RENAME_FAIL_SOURCE.with_suffix(".so")
 RENAME_FAIL_TARGET = str(PERMDATADIR / "udb_N.db")
+RENAME_FAIL_ARM = str(PERMDATADIR / "udb-snapshot-rename-fail-go")
 
 
 def skip(message):
@@ -84,7 +85,8 @@ udb {{
 ''', encoding="ascii")
 
 
-def bwrap_command(node, ircd, config, module, mutator=None, configtest=False, rename_failure=False):
+def bwrap_command(node, ircd, config, module, mutator=None, configtest=False, rename_failure=False,
+                  rename_failure_arm=False):
     # A read-only host root leaves dependencies and installed modules available.
     # Only this node's working directory and compiled data directory are writable.
     command = ["bwrap", "--die-with-parent", "--ro-bind", "/", "/",
@@ -96,6 +98,8 @@ def bwrap_command(node, ircd, config, module, mutator=None, configtest=False, re
     if rename_failure:
         command.extend(("--setenv", "LD_PRELOAD", str(RENAME_FAIL_MODULE),
                         "--setenv", "UDB_SNAPSHOT_RENAME_FAIL_TARGET", RENAME_FAIL_TARGET))
+        if rename_failure_arm:
+            command.extend(("--setenv", "UDB_SNAPSHOT_RENAME_FAIL_ARM", RENAME_FAIL_ARM))
     command.extend((str(ircd), "-f", str(config)))
     if configtest:
         command.append("-c")
@@ -195,6 +199,13 @@ def mutator_delete_observed(b_log, b_db):
     return ordered(udb_commands(b_log), ("INS", "DEL")) and not db_contains(b_db, MUTATOR_RECORD)
 
 
+def runtime_rename_failure_observed(a_log, b_log, b_db, baseline):
+    return ("INS" in udb_commands(b_log) and "ERR" in udb_commands(a_log) and
+            b_db.read_bytes() == baseline and not db_contains(b_db, MUTATOR_RECORD) and
+            not b_db.with_suffix(".db.tmp").exists() and
+            "UDB_TEST_SNAPSHOT_RENAME_FAIL:" in log_text(b_log))
+
+
 def print_diagnostics(logs, b_db=None):
     commands = [udb_commands(log) for log in logs]
     print("DIAGNOSTIC: S2S link evidence was observed, but staged UDB snapshot evidence was not.",
@@ -241,6 +252,8 @@ def main():
     parser.add_argument("--keep", action="store_true", help="preserve temporary node directories")
     parser.add_argument("--snapshot-rename-failure", action="store_true",
                         help="fail node B's UDB N snapshot rename and verify staged-sync rollback")
+    parser.add_argument("--runtime-rename-failure", action="store_true",
+                        help="fail node B's armed live INS snapshot rename and verify no local commit")
     args = parser.parse_args()
 
     if not shutil.which("bwrap"):
@@ -258,7 +271,7 @@ def main():
     processes = []
     try:
         build_mutator()
-        if args.snapshot_rename_failure:
+        if args.snapshot_rename_failure or args.runtime_rename_failure:
             build_rename_fail_interposer()
         a, b = root / "node-a", root / "node-b"
         for node in (a, b):
@@ -293,7 +306,9 @@ def main():
             with log.open("w") as output:
                 mutator = MUTATOR_MODULE if node == a else None
                 processes.append(subprocess.Popen(bwrap_command(node, args.ircd, config, args.module, mutator,
-                                                                rename_failure=args.snapshot_rename_failure and node == b),
+                                                                 rename_failure=(args.snapshot_rename_failure or
+                                                                                 args.runtime_rename_failure) and node == b,
+                                                                 rename_failure_arm=args.runtime_rename_failure and node == b),
                                                    stdout=output, stderr=subprocess.STDOUT,
                                                    text=True))
         if not wait_for_link(processes, logs, args.timeout):
@@ -324,8 +339,21 @@ def main():
             print_diagnostics(logs, b_db)
             return skip("S2S linked, but UDB staged N-block transfer was not observed; this is not a PASS")
         print("PASS: UDB capability negotiation and staged N-block sync committed in node B")
+        if args.runtime_rename_failure:
+            b_baseline = b_db.read_bytes()
+            (b / "data" / "udb-snapshot-rename-fail-go").touch()
         (a / "data" / "udb-test-mutator-go").touch()
         deadline = time.monotonic() + args.timeout
+        if args.runtime_rename_failure:
+            while time.monotonic() < deadline:
+                if runtime_rename_failure_observed(logs[0], logs[1], b_db, b_baseline):
+                    break
+                time.sleep(0.25)
+            if not runtime_rename_failure_observed(logs[0], logs[1], b_db, b_baseline):
+                print_diagnostics(logs, b_db)
+                return 1
+            print("PASS: failed live INS snapshot rename left node B's active and durable N block unchanged")
+            return 0
         while time.monotonic() < deadline and not mutator_insert_observed(logs[1], b_db):
             time.sleep(0.25)
         if not mutator_insert_observed(logs[1], b_db):

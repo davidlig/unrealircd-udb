@@ -41,8 +41,75 @@ static int udb_password_record_valid(UdbBlock *block, const char *path,
 	return 1;
 }
 
+static void udb_block_replace_tree(UdbContext *ctx, UdbBlock *block,
+                                   UdbRecord *tree, unsigned int record_count)
+{
+	UdbRecord *rec;
+	struct stat st;
+
+	if (ctx->total_records >= block->record_count)
+		ctx->total_records -= block->record_count;
+	else
+		ctx->total_records = 0;
+	udb_record_free_tree(block->tree);
+	udb_hash_clear_block(ctx, udb_block_letter_to_index(block->letter));
+	block->tree = tree;
+	block->record_count = record_count;
+	ctx->total_records += record_count;
+	for (rec = tree->child; rec; rec = rec->sibling)
+		udb_hash_insert_record(ctx, rec, udb_block_letter_to_index(block->letter), rec->key);
+	udb_block_set_context_root(ctx, block);
+	block->checksum = udb_compute_block_checksum(block);
+	block->modified_at = time(NULL);
+	if (stat(block->filepath, &st) == 0)
+		block->filesize = st.st_size;
+}
+
 static UdbRecord *udb_record_insert(UdbContext *ctx, UdbBlock *block, UdbRecord *parent, const char *key, const char *data_str, unsigned long data_num, int persist)
 {
+	if (persist)
+	{
+		UdbRecord *candidate_parent = NULL;
+		UdbRecord *candidate;
+		char value[32];
+
+		if (!parent)
+			parent = block->tree;
+		candidate = udb_record_clone_tree(block->tree, parent, &candidate_parent);
+		if (!data_str)
+		{
+			snprintf(value, sizeof(value), "*%lu", data_num);
+			data_str = value;
+		}
+		if (!candidate_parent)
+			candidate_parent = candidate;
+		UdbRecord *rec = udb_record_find(NULL, key, candidate_parent);
+		if (!rec)
+		{
+			rec = udb_record_create(candidate_parent);
+			safe_strdup(rec->key, key);
+			rec->is_dynamic_key = 1;
+		}
+		if (rec->data_str)
+			safe_free(rec->data_str);
+		if (*data_str == '*')
+		{
+			rec->data_num = strtoul(data_str + 1, NULL, 10);
+			rec->data_str = NULL;
+		} else
+		{
+			safe_strdup(rec->data_str, data_str);
+			rec->data_num = 0;
+		}
+		if (!udb_file_write_snapshot(block, candidate, udb_record_count_tree(candidate)))
+		{
+			udb_record_free_tree(candidate);
+			return NULL;
+		}
+		udb_block_replace_tree(ctx, block, candidate, udb_record_count_tree(candidate));
+		udb_apply_special_record(ctx, block, rec, 1);
+		return rec;
+	}
 	if (!parent)
 		parent = block->tree;
 	UdbRecord *rec = udb_record_find(ctx, key, parent);
@@ -97,11 +164,6 @@ static UdbRecord *udb_record_insert(UdbContext *ctx, UdbBlock *block, UdbRecord 
 		rec->data_num = data_num;
 	}
 
-	if (persist)
-	{
-		udb_file_save_block(ctx, block);
-	}
-
 	udb_apply_special_record(ctx, block, rec, 1);
 
 	return rec;
@@ -113,6 +175,31 @@ static UdbRecord *udb_record_delete(UdbContext *ctx, UdbBlock *block, UdbRecord 
 	UdbRecord *line_rec = NULL;
 	if (!rec)
 		return NULL;
+	if (persist)
+	{
+		UdbRecord *candidate_rec = NULL;
+		UdbRecord *candidate_line = NULL;
+		UdbRecord *candidate = udb_record_clone_tree(block->tree, rec, &candidate_rec);
+		if (!candidate_rec)
+		{
+			udb_record_free_tree(candidate);
+			return rec;
+		}
+		if (block->letter == 'K' && candidate_rec->parent && candidate_rec->parent->parent &&
+		    candidate_rec->parent->parent != candidate)
+			candidate_line = candidate_rec->parent;
+		udb_record_delete_tree(candidate_rec);
+		if (!udb_file_write_snapshot(block, candidate, udb_record_count_tree(candidate)))
+		{
+			udb_record_free_tree(candidate);
+			return rec;
+		}
+		udb_remove_special_record(ctx, block, rec);
+		udb_block_replace_tree(ctx, block, candidate, udb_record_count_tree(candidate));
+		if (candidate_line)
+			udb_lines_apply_effect(ctx, block, candidate_line, 0);
+		return NULL;
+	}
 
 	/* A K property deletion changes its owning pattern, not a line of its own. */
 	if (block->letter == 'K' && rec->parent && rec->parent->parent &&
@@ -156,10 +243,6 @@ static UdbRecord *udb_record_delete(UdbContext *ctx, UdbBlock *block, UdbRecord 
 	if (line_rec)
 		udb_lines_apply_effect(ctx, block, line_rec, 0);
 
-	if (persist)
-	{
-		udb_file_save_block(ctx, block);
-	}
 	return NULL;
 }
 

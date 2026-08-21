@@ -92,6 +92,25 @@ static void udb_mutation_forward_del(Client *source, Client *except, const char 
 	udb_sendto_confirmed_servers(except, ":%s DB %s DEL %s", source->id, target, path);
 }
 
+static int udb_mutation_commit(UdbContext *ctx, UdbBlock *block, UdbRecord *tree)
+{
+	unsigned int record_count = udb_record_count_tree(tree);
+
+	if (!udb_file_write_snapshot(block, tree, record_count))
+	{
+		udb_record_free_tree(tree);
+		return 0;
+	}
+	udb_block_replace_tree(ctx, block, tree, record_count);
+	return 1;
+}
+
+static void udb_mutation_persist_error(Client *client, const char *subcmd, char letter)
+{
+	sendto_one(client, NULL, ":%s DB %s ERR %s %d %c", me.id, client->id,
+	           subcmd, UDB_ERR_FATAL, letter);
+}
+
 static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target,
                              const char *path, const char *data, int is_for_me, int is_broadcast)
 {
@@ -115,15 +134,28 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 			sendto_one(client, NULL, ":%s DB %s ERR INS %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 			return;
 		}
-		int len = strlen(path) + strlen(data) + 2;
-		char *line = safe_alloc(len);
-		snprintf(line, len, "%s %s", path + 3, data);
-		UdbRecord *rec = udb_file_parse_line(ctx, block, line);
-		safe_free(line);
-		if (rec)
-			udb_apply_special_record(ctx, block, rec, 1);
-		if (!block->syncing_from)
-			udb_file_save_block(ctx, block);
+		UdbRecord *tree;
+		UdbRecord *rec;
+
+		if (!udb_password_record_valid(block, path + 3, data))
+		{
+			udb_protocol_params_error(client, "INS");
+			return;
+		}
+		tree = udb_record_clone_tree(block->tree, NULL, NULL);
+		rec = udb_record_insert_path(tree, path + 3, data);
+		if (!rec)
+		{
+			udb_record_free_tree(tree);
+			udb_mutation_persist_error(client, "INS", letter);
+			return;
+		}
+		if (!udb_mutation_commit(ctx, block, tree))
+		{
+			udb_mutation_persist_error(client, "INS", letter);
+			return;
+		}
+		udb_apply_special_record(ctx, block, rec, 1);
 		char logbuf[512];
 		snprintf(logbuf, sizeof(logbuf), "[UDB] Inserted record via S2S: %s -> %s", path, data);
 		unreal_log(ULOG_INFO, "udb", "UDB_INS_RECEIVED", client, "$msg", log_data_string("msg", logbuf));
@@ -161,9 +193,28 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, const char *target
 			sendto_one(client, NULL, ":%s DB %s ERR DEL %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 			return;
 		}
-		UdbRecord *rec = udb_record_find_path(ctx, block, path + 3);
-		if (rec)
-			udb_record_delete(ctx, block, rec, 1);
+		UdbRecord *old_rec = udb_record_find_path(ctx, block, path + 3);
+		UdbRecord *candidate_rec = NULL;
+		UdbRecord *candidate_line = NULL;
+		UdbRecord *tree = udb_record_clone_tree(block->tree, old_rec, &candidate_rec);
+		unsigned int record_count;
+		if (block->letter == 'K' && candidate_rec && candidate_rec->parent &&
+		    candidate_rec->parent->parent && candidate_rec->parent->parent != tree)
+			candidate_line = candidate_rec->parent;
+		if (candidate_rec)
+			udb_record_delete_tree(candidate_rec);
+		record_count = udb_record_count_tree(tree);
+		if (!udb_file_write_snapshot(block, tree, record_count))
+		{
+			udb_record_free_tree(tree);
+			udb_mutation_persist_error(client, "DEL", letter);
+			return;
+		}
+		if (old_rec)
+			udb_remove_special_record(ctx, block, old_rec);
+		udb_block_replace_tree(ctx, block, tree, record_count);
+		if (candidate_line)
+			udb_lines_apply_effect(ctx, block, candidate_line, 0);
 		if (ctx->propagator && block->syncing_from == client)
 		{
 			udb_mutation_forward_del(ctx->propagator, client, target, path);
@@ -196,11 +247,18 @@ static void udb_mutation_drp(UdbContext *ctx, Client *client, const char *target
 			sendto_one(client, NULL, ":%s DB %s ERR DRP %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 			return;
 		}
+		UdbRecord *tree = udb_record_clone_tree(block->tree, NULL, NULL);
+		while (tree->child)
+			udb_record_delete_tree(tree->child);
+		if (!udb_file_write_snapshot(block, tree, 0))
+		{
+			udb_record_free_tree(tree);
+			udb_mutation_persist_error(client, "DRP", letter);
+			return;
+		}
+		/* Reset removes the old block's runtime effects only after persistence. */
 		udb_block_reset(ctx, block);
-		block->checksum = 0;
-		block->filesize = 0;
-		if (!block->syncing_from)
-			udb_file_save_block(ctx, block);
+		udb_block_replace_tree(ctx, block, tree, 0);
 		if (!is_broadcast)
 			return;
 	}
