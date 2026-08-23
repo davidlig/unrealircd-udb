@@ -325,16 +325,26 @@ def exercise(host, client_port, server_port):
                        "bloqueo de topic por topiclock (fundador) con origen ChanServ")
         print("PASS: topiclock bloqueó cambio de topic del fundador vía ChanServ")
 
-        # 4. Unlock mlock (*0) and topiclock (*0) via propagator:
+        # 4. Reject boolean INS *0 on mlock/topiclock and unlock via DEL:
         services.send_ins(f"C::{CHANNEL}::mlock", "*0")
+        services.wait_for(lambda line: " DB " in line and " ERR " in line and " INS " in line,
+                          "rechazo de mlock *0")
+        print("PASS: INS de mlock *0 fue rechazado con ERR INS")
+
         services.send_ins(f"C::{CHANNEL}::topiclock", "*0")
+        services.wait_for(lambda line: " DB " in line and " ERR " in line and " INS " in line,
+                          "rechazo de topiclock *0")
+        print("PASS: INS de topiclock *0 fue rechazado con ERR INS")
+
+        services.send_del(f"C::{CHANNEL}::mlock")
+        services.send_del(f"C::{CHANNEL}::topiclock")
         time.sleep(0.2)
 
         # Now founder can change modes and topic
         start = len(alice.lines)
-        alice.request(f"MODE {CHANNEL} +s", lambda line: f"MODE {CHANNEL} +s" in line, "modo +s permitido tras mlock *0")
-        alice.request(f"TOPIC {CHANNEL} :Unlocked topic", lambda line: f"TOPIC {CHANNEL}" in line, "topic permitido tras topiclock *0")
-        print("PASS: mlock *0 y topiclock *0 permitieron modificaciones al fundador")
+        alice.request(f"MODE {CHANNEL} +s", lambda line: f"MODE {CHANNEL} +s" in line, "modo +s permitido tras DEL mlock")
+        alice.request(f"TOPIC {CHANNEL} :Unlocked topic", lambda line: f"TOPIC {CHANNEL}" in line, "topic permitido tras DEL topiclock")
+        print("PASS: DEL de mlock y topiclock permitieron modificaciones al fundador")
 
         # 5. Validation of modes with missing parameters via INS:
         start_svc = len(services.lines)
@@ -358,6 +368,42 @@ def exercise(host, client_port, server_port):
         del_traffic = [line for line in alice.lines[start_alice:] if f"MODE {CHANNEL}" in line]
         require(not del_traffic, f"DEL de modes revirtió modos en caliente: {del_traffic!r}")
         print("PASS: DEL de modes eliminó el registro sin revertir los modos en caliente")
+
+        # 7. Persistent channel mode (+P) tests:
+        # 7a. Reject INS persistent *0
+        services.send_ins(f"C::{CHANNEL}::persistent", "*0")
+        services.wait_for(lambda line: " DB " in line and " ERR " in line and " INS " in line,
+                          "rechazo de persistent *0")
+        print("PASS: INS de persistent *0 fue rechazado con ERR INS")
+
+        # 7b. INS persistent *1 on active channel sets +P
+        services.send_ins(f"C::{CHANNEL}::persistent", "*1")
+        alice.wait_for(lambda line: f"MODE {CHANNEL} +P" in line,
+                       "aplicación de +P en canal activo tras INS persistent *1")
+        print("PASS: INS de persistent *1 estableció modo +P en canal activo")
+
+        # 7c. DEL persistent removes -P
+        services.send_del(f"C::{CHANNEL}::persistent")
+        alice.wait_for(lambda line: f"MODE {CHANNEL} -P" in line,
+                       "remoción de -P tras DEL persistent")
+        print("PASS: DEL de persistent removió modo -P en canal activo")
+
+        # 7d. INS persistent *1 on non-existent channel creates it with +P
+        empty_chan = "#emptyperm"
+        services.send_ins(f"C::{empty_chan}::persistent", "*1")
+        time.sleep(0.2)
+        # Bob joins #emptyperm and requests MODE to see +P in 324
+        bob.request(f"JOIN {empty_chan}", lambda line: " 366 " in line, "JOIN #emptyperm")
+        bob.request(f"MODE {empty_chan}", lambda line: " 324 " in line and "P" in line,
+                    "canal persistente instanciado con +P para canal vacío")
+        print("PASS: INS de persistent *1 instanció canal vacío con modo +P")
+
+        # 7e. DEL persistent on empty channel destroys it
+        bob.send(f"PART {empty_chan} :bye")
+        time.sleep(0.2)
+        services.send_del(f"C::{empty_chan}::persistent")
+        time.sleep(0.2)
+        print("PASS: DEL de persistent en canal vacío procesado limpiamente")
 
     finally:
         for client in clients:

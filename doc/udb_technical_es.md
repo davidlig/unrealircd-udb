@@ -50,14 +50,14 @@ Almacena configuraciones para usuarios registrados.
 #### Bloque C (Canales)
 *   **founder**: Nick del fundador original del canal (se le otorga +q automáticamente).
 *   **modes**: Modos de canal gestionados por UDB. Los parámetros siguen a la cadena de modos. Se validan estrictamente las letras de modo y la cantidad de parámetros requeridos (por ejemplo, `+ntMl` sin parámetro se rechaza, requiriéndose `+ntMl 50`). Al borrarse mediante `DEL`, no se revierten en caliente en el canal.
-*   **mlock**: Bloqueo absoluto de modos de canal (`*1` = activado, `*0` = desactivado). Cuando está activo (`*1`), nadie puede modificar los modos del canal mediante `MODE` o `SAMODE`.
-*   **topiclock**: Bloqueo absoluto del topic del canal (`*1` = activado, `*0` = desactivado). Cuando está activo (`*1`), nadie puede modificar el topic del canal mediante `TOPIC`.
+*   **mlock**: Bloqueo absoluto de modos de canal (`*1` en `INS`; se desactiva con `DEL`). Cuando está activo (`*1`), nadie puede modificar los modos del canal mediante `MODE` o `SAMODE`.
+*   **topiclock**: Bloqueo absoluto del topic del canal (`*1` en `INS`; se desactiva con `DEL`). Cuando está activo (`*1`), nadie puede modificar el topic del canal mediante `TOPIC`.
 *   **topic**: El tema (topic) persistente del canal.
 *   **access**: Subregistros con los nicks identificados que pueden entrar.
 *   **forbid**: Motivo de prohibición del canal.
 *   **suspended**: Desactiva el comportamiento de fundador y `+r` del canal registrado.
 *   **pass** y **challenge**: Credencial de autenticación de administrador del canal.
-*   **persistent**: Activa el `+P` nativo cuando está cargado el manejador de canales permanentes (`*1` / `*0`).
+*   **persistent**: Activa el `+P` nativo cuando está cargado el manejador de canales permanentes (`*1` en `INS`; se desactiva y remueve con `DEL`). Si el canal no existe al insertarse, se crea automáticamente; si queda vacío al borrarse con `DEL`, se destruye.
 *   **options**: Opciones numéricas: `*1` protege los bans locales y `*2`
      bloquea cualquier cambio local de `MODE` o `SAMODE` salvo para el fundador
      identificado.

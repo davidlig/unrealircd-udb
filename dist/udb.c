@@ -1330,7 +1330,7 @@ static int udb_boolean_record_valid(const char *value)
 {
 	if (!value)
 		return 0;
-	return !strcmp(value, "*1") || !strcmp(value, "*0");
+	return !strcmp(value, "*1");
 }
 
 static int udb_channel_modes_record_valid(const char *value)
@@ -4405,7 +4405,7 @@ static void udb_channel_do_mode(Channel *channel, MessageTag *mtags,
 		myparv[myparc++] = raw_strdup(param);
 	myparv[myparc] = NULL;
 
-	do_mode(channel, source, mtags, myparc, (const char **)myparv, 0, 0);
+	do_mode(channel, source, mtags, myparc, (const char **)myparv, 0, 1);
 	for (i = 0; i < myparc; i++)
 		safe_free(myparv[i]);
 }
@@ -4868,6 +4868,11 @@ static void udb_channel_apply_record(UdbContext *ctx, UdbBlock *block, UdbRecord
 		return;
 	chan_rec = rec->parent == block->tree ? rec : rec->parent;
 	channel = find_channel(chan_rec->key);
+	if (!channel && udb_channel_is_persistent(ctx, chan_rec) && find_channel_mode_handler('P'))
+	{
+		channel = make_channel(chan_rec->key);
+		channel->creationtime = TStime();
+	}
 	if (channel)
 		udb_channel_apply_subrecord(ctx, channel, chan_rec, rec->key, is_new);
 }

@@ -15,7 +15,7 @@ static int udb_boolean_record_valid(const char *value)
 {
 	if (!value)
 		return 0;
-	return !strcmp(value, "*1") || !strcmp(value, "*0");
+	return !strcmp(value, "*1");
 }
 
 static int udb_channel_modes_record_valid(const char *value)
