@@ -773,7 +773,8 @@ static int udb_hook_can_use_nick(Client *client, const char *newnick, const char
 		if (!pass)
 		{
 			udb_send_service_notice(client, SKEY_NICKSERV,
-			                        "This nickname is registered and requires a password.");
+			                        "Nickname is unavailable: This nick is registered and requires a password and an authorized IP. Use /NICK %s:Password",
+			                        newnick);
 		} else if (udb_check_password(pass, nick_rec, client))
 		{
 			if (udb_nick_access_allowed(client, nick_rec))

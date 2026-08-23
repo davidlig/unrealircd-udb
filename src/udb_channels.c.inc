@@ -204,23 +204,35 @@ static void udb_channel_apply_modes(Channel *channel, const char *value)
 static void udb_channel_remove_modes(Channel *channel, const char *fallback_value)
 {
 	UdbChannelModeState *state;
-	const char *value = fallback_value;
 
+	(void)fallback_value;
 	if (!udb_channel_modes_md)
-	{
-		udb_channel_reverse_modes(channel, fallback_value);
 		return;
-	}
 	state = moddata_channel(channel, udb_channel_modes_md).ptr;
-	if (state && state->value)
-		value = state->value;
-	udb_channel_reverse_modes(channel, value);
 	if (state)
 	{
 		safe_free(state->value);
 		safe_free(state);
 		moddata_channel(channel, udb_channel_modes_md).ptr = NULL;
 	}
+}
+
+static int udb_channel_is_persistent(UdbContext *ctx, UdbRecord *chan_rec)
+{
+	UdbRecord *rec = chan_rec ? udb_record_find(ctx, CKEY_PERSISTENT, chan_rec) : NULL;
+	return rec && !rec->data_str && rec->data_num == 1;
+}
+
+static int udb_channel_is_mlock(UdbContext *ctx, UdbRecord *chan_rec)
+{
+	UdbRecord *rec = chan_rec ? udb_record_find(ctx, CKEY_MLOCK, chan_rec) : NULL;
+	return rec && !rec->data_str && rec->data_num == 1;
+}
+
+static int udb_channel_is_topiclock(UdbContext *ctx, UdbRecord *chan_rec)
+{
+	UdbRecord *rec = chan_rec ? udb_record_find(ctx, CKEY_TOPICLOCK, chan_rec) : NULL;
+	return rec && !rec->data_str && rec->data_num == 1;
 }
 
 static void udb_channel_set_persistent(Channel *channel, int enabled)
@@ -517,9 +529,14 @@ static void udb_channel_apply_subrecord(UdbContext *ctx, Channel *channel, UdbRe
 		udb_channel_reconcile_founder(channel, chan_rec);
 		if (mode_rec && mode_rec->data_str)
 			udb_channel_apply_modes(channel, mode_rec->data_str);
-		if (udb_record_find(ctx, CKEY_PERSISTENT, chan_rec))
-			udb_channel_set_persistent(channel, 1);
+		udb_channel_set_persistent(channel, udb_channel_is_persistent(ctx, chan_rec));
 		udb_channel_apply_topic(channel, topic_rec);
+		return;
+	}
+
+	if (!strcmp(subkey, CKEY_PERSISTENT))
+	{
+		udb_channel_set_persistent(channel, udb_channel_is_persistent(ctx, chan_rec));
 		return;
 	}
 
@@ -533,9 +550,6 @@ static void udb_channel_apply_subrecord(UdbContext *ctx, Channel *channel, UdbRe
 	} else if (!strcmp(subkey, CKEY_MODES))
 	{
 		udb_channel_apply_modes(channel, sub_rec->data_str);
-	} else if (!strcmp(subkey, CKEY_PERSISTENT))
-	{
-		udb_channel_set_persistent(channel, 1);
 	} else if (!strcmp(subkey, CKEY_PASS) || !strcmp(subkey, CKEY_CHALLENGE))
 	{
 		udb_channel_revoke_udb_admins(channel);
@@ -701,8 +715,7 @@ static void handle_join(Client *client, Channel *channel, MessageTag *mtags)
 
 		udb_channel_apply_subrecord(udb_ctx, channel, chan_rec, CKEY_MODES, 0);
 		udb_channel_apply_subrecord(udb_ctx, channel, chan_rec, CKEY_TOPIC, 0);
-		if (udb_record_find(udb_ctx, CKEY_PERSISTENT, chan_rec))
-			udb_channel_set_persistent(channel, 1);
+		udb_channel_set_persistent(channel, udb_channel_is_persistent(udb_ctx, chan_rec));
 	}
 
 	/* Founder +q is UDB-owned and must have exactly one current holder. */
@@ -850,6 +863,12 @@ CMD_OVERRIDE_FUNC(udb_override_mode)
 	}
 	strlcpy(channel_name, channel->name, sizeof(channel_name));
 	is_founder = udb_channel_is_identified_founder(client, chan_rec);
+	if (udb_channel_is_mlock(udb_ctx, chan_rec) &&
+	    udb_channel_mode_has_change(parv[2]))
+	{
+		sendnotice(client, "You do not have permission to change modes in %s (locked by UDB mlock)", channel->name);
+		return;
+	}
 	if (options_rec && (options_rec->data_num & UDB_CHOPT_LOCK_MODES) &&
 	    udb_channel_mode_has_change(parv[2]) && !is_founder)
 	{
@@ -884,6 +903,12 @@ static const char *udb_hook_pre_topic(Client *client, Channel *channel, const ch
 	UdbRecord *chan_rec = udb_record_find(udb_ctx, channel->name, udb_ctx->channels);
 	if (!chan_rec)
 		return topic;
+
+	if (udb_channel_is_topiclock(udb_ctx, chan_rec))
+	{
+		sendnotice(client, "You do not have permission to change the topic in %s (locked by UDB topiclock)", channel->name);
+		return NULL;
+	}
 
 	UdbRecord *topic_rec = udb_record_find(udb_ctx, CKEY_TOPIC, chan_rec);
 	if (topic_rec)

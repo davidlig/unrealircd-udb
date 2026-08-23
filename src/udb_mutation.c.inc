@@ -139,7 +139,7 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 		UdbRecord *rec = NULL;
 		int unchanged;
 
-		if (!udb_password_record_valid(block, path + 3, data))
+		if (!udb_record_validate(block, path + 3, data))
 		{
 			udb_protocol_params_error(client, "INS");
 			return;
@@ -163,7 +163,10 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 		/* Revoke the old value's effects only when the value actually changes:
 		 * an identical INS must not churn channel modes nor revoke +q ranks. */
 		if (old_rec && !unchanged)
-			udb_remove_special_record(ctx, block, old_rec);
+		{
+			if (block->letter != 'C' || old_rec->parent == block->tree || strcmp(old_rec->key, CKEY_MODES))
+				udb_remove_special_record(ctx, block, old_rec);
+		}
 		udb_block_replace_tree(ctx, block, tree, udb_record_count_tree(tree));
 		if (!unchanged)
 			udb_apply_special_record(ctx, block, rec, 1);

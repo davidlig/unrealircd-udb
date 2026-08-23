@@ -11,33 +11,118 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
-static int udb_password_record_valid(UdbBlock *block, const char *path,
-                                     const char *value)
+static int udb_boolean_record_valid(const char *value)
+{
+	if (!value)
+		return 0;
+	return !strcmp(value, "*1") || !strcmp(value, "*0");
+}
+
+static int udb_channel_modes_record_valid(const char *value)
+{
+	char modebuf[512];
+	char *modes;
+	char *p, *param;
+	int expected_params = 0;
+	int actual_params = 0;
+	int mode_letters = 0;
+	int what = MODE_ADD;
+	const char *c;
+
+	if (!value || !*value || strlen(value) >= sizeof(modebuf))
+		return 0;
+
+	strlcpy(modebuf, value, sizeof(modebuf));
+	modes = strtoken(&p, modebuf, " ");
+	if (!modes || !*modes)
+		return 0;
+
+	for (c = modes; *c; c++)
+	{
+		Cmode *cm;
+
+		if (*c == '+')
+		{
+			what = MODE_ADD;
+			continue;
+		}
+		if (*c == '-')
+		{
+			what = MODE_DEL;
+			continue;
+		}
+
+		cm = find_channel_mode_handler(*c);
+		if (!cm)
+			return 0;
+
+		mode_letters++;
+		if (cm->type == CMODE_MEMBER)
+		{
+			expected_params++;
+		} else if (what == MODE_ADD && cm->paracount > 0)
+		{
+			expected_params++;
+		} else if (what == MODE_DEL && cm->paracount > 0 && cm->unset_with_param)
+		{
+			expected_params++;
+		}
+	}
+
+	if (mode_letters == 0)
+		return 0;
+
+	while ((param = strtoken(&p, NULL, " ")))
+	{
+		if (!*param)
+			return 0;
+		actual_params++;
+	}
+
+	return expected_params == actual_params;
+}
+
+static int udb_record_validate(UdbBlock *block, const char *path,
+                              const char *value)
 {
 	const char *leaf;
 	size_t i;
 
-	if (!block || (block->letter != 'N' && block->letter != 'C') || !path)
+	if (!block || !path)
 		return 1;
 	leaf = strrchr(path, ':');
 	leaf = leaf ? leaf + 1 : path;
-	if (!strcasecmp(leaf, NKEY_CHALLENGE))
-		return value && (!strcasecmp(value, "argon2id") ||
-		                 !strcasecmp(value, "sha256") ||
-		                 !strcasecmp(value, "crypt"));
-	if (strcasecmp(leaf, NKEY_PASS))
-		return 1;
-	if (!value)
-		return 0;
-	if (!strncmp(value, "argon2id:$argon2id$", 19))
-		return 1;
-	if (!strncmp(value, "crypt:", 6))
-		return value[6] != '\0';
-	if (strncmp(value, "sha256:", 7) || strlen(value + 7) != 64)
-		return 0;
-	for (i = 7; value[i]; i++)
-		if (!isxdigit((unsigned char)value[i]))
-			return 0;
+	if (block->letter == 'N' || block->letter == 'C')
+	{
+		if (!strcasecmp(leaf, NKEY_CHALLENGE))
+			return value && (!strcasecmp(value, "argon2id") ||
+			                 !strcasecmp(value, "sha256") ||
+			                 !strcasecmp(value, "crypt"));
+		if (!strcasecmp(leaf, NKEY_PASS))
+		{
+			if (!value)
+				return 0;
+			if (!strncmp(value, "argon2id:$argon2id$", 19))
+				return 1;
+			if (!strncmp(value, "crypt:", 6))
+				return value[6] != '\0';
+			if (strncmp(value, "sha256:", 7) || strlen(value + 7) != 64)
+				return 0;
+			for (i = 7; value[i]; i++)
+				if (!isxdigit((unsigned char)value[i]))
+					return 0;
+			return 1;
+		}
+	}
+	if (block->letter == 'C')
+	{
+		if (!strcasecmp(leaf, CKEY_MODES))
+			return udb_channel_modes_record_valid(value);
+		if (!strcasecmp(leaf, CKEY_PERSISTENT) ||
+		    !strcasecmp(leaf, CKEY_MLOCK) ||
+		    !strcasecmp(leaf, CKEY_TOPICLOCK))
+			return udb_boolean_record_valid(value);
+	}
 	return 1;
 }
 
@@ -391,7 +476,7 @@ static int udb_stage_parse_line(UdbBlock *block, UdbSyncSession *session, const 
 		*value++ = '\0';
 	if (!*line)
 		return 0;
-	if (!udb_password_record_valid(block, line, value))
+	if (!udb_record_validate(block, line, value))
 		return 0;
 	parent = session->tree;
 	part = line;
@@ -515,7 +600,7 @@ static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *li
 	/* Validate before lookup/allocation: an empty component would leave rec->key NULL. */
 	if (!udb_record_path_valid(line))
 		return NULL;
-	if (!udb_password_record_valid(block, line, data_str))
+	if (!udb_record_validate(block, line, value))
 		return NULL;
 
 	char *p = line;

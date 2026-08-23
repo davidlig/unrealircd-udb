@@ -89,6 +89,8 @@ module
   /* Channel sub-records: C::<#chan>::<key> <value> */
   #define CKEY_FOUNDER    "founder"    /* Founder nick */
   #define CKEY_MODES      "modes"      /* Locked channel modes */
+  #define CKEY_MLOCK      "mlock"      /* Channel mode lock flag (*1 = locked, *0 = unlocked) */
+  #define CKEY_TOPICLOCK  "topiclock"  /* Channel topic lock flag (*1 = locked, *0 = unlocked) */
   #define CKEY_TOPIC      "topic"      /* Persistent topic */
   #define CKEY_ACCESS     "access"     /* Access list (has sub-records per nick) */
   #define CKEY_FORBID     "forbid"     /* Forbidden channel (value = reason) */
@@ -96,7 +98,7 @@ module
   #define CKEY_PASS       "pass"       /* Channel password for +ao */
   #define CKEY_CHALLENGE  "challenge"  /* Channel password hash method */
   #define CKEY_OPTIONS    "options"    /* Channel option flags (*N) */
-  #define CKEY_PERSISTENT "persistent" /* Keep the channel alive through native +P */
+  #define CKEY_PERSISTENT "persistent" /* Keep the channel alive through native +P (*1 or *0) */
 
   /* IP sub-records: I::<ip|host>::<key> <value> */
   #define IKEY_CLONES  "clones"  /* Max clones allowed (*N) */
@@ -1324,33 +1326,118 @@ static void udb_config_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord
 #include <sys/stat.h>
 #include <sys/types.h>
 
-static int udb_password_record_valid(UdbBlock *block, const char *path,
-                                     const char *value)
+static int udb_boolean_record_valid(const char *value)
+{
+	if (!value)
+		return 0;
+	return !strcmp(value, "*1") || !strcmp(value, "*0");
+}
+
+static int udb_channel_modes_record_valid(const char *value)
+{
+	char modebuf[512];
+	char *modes;
+	char *p, *param;
+	int expected_params = 0;
+	int actual_params = 0;
+	int mode_letters = 0;
+	int what = MODE_ADD;
+	const char *c;
+
+	if (!value || !*value || strlen(value) >= sizeof(modebuf))
+		return 0;
+
+	strlcpy(modebuf, value, sizeof(modebuf));
+	modes = strtoken(&p, modebuf, " ");
+	if (!modes || !*modes)
+		return 0;
+
+	for (c = modes; *c; c++)
+	{
+		Cmode *cm;
+
+		if (*c == '+')
+		{
+			what = MODE_ADD;
+			continue;
+		}
+		if (*c == '-')
+		{
+			what = MODE_DEL;
+			continue;
+		}
+
+		cm = find_channel_mode_handler(*c);
+		if (!cm)
+			return 0;
+
+		mode_letters++;
+		if (cm->type == CMODE_MEMBER)
+		{
+			expected_params++;
+		} else if (what == MODE_ADD && cm->paracount > 0)
+		{
+			expected_params++;
+		} else if (what == MODE_DEL && cm->paracount > 0 && cm->unset_with_param)
+		{
+			expected_params++;
+		}
+	}
+
+	if (mode_letters == 0)
+		return 0;
+
+	while ((param = strtoken(&p, NULL, " ")))
+	{
+		if (!*param)
+			return 0;
+		actual_params++;
+	}
+
+	return expected_params == actual_params;
+}
+
+static int udb_record_validate(UdbBlock *block, const char *path,
+                               const char *value)
 {
 	const char *leaf;
 	size_t i;
 
-	if (!block || (block->letter != 'N' && block->letter != 'C') || !path)
+	if (!block || !path)
 		return 1;
 	leaf = strrchr(path, ':');
 	leaf = leaf ? leaf + 1 : path;
-	if (!strcasecmp(leaf, NKEY_CHALLENGE))
-		return value && (!strcasecmp(value, "argon2id") ||
-		                 !strcasecmp(value, "sha256") ||
-		                 !strcasecmp(value, "crypt"));
-	if (strcasecmp(leaf, NKEY_PASS))
-		return 1;
-	if (!value)
-		return 0;
-	if (!strncmp(value, "argon2id:$argon2id$", 19))
-		return 1;
-	if (!strncmp(value, "crypt:", 6))
-		return value[6] != '\0';
-	if (strncmp(value, "sha256:", 7) || strlen(value + 7) != 64)
-		return 0;
-	for (i = 7; value[i]; i++)
-		if (!isxdigit((unsigned char)value[i]))
-			return 0;
+	if (block->letter == 'N' || block->letter == 'C')
+	{
+		if (!strcasecmp(leaf, NKEY_CHALLENGE))
+			return value && (!strcasecmp(value, "argon2id") ||
+			                 !strcasecmp(value, "sha256") ||
+			                 !strcasecmp(value, "crypt"));
+		if (!strcasecmp(leaf, NKEY_PASS))
+		{
+			if (!value)
+				return 0;
+			if (!strncmp(value, "argon2id:$argon2id$", 19))
+				return 1;
+			if (!strncmp(value, "crypt:", 6))
+				return value[6] != '\0';
+			if (strncmp(value, "sha256:", 7) || strlen(value + 7) != 64)
+				return 0;
+			for (i = 7; value[i]; i++)
+				if (!isxdigit((unsigned char)value[i]))
+					return 0;
+			return 1;
+		}
+	}
+	if (block->letter == 'C')
+	{
+		if (!strcasecmp(leaf, CKEY_MODES))
+			return udb_channel_modes_record_valid(value);
+		if (!strcasecmp(leaf, CKEY_PERSISTENT) ||
+		    !strcasecmp(leaf, CKEY_MLOCK) ||
+		    !strcasecmp(leaf, CKEY_TOPICLOCK))
+			return udb_boolean_record_valid(value);
+	}
 	return 1;
 }
 
@@ -1704,7 +1791,7 @@ static int udb_stage_parse_line(UdbBlock *block, UdbSyncSession *session, const 
 		*value++ = '\0';
 	if (!*line)
 		return 0;
-	if (!udb_password_record_valid(block, line, value))
+	if (!udb_record_validate(block, line, value))
 		return 0;
 	parent = session->tree;
 	part = line;
@@ -1828,7 +1915,7 @@ static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *li
 	/* Validate before lookup/allocation: an empty component would leave rec->key NULL. */
 	if (!udb_record_path_valid(line))
 		return NULL;
-	if (!udb_password_record_valid(block, line, data_str))
+	if (!udb_record_validate(block, line, value))
 		return NULL;
 
 	char *p = line;
@@ -2130,8 +2217,16 @@ static void udb_send_service_notice(Client *target, const char *service_key,
 	va_start(vl, pattern);
 	ircvsnprintf(message, sizeof(message), pattern, vl);
 	va_end(vl);
-	sendto_prefix_one(target, source, NULL, ":%s NOTICE %s :%s",
-	                  source->name, name, message);
+	if (source != &me)
+	{
+		sendto_prefix_one(target, source, NULL, ":%s NOTICE %s :%s",
+		                  source->name, name, message);
+	} else
+	{
+		const char *bot_nick = udb_get_bot_nick(service_key, 0);
+		sendto_one(target, NULL, ":%s NOTICE %s :%s",
+		           bot_nick ? bot_nick : me.name, name, message);
+	}
 }
 
 /* End of udb_services.c.inc */
@@ -2666,7 +2761,7 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 		UdbRecord *rec = NULL;
 		int unchanged;
 
-		if (!udb_password_record_valid(block, path + 3, data))
+		if (!udb_record_validate(block, path + 3, data))
 		{
 			udb_protocol_params_error(client, "INS");
 			return;
@@ -2690,7 +2785,10 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 		/* Revoke the old value's effects only when the value actually changes:
 		 * an identical INS must not churn channel modes nor revoke +q ranks. */
 		if (old_rec && !unchanged)
-			udb_remove_special_record(ctx, block, old_rec);
+		{
+			if (block->letter != 'C' || old_rec->parent == block->tree || strcmp(old_rec->key, CKEY_MODES))
+				udb_remove_special_record(ctx, block, old_rec);
+		}
 		udb_block_replace_tree(ctx, block, tree, udb_record_count_tree(tree));
 		if (!unchanged)
 			udb_apply_special_record(ctx, block, rec, 1);
@@ -4072,7 +4170,8 @@ static int udb_hook_can_use_nick(Client *client, const char *newnick, const char
 		if (!pass)
 		{
 			udb_send_service_notice(client, SKEY_NICKSERV,
-			                        "This nickname is registered and requires a password.");
+			                        "Nickname is unavailable: This nick is registered and requires a password and an authorized IP. Use /NICK %s:Password",
+			                        newnick);
 		} else if (udb_check_password(pass, nick_rec, client))
 		{
 			if (udb_nick_access_allowed(client, nick_rec))
@@ -4374,23 +4473,35 @@ static void udb_channel_apply_modes(Channel *channel, const char *value)
 static void udb_channel_remove_modes(Channel *channel, const char *fallback_value)
 {
 	UdbChannelModeState *state;
-	const char *value = fallback_value;
 
+	(void)fallback_value;
 	if (!udb_channel_modes_md)
-	{
-		udb_channel_reverse_modes(channel, fallback_value);
 		return;
-	}
 	state = moddata_channel(channel, udb_channel_modes_md).ptr;
-	if (state && state->value)
-		value = state->value;
-	udb_channel_reverse_modes(channel, value);
 	if (state)
 	{
 		safe_free(state->value);
 		safe_free(state);
 		moddata_channel(channel, udb_channel_modes_md).ptr = NULL;
 	}
+}
+
+static int udb_channel_is_persistent(UdbContext *ctx, UdbRecord *chan_rec)
+{
+	UdbRecord *rec = chan_rec ? udb_record_find(ctx, CKEY_PERSISTENT, chan_rec) : NULL;
+	return rec && !rec->data_str && rec->data_num == 1;
+}
+
+static int udb_channel_is_mlock(UdbContext *ctx, UdbRecord *chan_rec)
+{
+	UdbRecord *rec = chan_rec ? udb_record_find(ctx, CKEY_MLOCK, chan_rec) : NULL;
+	return rec && !rec->data_str && rec->data_num == 1;
+}
+
+static int udb_channel_is_topiclock(UdbContext *ctx, UdbRecord *chan_rec)
+{
+	UdbRecord *rec = chan_rec ? udb_record_find(ctx, CKEY_TOPICLOCK, chan_rec) : NULL;
+	return rec && !rec->data_str && rec->data_num == 1;
 }
 
 static void udb_channel_set_persistent(Channel *channel, int enabled)
@@ -4687,9 +4798,14 @@ static void udb_channel_apply_subrecord(UdbContext *ctx, Channel *channel, UdbRe
 		udb_channel_reconcile_founder(channel, chan_rec);
 		if (mode_rec && mode_rec->data_str)
 			udb_channel_apply_modes(channel, mode_rec->data_str);
-		if (udb_record_find(ctx, CKEY_PERSISTENT, chan_rec))
-			udb_channel_set_persistent(channel, 1);
+		udb_channel_set_persistent(channel, udb_channel_is_persistent(ctx, chan_rec));
 		udb_channel_apply_topic(channel, topic_rec);
+		return;
+	}
+
+	if (!strcmp(subkey, CKEY_PERSISTENT))
+	{
+		udb_channel_set_persistent(channel, udb_channel_is_persistent(ctx, chan_rec));
 		return;
 	}
 
@@ -4703,9 +4819,6 @@ static void udb_channel_apply_subrecord(UdbContext *ctx, Channel *channel, UdbRe
 	} else if (!strcmp(subkey, CKEY_MODES))
 	{
 		udb_channel_apply_modes(channel, sub_rec->data_str);
-	} else if (!strcmp(subkey, CKEY_PERSISTENT))
-	{
-		udb_channel_set_persistent(channel, 1);
 	} else if (!strcmp(subkey, CKEY_PASS) || !strcmp(subkey, CKEY_CHALLENGE))
 	{
 		udb_channel_revoke_udb_admins(channel);
@@ -4871,8 +4984,7 @@ static void handle_join(Client *client, Channel *channel, MessageTag *mtags)
 
 		udb_channel_apply_subrecord(udb_ctx, channel, chan_rec, CKEY_MODES, 0);
 		udb_channel_apply_subrecord(udb_ctx, channel, chan_rec, CKEY_TOPIC, 0);
-		if (udb_record_find(udb_ctx, CKEY_PERSISTENT, chan_rec))
-			udb_channel_set_persistent(channel, 1);
+		udb_channel_set_persistent(channel, udb_channel_is_persistent(udb_ctx, chan_rec));
 	}
 
 	/* Founder +q is UDB-owned and must have exactly one current holder. */
@@ -5020,6 +5132,12 @@ CMD_OVERRIDE_FUNC(udb_override_mode)
 	}
 	strlcpy(channel_name, channel->name, sizeof(channel_name));
 	is_founder = udb_channel_is_identified_founder(client, chan_rec);
+	if (udb_channel_is_mlock(udb_ctx, chan_rec) &&
+	    udb_channel_mode_has_change(parv[2]))
+	{
+		sendnotice(client, "You do not have permission to change modes in %s (locked by UDB mlock)", channel->name);
+		return;
+	}
 	if (options_rec && (options_rec->data_num & UDB_CHOPT_LOCK_MODES) &&
 	    udb_channel_mode_has_change(parv[2]) && !is_founder)
 	{
@@ -5054,6 +5172,12 @@ static const char *udb_hook_pre_topic(Client *client, Channel *channel, const ch
 	UdbRecord *chan_rec = udb_record_find(udb_ctx, channel->name, udb_ctx->channels);
 	if (!chan_rec)
 		return topic;
+
+	if (udb_channel_is_topiclock(udb_ctx, chan_rec))
+	{
+		sendnotice(client, "You do not have permission to change the topic in %s (locked by UDB topiclock)", channel->name);
+		return NULL;
+	}
 
 	UdbRecord *topic_rec = udb_record_find(udb_ctx, CKEY_TOPIC, chan_rec);
 	if (topic_rec)

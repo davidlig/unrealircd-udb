@@ -49,13 +49,15 @@ Stores configurations for registered users.
 
 #### Block C (Channels)
 *   **founder**: Nickname of the original channel founder (granted +q automatically).
-*   **modes**: Channel modes managed by UDB. Parameters follow the mode string.
+*   **modes**: Channel modes managed by UDB. Parameters follow the mode string. Mode letters and parameter counts are strictly validated (e.g. `+ntMl` without parameters is rejected, requiring `+ntMl 50`). Deleting via `DEL` does not revert live channel modes.
+*   **mlock**: Absolute channel mode lock (`*1` = enabled, `*0` = disabled). When enabled (`*1`), nobody can modify channel modes via `MODE` or `SAMODE`.
+*   **topiclock**: Absolute channel topic lock (`*1` = enabled, `*0` = disabled). When enabled (`*1`), nobody can modify the channel topic via `TOPIC`.
 *   **topic**: The persistent channel topic.
 *   **access**: Child records keyed by the identified nicknames allowed to join.
 *   **forbid**: Channel prohibition reason.
 *   **suspended**: Disables registered-channel founder and `+r` behavior.
 *   **pass** and **challenge**: Channel-admin authentication credential.
-*   **persistent**: Sets native `+P` when the permanent-channel mode handler is loaded.
+*   **persistent**: Sets native `+P` when the permanent-channel mode handler is loaded (`*1` / `*0`).
 *   **options**: Numeric channel options: `*1` protects locally-added bans,
     and `*2` locks every local `MODE` and `SAMODE` change to the identified
     founder.

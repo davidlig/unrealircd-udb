@@ -59,6 +59,14 @@ static void udb_send_service_notice(Client *target, const char *service_key,
 	va_start(vl, pattern);
 	ircvsnprintf(message, sizeof(message), pattern, vl);
 	va_end(vl);
-	sendto_prefix_one(target, source, NULL, ":%s NOTICE %s :%s",
-	                  source->name, name, message);
+	if (source != &me)
+	{
+		sendto_prefix_one(target, source, NULL, ":%s NOTICE %s :%s",
+		                  source->name, name, message);
+	} else
+	{
+		const char *bot_nick = udb_get_bot_nick(service_key, 0);
+		sendto_one(target, NULL, ":%s NOTICE %s :%s",
+		           bot_nick ? bot_nick : me.name, name, message);
+	}
 }
