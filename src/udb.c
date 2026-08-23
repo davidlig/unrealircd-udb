@@ -45,6 +45,9 @@ ModuleHeader MOD_HEADER = {
 /* Core database engine: records, checksums, sync staging, and file I/O */
 #include "udb_core.c.inc"
 
+/* Dynamic connected service clients and service-originated notices */
+#include "udb_services.c.inc"
+
 /* Runtime effects: special-record dispatch only */
 #include "udb_effects.c.inc"
 

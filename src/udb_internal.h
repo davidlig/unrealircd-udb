@@ -227,6 +227,11 @@ static void udb_lines_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *
 static void udb_lines_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
 static const char *udb_get_bot_nick(const char *service_key, int force_default);
 static const char *udb_get_bot_mask(const char *service_key, int force_default);
+static Client *udb_service_source(const char *service_key);
+static void udb_send_service_notice(Client *target, const char *service_key,
+                                    FORMAT_STRING(const char *pattern), ...)
+    __attribute__((format(printf, 3, 4)));
+static int udb_ip_reapply_vhost(Client *client);
 /* Runtime dispatcher; concrete per-block effects stay in their own modules. */
 static int udb_apply_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new);
 static void udb_remove_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);

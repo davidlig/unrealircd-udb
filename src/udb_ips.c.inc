@@ -16,6 +16,24 @@ static ModDataInfo *udb_ip_host_md = NULL;
 
 static void udb_ip_restore_host(Client *client, const char *ip_key);
 
+static const char *udb_ip_visible_host(Client *client)
+{
+	if (client && client->user && IsHidden(client) && client->user->virthost)
+		return client->user->virthost;
+	return client && client->user ? client->user->realhost : "";
+}
+
+static void udb_ip_notify_host_change(Client *client, const char *notice)
+{
+	if (!MyUser(client))
+		return;
+	sendto_server(client, 0, 0, NULL, ":%s SETHOST %s", client->id,
+	              udb_ip_visible_host(client));
+	userhost_changed(client);
+	if (notice)
+		udb_send_service_notice(client, SKEY_IPSERV, "%s", notice);
+}
+
 static void udb_ip_host_state_free(ModData *m)
 {
 	UdbIpHostState *state = m->ptr;
@@ -81,6 +99,7 @@ static void udb_ip_apply_host(Client *client, const char *ip_key, const char *ho
 	strlcpy(client->user->realhost, host, sizeof(client->user->realhost));
 	strlcpy(client->user->cloakedhost, host, sizeof(client->user->cloakedhost));
 	safe_strdup(client->user->virthost, host);
+	client->umodes |= UMODE_HIDE | UMODE_SETHOST;
 }
 
 static void udb_ip_restore_host(Client *client, const char *ip_key)
@@ -103,7 +122,8 @@ static const char *udb_ip_explicit_vhost(Client *client)
 	UdbRecord *nick_rec;
 	UdbRecord *vhost_rec;
 
-	if (!client || !client->user || !udb_ctx || !udb_ctx->nicks)
+	if (!client || !client->user || !has_user_mode(client, 'r') ||
+	    !udb_ctx || !udb_ctx->nicks)
 		return NULL;
 	nick_rec = udb_record_find(udb_ctx, client->name, udb_ctx->nicks);
 	if (!nick_rec && strcmp(client->user->account, "*"))
@@ -136,6 +156,55 @@ static int udb_ip_derive_vhost(Client *client, char *host, size_t hostlen)
 	return 1;
 }
 
+static int udb_ip_reapply_vhost(Client *client)
+{
+	UdbIpHostState *state;
+	UdbRecord *ip_rec;
+	UdbRecord *host_rec;
+	char host[HOSTLEN + 1];
+	char notice[HOSTLEN + 96];
+
+	if (!client || !MyUser(client) || !udb_ip_host_md)
+		return 0;
+	state = moddata_local_client(client, udb_ip_host_md).ptr;
+	if (!state)
+	{
+		if (!udb_ip_derive_vhost(client, host, sizeof(host)))
+			return 0;
+		userhost_save_current(client);
+		udb_ip_save_host_state(client, client->ip);
+		state = moddata_local_client(client, udb_ip_host_md).ptr;
+		safe_strdup(client->user->virthost, host);
+		client->umodes |= UMODE_HIDE | UMODE_SETHOST;
+		state->derived_vhost = 1;
+		snprintf(notice, sizeof(notice), "*** Your IP-derived vhost has been restored: %s", host);
+		udb_ip_notify_host_change(client, notice);
+		return 1;
+	}
+	if (state->derived_vhost)
+	{
+		if (!udb_ip_derive_vhost(client, host, sizeof(host)))
+			return 0;
+		userhost_save_current(client);
+		safe_strdup(client->user->virthost, host);
+		client->umodes |= UMODE_HIDE | UMODE_SETHOST;
+		snprintf(notice, sizeof(notice), "*** Your IP-derived vhost has been restored: %s", host);
+		udb_ip_notify_host_change(client, notice);
+		return 1;
+	}
+
+	ip_rec = udb_hash_find(udb_ctx, udb_block_letter_to_index('I'), state->key);
+	host_rec = ip_rec ? udb_record_find(udb_ctx, IKEY_HOST, ip_rec) : NULL;
+	if (!host_rec || !host_rec->data_str || !*host_rec->data_str)
+		return 0;
+	userhost_save_current(client);
+	udb_ip_apply_host(client, state->key, host_rec->data_str);
+	snprintf(notice, sizeof(notice), "*** Your explicit IP vhost has been restored: %s",
+	         host_rec->data_str);
+	udb_ip_notify_host_change(client, notice);
+	return 1;
+}
+
 static void udb_ip_refresh_derived_hosts(void)
 {
 	Client *client;
@@ -154,11 +223,18 @@ static void udb_ip_refresh_derived_hosts(void)
 		explicit_vhost = udb_ip_explicit_vhost(client);
 		if (explicit_vhost)
 		{
-			/* A nick vhost supersedes a derived vhost without restoring over it. */
-			if (state && state->derived_vhost)
+			/* A nick vhost supersedes a derived vhost without restoring over it.
+			 * Keep the original state so removing the nick vhost can restore the
+			 * derived vhost instead of losing the precedence relationship. */
+			if ((!state || state->derived_vhost) &&
+			    strcmp(udb_ip_visible_host(client), explicit_vhost))
 			{
-				udb_ip_host_state_free(&moddata_local_client(client, udb_ip_host_md));
-				moddata_local_client(client, udb_ip_host_md).ptr = NULL;
+				char notice[HOSTLEN + 96];
+				userhost_save_current(client);
+				safe_strdup(client->user->virthost, explicit_vhost);
+				client->umodes |= UMODE_HIDE | UMODE_SETHOST;
+				snprintf(notice, sizeof(notice), "*** Your vhost is now %s", explicit_vhost);
+				udb_ip_notify_host_change(client, notice);
 			}
 			continue;
 		}
@@ -168,7 +244,7 @@ static void udb_ip_refresh_derived_hosts(void)
 			{
 				userhost_save_current(client);
 				udb_ip_restore_host(client, state->key);
-				userhost_changed(client);
+				udb_ip_notify_host_change(client, "*** Your IP-derived vhost has been removed");
 			}
 			continue;
 		}
@@ -182,8 +258,11 @@ static void udb_ip_refresh_derived_hosts(void)
 		safe_strdup(client->user->virthost, host);
 		client->umodes |= UMODE_HIDE | UMODE_SETHOST;
 		state->derived_vhost = 1;
-		sendto_server(client, 0, 0, NULL, ":%s SETHOST %s", client->id, host);
-		userhost_changed(client);
+		{
+			char notice[HOSTLEN + 96];
+			snprintf(notice, sizeof(notice), "*** Your IP-derived vhost is now %s", host);
+			udb_ip_notify_host_change(client, notice);
+		}
 	}
 }
 
@@ -193,12 +272,31 @@ static void udb_ip_reconcile_host(const char *ip_key, const char *host)
 
 	list_for_each_entry(client, &lclient_list, lclient_node)
 	{
+		char oldhost[HOSTLEN + 1];
+		char notice[HOSTLEN + 96];
+
 		if (!udb_ip_client_matches(client, ip_key))
 			continue;
+		strlcpy(oldhost, udb_ip_visible_host(client), sizeof(oldhost));
 		if (host)
+		{
+			if (MyUser(client))
+				userhost_save_current(client);
 			udb_ip_apply_host(client, ip_key, host);
+			if (MyUser(client) && strcmp(oldhost, udb_ip_visible_host(client)))
+			{
+				snprintf(notice, sizeof(notice), "*** Your explicit IP vhost is now %s", host);
+				udb_ip_notify_host_change(client, notice);
+			}
+		}
 		else
+		{
+			if (MyUser(client))
+				userhost_save_current(client);
 			udb_ip_restore_host(client, ip_key);
+			if (MyUser(client) && strcmp(oldhost, udb_ip_visible_host(client)))
+				udb_ip_notify_host_change(client, "*** Your explicit IP vhost has been removed");
+		}
 	}
 }
 
@@ -242,6 +340,7 @@ static void udb_ip_remove_record(const char *ip_key, UdbRecord *ip_rec, const ch
 	} else if (!strcmp(subkey, IKEY_HOST))
 	{
 		udb_ip_reconcile_host(ip_key, NULL);
+		udb_ip_refresh_derived_hosts();
 	}
 }
 

@@ -8,6 +8,7 @@
  *
  * Architecture: Multiple implementation files (#include'd from udb.c)
  *   udb_core.inc.c    - Database engine, tree, hash, file I/O
+ *   udb_services.inc.c - Dynamic service-client resolution and notices
  *   udb_protocol.inc.c - S2S protocol (DB command) and sync
  *   udb_nicks.inc.c   - Nick registration, identification, ghost
  *   udb_channels.inc.c - Channel registration, founder, modes

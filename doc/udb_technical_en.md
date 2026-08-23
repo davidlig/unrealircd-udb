@@ -84,6 +84,13 @@ and `crypt`. Plaintext, MD5, bcrypt, and unsupported challenge names fail
 closed. Failed checks are bounded and rate-limited by the active `S::flood` or
 `udb::password-flood` setting per profile and source IP.
 
+UDB channel effects are executed with the connected ChanServ client resolved
+from `S::chanserv`: persistent topic updates and removals, configured channel
+modes, and UDB-managed member ranks (`q`, `a`, `o`, `h`, and `v`). This preserves
+the native MODE/TOPIC protocol while making the service client the visible
+origin. A missing or ambiguous service client falls back to the local server
+source and is logged; UDB never fabricates a client.
+
 UDB uses command overrides for `MODE` and `SAMODE`, rather than raw command
 text inspection. With channel option `*1`, locally-added `+b` masks are tracked
 with their setter and cannot be removed by another local user, except an
@@ -135,7 +142,14 @@ Only these values are supported: `quit_ips`, `quit_clones`, `flood`,
     local clients. `N::<nick>::vhost` and explicit `I::<ip>::host` take
     precedence over a derived vhost.
 *   **nickserv**, **chanserv**, **ipserv**: Service masks in `nick!user@host`
-    form.
+    form. Each mask is resolved dynamically against exactly one connected,
+    non-dead ULine user with UnrealIRCd's native user-mask matcher. The result
+    is not cached. If there is no unique match, the affected event uses the
+    local server source and UDB logs the safe fallback.
+    NickServ is the visible source of nick-related notices, including invalid
+    password and password-flood notifications. IpServ is the visible source
+    of explicit nick vhost, derived IP vhost, and `I::<ip>::host` change or
+    restoration notices.
 *   **quit_ips** and **quit_clones**: Validated disconnect-message state; the
     clone hook consumes `quit_clones`.
 

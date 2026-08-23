@@ -1,5 +1,66 @@
 #include <openssl/evp.h>
 
+typedef struct UdbNickPasswordCache UdbNickPasswordCache;
+struct UdbNickPasswordCache {
+	char nick[NICKLEN + 1];
+	int valid;
+};
+
+static ModDataInfo *udb_nick_password_cache_md = NULL;
+
+static void udb_nick_password_cache_free(ModData *m)
+{
+	safe_free(m->ptr);
+	m->ptr = NULL;
+}
+
+static void udb_nick_password_cache_clear(Client *client)
+{
+	UdbNickPasswordCache *cache;
+
+	if (!client || !udb_nick_password_cache_md)
+		return;
+	cache = moddata_local_client(client, udb_nick_password_cache_md).ptr;
+	if (cache)
+	{
+		safe_free(cache);
+		moddata_local_client(client, udb_nick_password_cache_md).ptr = NULL;
+	}
+}
+
+static void udb_nick_password_cache_set(Client *client, const char *nick)
+{
+	UdbNickPasswordCache *cache;
+
+	if (!client || !nick || !udb_nick_password_cache_md)
+		return;
+	udb_nick_password_cache_clear(client);
+	cache = safe_alloc(sizeof(*cache));
+	strlcpy(cache->nick, nick, sizeof(cache->nick));
+	cache->valid = 1;
+	moddata_local_client(client, udb_nick_password_cache_md).ptr = cache;
+}
+
+static int udb_nick_password_cache_take(Client *client, const char *nick)
+{
+	UdbNickPasswordCache *cache;
+	int valid;
+
+	if (!client || !nick || !udb_nick_password_cache_md)
+		return 0;
+	cache = moddata_local_client(client, udb_nick_password_cache_md).ptr;
+	if (!cache)
+		return 0;
+	if (strcasecmp(cache->nick, nick))
+	{
+		udb_nick_password_cache_clear(client);
+		return 0;
+	}
+	valid = cache->valid;
+	udb_nick_password_cache_clear(client);
+	return valid;
+}
+
 static void udb_nick_set_vhost(Client *client, UdbRecord *vhost_rec)
 {
 	if (!client || !client->user || !vhost_rec || !vhost_rec->data_str)
@@ -22,7 +83,8 @@ static void udb_nick_set_vhost(Client *client, UdbRecord *vhost_rec)
 	if (MyConnect(client))
 	{
 		sendto_one(client, NULL, ":%s MODE %s :+tx", client->name, client->name);
-		sendnotice(client, "*** Your vhost is now %s", client->user->virthost);
+		udb_send_service_notice(client, SKEY_IPSERV, "*** Your vhost is now %s",
+		                        client->user->virthost);
 	}
 
 	userhost_changed(client);
@@ -31,6 +93,8 @@ static void udb_nick_set_vhost(Client *client, UdbRecord *vhost_rec)
 static void udb_nick_remove_vhost(Client *client)
 {
 	if (!client || !client->user)
+		return;
+	if (udb_ip_reapply_vhost(client))
 		return;
 
 	userhost_save_current(client);
@@ -52,7 +116,7 @@ static void udb_nick_remove_vhost(Client *client)
 	if (MyConnect(client))
 	{
 		sendto_one(client, NULL, ":%s MODE %s :-t", client->name, client->name);
-		sendnotice(client, "*** Your vhost has been removed");
+		udb_send_service_notice(client, SKEY_IPSERV, "*** Your vhost has been removed");
 	}
 
 	userhost_changed(client);
@@ -145,8 +209,12 @@ static void udb_nick_force_rename(Client *client, const char *nick_in_db)
 	rand_suffix[5] = '\0';
 	snprintf(newnick, sizeof(newnick), "Guest%s", rand_suffix);
 
-	sendnotice(client, "This nickname (%s) has been registered or synced in the UDB database.", nick_in_db);
-	sendnotice(client, "You have been renamed. If you are the owner, please identify: /NICK %s:Password", nick_in_db);
+	udb_send_service_notice(client, SKEY_NICKSERV,
+	                        "This nickname (%s) has been registered or synced in the UDB database.",
+	                        nick_in_db);
+	udb_send_service_notice(client, SKEY_NICKSERV,
+	                        "You have been renamed. If you are the owner, please identify: /NICK %s:Password",
+	                        nick_in_db);
 
 	const char *args[5];
 	char tsbuf[32];
@@ -367,6 +435,17 @@ static void udb_password_failure_record(UdbRecord *profile_rec, Client *client, 
 		entry->attempts++;
 }
 
+static void udb_nick_password_failure_notice(Client *client, UdbRecord *profile_rec,
+	                                            const char *nick)
+{
+	if (udb_password_flooded(profile_rec, client))
+		udb_send_service_notice(client, SKEY_NICKSERV,
+		                        "Too many failed password attempts for %s; try again later.",
+		                        nick);
+	else
+		udb_send_service_notice(client, SKEY_NICKSERV, "Invalid password for %s.", nick);
+}
+
 static int udb_password_type(const char *challenge, const char *stored_pass,
                              const char **hash)
 {
@@ -537,25 +616,27 @@ CMD_FUNC(cmd_ghost)
 
 	if (!udb_ctx || !udb_ctx->nicks)
 	{
-		sendnotice(client, "UDB is not fully initialized.");
+		udb_send_service_notice(client, SKEY_NICKSERV, "UDB is not fully initialized.");
 		return;
 	}
 
 	UdbRecord *nick_rec = udb_record_find(udb_ctx, target_nick, udb_ctx->nicks);
 	if (!nick_rec)
 	{
-		sendnotice(client, "Nick %s is not registered.", target_nick);
+		udb_send_service_notice(client, SKEY_NICKSERV, "Nick %s is not registered.", target_nick);
 		return;
 	}
 
 	if (!udb_check_password(pass, nick_rec, client))
 	{
-		sendnotice(client, "Invalid password for %s.", target_nick);
+		udb_nick_password_failure_notice(client, nick_rec, target_nick);
 		return;
 	}
 	if (!udb_nick_access_allowed(client, nick_rec))
 	{
-		sendnotice(client, "Access to %s is not permitted from your IP address.", target_nick);
+		udb_send_service_notice(client, SKEY_NICKSERV,
+		                        "Access to %s is not permitted from your IP address.",
+		                        target_nick);
 		return;
 	}
 
@@ -564,14 +645,14 @@ CMD_FUNC(cmd_ghost)
 	{
 		if (target == client)
 		{
-			sendnotice(client, "You cannot ghost yourself.");
+			udb_send_service_notice(client, SKEY_NICKSERV, "You cannot ghost yourself.");
 			return;
 		}
-		sendnotice(client, "Ghosting %s...", target_nick);
+		udb_send_service_notice(client, SKEY_NICKSERV, "Ghosting %s...", target_nick);
 		exit_client(target, NULL, "GHOST command used");
 	} else
 	{
-		sendnotice(client, "%s is not online.", target_nick);
+		udb_send_service_notice(client, SKEY_NICKSERV, "%s is not online.", target_nick);
 	}
 }
 
@@ -607,21 +688,40 @@ CMD_OVERRIDE_FUNC(udb_override_nick)
 		safe_strdup(client->local->passwd, pass);
 
 	UdbRecord *rec = (udb_ctx && udb_ctx->nicks) ? udb_record_find(udb_ctx, clean_nick, udb_ctx->nicks) : NULL;
+	Client *acptr = rec ? find_client(clean_nick, NULL) : NULL;
 
-	if (rec && udb_check_password(pass, rec, client) && udb_nick_access_allowed(client, rec))
+	/* The core NICK path checks the password too. Only pre-check when a
+	 * collision needs the password for ghost/recovery, and stop on failure so
+	 * the flood tracker is consumed exactly once. */
+	if (rec && acptr && acptr != client)
 	{
-		Client *acptr = find_client(clean_nick, NULL);
-		if (acptr && acptr != client)
+		if (!udb_check_password(pass, rec, client))
 		{
-			if (force_ghost)
-			{
-				char quit_msg[128];
-				snprintf(quit_msg, sizeof(quit_msg), "Ghosted (Nick taken by %s)", client->name);
-				exit_client(acptr, NULL, quit_msg);
-			} else
-			{
-				sendnotice(client, "This nickname is currently in use. If you are the owner, you can recover it by typing /NICK %s!Password", clean_nick);
-			}
+			udb_nick_password_failure_notice(client, rec, clean_nick);
+			sendnumeric(client, ERR_ERRONEUSNICKNAME, clean_nick,
+			            "Nickname requires a valid UDB password.");
+			return;
+		}
+		if (!udb_nick_access_allowed(client, rec))
+		{
+			udb_send_service_notice(client, SKEY_NICKSERV,
+			                        "Access to %s is not permitted from your IP address.",
+			                        clean_nick);
+			sendnumeric(client, ERR_ERRONEUSNICKNAME, clean_nick,
+			            "Nickname requires a valid UDB password and authorized IP.");
+			return;
+		}
+		udb_nick_password_cache_set(client, clean_nick);
+		if (force_ghost)
+		{
+			char quit_msg[128];
+			snprintf(quit_msg, sizeof(quit_msg), "Ghosted (Nick taken by %s)", client->name);
+			exit_client(acptr, NULL, quit_msg);
+		} else
+		{
+			udb_send_service_notice(client, SKEY_NICKSERV,
+			                        "This nickname is currently in use. If you are the owner, you can recover it by typing /NICK %s!Password",
+			                        clean_nick);
 		}
 	}
 
@@ -649,19 +749,41 @@ static int udb_hook_can_use_nick(Client *client, const char *newnick, const char
 		UdbRecord *forbid = udb_record_find(udb_ctx, NKEY_FORBID, nick_rec);
 		if (forbid)
 		{
+			udb_send_service_notice(client, SKEY_NICKSERV, "This nickname is forbidden.");
 			*reject_reason = "This nick is forbidden.";
 			return HOOK_DENY;
 		}
 
 		/* If client is already this nick and identified with +r, allow without re-entering password */
 		if (!strcasecmp(client->name, newnick) && has_user_mode(client, 'r'))
-			return udb_nick_access_allowed(client, nick_rec) ? HOOK_CONTINUE : HOOK_DENY;
+		{
+			udb_nick_password_cache_clear(client);
+			if (udb_nick_access_allowed(client, nick_rec))
+				return HOOK_CONTINUE;
+			udb_send_service_notice(client, SKEY_NICKSERV,
+			                        "Access to %s is not permitted from your IP address.",
+			                        newnick);
+			return HOOK_DENY;
+		}
+
+		if (udb_nick_password_cache_take(client, newnick))
+			return HOOK_CONTINUE;
 
 		const char *pass = client->local ? client->local->passwd : NULL;
-		if (pass && udb_check_password(pass, nick_rec, client) &&
-		    udb_nick_access_allowed(client, nick_rec))
+		if (!pass)
 		{
-			return HOOK_CONTINUE;
+			udb_send_service_notice(client, SKEY_NICKSERV,
+			                        "This nickname is registered and requires a password.");
+		} else if (udb_check_password(pass, nick_rec, client))
+		{
+			if (udb_nick_access_allowed(client, nick_rec))
+				return HOOK_CONTINUE;
+			udb_send_service_notice(client, SKEY_NICKSERV,
+			                        "Access to %s is not permitted from your IP address.",
+			                        newnick);
+		} else
+		{
+			udb_nick_password_failure_notice(client, nick_rec, newnick);
 		}
 
 		static char reject_buf[256];
@@ -669,6 +791,7 @@ static int udb_hook_can_use_nick(Client *client, const char *newnick, const char
 		*reject_reason = reject_buf;
 		return HOOK_DENY;
 	}
+	udb_nick_password_cache_clear(client);
 	return HOOK_CONTINUE;
 }
 
@@ -720,6 +843,14 @@ static int udb_hook_local_connect(Client *client)
 
 int udb_nicks_init(ModuleInfo *modinfo)
 {
+	ModDataInfo mreq;
+
+	memset(&mreq, 0, sizeof(mreq));
+	mreq.name = "udb_nick_password_cache";
+	mreq.type = MODDATATYPE_LOCAL_CLIENT;
+	mreq.free = udb_nick_password_cache_free;
+	udb_nick_password_cache_md = ModDataAdd(modinfo->handle, mreq);
+
 	CommandAdd(modinfo->handle, "GHOST", cmd_ghost, 3, CMD_USER);
 	HookAdd(modinfo->handle, HOOKTYPE_CAN_USE_NICK, 0, udb_hook_can_use_nick);
 	HookAdd(modinfo->handle, HOOKTYPE_LOCAL_NICKCHANGE, 0, udb_hook_nick_change);

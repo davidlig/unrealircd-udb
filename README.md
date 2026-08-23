@@ -131,6 +131,9 @@ Detailed technical documentation is available in the `doc/` directory:
   challenge names are rejected, including existing stored credentials.
 - Failed credential checks are rate-limited per UDB profile and source IP using
   `S::flood` or `udb::password-flood`; the in-memory tracker is bounded.
+- Nick-related UDB notices, including invalid credentials and password-flood
+  locks, use the connected ULine client matched by `S::nickserv` as their
+  prefix. Numeric replies remain server-generated.
 - `N::<nick>::access` may contain one or more comma- or whitespace-separated
   IPv4 or IPv6 CIDRs. A valid nick password also requires a matching CIDR for
   `/NICK` and `/GHOST`.
@@ -160,6 +163,8 @@ Detailed technical documentation is available in the `doc/` directory:
 - Include `c` in `nolines` to exempt that IP/host from UDB's clone throttle.
 - `I::<ip-or-host>::host <hostname>` overrides local clients and restores their
   original host fields when the record is replaced, removed, or the module unloads.
+  Live explicit and derived vhost changes are announced by the connected ULine
+  client matched by `S::ipserv`.
 
 ### Settings and Links
 
@@ -177,7 +182,13 @@ Detailed technical documentation is available in the `doc/` directory:
   an encryption key for UDB files. An explicit `N::<nick>::vhost` takes precedence.
   Suffixes must be valid dotted hostnames and leave room for the 32-character label.
 - Service settings (`nickserv`, `chanserv`, and `ipserv`) must be masks in
-  `nick!user@host` form. They drive the corresponding service identity helpers.
+  `nick!user@host` form. UDB resolves each mask against exactly one connected,
+  non-dead ULine user using UnrealIRCd's native user-mask matcher; it never
+  fabricates a `Client` or caches the result. If no unique service client is
+  available, UDB keeps the event safe by using the local server source and logs
+  the fallback.
+- ChanServ is the source of UDB channel effects: persistent topics, managed
+  channel modes, and member rank changes (`q`, `a`, `o`, `h`, and `v`).
 - The only supported `S` values are `quit_ips`, `quit_clones`, `flood`,
   `encryption_key`, `suffix`, `nickserv`, `chanserv`, and `ipserv`.
 - The only supported `L` child is `L::<server>::options`: `*1` enables UDB

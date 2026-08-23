@@ -30,6 +30,9 @@ SERVICES_SID = "002"
 IRCD_SID = "001"
 LINK_PASSWORD = "udb-svc-link-password"
 CHANNEL = "#vault"
+NICKSERV_PREFIX = ":NickServ!services@services.test"
+CHANSERV_PREFIX = ":ChanServ!services@services.test"
+IPSERV_PREFIX = ":IpServ!services@services.test"
 
 
 class EnvironmentUnavailable(Exception):
@@ -74,10 +77,13 @@ allow {{ mask "127.0.0.1"; class clients; maxperip 20; }}
 listen {{ ip "127.0.0.1"; port {client_port}; }}
 listen {{ ip "127.0.0.1"; port {server_port}; options {{ serversonly; }} }}
 listen {{ ip "127.0.0.1"; port {tls_port}; options {{ tls; }} }}
-link {SERVICES_NAME} {{
-    incoming {{ mask "127.0.0.1"; }}
-    password "{LINK_PASSWORD}";
-    class servers;
+    link {SERVICES_NAME} {{
+        incoming {{ mask "127.0.0.1"; }}
+        password "{LINK_PASSWORD}";
+        class servers;
+    }}
+ulines {{
+    {SERVICES_NAME};
 }}
 loadmodule "cloak_sha256";
 loadmodule "third/udb";
@@ -184,6 +190,7 @@ class FakeServices:
     def __init__(self, host, port, name, sid, password, ircd_sid):
         self.sid = sid
         self.ircd_sid = ircd_sid
+        self.uid_counter = 0
         self.sock = socket.create_connection((host, port), timeout=5)
         self.sock.settimeout(0.25)
         self.lines = []
@@ -233,6 +240,14 @@ class FakeServices:
     def send_ins(self, path, data):
         self.send(f"DB * INS {path} :{data}")
 
+    def send_del(self, path):
+        self.send(f"DB * DEL {path}")
+
+    def send_uid(self, nick, username="services", hostname="services.test"):
+        self.uid_counter += 1
+        uid = f"{self.sid}{self.uid_counter:06d}"
+        self.send(f"UID {nick} 1 {int(time.time())} {username} {hostname} {uid} * +S * * * :{nick}")
+
     def close(self):
         try:
             self.sock.close()
@@ -277,24 +292,74 @@ def wait_for_file_content(path, needle, timeout):
     return False
 
 
+def wait_for_file_absent(path, timeout):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not path.exists():
+            return True
+        time.sleep(0.05)
+    return not path.exists()
+
+
 def exercise(host, client_port, server_port, c_db):
     clients = []
     services = None
     try:
+        services = FakeServices(host, server_port, SERVICES_NAME, SERVICES_SID, LINK_PASSWORD, IRCD_SID)
+        services.wait_hel()
+        services.hel_ack()
+        for nick in ("NickServ", "ChanServ", "IpServ"):
+            services.send_uid(nick)
+
         alice = IrcClient(host, client_port, "alice-setup")
         clients.append(alice)
         alice.request("NICK alice:secret", lambda line: " NICK :alice" in line,
                       "cambio al nick registrado")
         alice.wait_for(lambda line: " MODE alice " in line and "+r" in line, "nick registration +r")
+        alice.wait_for(lambda line: line.startswith(f"{IPSERV_PREFIX} NOTICE alice :") and
+                       "Your vhost is now alice.test" in line,
+                       "explicit nick vhost notice")
         alice.request("CAP REQ :multi-prefix", lambda line: " CAP " in line and
                       (" ACK " in line or " NAK " in line), "CAP reply")
         alice.request("JOIN " + CHANNEL, lambda line: " 366 " in line, "end of founder JOIN")
         require(any("~alice" in line for line in names(alice)),
-                f"el fundador no recibió +q al entrar: {names(alice)!r}")
+                f"the founder did not receive +q on join: {names(alice)!r}")
+        join_modes = [line for line in alice.lines if f"MODE {CHANNEL}" in line]
+        require(any(line.startswith(f"{CHANSERV_PREFIX} MODE {CHANNEL} ") and "-o alice" in line
+                    for line in join_modes),
+                f"the initial -o was not originated by ChanServ: {join_modes!r}")
+        require(any(line.startswith(f"{CHANSERV_PREFIX} MODE {CHANNEL} ") and "+q alice" in line
+                    for line in join_modes),
+                f"the founder +q was not originated by ChanServ: {join_modes!r}")
+        require(any(line.startswith(f"{CHANSERV_PREFIX} MODE {CHANNEL} ") and "+r" in line
+                    for line in join_modes),
+                f"the channel +r was not originated by ChanServ: {join_modes!r}")
+        require(any(line.startswith(f"{CHANSERV_PREFIX} TOPIC {CHANNEL} :") for line in alice.lines),
+                f"the persistent topic was not originated by ChanServ: {alice.lines!r}")
 
-        services = FakeServices(host, server_port, SERVICES_NAME, SERVICES_SID, LINK_PASSWORD, IRCD_SID)
-        services.wait_hel()
-        services.hel_ack()
+        bob = IrcClient(host, client_port, "bob")
+        clients.append(bob)
+        bob_join_start = len(bob.lines)
+        bob.request("JOIN " + CHANNEL + " chansecret", lambda line: " 366 " in line,
+                    "end of password JOIN")
+        bob.wait_for(lambda line: line.startswith(f"{CHANSERV_PREFIX} MODE {CHANNEL} ") and
+                     "+a bob" in line,
+                     "ChanServ authentication +a", start=bob_join_start)
+        alice.receive(time.monotonic() + 1)
+
+        # NickServ must own password failures, while server numerics remain intact.
+        first_failure = bob.request("NICK locked:wrong",
+                                    lambda line: any(code in line for code in (" 432 ", " 433 ", " 437 ")),
+                                    "invalid nickname password rejection")
+        require(sum(line.startswith(f"{NICKSERV_PREFIX} NOTICE bob :") for line in first_failure) == 1 and
+                any("Invalid password" in line for line in first_failure),
+                f"the password failure was not one NickServ NOTICE: {first_failure!r}")
+        flood_failure = bob.request("NICK locked:wrong",
+                                    lambda line: any(code in line for code in (" 432 ", " 433 ", " 437 ")),
+                                    "password flood lock")
+        require(sum(line.startswith(f"{NICKSERV_PREFIX} NOTICE bob :") for line in flood_failure) == 1 and
+                any("Too many failed password attempts" in line for line in flood_failure),
+                f"the flood lock was not one NickServ NOTICE: {flood_failure!r}")
 
         # Phase 1: identical modes INS must be a no-op (no -ntM/+ntM churn,
         # and above all no founder +q removal).
@@ -322,15 +387,68 @@ def exercise(host, client_port, server_port, c_db):
         require(wait_for_file_content(c_db, f"{CHANNEL}::modes +ntm", 5),
                 f"el valor cambiado de modes no se persistió en {c_db}")
 
+        # Every UDB-managed member rank, including generic C::modes ranks, must
+        # be emitted by ChanServ when the target is already present.
+        start = len(bob.lines)
+        services.send_ins(f"C::{CHANNEL}::modes", "+ovh bob bob bob")
+        bob.wait_for(lambda line: f"MODE {CHANNEL}" in line and "+ovh" in line,
+                     "ChanServ q/a/o/h/v rank application", start=start)
+        rank_traffic = bob.lines[start:]
+        require(any(line.startswith(f"{CHANSERV_PREFIX} MODE {CHANNEL} ") and "+ovh" in line
+                    for line in rank_traffic),
+                f"the o/h/v ranks were not originated by ChanServ: {rank_traffic!r}")
+
+        services.send_del(f"C::{CHANNEL}::pass")
+        bob.wait_for(lambda line: line.startswith(f"{CHANSERV_PREFIX} MODE {CHANNEL} ") and
+                     "-a bob" in line,
+                     "ChanServ authentication +a revocation")
+        alice.receive(time.monotonic() + 1)
+
+        start = len(alice.lines)
+        services.send_ins(f"C::{CHANNEL}::modes", "+ntM")
+        alice.wait_for(lambda line: f"MODE {CHANNEL}" in line and "+ntM" in line,
+                       "UDB-managed rank reversion", start=start)
+        require(any(line.startswith(f"{CHANSERV_PREFIX} MODE {CHANNEL} ") and "-ovh" in line
+                    for line in alice.lines[start:]),
+                f"the o/h/v rank reversion was not originated by ChanServ: {alice.lines[start:]!r}")
+
         # Phase 3: a channel-profile INS revokes and must restore the founder.
         start = len(alice.lines)
         services.send_ins(f"C::{CHANNEL}", "*123")
         alice.wait_for(lambda line: f"MODE {CHANNEL}" in line and "+q alice" in line,
                        "restauración del founder +q tras el INS del canal", start=start)
-        require(any("-q alice" in line for line in alice.lines[start:]),
+        require(any(line.startswith(f"{CHANSERV_PREFIX} MODE {CHANNEL} ") and "-q alice" in line
+                    for line in alice.lines[start:]),
                 f"el INS del canal no revocó el +q previo: {alice.lines[start:]!r}")
+        require(any(line.startswith(f"{CHANSERV_PREFIX} MODE {CHANNEL} ") and "+q alice" in line
+                    for line in alice.lines[start:]),
+                f"the founder +q restoration was not originated by ChanServ: {alice.lines[start:]!r}")
         require(any("~alice" in line for line in names(alice)),
                 f"el INS del canal no restauró el +q del fundador: {names(alice)!r}")
+
+        services.send_del(f"C::{CHANNEL}::topic")
+        alice.wait_for(lambda line: line.startswith(f"{CHANSERV_PREFIX} TOPIC {CHANNEL} :"),
+                       "ChanServ persistent topic removal")
+
+        services.send_del("N::alice::vhost")
+        alice.wait_for(lambda line: line.startswith(f"{IPSERV_PREFIX} NOTICE alice :") and
+                       "IP-derived vhost has been restored" in line,
+                       "derived vhost restoration after explicit nick vhost removal")
+
+        # IpServ must own live derived-vhost and I::host reconciliation notices.
+        services.send_ins("S::suffix", ".changed.test")
+        bob.wait_for(lambda line: line.startswith(f"{IPSERV_PREFIX} NOTICE bob :") and
+                     "IP-derived vhost is now" in line,
+                     "IP-derived vhost notice")
+        services.send_ins("I::127.0.0.1::host", "explicit.test")
+        bob.wait_for(lambda line: line.startswith(f"{IPSERV_PREFIX} NOTICE bob :") and
+                     "explicit IP vhost is now explicit.test" in line,
+                     "explicit IP vhost notice")
+        services.send_del("I::127.0.0.1::host")
+        bob.wait_for(lambda line: line.startswith(f"{IPSERV_PREFIX} NOTICE bob :") and
+                     ("explicit IP vhost has been removed" in line or
+                      "IP-derived vhost is now" in line),
+                     "explicit IP vhost reversion")
         print("PASS: INS idéntico sin churn ni pérdida de +q, modos aplicados al cambiar y "
               "fundador restaurado tras el INS del perfil de canal")
     finally:
@@ -370,16 +488,28 @@ def main():
         third_modules = node / "modules" / "third"
         third_modules.mkdir(parents=True)
         shutil.copy2(args.module, third_modules / "udb.so")
-        (data / "udb_N.db").write_text(
-            f"alice::pass sha256:{sha256('secret')}\n"
-            "alice::challenge sha256\n"
-            "alice::access 127.0.0.0/8\n",
-            encoding="ascii")
         (data / "udb_C.db").write_text(
             f"{CHANNEL}::founder alice\n"
             f"{CHANNEL}::pass sha256:{sha256('chansecret')}\n"
             f"{CHANNEL}::challenge sha256\n"
-            f"{CHANNEL}::modes +ntM\n",
+            f"{CHANNEL}::modes +ntM\n"
+            f"{CHANNEL}::topic Persistent topic\n",
+            encoding="ascii")
+        (data / "udb_N.db").write_text(
+            f"alice::pass sha256:{sha256('secret')}\n"
+            "alice::challenge sha256\n"
+            "alice::access 127.0.0.0/8\n"
+            "alice::vhost alice.test\n"
+            f"locked::pass sha256:{sha256('secret')}\n"
+            "locked::challenge sha256\n",
+            encoding="ascii")
+        (data / "udb_S.db").write_text(
+            "nickserv NickServ!services@services.test\n"
+            "chanserv ChanServ!services@services.test\n"
+            "ipserv IpServ!services@services.test\n"
+            "flood 2:60\n"
+            "encryption_key " + ("a1" * 32) + "\n"
+            "suffix .derived.test\n",
             encoding="ascii")
         residual_snapshot = data / "udb_C.db.tmp"
         residual_snapshot.write_text(
@@ -396,10 +526,10 @@ def main():
             process = subprocess.Popen(bwrap_command(node, args.ircd, config), stdout=output,
                                        stderr=subprocess.STDOUT, text=True)
         wait_for_daemon(process, (("127.0.0.1", port), ("127.0.0.1", server_port)), args.timeout)
-        require(not residual_snapshot.exists(),
-                f"el snapshot temporal residual no se limpió: {residual_snapshot}")
+        require(wait_for_file_absent(residual_snapshot, 5),
+                f"the residual temporary snapshot was not cleaned: {residual_snapshot}")
         require(wait_for_file_content(data / "udb_C.db", f"{CHANNEL}::modes +ntM", 1),
-                "la limpieza del snapshot temporal alteró el snapshot activo")
+                "temporary snapshot cleanup changed the active snapshot")
         exercise("127.0.0.1", port, server_port, data / "udb_C.db")
         return 0
     except EnvironmentUnavailable as exc:

@@ -83,6 +83,14 @@ Las credenciales UDB solo admiten `challenge` `argon2id`, `sha256` o `crypt`.
 Los intentos fallidos se limitan por perfil e IP con `S::flood` o
 `udb::password-flood`.
 
+Los efectos de canal de UDB se ejecutan con el cliente ChanServ conectado que
+se resuelve desde `S::chanserv`: topics persistentes, modos de canal
+configurados y cambios de rangos gestionados por UDB (`q`, `a`, `o`, `h` y
+`v`). Se conserva el protocolo nativo de MODE/TOPIC, pero el origen visible es
+el cliente de servicio. Si el cliente de servicio no está conectado o la
+máscara es ambigua, el evento usa de forma segura el servidor local y UDB
+registra la degradación; nunca se fabrica un `Client`.
+
 UDB usa overrides de `MODE` y `SAMODE`, no inspección de texto crudo. Con la
 opción `*1`, los `+b` añadidos localmente se asocian a su autor y otro usuario
 local no puede eliminarlos, salvo un fundador identificado o un oper.
@@ -122,7 +130,14 @@ Solo se admiten `quit_ips`, `quit_clones`, `flood`, `encryption_key`, `suffix`,
     locales conectados. `N::<nick>::vhost` e `I::<ip>::host` explícito tienen
     prioridad sobre el vhost derivado.
 *   **nickserv**, **chanserv**, **ipserv**: Máscaras de servicio en formato
-    `nick!user@host`.
+    `nick!user@host`. Cada máscara se resuelve dinámicamente contra un único
+    usuario ULine conectado, no muerto, mediante el matcher nativo de usuarios
+    de UnrealIRCd. El resultado no se guarda en caché. Si no hay una coincidencia
+    única, el evento usa el servidor local y UDB registra la degradación segura.
+    NickServ es el origen visible de los avisos relacionados con nicks,
+    incluidos password incorrecto y bloqueo por flood. IpServ es el origen
+    visible de los avisos de vhost explícito de nick, vhost derivado por IP y
+    cambios o restauraciones de `I::<ip>::host`.
 *   **quit_ips** y **quit_clones**: Estado validado para mensajes de expulsión;
     el hook de clones consume `quit_clones`.
 

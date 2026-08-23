@@ -115,6 +115,32 @@ static void udb_channel_ban_owners_free(ModData *m)
 	m->ptr = NULL;
 }
 
+static void udb_channel_do_mode(Channel *channel, MessageTag *mtags,
+                                const char *modes, const char *parameters)
+{
+	char buf[512];
+	char *p, *param;
+	int myparc = 1;
+	int i;
+	char *myparv[512];
+	Client *source;
+
+	if (!channel || !modes || !*modes || !do_mode)
+		return;
+	source = udb_service_source(SKEY_CHANSERV);
+	memset(myparv, 0, sizeof(myparv));
+	myparv[0] = raw_strdup(modes);
+	strlcpy(buf, parameters ? parameters : "", sizeof(buf));
+	for (param = strtoken(&p, buf, " "); param && myparc < (int)(sizeof(myparv) / sizeof(myparv[0])) - 1;
+	     param = strtoken(&p, NULL, " "))
+		myparv[myparc++] = raw_strdup(param);
+	myparv[myparc] = NULL;
+
+	do_mode(channel, source, mtags, myparc, (const char **)myparv, 0, 0);
+	for (i = 0; i < myparc; i++)
+		safe_free(myparv[i]);
+}
+
 static void udb_channel_set_modes(Channel *channel, const char *value)
 {
 	char modebuf[512];
@@ -126,7 +152,7 @@ static void udb_channel_set_modes(Channel *channel, const char *value)
 	parabuf = strchr(modebuf, ' ');
 	if (parabuf)
 		*parabuf++ = '\0';
-	set_channel_mode(channel, NULL, modebuf, parabuf ? parabuf : "");
+	udb_channel_do_mode(channel, NULL, modebuf, parabuf ? parabuf : "");
 }
 
 static void udb_channel_reverse_modes(Channel *channel, const char *value)
@@ -153,7 +179,7 @@ static void udb_channel_reverse_modes(Channel *channel, const char *value)
 			*dst++ = *src;
 	}
 	*dst = '\0';
-	set_channel_mode(channel, NULL, inverse, parabuf ? parabuf : "");
+	udb_channel_do_mode(channel, NULL, inverse, parabuf ? parabuf : "");
 }
 
 static void udb_channel_apply_modes(Channel *channel, const char *value)
@@ -203,9 +229,9 @@ static void udb_channel_set_persistent(Channel *channel, int enabled)
 	if (!find_channel_mode_handler('P'))
 		return;
 	if (enabled && !has_channel_mode(channel, 'P'))
-		set_channel_mode(channel, NULL, "+P", "");
+		udb_channel_do_mode(channel, NULL, "+P", "");
 	else if (!enabled && has_channel_mode(channel, 'P'))
-		set_channel_mode(channel, NULL, "-P", "");
+		udb_channel_do_mode(channel, NULL, "-P", "");
 }
 
 static void udb_channel_invite_grant_set(Client *client, Channel *channel)
@@ -410,11 +436,11 @@ static void udb_channel_reconcile_founder(Channel *channel, UdbRecord *chan_rec)
 		if (is_founder)
 		{
 			if (!check_channel_access_member(member, "q"))
-				set_channel_mode(channel, NULL, "+q", member->client->name);
+				udb_channel_do_mode(channel, NULL, "+q", member->client->name);
 		} else if (check_channel_access_member(member, "q"))
 		{
 			/* UDB owns founder +q, so a profile replacement has one owner only. */
-			set_channel_mode(channel, NULL, "-q", member->client->name);
+			udb_channel_do_mode(channel, NULL, "-q", member->client->name);
 		}
 	}
 }
@@ -430,7 +456,7 @@ static void udb_channel_revoke_udb_admins(Channel *channel)
 		if (!moddata_member(member, udb_channel_auth_member_md).i)
 			continue;
 		if (check_channel_access_member(member, "a"))
-			set_channel_mode(channel, NULL, "-a", member->client->name);
+			udb_channel_do_mode(channel, NULL, "-a", member->client->name);
 		moddata_member(member, udb_channel_auth_member_md).i = 0;
 	}
 }
@@ -446,36 +472,36 @@ static void udb_channel_grant_pending_admin(Client *client, Channel *channel,
 	member = find_member_link(channel->members, client);
 	if (!member || check_channel_access_member(member, "a"))
 		return;
-	set_channel_mode(channel, mtags, "+a", client->name);
+	udb_channel_do_mode(channel, mtags, "+a", client->name);
 	moddata_member(member, udb_channel_auth_member_md).i = 1;
 }
 
 static void udb_channel_clear_topic(Channel *channel)
 {
+	Client *source = udb_service_source(SKEY_CHANSERV);
+
 	safe_free(channel->topic);
 	safe_free(channel->topic_nick);
 	channel->topic_time = 0;
 	if (channel->users > 0)
 	{
-		sendto_channel(channel, &me, NULL, 0, 0, SEND_LOCAL, NULL,
-		               ":%s TOPIC %s :", me.name, channel->name);
+		sendto_channel(channel, source, NULL, 0, 0, SEND_LOCAL, NULL,
+		               ":%s TOPIC %s :", source->name, channel->name);
 	}
 }
 
 static void udb_channel_apply_topic(Channel *channel, UdbRecord *topic_rec)
 {
+	Client *source;
+
 	if (!topic_rec || !topic_rec->data_str)
 		return;
-	if (channel->topic && !strcmp(channel->topic, topic_rec->data_str))
+	source = udb_service_source(SKEY_CHANSERV);
+	if (channel->topic && !strcmp(channel->topic, topic_rec->data_str) &&
+	    channel->topic_nick && !strcmp(channel->topic_nick, source->name))
 		return;
-	safe_strdup(channel->topic, topic_rec->data_str);
-	channel->topic_time = TStime();
-	safe_strdup(channel->topic_nick, udb_get_bot_nick(SKEY_CHANSERV, 0));
-	if (channel->users > 0)
-	{
-		sendto_channel(channel, &me, NULL, 0, 0, SEND_LOCAL, NULL,
-		               ":%s TOPIC %s :%s", me.name, channel->name, channel->topic);
-	}
+	if (set_channel_topic)
+		set_channel_topic(source, channel, NULL, topic_rec->data_str, source->name, TStime());
 }
 
 static void udb_channel_apply_subrecord(UdbContext *ctx, Channel *channel, UdbRecord *chan_rec,
@@ -665,12 +691,12 @@ static void handle_join(Client *client, Channel *channel, MessageTag *mtags)
 		/* A registered channel assigns founder authority exclusively as +q. */
 		if (!IsServer(client) && !IsULine(client))
 		{
-			set_channel_mode(channel, mtags, "-o", client->name);
+			udb_channel_do_mode(channel, mtags, "-o", client->name);
 		}
 
 		if (!susp_rec)
 		{
-			set_channel_mode(channel, mtags, "+r", "");
+			udb_channel_do_mode(channel, mtags, "+r", "");
 		}
 
 		udb_channel_apply_subrecord(udb_ctx, channel, chan_rec, CKEY_MODES, 0);

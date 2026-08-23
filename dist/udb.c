@@ -44,6 +44,7 @@ module
  *
  * Architecture: Multiple implementation files (#include'd from udb.c)
  *   udb_core.inc.c    - Database engine, tree, hash, file I/O
+ *   udb_services.inc.c - Dynamic service-client resolution and notices
  *   udb_protocol.inc.c - S2S protocol (DB command) and sync
  *   udb_nicks.inc.c   - Nick registration, identification, ghost
  *   udb_channels.inc.c - Channel registration, founder, modes
@@ -384,6 +385,11 @@ static void udb_lines_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *
 static void udb_lines_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
 static const char *udb_get_bot_nick(const char *service_key, int force_default);
 static const char *udb_get_bot_mask(const char *service_key, int force_default);
+static Client *udb_service_source(const char *service_key);
+static void udb_send_service_notice(Client *target, const char *service_key,
+                                    FORMAT_STRING(const char *pattern), ...)
+    __attribute__((format(printf, 3, 4)));
+static int udb_ip_reapply_vhost(Client *client);
 /* Runtime dispatcher; concrete per-block effects stay in their own modules. */
 static int udb_apply_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new);
 static void udb_remove_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
@@ -2061,6 +2067,75 @@ static void udb_send_to_debugs(Client *source, const char *fmt, ...)
 
 /* End of udb_core.c.inc */
 
+/* Dynamic connected service clients and service-originated notices */
+/* Inlined: udb_services.c.inc */
+/* UDB service-client resolution and service-originated notices. */
+
+static Client *udb_service_source(const char *service_key)
+{
+	const char *mask = udb_get_bot_mask(service_key, 0);
+	Client *source = NULL;
+	Client *client;
+
+	if (!mask || !match_user)
+	{
+		udb_log(ULOG_WARNING, "UDB_SERVICE_SOURCE_FALLBACK", NULL,
+		        "No user-mask matcher is available for $service; using the local server source",
+		        log_data_string("service", service_key));
+		return &me;
+	}
+
+	list_for_each_entry(client, &client_list, client_node)
+	{
+		if (!IsUser(client) || IsDead(client) || !client->user || !IsULine(client) ||
+		    !client->name[0] || !client->user->username[0] || !client->user->realhost[0])
+			continue;
+		if (!match_user(mask, client, MATCH_CHECK_ALL))
+			continue;
+		if (source)
+		{
+			udb_log(ULOG_WARNING, "UDB_SERVICE_SOURCE_FALLBACK", NULL,
+			        "Multiple connected ULine users match the $service mask; using the local server source",
+			        log_data_string("service", service_key),
+			        log_data_string("mask", mask));
+			return &me;
+		}
+		source = client;
+	}
+
+	if (!source)
+	{
+		udb_log(ULOG_WARNING, "UDB_SERVICE_SOURCE_FALLBACK", NULL,
+		        "No connected ULine user matches the $service mask; using the local server source",
+		        log_data_string("service", service_key),
+		        log_data_string("mask", mask));
+		return &me;
+	}
+
+	return source;
+}
+
+static void udb_send_service_notice(Client *target, const char *service_key,
+                                    FORMAT_STRING(const char *pattern), ...)
+{
+	Client *source;
+	char message[1024];
+	char *name;
+	va_list vl;
+
+	if (!target || !target->name[0])
+		return;
+	source = udb_service_source(service_key);
+	name = *target->name ? target->name : "*";
+	va_start(vl, pattern);
+	ircvsnprintf(message, sizeof(message), pattern, vl);
+	va_end(vl);
+	sendto_prefix_one(target, source, NULL, ":%s NOTICE %s :%s",
+	                  source->name, name, message);
+}
+
+/* End of udb_services.c.inc */
+
 /* Runtime effects: special-record dispatch only */
 /* Inlined: udb_effects.c.inc */
 /*
@@ -3224,6 +3299,67 @@ static int udb_protocol_init(ModuleInfo *modinfo)
 /* Inlined: udb_nicks.c.inc */
 #include <openssl/evp.h>
 
+typedef struct UdbNickPasswordCache UdbNickPasswordCache;
+struct UdbNickPasswordCache {
+	char nick[NICKLEN + 1];
+	int valid;
+};
+
+static ModDataInfo *udb_nick_password_cache_md = NULL;
+
+static void udb_nick_password_cache_free(ModData *m)
+{
+	safe_free(m->ptr);
+	m->ptr = NULL;
+}
+
+static void udb_nick_password_cache_clear(Client *client)
+{
+	UdbNickPasswordCache *cache;
+
+	if (!client || !udb_nick_password_cache_md)
+		return;
+	cache = moddata_local_client(client, udb_nick_password_cache_md).ptr;
+	if (cache)
+	{
+		safe_free(cache);
+		moddata_local_client(client, udb_nick_password_cache_md).ptr = NULL;
+	}
+}
+
+static void udb_nick_password_cache_set(Client *client, const char *nick)
+{
+	UdbNickPasswordCache *cache;
+
+	if (!client || !nick || !udb_nick_password_cache_md)
+		return;
+	udb_nick_password_cache_clear(client);
+	cache = safe_alloc(sizeof(*cache));
+	strlcpy(cache->nick, nick, sizeof(cache->nick));
+	cache->valid = 1;
+	moddata_local_client(client, udb_nick_password_cache_md).ptr = cache;
+}
+
+static int udb_nick_password_cache_take(Client *client, const char *nick)
+{
+	UdbNickPasswordCache *cache;
+	int valid;
+
+	if (!client || !nick || !udb_nick_password_cache_md)
+		return 0;
+	cache = moddata_local_client(client, udb_nick_password_cache_md).ptr;
+	if (!cache)
+		return 0;
+	if (strcasecmp(cache->nick, nick))
+	{
+		udb_nick_password_cache_clear(client);
+		return 0;
+	}
+	valid = cache->valid;
+	udb_nick_password_cache_clear(client);
+	return valid;
+}
+
 static void udb_nick_set_vhost(Client *client, UdbRecord *vhost_rec)
 {
 	if (!client || !client->user || !vhost_rec || !vhost_rec->data_str)
@@ -3246,7 +3382,8 @@ static void udb_nick_set_vhost(Client *client, UdbRecord *vhost_rec)
 	if (MyConnect(client))
 	{
 		sendto_one(client, NULL, ":%s MODE %s :+tx", client->name, client->name);
-		sendnotice(client, "*** Your vhost is now %s", client->user->virthost);
+		udb_send_service_notice(client, SKEY_IPSERV, "*** Your vhost is now %s",
+		                        client->user->virthost);
 	}
 
 	userhost_changed(client);
@@ -3255,6 +3392,8 @@ static void udb_nick_set_vhost(Client *client, UdbRecord *vhost_rec)
 static void udb_nick_remove_vhost(Client *client)
 {
 	if (!client || !client->user)
+		return;
+	if (udb_ip_reapply_vhost(client))
 		return;
 
 	userhost_save_current(client);
@@ -3276,7 +3415,7 @@ static void udb_nick_remove_vhost(Client *client)
 	if (MyConnect(client))
 	{
 		sendto_one(client, NULL, ":%s MODE %s :-t", client->name, client->name);
-		sendnotice(client, "*** Your vhost has been removed");
+		udb_send_service_notice(client, SKEY_IPSERV, "*** Your vhost has been removed");
 	}
 
 	userhost_changed(client);
@@ -3369,8 +3508,12 @@ static void udb_nick_force_rename(Client *client, const char *nick_in_db)
 	rand_suffix[5] = '\0';
 	snprintf(newnick, sizeof(newnick), "Guest%s", rand_suffix);
 
-	sendnotice(client, "This nickname (%s) has been registered or synced in the UDB database.", nick_in_db);
-	sendnotice(client, "You have been renamed. If you are the owner, please identify: /NICK %s:Password", nick_in_db);
+	udb_send_service_notice(client, SKEY_NICKSERV,
+	                        "This nickname (%s) has been registered or synced in the UDB database.",
+	                        nick_in_db);
+	udb_send_service_notice(client, SKEY_NICKSERV,
+	                        "You have been renamed. If you are the owner, please identify: /NICK %s:Password",
+	                        nick_in_db);
 
 	const char *args[5];
 	char tsbuf[32];
@@ -3591,6 +3734,17 @@ static void udb_password_failure_record(UdbRecord *profile_rec, Client *client, 
 		entry->attempts++;
 }
 
+static void udb_nick_password_failure_notice(Client *client, UdbRecord *profile_rec,
+                                             const char *nick)
+{
+	if (udb_password_flooded(profile_rec, client))
+		udb_send_service_notice(client, SKEY_NICKSERV,
+		                        "Too many failed password attempts for %s; try again later.",
+		                        nick);
+	else
+		udb_send_service_notice(client, SKEY_NICKSERV, "Invalid password for %s.", nick);
+}
+
 static int udb_password_type(const char *challenge, const char *stored_pass,
                              const char **hash)
 {
@@ -3761,25 +3915,27 @@ CMD_FUNC(cmd_ghost)
 
 	if (!udb_ctx || !udb_ctx->nicks)
 	{
-		sendnotice(client, "UDB is not fully initialized.");
+		udb_send_service_notice(client, SKEY_NICKSERV, "UDB is not fully initialized.");
 		return;
 	}
 
 	UdbRecord *nick_rec = udb_record_find(udb_ctx, target_nick, udb_ctx->nicks);
 	if (!nick_rec)
 	{
-		sendnotice(client, "Nick %s is not registered.", target_nick);
+		udb_send_service_notice(client, SKEY_NICKSERV, "Nick %s is not registered.", target_nick);
 		return;
 	}
 
 	if (!udb_check_password(pass, nick_rec, client))
 	{
-		sendnotice(client, "Invalid password for %s.", target_nick);
+		udb_nick_password_failure_notice(client, nick_rec, target_nick);
 		return;
 	}
 	if (!udb_nick_access_allowed(client, nick_rec))
 	{
-		sendnotice(client, "Access to %s is not permitted from your IP address.", target_nick);
+		udb_send_service_notice(client, SKEY_NICKSERV,
+		                        "Access to %s is not permitted from your IP address.",
+		                        target_nick);
 		return;
 	}
 
@@ -3788,14 +3944,14 @@ CMD_FUNC(cmd_ghost)
 	{
 		if (target == client)
 		{
-			sendnotice(client, "You cannot ghost yourself.");
+			udb_send_service_notice(client, SKEY_NICKSERV, "You cannot ghost yourself.");
 			return;
 		}
-		sendnotice(client, "Ghosting %s...", target_nick);
+		udb_send_service_notice(client, SKEY_NICKSERV, "Ghosting %s...", target_nick);
 		exit_client(target, NULL, "GHOST command used");
 	} else
 	{
-		sendnotice(client, "%s is not online.", target_nick);
+		udb_send_service_notice(client, SKEY_NICKSERV, "%s is not online.", target_nick);
 	}
 }
 
@@ -3831,21 +3987,40 @@ CMD_OVERRIDE_FUNC(udb_override_nick)
 		safe_strdup(client->local->passwd, pass);
 
 	UdbRecord *rec = (udb_ctx && udb_ctx->nicks) ? udb_record_find(udb_ctx, clean_nick, udb_ctx->nicks) : NULL;
+	Client *acptr = rec ? find_client(clean_nick, NULL) : NULL;
 
-	if (rec && udb_check_password(pass, rec, client) && udb_nick_access_allowed(client, rec))
+	/* The core NICK path checks the password too. Only pre-check when a
+	 * collision needs the password for ghost/recovery, and stop on failure so
+	 * the flood tracker is consumed exactly once. */
+	if (rec && acptr && acptr != client)
 	{
-		Client *acptr = find_client(clean_nick, NULL);
-		if (acptr && acptr != client)
+		if (!udb_check_password(pass, rec, client))
 		{
-			if (force_ghost)
-			{
-				char quit_msg[128];
-				snprintf(quit_msg, sizeof(quit_msg), "Ghosted (Nick taken by %s)", client->name);
-				exit_client(acptr, NULL, quit_msg);
-			} else
-			{
-				sendnotice(client, "This nickname is currently in use. If you are the owner, you can recover it by typing /NICK %s!Password", clean_nick);
-			}
+			udb_nick_password_failure_notice(client, rec, clean_nick);
+			sendnumeric(client, ERR_ERRONEUSNICKNAME, clean_nick,
+			            "Nickname requires a valid UDB password.");
+			return;
+		}
+		if (!udb_nick_access_allowed(client, rec))
+		{
+			udb_send_service_notice(client, SKEY_NICKSERV,
+			                        "Access to %s is not permitted from your IP address.",
+			                        clean_nick);
+			sendnumeric(client, ERR_ERRONEUSNICKNAME, clean_nick,
+			            "Nickname requires a valid UDB password and authorized IP.");
+			return;
+		}
+		udb_nick_password_cache_set(client, clean_nick);
+		if (force_ghost)
+		{
+			char quit_msg[128];
+			snprintf(quit_msg, sizeof(quit_msg), "Ghosted (Nick taken by %s)", client->name);
+			exit_client(acptr, NULL, quit_msg);
+		} else
+		{
+			udb_send_service_notice(client, SKEY_NICKSERV,
+			                        "This nickname is currently in use. If you are the owner, you can recover it by typing /NICK %s!Password",
+			                        clean_nick);
 		}
 	}
 
@@ -3873,19 +4048,41 @@ static int udb_hook_can_use_nick(Client *client, const char *newnick, const char
 		UdbRecord *forbid = udb_record_find(udb_ctx, NKEY_FORBID, nick_rec);
 		if (forbid)
 		{
+			udb_send_service_notice(client, SKEY_NICKSERV, "This nickname is forbidden.");
 			*reject_reason = "This nick is forbidden.";
 			return HOOK_DENY;
 		}
 
 		/* If client is already this nick and identified with +r, allow without re-entering password */
 		if (!strcasecmp(client->name, newnick) && has_user_mode(client, 'r'))
-			return udb_nick_access_allowed(client, nick_rec) ? HOOK_CONTINUE : HOOK_DENY;
+		{
+			udb_nick_password_cache_clear(client);
+			if (udb_nick_access_allowed(client, nick_rec))
+				return HOOK_CONTINUE;
+			udb_send_service_notice(client, SKEY_NICKSERV,
+			                        "Access to %s is not permitted from your IP address.",
+			                        newnick);
+			return HOOK_DENY;
+		}
+
+		if (udb_nick_password_cache_take(client, newnick))
+			return HOOK_CONTINUE;
 
 		const char *pass = client->local ? client->local->passwd : NULL;
-		if (pass && udb_check_password(pass, nick_rec, client) &&
-		    udb_nick_access_allowed(client, nick_rec))
+		if (!pass)
 		{
-			return HOOK_CONTINUE;
+			udb_send_service_notice(client, SKEY_NICKSERV,
+			                        "This nickname is registered and requires a password.");
+		} else if (udb_check_password(pass, nick_rec, client))
+		{
+			if (udb_nick_access_allowed(client, nick_rec))
+				return HOOK_CONTINUE;
+			udb_send_service_notice(client, SKEY_NICKSERV,
+			                        "Access to %s is not permitted from your IP address.",
+			                        newnick);
+		} else
+		{
+			udb_nick_password_failure_notice(client, nick_rec, newnick);
 		}
 
 		static char reject_buf[256];
@@ -3893,6 +4090,7 @@ static int udb_hook_can_use_nick(Client *client, const char *newnick, const char
 		*reject_reason = reject_buf;
 		return HOOK_DENY;
 	}
+	udb_nick_password_cache_clear(client);
 	return HOOK_CONTINUE;
 }
 
@@ -3944,6 +4142,14 @@ static int udb_hook_local_connect(Client *client)
 
 int udb_nicks_init(ModuleInfo *modinfo)
 {
+	ModDataInfo mreq;
+
+	memset(&mreq, 0, sizeof(mreq));
+	mreq.name = "udb_nick_password_cache";
+	mreq.type = MODDATATYPE_LOCAL_CLIENT;
+	mreq.free = udb_nick_password_cache_free;
+	udb_nick_password_cache_md = ModDataAdd(modinfo->handle, mreq);
+
 	CommandAdd(modinfo->handle, "GHOST", cmd_ghost, 3, CMD_USER);
 	HookAdd(modinfo->handle, HOOKTYPE_CAN_USE_NICK, 0, udb_hook_can_use_nick);
 	HookAdd(modinfo->handle, HOOKTYPE_LOCAL_NICKCHANGE, 0, udb_hook_nick_change);
@@ -4079,6 +4285,32 @@ static void udb_channel_ban_owners_free(ModData *m)
 	m->ptr = NULL;
 }
 
+static void udb_channel_do_mode(Channel *channel, MessageTag *mtags,
+                                const char *modes, const char *parameters)
+{
+	char buf[512];
+	char *p, *param;
+	int myparc = 1;
+	int i;
+	char *myparv[512];
+	Client *source;
+
+	if (!channel || !modes || !*modes || !do_mode)
+		return;
+	source = udb_service_source(SKEY_CHANSERV);
+	memset(myparv, 0, sizeof(myparv));
+	myparv[0] = raw_strdup(modes);
+	strlcpy(buf, parameters ? parameters : "", sizeof(buf));
+	for (param = strtoken(&p, buf, " "); param && myparc < (int)(sizeof(myparv) / sizeof(myparv[0])) - 1;
+	     param = strtoken(&p, NULL, " "))
+		myparv[myparc++] = raw_strdup(param);
+	myparv[myparc] = NULL;
+
+	do_mode(channel, source, mtags, myparc, (const char **)myparv, 0, 0);
+	for (i = 0; i < myparc; i++)
+		safe_free(myparv[i]);
+}
+
 static void udb_channel_set_modes(Channel *channel, const char *value)
 {
 	char modebuf[512];
@@ -4090,7 +4322,7 @@ static void udb_channel_set_modes(Channel *channel, const char *value)
 	parabuf = strchr(modebuf, ' ');
 	if (parabuf)
 		*parabuf++ = '\0';
-	set_channel_mode(channel, NULL, modebuf, parabuf ? parabuf : "");
+	udb_channel_do_mode(channel, NULL, modebuf, parabuf ? parabuf : "");
 }
 
 static void udb_channel_reverse_modes(Channel *channel, const char *value)
@@ -4117,7 +4349,7 @@ static void udb_channel_reverse_modes(Channel *channel, const char *value)
 			*dst++ = *src;
 	}
 	*dst = '\0';
-	set_channel_mode(channel, NULL, inverse, parabuf ? parabuf : "");
+	udb_channel_do_mode(channel, NULL, inverse, parabuf ? parabuf : "");
 }
 
 static void udb_channel_apply_modes(Channel *channel, const char *value)
@@ -4167,9 +4399,9 @@ static void udb_channel_set_persistent(Channel *channel, int enabled)
 	if (!find_channel_mode_handler('P'))
 		return;
 	if (enabled && !has_channel_mode(channel, 'P'))
-		set_channel_mode(channel, NULL, "+P", "");
+		udb_channel_do_mode(channel, NULL, "+P", "");
 	else if (!enabled && has_channel_mode(channel, 'P'))
-		set_channel_mode(channel, NULL, "-P", "");
+		udb_channel_do_mode(channel, NULL, "-P", "");
 }
 
 static void udb_channel_invite_grant_set(Client *client, Channel *channel)
@@ -4374,11 +4606,11 @@ static void udb_channel_reconcile_founder(Channel *channel, UdbRecord *chan_rec)
 		if (is_founder)
 		{
 			if (!check_channel_access_member(member, "q"))
-				set_channel_mode(channel, NULL, "+q", member->client->name);
+				udb_channel_do_mode(channel, NULL, "+q", member->client->name);
 		} else if (check_channel_access_member(member, "q"))
 		{
 			/* UDB owns founder +q, so a profile replacement has one owner only. */
-			set_channel_mode(channel, NULL, "-q", member->client->name);
+			udb_channel_do_mode(channel, NULL, "-q", member->client->name);
 		}
 	}
 }
@@ -4394,7 +4626,7 @@ static void udb_channel_revoke_udb_admins(Channel *channel)
 		if (!moddata_member(member, udb_channel_auth_member_md).i)
 			continue;
 		if (check_channel_access_member(member, "a"))
-			set_channel_mode(channel, NULL, "-a", member->client->name);
+			udb_channel_do_mode(channel, NULL, "-a", member->client->name);
 		moddata_member(member, udb_channel_auth_member_md).i = 0;
 	}
 }
@@ -4410,36 +4642,36 @@ static void udb_channel_grant_pending_admin(Client *client, Channel *channel,
 	member = find_member_link(channel->members, client);
 	if (!member || check_channel_access_member(member, "a"))
 		return;
-	set_channel_mode(channel, mtags, "+a", client->name);
+	udb_channel_do_mode(channel, mtags, "+a", client->name);
 	moddata_member(member, udb_channel_auth_member_md).i = 1;
 }
 
 static void udb_channel_clear_topic(Channel *channel)
 {
+	Client *source = udb_service_source(SKEY_CHANSERV);
+
 	safe_free(channel->topic);
 	safe_free(channel->topic_nick);
 	channel->topic_time = 0;
 	if (channel->users > 0)
 	{
-		sendto_channel(channel, &me, NULL, 0, 0, SEND_LOCAL, NULL,
-		               ":%s TOPIC %s :", me.name, channel->name);
+		sendto_channel(channel, source, NULL, 0, 0, SEND_LOCAL, NULL,
+		               ":%s TOPIC %s :", source->name, channel->name);
 	}
 }
 
 static void udb_channel_apply_topic(Channel *channel, UdbRecord *topic_rec)
 {
+	Client *source;
+
 	if (!topic_rec || !topic_rec->data_str)
 		return;
-	if (channel->topic && !strcmp(channel->topic, topic_rec->data_str))
+	source = udb_service_source(SKEY_CHANSERV);
+	if (channel->topic && !strcmp(channel->topic, topic_rec->data_str) &&
+	    channel->topic_nick && !strcmp(channel->topic_nick, source->name))
 		return;
-	safe_strdup(channel->topic, topic_rec->data_str);
-	channel->topic_time = TStime();
-	safe_strdup(channel->topic_nick, udb_get_bot_nick(SKEY_CHANSERV, 0));
-	if (channel->users > 0)
-	{
-		sendto_channel(channel, &me, NULL, 0, 0, SEND_LOCAL, NULL,
-		               ":%s TOPIC %s :%s", me.name, channel->name, channel->topic);
-	}
+	if (set_channel_topic)
+		set_channel_topic(source, channel, NULL, topic_rec->data_str, source->name, TStime());
 }
 
 static void udb_channel_apply_subrecord(UdbContext *ctx, Channel *channel, UdbRecord *chan_rec,
@@ -4629,12 +4861,12 @@ static void handle_join(Client *client, Channel *channel, MessageTag *mtags)
 		/* A registered channel assigns founder authority exclusively as +q. */
 		if (!IsServer(client) && !IsULine(client))
 		{
-			set_channel_mode(channel, mtags, "-o", client->name);
+			udb_channel_do_mode(channel, mtags, "-o", client->name);
 		}
 
 		if (!susp_rec)
 		{
-			set_channel_mode(channel, mtags, "+r", "");
+			udb_channel_do_mode(channel, mtags, "+r", "");
 		}
 
 		udb_channel_apply_subrecord(udb_ctx, channel, chan_rec, CKEY_MODES, 0);
@@ -4906,6 +5138,24 @@ static ModDataInfo *udb_ip_host_md = NULL;
 
 static void udb_ip_restore_host(Client *client, const char *ip_key);
 
+static const char *udb_ip_visible_host(Client *client)
+{
+	if (client && client->user && IsHidden(client) && client->user->virthost)
+		return client->user->virthost;
+	return client && client->user ? client->user->realhost : "";
+}
+
+static void udb_ip_notify_host_change(Client *client, const char *notice)
+{
+	if (!MyUser(client))
+		return;
+	sendto_server(client, 0, 0, NULL, ":%s SETHOST %s", client->id,
+	              udb_ip_visible_host(client));
+	userhost_changed(client);
+	if (notice)
+		udb_send_service_notice(client, SKEY_IPSERV, "%s", notice);
+}
+
 static void udb_ip_host_state_free(ModData *m)
 {
 	UdbIpHostState *state = m->ptr;
@@ -4971,6 +5221,7 @@ static void udb_ip_apply_host(Client *client, const char *ip_key, const char *ho
 	strlcpy(client->user->realhost, host, sizeof(client->user->realhost));
 	strlcpy(client->user->cloakedhost, host, sizeof(client->user->cloakedhost));
 	safe_strdup(client->user->virthost, host);
+	client->umodes |= UMODE_HIDE | UMODE_SETHOST;
 }
 
 static void udb_ip_restore_host(Client *client, const char *ip_key)
@@ -4993,7 +5244,8 @@ static const char *udb_ip_explicit_vhost(Client *client)
 	UdbRecord *nick_rec;
 	UdbRecord *vhost_rec;
 
-	if (!client || !client->user || !udb_ctx || !udb_ctx->nicks)
+	if (!client || !client->user || !has_user_mode(client, 'r') ||
+	    !udb_ctx || !udb_ctx->nicks)
 		return NULL;
 	nick_rec = udb_record_find(udb_ctx, client->name, udb_ctx->nicks);
 	if (!nick_rec && strcmp(client->user->account, "*"))
@@ -5026,6 +5278,55 @@ static int udb_ip_derive_vhost(Client *client, char *host, size_t hostlen)
 	return 1;
 }
 
+static int udb_ip_reapply_vhost(Client *client)
+{
+	UdbIpHostState *state;
+	UdbRecord *ip_rec;
+	UdbRecord *host_rec;
+	char host[HOSTLEN + 1];
+	char notice[HOSTLEN + 96];
+
+	if (!client || !MyUser(client) || !udb_ip_host_md)
+		return 0;
+	state = moddata_local_client(client, udb_ip_host_md).ptr;
+	if (!state)
+	{
+		if (!udb_ip_derive_vhost(client, host, sizeof(host)))
+			return 0;
+		userhost_save_current(client);
+		udb_ip_save_host_state(client, client->ip);
+		state = moddata_local_client(client, udb_ip_host_md).ptr;
+		safe_strdup(client->user->virthost, host);
+		client->umodes |= UMODE_HIDE | UMODE_SETHOST;
+		state->derived_vhost = 1;
+		snprintf(notice, sizeof(notice), "*** Your IP-derived vhost has been restored: %s", host);
+		udb_ip_notify_host_change(client, notice);
+		return 1;
+	}
+	if (state->derived_vhost)
+	{
+		if (!udb_ip_derive_vhost(client, host, sizeof(host)))
+			return 0;
+		userhost_save_current(client);
+		safe_strdup(client->user->virthost, host);
+		client->umodes |= UMODE_HIDE | UMODE_SETHOST;
+		snprintf(notice, sizeof(notice), "*** Your IP-derived vhost has been restored: %s", host);
+		udb_ip_notify_host_change(client, notice);
+		return 1;
+	}
+
+	ip_rec = udb_hash_find(udb_ctx, udb_block_letter_to_index('I'), state->key);
+	host_rec = ip_rec ? udb_record_find(udb_ctx, IKEY_HOST, ip_rec) : NULL;
+	if (!host_rec || !host_rec->data_str || !*host_rec->data_str)
+		return 0;
+	userhost_save_current(client);
+	udb_ip_apply_host(client, state->key, host_rec->data_str);
+	snprintf(notice, sizeof(notice), "*** Your explicit IP vhost has been restored: %s",
+	         host_rec->data_str);
+	udb_ip_notify_host_change(client, notice);
+	return 1;
+}
+
 static void udb_ip_refresh_derived_hosts(void)
 {
 	Client *client;
@@ -5044,11 +5345,18 @@ static void udb_ip_refresh_derived_hosts(void)
 		explicit_vhost = udb_ip_explicit_vhost(client);
 		if (explicit_vhost)
 		{
-			/* A nick vhost supersedes a derived vhost without restoring over it. */
-			if (state && state->derived_vhost)
+			/* A nick vhost supersedes a derived vhost without restoring over it.
+			 * Keep the original state so removing the nick vhost can restore the
+			 * derived vhost instead of losing the precedence relationship. */
+			if ((!state || state->derived_vhost) &&
+			    strcmp(udb_ip_visible_host(client), explicit_vhost))
 			{
-				udb_ip_host_state_free(&moddata_local_client(client, udb_ip_host_md));
-				moddata_local_client(client, udb_ip_host_md).ptr = NULL;
+				char notice[HOSTLEN + 96];
+				userhost_save_current(client);
+				safe_strdup(client->user->virthost, explicit_vhost);
+				client->umodes |= UMODE_HIDE | UMODE_SETHOST;
+				snprintf(notice, sizeof(notice), "*** Your vhost is now %s", explicit_vhost);
+				udb_ip_notify_host_change(client, notice);
 			}
 			continue;
 		}
@@ -5058,7 +5366,7 @@ static void udb_ip_refresh_derived_hosts(void)
 			{
 				userhost_save_current(client);
 				udb_ip_restore_host(client, state->key);
-				userhost_changed(client);
+				udb_ip_notify_host_change(client, "*** Your IP-derived vhost has been removed");
 			}
 			continue;
 		}
@@ -5072,8 +5380,11 @@ static void udb_ip_refresh_derived_hosts(void)
 		safe_strdup(client->user->virthost, host);
 		client->umodes |= UMODE_HIDE | UMODE_SETHOST;
 		state->derived_vhost = 1;
-		sendto_server(client, 0, 0, NULL, ":%s SETHOST %s", client->id, host);
-		userhost_changed(client);
+		{
+			char notice[HOSTLEN + 96];
+			snprintf(notice, sizeof(notice), "*** Your IP-derived vhost is now %s", host);
+			udb_ip_notify_host_change(client, notice);
+		}
 	}
 }
 
@@ -5083,12 +5394,30 @@ static void udb_ip_reconcile_host(const char *ip_key, const char *host)
 
 	list_for_each_entry(client, &lclient_list, lclient_node)
 	{
+		char oldhost[HOSTLEN + 1];
+		char notice[HOSTLEN + 96];
+
 		if (!udb_ip_client_matches(client, ip_key))
 			continue;
+		strlcpy(oldhost, udb_ip_visible_host(client), sizeof(oldhost));
 		if (host)
+		{
+			if (MyUser(client))
+				userhost_save_current(client);
 			udb_ip_apply_host(client, ip_key, host);
-		else
+			if (MyUser(client) && strcmp(oldhost, udb_ip_visible_host(client)))
+			{
+				snprintf(notice, sizeof(notice), "*** Your explicit IP vhost is now %s", host);
+				udb_ip_notify_host_change(client, notice);
+			}
+		} else
+		{
+			if (MyUser(client))
+				userhost_save_current(client);
 			udb_ip_restore_host(client, ip_key);
+			if (MyUser(client) && strcmp(oldhost, udb_ip_visible_host(client)))
+				udb_ip_notify_host_change(client, "*** Your explicit IP vhost has been removed");
+		}
 	}
 }
 
@@ -5132,6 +5461,7 @@ static void udb_ip_remove_record(const char *ip_key, UdbRecord *ip_rec, const ch
 	} else if (!strcmp(subkey, IKEY_HOST))
 	{
 		udb_ip_reconcile_host(ip_key, NULL);
+		udb_ip_refresh_derived_hosts();
 	}
 }
 

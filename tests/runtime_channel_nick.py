@@ -311,6 +311,10 @@ def main():
                 "malformed and overlong persisted UDB paths were not rejected with warnings")
         print("PASS: malformed and overlong persisted UDB paths were skipped without aborting the block load")
         exercise("127.0.0.1", port)
+        require(wait_for_log(lambda path: "No connected ULine user matches" in
+                             path.read_text(errors="replace"), log, args.timeout),
+                "missing service clients did not produce a safe UDB source fallback log")
+        print("PASS: missing service clients used the local server source and logged the fallback")
         return 0
     except EnvironmentUnavailable as exc:
         return skip(f"bwrap cannot create the required mount namespace: {exc}")
