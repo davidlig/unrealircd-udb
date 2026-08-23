@@ -164,7 +164,8 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 		 * an identical INS must not churn channel modes nor revoke +q ranks. */
 		if (old_rec && !unchanged)
 		{
-			if (block->letter != 'C' || old_rec->parent == block->tree || strcmp(old_rec->key, CKEY_MODES))
+			if (block->letter != 'C' || old_rec->parent == block->tree ||
+			    (strcmp(old_rec->key, CKEY_MODES) && strcmp(old_rec->key, CKEY_TOPIC)))
 				udb_remove_special_record(ctx, block, old_rec);
 		}
 		udb_block_replace_tree(ctx, block, tree, udb_record_count_tree(tree));

@@ -508,10 +508,9 @@ static void udb_channel_apply_topic(Channel *channel, UdbRecord *topic_rec)
 
 	if (!topic_rec || !topic_rec->data_str)
 		return;
-	source = udb_service_source(SKEY_CHANSERV);
-	if (channel->topic && !strcmp(channel->topic, topic_rec->data_str) &&
-	    channel->topic_nick && !strcmp(channel->topic_nick, source->name))
+	if (channel->topic && !strcmp(channel->topic, topic_rec->data_str))
 		return;
+	source = udb_service_source(SKEY_CHANSERV);
 	if (set_channel_topic)
 		set_channel_topic(source, channel, NULL, topic_rec->data_str, source->name, TStime());
 }
