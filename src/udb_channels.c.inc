@@ -790,7 +790,7 @@ static int udb_channel_blocks_ban_removal(Client *client, Channel *channel,
 			UdbBanOwner *owner = udb_channel_ban_owner_find(channel, ban);
 			if (owner && strcasecmp(owner->owner, client->name))
 			{
-				sendnotice(client, "You may not remove the UDB-protected ban %s", ban);
+				udb_send_service_notice(client, SKEY_CHANSERV, "You may not remove the UDB-protected ban %s", ban);
 				return 1;
 			}
 		}
@@ -826,7 +826,7 @@ CMD_OVERRIDE_FUNC(udb_override_invite)
 	}
 	if (!MyUser(target))
 	{
-		sendnotice(client, "Password INVITE requires a local target");
+		udb_send_service_notice(client, SKEY_CHANSERV, "Password INVITE requires a local target");
 		return;
 	}
 	if (!udb_check_password(parv[3], chan_rec, client))
@@ -866,13 +866,13 @@ CMD_OVERRIDE_FUNC(udb_override_mode)
 	if (udb_channel_is_mlock(udb_ctx, chan_rec) &&
 	    udb_channel_mode_has_change(parv[2]))
 	{
-		sendnotice(client, "You do not have permission to change modes in %s (locked by UDB mlock)", channel->name);
+		udb_send_service_notice(client, SKEY_CHANSERV, "You do not have permission to change modes in %s (locked by UDB mlock)", channel->name);
 		return;
 	}
 	if (options_rec && (options_rec->data_num & UDB_CHOPT_LOCK_MODES) &&
 	    udb_channel_mode_has_change(parv[2]) && !is_founder)
 	{
-		sendnotice(client, "You do not have permission to change modes in %s (locked by UDB)", channel->name);
+		udb_send_service_notice(client, SKEY_CHANSERV, "You do not have permission to change modes in %s (locked by UDB)", channel->name);
 		return;
 	}
 	protect_bans = options_rec && (options_rec->data_num & UDB_CHOPT_PROTECT_BANS);
@@ -895,6 +895,46 @@ CMD_OVERRIDE_FUNC(udb_override_mode)
 		udb_channel_ban_owners_prune(channel);
 }
 
+CMD_OVERRIDE_FUNC(udb_override_topic)
+{
+	Channel *channel;
+	UdbRecord *chan_rec;
+
+	if (!MyUser(client) || parc < 2 || !IsChannelName(parv[1]))
+	{
+		CALL_NEXT_COMMAND_OVERRIDE();
+		return;
+	}
+	if (parc < 3 || BadPtr(parv[2]))
+	{
+		CALL_NEXT_COMMAND_OVERRIDE();
+		return;
+	}
+	channel = find_channel(parv[1]);
+	chan_rec = (channel && udb_ctx && udb_ctx->channels) ? udb_record_find(udb_ctx, channel->name, udb_ctx->channels) : NULL;
+	if (!chan_rec)
+	{
+		CALL_NEXT_COMMAND_OVERRIDE();
+		return;
+	}
+	if (udb_channel_is_topiclock(udb_ctx, chan_rec))
+	{
+		udb_send_service_notice(client, SKEY_CHANSERV, "You do not have permission to change the topic in %s (locked by UDB topiclock)", channel->name);
+		return;
+	}
+	UdbRecord *topic_rec = udb_record_find(udb_ctx, CKEY_TOPIC, chan_rec);
+	if (topic_rec)
+	{
+		int is_founder = udb_channel_is_identified_founder(client, chan_rec);
+		if (!is_founder)
+		{
+			sendnumeric(client, ERR_CHANOPRIVSNEEDED, channel->name);
+			return;
+		}
+	}
+	CALL_NEXT_COMMAND_OVERRIDE();
+}
+
 static const char *udb_hook_pre_topic(Client *client, Channel *channel, const char *topic)
 {
 	if (IsServer(client))
@@ -906,7 +946,7 @@ static const char *udb_hook_pre_topic(Client *client, Channel *channel, const ch
 
 	if (udb_channel_is_topiclock(udb_ctx, chan_rec))
 	{
-		sendnotice(client, "You do not have permission to change the topic in %s (locked by UDB topiclock)", channel->name);
+		udb_send_service_notice(client, SKEY_CHANSERV, "You do not have permission to change the topic in %s (locked by UDB topiclock)", channel->name);
 		return NULL;
 	}
 
@@ -968,5 +1008,6 @@ static int udb_channels_load(ModuleInfo *modinfo)
 	CommandOverrideAdd(modinfo->handle, "INVITE", 0, udb_override_invite);
 	CommandOverrideAdd(modinfo->handle, "MODE", 0, udb_override_mode);
 	CommandOverrideAdd(modinfo->handle, "SAMODE", 0, udb_override_mode);
+	CommandOverrideAdd(modinfo->handle, "TOPIC", 0, udb_override_topic);
 	return 0;
 }

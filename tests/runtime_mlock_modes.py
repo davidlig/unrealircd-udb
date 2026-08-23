@@ -301,20 +301,29 @@ def exercise(host, client_port, server_port):
         # mlock is active (*1). Neither founder nor non-founder can change modes.
         start = len(bob.lines)
         bob.send(f"MODE {CHANNEL} +s")
-        bob.wait_for(lambda line: "locked by UDB mlock" in line, "bloqueo de modo por mlock (bob)")
-        print("PASS: mlock bloqueó cambio de modo de usuario normal")
+        bob.wait_for(lambda line: "locked by UDB mlock" in line and (line.startswith(":ChanServ") or "ChanServ" in line),
+                     "bloqueo de modo por mlock (bob) con origen ChanServ")
+        print("PASS: mlock bloqueó cambio de modo de usuario normal vía ChanServ")
 
         start = len(alice.lines)
         alice.send(f"MODE {CHANNEL} +s")
-        alice.wait_for(lambda line: "locked by UDB mlock" in line, "bloqueo de modo por mlock (fundador)")
-        print("PASS: mlock bloqueó cambio de modo del fundador")
+        alice.wait_for(lambda line: "locked by UDB mlock" in line and (line.startswith(":ChanServ") or "ChanServ" in line),
+                       "bloqueo de modo por mlock (fundador) con origen ChanServ")
+        print("PASS: mlock bloqueó cambio de modo del fundador vía ChanServ")
 
         # 3. topiclock test:
-        # topiclock is active (*1). Founder (+q) cannot change topic.
+        # topiclock is active (*1). Neither founder nor non-founder can change topic.
+        start = len(bob.lines)
+        bob.send(f"TOPIC {CHANNEL} :New topic by bob")
+        bob.wait_for(lambda line: "locked by UDB topiclock" in line and (line.startswith(":ChanServ") or "ChanServ" in line),
+                     "bloqueo de topic por topiclock (bob) con origen ChanServ")
+        print("PASS: topiclock bloqueó cambio de topic de bob vía ChanServ")
+
         start = len(alice.lines)
         alice.send(f"TOPIC {CHANNEL} :New topic by alice")
-        alice.wait_for(lambda line: "locked by UDB topiclock" in line, "bloqueo de topic por topiclock (fundador)")
-        print("PASS: topiclock bloqueó cambio de topic del fundador")
+        alice.wait_for(lambda line: "locked by UDB topiclock" in line and (line.startswith(":ChanServ") or "ChanServ" in line),
+                       "bloqueo de topic por topiclock (fundador) con origen ChanServ")
+        print("PASS: topiclock bloqueó cambio de topic del fundador vía ChanServ")
 
         # 4. Unlock mlock (*0) and topiclock (*0) via propagator:
         services.send_ins(f"C::{CHANNEL}::mlock", "*0")
