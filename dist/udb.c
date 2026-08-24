@@ -2652,19 +2652,27 @@ static void udb_sync_send_stage(Client *server, UdbBlock *block)
 EVENT(udb_sync_timeout_event)
 {
 	UdbBlock *block;
-	UdbHelloPeer *peer;
+	UdbHelloPeer *peer, *next;
 	time_t now = time(NULL);
 
 	for (block = udb_ctx ? udb_ctx->block_list : NULL; block; block = block->next)
 		if (block->session && block->session->deadline <= now)
 			udb_sync_abort(block, "timeout");
-	for (peer = udb_hello_peers; peer; peer = peer->next)
+	for (peer = udb_hello_peers; peer; peer = next)
+	{
+		next = peer->next;
 		if (peer->state == UDB_HEL_WAITING && peer->deadline <= now)
 		{
+			Client *c = peer->peer;
 			peer->state = UDB_HEL_UNSUPPORTED;
-			udb_log(ULOG_INFO, "UDB_HEL_TIMEOUT", peer->peer,
-			        "No UDB HEL 4 acknowledgement from directly linked server; capability disabled for this link");
+			udb_log(ULOG_ERROR, "UDB_HEL_TIMEOUT", c,
+			        "No UDB HEL 4 acknowledgement from directly linked server; link aborted");
+			if (c)
+			{
+				exit_client_fmt(c, NULL, "Link aborted: server does not support UDB protocol (HEL timeout)");
+			}
 		}
+	}
 }
 
 static void udb_sync_server_quit(Client *client)

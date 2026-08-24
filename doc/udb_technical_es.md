@@ -163,6 +163,12 @@ como propagador configurado. Esto permite propagación A-a-B-a-C local por
 enlace cuando B selecciona A y C selecciona B. Las mutaciones en caliente deben
 proceder igualmente del `udb::propagator` configurado; un peer que sirve una
 sincronización autorizada solo puede enviar registros de ese bloque.
+
+Para garantizar la integridad y coherencia de los datos en toda la red, se recomienda
+configurar el bloque `require module { name "third/udb"; };` en `unrealircd.conf`. Esto
+hace que el servidor aborte de forma inmediata (`SQUIT`) cualquier intento de enlace
+con un nodo que no tenga UDB activo durante el handshake inicial `SMOD`.
+
 **Estructura general:**
 `:<sid_origen> DB <destino> <subcomando> <parametros>`
 
@@ -174,7 +180,8 @@ el orden de inserción no lo afectan. Tras `HOOKTYPE_SERVER_SYNC`, cada peer
 directamente enlazado recibe una petición `HEL 4 <propagador-seleccionado>`. Solo el `HEL 4 ACK` directo
 correspondiente confirma UDB V4 para ese enlace; antes no se envían `INF`, frames
 staged ni frames DB UDB reenviados. Si no llega el acuse en 60 segundos, el enlace
-queda marcado como no compatible hasta reconectar. `HEL` es el único frame DB
+se aborta automáticamente mediante `SQUIT` para proteger la red de desincronizaciones.
+`HEL` es el único frame DB
 aceptado antes de confirmar y nunca se reenvía fuera del enlace directo.
 
 **HEL (Negociación de capacidad):**

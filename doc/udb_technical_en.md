@@ -174,6 +174,12 @@ permits edge-local A-to-B-to-C propagation when B selects A and C selects B.
 Real-time mutations must likewise originate from the configured
 `udb::propagator`; a peer that is actively serving an authorized block
 synchronization may only send records for that block.
+
+To guarantee network-wide data integrity and consistency, configuring
+`require module { name "third/udb"; };` in `unrealircd.conf` is strongly recommended.
+This ensures that the server immediately aborts (`SQUIT`) any link attempt from
+a node lacking UDB during the initial `SMOD` handshake.
+
 **General structure:**
 `:<source_sid> DB <target> <subcommand> <parameters>`
 
@@ -184,8 +190,8 @@ so save timestamps, comment headers, and sibling insertion order do not affect
 it. After `HOOKTYPE_SERVER_SYNC`, each directly linked peer receives one
 `HEL 4 <selected-propagator>` request. Only the matching direct `HEL 4 ACK` confirms UDB V4 for that
 link; no `INF`, staged frame, or forwarded UDB DB frame is sent first. A missing
-acknowledgement times out after 60 seconds and marks that link unsupported until
-it reconnects. `HEL` is the only DB frame accepted before confirmation and is
+acknowledgement times out after 60 seconds and automatically aborts the link with `SQUIT`.
+`HEL` is the only DB frame accepted before confirmation and is
 never routed beyond the direct link.
 
 **HEL (Capability Negotiation):**

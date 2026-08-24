@@ -86,12 +86,24 @@ Add the module loading directive and the `udb` configuration block to your `conf
 ```conf
 loadmodule "third/udb";
 
+// Recommended for instant fail-fast rejection during initial server connect:
+require module {
+    name "third/udb";
+};
+
 udb {
     propagator "ares-services.yournetwork.net";
     // Optional: UDB stores udb_N.db, udb_C.db, etc. in this directory.
     database-directory "/var/lib/unrealircd/udb";
 };
 ```
+
+`require module { name "third/udb"; };` ensures that any server attempting to link
+into the network without the UDB module loaded is immediately rejected at the
+connection handshake, protecting the network from database desynchronization.
+Additionally, UDB's native S2S protocol strictly enforces that directly linked
+peers complete the `DB HEL 4` capability negotiation within the synchronization
+timeout, automatically aborting the link (`SQUIT`) if UDB capability is missing.
 
 `database-directory` accepts a local absolute path or a path relative to
 UnrealIRCd's permanent data directory. UDB creates the final directory if it
