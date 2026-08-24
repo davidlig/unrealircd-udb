@@ -44,7 +44,7 @@
 #define NKEY_VHOST     "vhost"     /* Virtual host */
 #define NKEY_FORBID    "forbid"    /* Forbidden nick (value = reason) */
 #define NKEY_SUSPENDED "suspended" /* Suspended nick (value = reason) */
-#define NKEY_OPER      "oper"      /* Oper level bitmask (*N) */
+#define NKEY_OPER      "oper"      /* Operclass name string (e.g. "locop", "netadmin-with-override") */
 #define NKEY_CHALLENGE "challenge" /* Password hash method */
 #define NKEY_MODES     "modes"     /* Allowed oper modes */
 #define NKEY_SNOMASKS  "snomasks"  /* Allowed snomasks */
@@ -111,12 +111,6 @@
 /* SHA-256 is deliberately handled by UDB, not Auth_Check(). */
 #define UDB_AUTHTYPE_SHA256 1001
 
-/* ========================================================================
- * Oper Levels (bitmask stored in N::<nick>::oper *<value>)
- * ======================================================================== */
-#define UDB_OPER_HELPER 0x1 /* Pre-operator: receives +h automatically */
-#define UDB_OPER_ADMIN  0x2 /* Admin: receives +oa */
-#define UDB_OPER_ROOT   0x4 /* Root: receives +oN, can /rehash /restart */
 
 /* ========================================================================
  * Channel Option Flags (bitmask in C::<#chan>::options *<value>)

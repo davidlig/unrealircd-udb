@@ -124,34 +124,30 @@ static void udb_nick_remove_vhost(Client *client)
 
 static void udb_nick_grant_oper(Client *client, UdbRecord *nick_rec, UdbRecord *oper_rec)
 {
-	if (!oper_rec)
+	if (!client || !oper_rec)
 		return;
 
-	unsigned long level = oper_rec->data_num;
-	const char *operclass = NULL;
+	const char *operclass = oper_rec->data_str;
+	if (BadPtr(operclass))
+		return;
 
-	if (level & UDB_OPER_ROOT)
+	if (!find_operclass(operclass))
 	{
-		operclass = "netadmin";
-	} else if (level & UDB_OPER_ADMIN)
-	{
-		operclass = "admin";
-	} else if (level & UDB_OPER_HELPER)
-	{
-		operclass = "locop";
+		unreal_log(ULOG_WARNING, "udb", "UDB_OPERCLASS_NOT_FOUND", client,
+		           "UDB: operclass '$operclass' for $client.details does not exist in unrealircd.conf",
+		           log_data_string("operclass", operclass));
+		return;
 	}
 
-	if (operclass)
+	if (IsOper(client))
 	{
-		if (IsOper(client))
-		{
-			const char *curr_class = get_operclass(client);
-			if (curr_class && !strcmp(curr_class, operclass))
-				return;
-			udb_nick_revoke_oper(client);
-		}
-		make_oper(client, "UDB", operclass, NULL, UMODE_OPER, NULL, NULL, NULL);
+		const char *curr_class = get_operclass(client);
+		if (curr_class && !strcmp(curr_class, operclass))
+			return;
+		udb_nick_revoke_oper(client);
 	}
+
+	make_oper(client, "UDB", operclass, NULL, 0, NULL, NULL, NULL);
 }
 
 static void udb_nick_revoke_oper(Client *client)
@@ -195,9 +191,23 @@ static void udb_nick_set_swhois(Client *client, UdbRecord *nick_rec, UdbRecord *
 
 static void udb_nick_set_snomasks(Client *client, UdbRecord *nick_rec, UdbRecord *snomask_rec)
 {
-	if (!snomask_rec || !snomask_rec->data_str)
+	if (!client || !client->user || !snomask_rec || !snomask_rec->data_str)
 		return;
+
+	long old_umodes = client->umodes & ALL_UMODES;
 	set_snomask(client, snomask_rec->data_str);
+
+	if (client->user->snomask && *client->user->snomask)
+	{
+		client->umodes |= UMODE_SERVNOTICE;
+		if (MyUser(client))
+			sendnumeric(client, RPL_SNOMASK, client->user->snomask);
+	} else
+	{
+		client->umodes &= ~UMODE_SERVNOTICE;
+	}
+
+	send_umode_out(client, 1, old_umodes);
 }
 
 static void udb_nick_force_rename(Client *client, const char *nick_in_db)
@@ -350,13 +360,30 @@ static void udb_nick_remove_record(UdbBlock *block, UdbRecord *rec)
 			} else if (!strcmp(rec->key, NKEY_MODES))
 			{
 				long old_umodes = client->umodes & ALL_UMODES;
-				UdbRecord *mode_rec = udb_record_find(udb_ctx, NKEY_MODES, nick_rec);
-				if (mode_rec && mode_rec->data_str)
-					client->umodes &= ~(set_usermode(mode_rec->data_str) & ~UMODE_OPER);
+				if (rec->data_str)
+					client->umodes &= ~(set_usermode(rec->data_str) & ~UMODE_OPER);
+				UdbRecord *oper_rec = udb_record_find(udb_ctx, NKEY_OPER, nick_rec);
+				if (oper_rec && IsOper(client))
+					client->umodes |= OPER_MODES;
 				send_umode_out(client, 1, old_umodes);
 			} else if (!strcmp(rec->key, NKEY_SNOMASKS))
 			{
+				long old_umodes = client->umodes & ALL_UMODES;
 				set_snomask(client, NULL);
+				UdbRecord *oper_rec = udb_record_find(udb_ctx, NKEY_OPER, nick_rec);
+				if (oper_rec && IsOper(client))
+				{
+					set_snomask(client, OPER_SNOMASK);
+					if (client->user->snomask && *client->user->snomask)
+					{
+						client->umodes |= UMODE_SERVNOTICE;
+						sendnumeric(client, RPL_SNOMASK, client->user->snomask);
+					}
+				} else
+				{
+					client->umodes &= ~UMODE_SERVNOTICE;
+				}
+				send_umode_out(client, 1, old_umodes);
 			} else if (!strcmp(rec->key, NKEY_SUSPENDED))
 			{
 				long old_umodes = client->umodes & ALL_UMODES;

@@ -82,6 +82,76 @@ static int udb_channel_modes_record_valid(const char *value)
 	return expected_params == actual_params;
 }
 
+static int udb_user_mode_letter_valid(char c)
+{
+	Umode *um;
+	if (c == 'o') /* +o is strictly forbidden in N::modes */
+		return 0;
+	if (!isalpha((unsigned char)c))
+		return 0;
+	if (!usermodes)
+		return 1;
+	for (um = usermodes; um; um = um->next)
+	{
+		if (um->letter == c)
+			return 1;
+	}
+	return 0;
+}
+
+static int udb_user_modes_record_valid(const char *value)
+{
+	const char *c;
+	int letters = 0;
+
+	if (!value || !*value || strlen(value) > 64)
+		return 0;
+
+	for (c = value; *c; c++)
+	{
+		if (*c == '+' || *c == '-')
+			continue;
+		if (!udb_user_mode_letter_valid(*c))
+			return 0;
+		letters++;
+	}
+
+	return letters > 0;
+}
+
+static int udb_snomasks_record_valid(const char *value)
+{
+	const char *c;
+	int letters = 0;
+
+	if (!value || !*value || strlen(value) > 64)
+		return 0;
+
+	for (c = value; *c; c++)
+	{
+		if (*c == '+' || *c == '-')
+			continue;
+		if (!isalpha((unsigned char)*c))
+			return 0;
+		letters++;
+	}
+
+	return letters > 0;
+}
+
+static int udb_oper_record_valid(const char *value)
+{
+	const char *c;
+	if (!value || !*value || strlen(value) > 64)
+		return 0;
+	for (c = value; *c; c++)
+	{
+		if (!isalnum((unsigned char)*c) && *c != '_' && *c != '-')
+			return 0;
+	}
+	return 1;
+}
+
 static int udb_record_validate(UdbBlock *block, const char *path,
                               const char *value)
 {
@@ -113,6 +183,15 @@ static int udb_record_validate(UdbBlock *block, const char *path,
 					return 0;
 			return 1;
 		}
+	}
+	if (block->letter == 'N')
+	{
+		if (!strcasecmp(leaf, NKEY_MODES))
+			return udb_user_modes_record_valid(value);
+		if (!strcasecmp(leaf, NKEY_SNOMASKS))
+			return udb_snomasks_record_valid(value);
+		if (!strcasecmp(leaf, NKEY_OPER))
+			return udb_oper_record_valid(value);
 	}
 	if (block->letter == 'C')
 	{

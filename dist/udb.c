@@ -80,7 +80,7 @@ module
   #define NKEY_VHOST     "vhost"     /* Virtual host */
   #define NKEY_FORBID    "forbid"    /* Forbidden nick (value = reason) */
   #define NKEY_SUSPENDED "suspended" /* Suspended nick (value = reason) */
-  #define NKEY_OPER      "oper"      /* Oper level bitmask (*N) */
+  #define NKEY_OPER      "oper"      /* Operclass name string (e.g. "locop", "netadmin-with-override") */
   #define NKEY_CHALLENGE "challenge" /* Password hash method */
   #define NKEY_MODES     "modes"     /* Allowed oper modes */
   #define NKEY_SNOMASKS  "snomasks"  /* Allowed snomasks */
@@ -147,12 +147,6 @@ module
   /* SHA-256 is deliberately handled by UDB, not Auth_Check(). */
   #define UDB_AUTHTYPE_SHA256 1001
 
-  /* ========================================================================
- * Oper Levels (bitmask stored in N::<nick>::oper *<value>)
- * ======================================================================== */
-  #define UDB_OPER_HELPER 0x1 /* Pre-operator: receives +h automatically */
-  #define UDB_OPER_ADMIN  0x2 /* Admin: receives +oa */
-  #define UDB_OPER_ROOT   0x4 /* Root: receives +oN, can /rehash /restart */
 
   /* ========================================================================
  * Channel Option Flags (bitmask in C::<#chan>::options *<value>)
@@ -1397,6 +1391,76 @@ static int udb_channel_modes_record_valid(const char *value)
 	return expected_params == actual_params;
 }
 
+static int udb_user_mode_letter_valid(char c)
+{
+	Umode *um;
+	if (c == 'o') /* +o is strictly forbidden in N::modes */
+		return 0;
+	if (!isalpha((unsigned char)c))
+		return 0;
+	if (!usermodes)
+		return 1;
+	for (um = usermodes; um; um = um->next)
+	{
+		if (um->letter == c)
+			return 1;
+	}
+	return 0;
+}
+
+static int udb_user_modes_record_valid(const char *value)
+{
+	const char *c;
+	int letters = 0;
+
+	if (!value || !*value || strlen(value) > 64)
+		return 0;
+
+	for (c = value; *c; c++)
+	{
+		if (*c == '+' || *c == '-')
+			continue;
+		if (!udb_user_mode_letter_valid(*c))
+			return 0;
+		letters++;
+	}
+
+	return letters > 0;
+}
+
+static int udb_snomasks_record_valid(const char *value)
+{
+	const char *c;
+	int letters = 0;
+
+	if (!value || !*value || strlen(value) > 64)
+		return 0;
+
+	for (c = value; *c; c++)
+	{
+		if (*c == '+' || *c == '-')
+			continue;
+		if (!isalpha((unsigned char)*c))
+			return 0;
+		letters++;
+	}
+
+	return letters > 0;
+}
+
+static int udb_oper_record_valid(const char *value)
+{
+	const char *c;
+	if (!value || !*value || strlen(value) > 64)
+		return 0;
+	for (c = value; *c; c++)
+	{
+		if (!isalnum((unsigned char)*c) && *c != '_' && *c != '-')
+			return 0;
+	}
+	return 1;
+}
+
 static int udb_record_validate(UdbBlock *block, const char *path,
                                const char *value)
 {
@@ -1428,6 +1492,15 @@ static int udb_record_validate(UdbBlock *block, const char *path,
 					return 0;
 			return 1;
 		}
+	}
+	if (block->letter == 'N')
+	{
+		if (!strcasecmp(leaf, NKEY_MODES))
+			return udb_user_modes_record_valid(value);
+		if (!strcasecmp(leaf, NKEY_SNOMASKS))
+			return udb_snomasks_record_valid(value);
+		if (!strcasecmp(leaf, NKEY_OPER))
+			return udb_oper_record_valid(value);
 	}
 	if (block->letter == 'C')
 	{
@@ -3522,34 +3595,30 @@ static void udb_nick_remove_vhost(Client *client)
 
 static void udb_nick_grant_oper(Client *client, UdbRecord *nick_rec, UdbRecord *oper_rec)
 {
-	if (!oper_rec)
+	if (!client || !oper_rec)
 		return;
 
-	unsigned long level = oper_rec->data_num;
-	const char *operclass = NULL;
+	const char *operclass = oper_rec->data_str;
+	if (BadPtr(operclass))
+		return;
 
-	if (level & UDB_OPER_ROOT)
+	if (!find_operclass(operclass))
 	{
-		operclass = "netadmin";
-	} else if (level & UDB_OPER_ADMIN)
-	{
-		operclass = "admin";
-	} else if (level & UDB_OPER_HELPER)
-	{
-		operclass = "locop";
+		unreal_log(ULOG_WARNING, "udb", "UDB_OPERCLASS_NOT_FOUND", client,
+		           "UDB: operclass '$operclass' for $client.details does not exist in unrealircd.conf",
+		           log_data_string("operclass", operclass));
+		return;
 	}
 
-	if (operclass)
+	if (IsOper(client))
 	{
-		if (IsOper(client))
-		{
-			const char *curr_class = get_operclass(client);
-			if (curr_class && !strcmp(curr_class, operclass))
-				return;
-			udb_nick_revoke_oper(client);
-		}
-		make_oper(client, "UDB", operclass, NULL, UMODE_OPER, NULL, NULL, NULL);
+		const char *curr_class = get_operclass(client);
+		if (curr_class && !strcmp(curr_class, operclass))
+			return;
+		udb_nick_revoke_oper(client);
 	}
+
+	make_oper(client, "UDB", operclass, NULL, 0, NULL, NULL, NULL);
 }
 
 static void udb_nick_revoke_oper(Client *client)
@@ -3593,9 +3662,23 @@ static void udb_nick_set_swhois(Client *client, UdbRecord *nick_rec, UdbRecord *
 
 static void udb_nick_set_snomasks(Client *client, UdbRecord *nick_rec, UdbRecord *snomask_rec)
 {
-	if (!snomask_rec || !snomask_rec->data_str)
+	if (!client || !client->user || !snomask_rec || !snomask_rec->data_str)
 		return;
+
+	long old_umodes = client->umodes & ALL_UMODES;
 	set_snomask(client, snomask_rec->data_str);
+
+	if (client->user->snomask && *client->user->snomask)
+	{
+		client->umodes |= UMODE_SERVNOTICE;
+		if (MyUser(client))
+			sendnumeric(client, RPL_SNOMASK, client->user->snomask);
+	} else
+	{
+		client->umodes &= ~UMODE_SERVNOTICE;
+	}
+
+	send_umode_out(client, 1, old_umodes);
 }
 
 static void udb_nick_force_rename(Client *client, const char *nick_in_db)
@@ -3748,13 +3831,30 @@ static void udb_nick_remove_record(UdbBlock *block, UdbRecord *rec)
 			} else if (!strcmp(rec->key, NKEY_MODES))
 			{
 				long old_umodes = client->umodes & ALL_UMODES;
-				UdbRecord *mode_rec = udb_record_find(udb_ctx, NKEY_MODES, nick_rec);
-				if (mode_rec && mode_rec->data_str)
-					client->umodes &= ~(set_usermode(mode_rec->data_str) & ~UMODE_OPER);
+				if (rec->data_str)
+					client->umodes &= ~(set_usermode(rec->data_str) & ~UMODE_OPER);
+				UdbRecord *oper_rec = udb_record_find(udb_ctx, NKEY_OPER, nick_rec);
+				if (oper_rec && IsOper(client))
+					client->umodes |= OPER_MODES;
 				send_umode_out(client, 1, old_umodes);
 			} else if (!strcmp(rec->key, NKEY_SNOMASKS))
 			{
+				long old_umodes = client->umodes & ALL_UMODES;
 				set_snomask(client, NULL);
+				UdbRecord *oper_rec = udb_record_find(udb_ctx, NKEY_OPER, nick_rec);
+				if (oper_rec && IsOper(client))
+				{
+					set_snomask(client, OPER_SNOMASK);
+					if (client->user->snomask && *client->user->snomask)
+					{
+						client->umodes |= UMODE_SERVNOTICE;
+						sendnumeric(client, RPL_SNOMASK, client->user->snomask);
+					}
+				} else
+				{
+					client->umodes &= ~UMODE_SERVNOTICE;
+				}
+				send_umode_out(client, 1, old_umodes);
 			} else if (!strcmp(rec->key, NKEY_SUSPENDED))
 			{
 				long old_umodes = client->umodes & ALL_UMODES;

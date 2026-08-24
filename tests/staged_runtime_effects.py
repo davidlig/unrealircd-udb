@@ -45,6 +45,7 @@ def write_config(path, name, sid, client_port, server_port, tls_port, peer, peer
     outgoing = (f'    outgoing {{ bind-ip "127.0.0.1"; hostname "127.0.0.1"; port {peer_port}; '
                 'options { autoconnect; } }\n') if autoconnect else ""
     path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
+include "{RUNTIME_ROOT}/conf/operclass.default.conf";
 include "{RUNTIME_ROOT}/conf/snomasks.default.conf";
 
 me {{
@@ -253,7 +254,7 @@ def main():
         # B starts with an active UDB oper; A's newer snapshot deliberately omits it.
         b_n = b / "data" / "udb_N.db"
         a_n = a / "data" / "udb_N.db"
-        b_n.write_text(f"alice::pass sha256:{sha256('secret')}\nalice::oper *4\n", encoding="ascii")
+        b_n.write_text(f"alice::pass sha256:{sha256('secret')}\nalice::oper netadmin\n", encoding="ascii")
         a_n.write_text(f"alice::pass sha256:{sha256('secret')}\n", encoding="ascii")
         (b / "data" / "udb_K.db").touch()
         (a / "data" / "udb_K.db").write_text(

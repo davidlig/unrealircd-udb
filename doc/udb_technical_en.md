@@ -16,7 +16,7 @@ Disk storage (`udb_X.db`) follows a flat hierarchical structure:
 ; Records: 5
 davidlig::pass sha256:abcd1234efgh
 davidlig::vhost admin.davidlig.net
-davidlig::oper *4
+davidlig::oper netadmin
 ```
 *   Sub-levels are separated by the `::` delimiter.
 *   An asterisk `*` prefix in the value indicates that the data is numeric (integer).
@@ -42,7 +42,7 @@ Stores configurations for registered users.
 *   **access**: Optional comma- or whitespace-separated IPv4/IPv6 CIDR list.
     A successful NICK or GHOST credential check must also match this list.
 *   **vhost**: Custom virtual host applied on connect.
-*   **oper**: IRCop level (`*1` = Helper, `*2` = Admin, `*4` = Root).
+*   **oper**: IRCop class name (`operclass`, e.g., `locop`, `globop`, `admin`, `services-admin`, `netadmin`, or `-with-override` variants). Validated against local configuration via `find_operclass()`.
 *   **swhois**: Extra line in the user's /WHOIS output.
 *   **snomasks**: Snomasks to apply automatically.
 *   **modes**: User modes to enforce upon authentication.
