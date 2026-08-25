@@ -1,3 +1,14 @@
+/*
+ * UDB 4 - Unreal Database System for UnrealIRCd 6
+ * Subsystem: Nick Registration, SHA-256 Identification & Forced Nick Migrations
+ *
+ * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
+ * Based on the original UDB concept by Trocotronic.
+ *
+ * (C) 2026 David Abuín Fontán
+ * License: GNU General Public License v2+
+ */
+
 #include <openssl/evp.h>
 
 typedef struct UdbNickPasswordCache UdbNickPasswordCache;

@@ -1,8 +1,12 @@
 /*
- * UDB record store primitives.
+ * UDB 4 - Unreal Database System for UnrealIRCd 6
+ * Subsystem: Record Tree, Indexing, Hashing & File Persistence
  *
- * These helpers only manage record trees, indexes, paths, and on-disk
- * serialization. Runtime effects remain in udb_core.c.inc.
+ * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
+ * Based on the original UDB concept by Trocotronic.
+ *
+ * (C) 2026 David Abuín Fontán
+ * License: GNU General Public License v2+
  */
 
 /* ========================================================================
@@ -127,7 +131,7 @@ static const char *udb_get_shared_subkey(const char *key)
 	    "access", "forbid", "suspended", "challenge", "founder", "topic",
 	    "options", "clones", "nolines", "host", "encryption_key", "suffix",
 	    "nickserv", "chanserv", "ipserv", "quit_ips", "quit_clones", "flood",
-	    "type", "action", "duration", "reason", NULL};
+	    "propagator", "type", "action", "duration", "reason", NULL};
 
 	for (int i = 0; known_keys[i]; i++)
 		if (!strcasecmp(known_keys[i], key))

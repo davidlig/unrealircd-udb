@@ -1,5 +1,12 @@
-/* UDB - Unreal Database System for UnrealIRCd 6
- * Protocol implementation (S2S DB command and sync)
+/*
+ * UDB 4 - Unreal Database System for UnrealIRCd 6
+ * Subsystem: Server-to-Server (S2S) Protocol & HEL Capability Negotiation
+ *
+ * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
+ * Based on the original UDB concept by Trocotronic.
+ *
+ * (C) 2026 David Abuín Fontán
+ * License: GNU General Public License v2+
  */
 
 static void udb_sendto_confirmed_servers(Client *except, const char *fmt, ...)
@@ -95,12 +102,12 @@ CMD_FUNC(cmd_db)
 			udb_sync_hello_ack(client);
 			return;
 		}
-		if (parc != 5)
-			return;
-		udb_hello_peer(client, 1)->authorizes_us = !strcasecmp(parv[4], me.name);
+		const char *prop = (parc >= 5 && parv[4]) ? parv[4] : "?";
+		udb_hello_peer(client, 1)->authorizes_us = !strcasecmp(prop, me.name) ||
+		                                           !strcmp(prop, "?");
 		udb_log(ULOG_INFO, "UDB_HEL_AUTHORIZATION", client,
 		        "Direct peer selected $propagator as its staged-sync source",
-		        log_data_string("propagator", parv[4]));
+		        log_data_string("propagator", prop));
 		/* Each side sends its own request, so only an ACK confirms outbound data. */
 		if (!udb_has_hello(client))
 			udb_sync_hello_start(client);
@@ -132,7 +139,7 @@ CMD_FUNC(cmd_db)
 					udb_protocol_params_error(client, subcmd);
 					return;
 				}
-				if (!udb_is_propagator(ctx, client))
+				if (udb_selected_propagator(ctx) && !udb_is_propagator(ctx, client))
 				{
 					sendto_one(client, NULL, ":%s DB %s ERR BEGIN %d %c", me.id, client->id,
 					           UDB_ERR_FORBIDDEN, parv[3] ? *parv[3] : '0');
@@ -165,7 +172,7 @@ CMD_FUNC(cmd_db)
 					udb_protocol_params_error(client, subcmd);
 					return;
 				}
-				if (!udb_is_propagator(ctx, client))
+				if (udb_selected_propagator(ctx) && !udb_is_propagator(ctx, client))
 				{
 					sendto_one(client, NULL, ":%s DB %s ERR PUT %d %c", me.id, client->id,
 					           UDB_ERR_FORBIDDEN, parv[3] ? *parv[3] : '0');
@@ -200,7 +207,7 @@ CMD_FUNC(cmd_db)
 					udb_protocol_params_error(client, subcmd);
 					return;
 				}
-				if (!udb_is_propagator(ctx, client))
+				if (udb_selected_propagator(ctx) && !udb_is_propagator(ctx, client))
 				{
 					sendto_one(client, NULL, ":%s DB %s ERR END %d %c", me.id, client->id,
 					           UDB_ERR_FORBIDDEN, parv[3] ? *parv[3] : '0');

@@ -1,5 +1,12 @@
-/* udb_ips.inc.c
- * Implements IP and host tracking and restrictions for UDB.
+/*
+ * UDB 4 - Unreal Database System for UnrealIRCd 6
+ * Subsystem: IP Management, Cloaks, Clone Limits & Virtual Hosts
+ *
+ * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
+ * Based on the original UDB concept by Trocotronic.
+ *
+ * (C) 2026 David Abuín Fontán
+ * License: GNU General Public License v2+
  */
 
 typedef struct UdbIpHostState UdbIpHostState;

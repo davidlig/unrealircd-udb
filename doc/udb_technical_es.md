@@ -1,6 +1,6 @@
-# UDB (Unreal DataBase) v4 - Especificación Técnica y Protocolo
+# UDB 4 (Unreal DataBase) - Especificación Técnica y Protocolo
 
-Esta documentación detalla el funcionamiento interno, el diseño de la base de datos y el protocolo Server-to-Server (S2S) del módulo **UDB (Unreal DataBase) v4.0.0** para UnrealIRCd 6.2.x.
+Esta documentación detalla el funcionamiento interno, el diseño de la base de datos y el protocolo Server-to-Server (S2S) del módulo **UDB 4 (Unreal DataBase v4.0.0)** para UnrealIRCd 6.2.x.
 
 Este documento está diseñado para desarrolladores que deseen implementar clientes, servicios (IRC Services) u otros bots compatibles con el protocolo UDB.
 
@@ -142,12 +142,17 @@ Solo se admiten `quit_ips`, `quit_clones`, `flood`, `encryption_key`, `suffix`,
     cambios o restauraciones de `I::<ip>::host`.
 *   **quit_ips** y **quit_clones**: Estado validado para mensajes de expulsión;
     el hook de clones consume `quit_clones`.
+*   **propagator**: Autoridad o lista ordenada de servidores autorizados para emitir mutaciones y snapshots en el clúster (ej: `S::propagator "servicios.red.net,hub1.red.net"`).
+
+##### Jerarquía de Resolución del Propagador
+UDB evalúa la autoridad activa mediante un modelo jerárquico determinista y tolerante a fallos:
+1. **Prioridad 1 (Override Local):** Si `udb { propagator "servidor"; }` está definido en `unrealircd.conf`, tiene precedencia absoluta sobre la red.
+2. **Prioridad 2 (Lista de Prioridad en BD):** Si existe `S::propagator "pri,sec"`, se selecciona el primer servidor de la lista que se encuentre actualmente online (`FindServer`), permitiendo Failover y Failback automático sin intervención manual.
+3. **Modo Bootstrap / Clean Node:** Si no hay propagador configurado localmente, el nodo acepta la sincronización inicial del peer directo enlazado vía `HEL 4 ?` y aprende la autoridad dinámicamente desde el bloque `S`.
 
 #### Bloque L (Enlaces S2S)
 Solo se admite `L::<servidor>::options`. Su máscara numérica usa `*1` para
-notices de depuración UDB y `*2` para seleccionar el propagador. Debe existir
-exactamente una fuente: `udb::propagator` o un registro `L` con `*2`; cero o
-más de una rechazan escrituras remotas. `prefix` y `allow_clients` no son
+notices de depuración UDB. `prefix` y `allow_clients` no son
 ajustes UDB soportados.
 
 ---
@@ -158,10 +163,10 @@ El protocolo UDB se integra en el tráfico S2S nativo de UnrealIRCd utilizando e
 Los peers directamente enlazados que completan explícitamente el intercambio
 HEL de UDB tienen capacidad de protocolo UDB V4. La capacidad no autoriza el
 acceso a datos: las importaciones staged `BEGIN`, `PUT` y `END`, y las
-peticiones y exportaciones `RES`, solo se aceptan del peer directo seleccionado
-como propagador configurado. Esto permite propagación A-a-B-a-C local por
-enlace cuando B selecciona A y C selecciona B. Las mutaciones en caliente deben
-proceder igualmente del `udb::propagator` configurado; un peer que sirve una
+peticiones y exportaciones `RES`, se aceptan del peer directo seleccionado
+como propagador o durante el auto-bootstrap de un nodo limpio. Esto permite propagación A-a-B-a-C local por
+enlace cuando B selecciona A y C selecciona B, así como arquitecturas de Ingest Gateway donde un Hub aísla a los Servicios del resto de la red. Las mutaciones en caliente deben
+proceder igualmente de la autoridad configurada; un peer que sirve una
 sincronización autorizada solo puede enviar registros de ese bloque.
 
 Para garantizar la integridad y coherencia de los datos en toda la red, se recomienda
@@ -184,12 +189,11 @@ se aborta automáticamente mediante `SQUIT` para proteger la red de desincroniza
 `HEL` es el único frame DB
 aceptado antes de confirmar y nunca se reenvía fuera del enlace directo.
 
-**HEL (Negociación de capacidad):**
+**HEL (Negociación de capacidad y Auto-Bootstrap):**
 `:<sid> DB <sid-peer-directo> HEL 4 <propagador-seleccionado>`
 
-El campo de propagador seleccionado es `-` cuando no existe una fuente única
-configurada. Permite al peer directo autorizar snapshots salientes solo cuando
-el receptor lo ha seleccionado explícitamente.
+El campo de propagador seleccionado es `?` cuando no existe una fuente local
+configurada. Permite al nodo nuevo auto-descubrir la autoridad y autoriza al peer directo a proveer el snapshot inicial staged.
 
 **Acuse HEL:**
 `:<sid> DB <sid-peer-directo> HEL 4 ACK`
@@ -309,9 +313,8 @@ muestran `<redacted>` para esos registros.
 
 ## 3. Créditos y Licencia
 
-**Autor Original (UnrealIRCd 3.x):**
-El protocolo UDB y su versión original clásica fueron ideados y desarrollados por **Trocotronic** (*www.redyc.com*). El módulo actual y las optimizaciones del protocolo son desarrolladas y mantenidas bajo la URL del proyecto **https://github.com/davidlig/unrealircd-udb** por **David Abuín Fontán ('davidlig')**.
+**Autor y Desarrollador Principal:**
+El módulo UDB, su arquitectura modular moderna para UnrealIRCd 6 y las extensiones del protocolo v4 son desarrollados y mantenidos por **David Abuín Fontán ('davidlig')** (<https://github.com/davidlig/unrealircd-udb>).
 
-**Versión Actual (UnrealIRCd 6.2.x - UDB v4.0.0):**
-Refactorización moderna, paso a la nueva arquitectura C modular y adaptación integral a la nueva API v6 de UnrealIRCd desarrollados por **David Abuín Fontán "davidlig"** (2026).
-Se ha logrado convertir UDB en un módulo de terceros estándar y optimizado (`udb.so`), con integración nativa al motor de TKLs, seguridad criptográfica moderna y soporte total para el enrutamiento S2S v6.
+**Concepto e Idea Original:**
+Basado en el concepto original del protocolo UDB concebido por **Trocotronic** (*www.redyc.com*).

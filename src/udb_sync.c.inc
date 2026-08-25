@@ -1,4 +1,13 @@
-/* UDB staged synchronization session state. */
+/*
+ * UDB 4 - Unreal Database System for UnrealIRCd 6
+ * Subsystem: Staged Synchronization Sessions & Snapshot Transfers
+ *
+ * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
+ * Based on the original UDB concept by Trocotronic.
+ *
+ * (C) 2026 David Abuín Fontán
+ * License: GNU General Public License v2+
+ */
 
 static unsigned long udb_sync_txid = 0;
 
@@ -68,7 +77,7 @@ static void udb_sync_hello_start(Client *server)
 	peer->deadline = time(NULL) + UDB_SYNC_TIMEOUT;
 	propagator = udb_selected_propagator(udb_ctx);
 	sendto_one(server, NULL, ":%s DB %s HEL 4 %s", me.id, server->id,
-	           propagator ? propagator : "-");
+	           propagator ? propagator : "?");
 }
 
 static int udb_sync_hello_ack(Client *server)

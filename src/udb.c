@@ -1,18 +1,11 @@
-/* UDB - Unreal Database System for UnrealIRCd 6
+/*
+ * UDB 4 - Unreal Database System for UnrealIRCd 6
+ * Subsystem: Main Module Entry Point & Coordinator
  *
- * A distributed database engine integrated into the IRC daemon, providing
- * persistent nick registration, channel registration, IP management,
- * distributed *lines, and network-wide configuration synchronization.
+ * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
+ * Based on the original UDB concept by Trocotronic.
  *
- * Originally developed by Trocotronic & MaD for UnrealIRCd 3.2.8 (UDB 3.6.1).
- * Migrated to UnrealIRCd 6 module API - 2026.
- *
- * Architecture:
- *   This file is the main module entry point. It #include's all implementation
- *   files (.inc.c) which are compiled into a single shared library (udb.so).
- *   This approach avoids inter-module symbol visibility issues while keeping
- *   the codebase modular and maintainable.
- *
+ * (C) 2026 David Abuín Fontán
  * License: GNU General Public License v2+
  */
 
@@ -25,7 +18,7 @@
 ModuleHeader MOD_HEADER = {
     "third/udb",
     "4.0.0",
-    "UDB - Unreal Database System (nick/channel/IP registration & sync)",
+    "UDB 4 - Unreal Database System (nick/channel/IP registration & sync)",
     "David Abuín Fontán ('davidlig')",
     "unrealircd-6"};
 

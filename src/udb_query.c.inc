@@ -1,5 +1,12 @@
-/* udb_query.inc.c
- * Implements the DBQ command to query the database manually.
+/*
+ * UDB 4 - Unreal Database System for UnrealIRCd 6
+ * Subsystem: DBQ Query Command & Secret Redaction
+ *
+ * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
+ * Based on the original UDB concept by Trocotronic.
+ *
+ * (C) 2026 David Abuín Fontán
+ * License: GNU General Public License v2+
  */
 
 static int udb_query_is_secret(const UdbRecord *rec)

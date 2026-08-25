@@ -1,8 +1,8 @@
-# UDB (Unreal DataBase) for UnrealIRCd 6
+# UDB 4 (Unreal DataBase) for UnrealIRCd 6
 
 A high-performance, distributed Unreal DataBase (UDB) protocol module for UnrealIRCd 6. It provides robust, real-time synchronized data storage across the IRC network for nicks, channels, IPs, and global settings without requiring external services.
 
-Originally authored by **Trocotronic**, this modern rewrite for the UnrealIRCd 6.x modular architecture was developed by **David Abuín Fontán ('davidlig')**.
+Developed by **David Abuín Fontán ('davidlig')**, based on the original UDB concept by **Trocotronic**.
 
 ---
 
@@ -202,13 +202,13 @@ Detailed technical documentation is available in the `doc/` directory:
 - ChanServ is the source of UDB channel effects: persistent topics, managed
   channel modes, and member rank changes (`q`, `a`, `o`, `h`, and `v`).
 - The only supported `S` values are `quit_ips`, `quit_clones`, `flood`,
-  `encryption_key`, `suffix`, `nickserv`, `chanserv`, and `ipserv`.
+  `encryption_key`, `suffix`, `nickserv`, `chanserv`, `ipserv`, and `propagator`.
 - The only supported `L` child is `L::<server>::options`: `*1` enables UDB
-  debug notices and `*2` selects that server as propagator. `prefix` and
-  `allow_clients` are not supported UDB settings.
-- Select exactly one UDB propagator source: either `udb::propagator` or one
-  `L::<server>::options` record with the propagator bit. Zero or multiple sources
-  reject remote UDB writes. Debug notices redact diagnostic detail.
+  debug notices. `prefix` and `allow_clients` are not supported UDB settings.
+- Propagator authority is resolved via a fault-tolerant priority model: local
+  `udb::propagator` takes precedence, followed by the dynamic priority list in
+  `S::propagator` (e.g. `services.net,hub1.net` with automatic failover via `FindServer`),
+  and auto-bootstrap for unconfigured clean nodes. Debug notices redact diagnostic detail.
 - UDB snapshots are created exclusively with mode `0600`, regardless of umask.
   Platforms that provide `O_NOFOLLOW` also reject a symlink temporary snapshot.
   UDB flushes and `fsync`s the temporary file before rename, then `fsync`s its
@@ -287,6 +287,6 @@ You can see UDB in action and test its real-time capabilities on our official te
 
 ## Credits
 
-- **Original UDB Protocol Author:** Trocotronic (*www.redyc.com*)
-- **UnrealIRCd 6.x Port & Refactor:** David Abuín Fontán ('davidlig')
+- **Author & Lead Developer:** David Abuín Fontán ('davidlig')
+- **Original Concept & Idea:** Based on the original UDB concept by Trocotronic (*www.redyc.com*)
 - **Project URL:** https://github.com/davidlig/unrealircd-udb

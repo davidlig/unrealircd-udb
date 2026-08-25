@@ -1,20 +1,12 @@
-/* UDB - Unreal Database System for UnrealIRCd 6
- * Originally by Trocotronic & MaD (UDB 3.6.1 for UnrealIRCd 3.2.8)
- * Migrated to UnrealIRCd 6 module API - 2026
+/*
+ * UDB 4 - Unreal Database System for UnrealIRCd 6
+ * Subsystem: Public Module Header & Constants
  *
- * This header defines the public UDB constants shared with module consumers.
- * Implementation-only state and cross-subsystem interfaces live in
- * udb_internal.h.
+ * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
+ * Based on the original UDB concept by Trocotronic.
  *
- * Architecture: Multiple implementation files (#include'd from udb.c)
- *   udb_core.inc.c    - Database engine, tree, hash, file I/O
- *   udb_services.inc.c - Dynamic service-client resolution and notices
- *   udb_protocol.inc.c - S2S protocol (DB command) and sync
- *   udb_nicks.inc.c   - Nick registration, identification, ghost
- *   udb_channels.inc.c - Channel registration, founder, modes
- *   udb_ips.inc.c     - IP management, clones, host overrides
- *   udb_lines.inc.c   - Distributed *lines (gline, zline, spamfilter)
- *   udb_query.inc.c   - DBQ user command for querying the database
+ * (C) 2026 David Abuín Fontán
+ * License: GNU General Public License v2+
  */
 
 #ifndef UDB_H
@@ -80,6 +72,7 @@
 #define SKEY_QUIT_CLONES "quit_clones"    /* Quit message for clone limit */
 #define SKEY_CHALLENGE   "challenge"      /* Global hash method */
 #define SKEY_FLOOD       "flood"          /* Password flood limit V:S */
+#define SKEY_PROPAGATOR  "propagator"     /* Cluster authoritative propagator(s) */
 
 /* Link sub-records: L::<server>::<key> <value> */
 #define LKEY_OPTIONS "options" /* Link option flags (*N) */
@@ -121,7 +114,6 @@
 /* ========================================================================
  * Link Option Flags (bitmask in L::<server>::options *<value>)
  * ======================================================================== */
-#define UDB_LNKOPT_DEBUG      0x1 /* Debug: receives all UDB mode changes */
-#define UDB_LNKOPT_PROPAGATOR 0x2 /* Propagator: only server that can push data */
+#define UDB_LNKOPT_DEBUG 0x1 /* Debug: receives all UDB mode changes */
 
 #endif /* UDB_H */

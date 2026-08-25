@@ -1,4 +1,13 @@
-/* UDB module and database lifecycle coordination. */
+/*
+ * UDB 4 - Unreal Database System for UnrealIRCd 6
+ * Subsystem: Module and Database Lifecycle Coordination
+ *
+ * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
+ * Based on the original UDB concept by Trocotronic.
+ *
+ * (C) 2026 David Abuín Fontán
+ * License: GNU General Public License v2+
+ */
 
 static UdbBlock *udb_block_create(UdbContext *ctx, char letter, const char *name)
 {

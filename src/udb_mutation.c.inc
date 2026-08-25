@@ -1,39 +1,59 @@
-/* UDB - authorized real-time database mutations. */
+/*
+ * UDB 4 - Unreal Database System for UnrealIRCd 6
+ * Subsystem: Real-time Database Mutations & Propagator Resolution
+ *
+ * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
+ * Based on the original UDB concept by Trocotronic.
+ *
+ * (C) 2026 David Abuín Fontán
+ * License: GNU General Public License v2+
+ */
 
 static const char *udb_selected_propagator(UdbContext *ctx)
 {
-	const char *selected = NULL;
+	static char selected_buf[512];
 	UdbRecord *link;
-	int sources = 0;
 
+	/* 1. Priority 1: Explicit local override in unrealircd.conf */
 	if (udb_cfg && udb_cfg->propagator && *udb_cfg->propagator)
+		return udb_cfg->propagator;
+
+	/* 2. Priority 2: Priority list in S::propagator */
+	if (ctx && ctx->propagator_setting && *ctx->propagator_setting)
 	{
-		selected = udb_cfg->propagator;
-		sources++;
-	}
-	if (ctx && ctx->links)
-	{
-		for (link = ctx->links->child; link; link = link->sibling)
+		char list_copy[512];
+		char *srv, *saveptr;
+		char *first_srv = NULL;
+
+		strlcpy(list_copy, ctx->propagator_setting, sizeof(list_copy));
+		for (srv = strtok_r(list_copy, ",", &saveptr); srv; srv = strtok_r(NULL, ",", &saveptr))
 		{
-			UdbRecord *options = udb_record_find(ctx, LKEY_OPTIONS, link);
-			if (options && !options->data_str &&
-			    !(options->data_num & ~(UDB_LNKOPT_DEBUG | UDB_LNKOPT_PROPAGATOR)) &&
-			    (options->data_num & UDB_LNKOPT_PROPAGATOR))
+			while (*srv == ' ')
+				srv++;
+			char *end = srv + strlen(srv) - 1;
+			while (end > srv && *end == ' ')
+				*end-- = '\0';
+			if (!*srv)
+				continue;
+
+			if (!first_srv)
+				first_srv = srv;
+
+			/* Check if online in UnrealIRCd or if it is the local server */
+			if (find_server(srv, NULL) || (me.name && !strcasecmp(srv, me.name)))
 			{
-				selected = link->key;
-				sources++;
+				strlcpy(selected_buf, srv, sizeof(selected_buf));
+				return selected_buf;
 			}
 		}
+		if (first_srv)
+		{
+			strlcpy(selected_buf, first_srv, sizeof(selected_buf));
+			return selected_buf;
+		}
 	}
-	if (sources != 1)
-	{
-		ctx->propagator = NULL;
-		udb_send_to_debugs(NULL, "propagator selection rejected");
-		udb_log(ULOG_WARNING, "UDB_PROPAGATOR_SELECTION", NULL,
-		        "Rejecting UDB writes: exactly one propagator source is required");
-		return NULL;
-	}
-	return selected;
+
+	return NULL;
 }
 
 static int udb_is_propagator(UdbContext *ctx, Client *server)

@@ -1,6 +1,6 @@
-# UDB (Unreal DataBase) v4 - Technical Specification & Protocol
+# UDB 4 (Unreal DataBase) - Technical Specification & Protocol
 
-This documentation details the internal workings, database design, and Server-to-Server (S2S) protocol of the **UDB (Unreal DataBase) v4.0.0** module for UnrealIRCd 6.2.x.
+This documentation details the internal workings, database design, and Server-to-Server (S2S) protocol of the **UDB 4 (Unreal DataBase v4.0.0)** module for UnrealIRCd 6.2.x.
 
 This document is designed for developers who wish to implement clients, IRC Services, or other bots compatible with the UDB protocol.
 
@@ -154,12 +154,17 @@ Only these values are supported: `quit_ips`, `quit_clones`, `flood`,
     restoration notices.
 *   **quit_ips** and **quit_clones**: Validated disconnect-message state; the
     clone hook consumes `quit_clones`.
+*   **propagator**: Cluster authoritative propagator or priority list of authorized servers (e.g. `S::propagator "services.yourdomain.net,hub1.yourdomain.net"`).
+
+##### Propagator Resolution Hierarchy
+UDB resolves the active cluster propagator using a deterministic, fault-tolerant priority model:
+1. **Priority 1 (Local Override):** Explicit `udb { propagator "<server>"; }` in `unrealircd.conf` takes strict precedence.
+2. **Priority 2 (Dynamic Priority List in DB):** If `S::propagator "pri,sec"` is defined, the first server currently connected and online (`FindServer`) is elected, enabling automated, zero-latency Failover and Failback.
+3. **Auto-Bootstrap (Clean Node Mode):** Nodes without local configuration accept initial staged syncs from their direct HEL 4 link partner via `HEL 4 ?` and learn the cluster authority dynamically from block `S`.
 
 #### Block L (S2S Links)
 Only `L::<server>::options` is supported. Its numeric bitmask is `*1` for UDB
-debug notices and `*2` for the propagator source. Select exactly one source:
-either `udb::propagator` or one `L` record with `*2`; zero or multiple sources
-reject remote writes. `prefix` and `allow_clients` are not supported settings.
+debug notices. `prefix` and `allow_clients` are not supported settings.
 
 ---
 
@@ -169,10 +174,9 @@ The UDB protocol integrates into UnrealIRCd's native S2S traffic using the exten
 Only directly linked peers that explicitly complete the UDB HEL exchange have
 the UDB V4 protocol capability. Capability does not authorize data access:
 staged `BEGIN`, `PUT`, and `END` imports, and `RES` requests and exports, are
-accepted only on the direct peer selected as the configured propagator. This
-permits edge-local A-to-B-to-C propagation when B selects A and C selects B.
-Real-time mutations must likewise originate from the configured
-`udb::propagator`; a peer that is actively serving an authorized block
+accepted from the direct peer selected as propagator or during auto-bootstrap of a fresh node. This
+permits edge-local A-to-B-to-C propagation when B selects A and C selects B, as well as Ingest Gateway topologies where a Hub shields Services from the rest of the network.
+Real-time mutations must likewise originate from the configured authority; a peer that is actively serving an authorized block
 synchronization may only send records for that block.
 
 To guarantee network-wide data integrity and consistency, configuring
@@ -194,12 +198,11 @@ acknowledgement times out after 60 seconds and automatically aborts the link wit
 `HEL` is the only DB frame accepted before confirmation and is
 never routed beyond the direct link.
 
-**HEL (Capability Negotiation):**
+**HEL (Capability Negotiation and Auto-Bootstrap):**
 `:<sid> DB <direct-peer-sid> HEL 4 <selected-propagator>`
 
-The selected propagator field is `-` when no unique source is configured. It
-lets the direct peer authorize outbound snapshots only when it is explicitly
-selected by the receiver.
+The selected propagator field is `?` when no local source is configured. It
+allows a clean node to discover cluster authority and authorizes the direct peer to supply the initial staged snapshot.
 
 **HEL acknowledgement:**
 `:<sid> DB <direct-peer-sid> HEL 4 ACK`
@@ -318,9 +321,8 @@ database directory.
 
 ## 3. Credits and License
 
-**Original Author (UnrealIRCd 3.x):**
-The UDB protocol and its classic original version were conceived and developed by **Trocotronic** (*www.redyc.com*). The current module and protocol optimizations are developed and maintained under the project URL **https://github.com/davidlig/unrealircd-udb** by **David Abuín Fontán ('davidlig')**.
+**Author & Lead Developer:**
+The UDB module, its modern modular architecture for UnrealIRCd 6, and the v4 protocol extensions are developed and maintained by **David Abuín Fontán ('davidlig')** (<https://github.com/davidlig/unrealircd-udb>).
 
-**Current Version (UnrealIRCd 6.2.x - UDB v4.0.0):**
-Modern refactoring, transition to the new modular C architecture, and full adaptation to the new UnrealIRCd v6 API developed by **David Abuín Fontán "davidlig"** (2026).
-UDB has been successfully converted into a standard and optimized 3rd-party module (`udb.so`), with native integration to the TKL engine, modern cryptographic security, and full support for v6 S2S routing.
+**Original Concept & Idea:**
+Based on the original UDB protocol concept conceived by **Trocotronic** (*www.redyc.com*).

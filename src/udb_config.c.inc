@@ -1,4 +1,13 @@
-/* UDB configuration and settings state. */
+/*
+ * UDB 4 - Unreal Database System for UnrealIRCd 6
+ * Subsystem: Configuration Parsing, Block S Settings & Link Options
+ *
+ * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
+ * Based on the original UDB concept by Trocotronic.
+ *
+ * (C) 2026 David Abuín Fontán
+ * License: GNU General Public License v2+
+ */
 
 static UdbConfig *udb_cfg = NULL;
 
@@ -139,6 +148,7 @@ static void udb_config_free(UdbContext *ctx)
 		safe_free(ctx->nickserv_mask);
 		safe_free(ctx->chanserv_mask);
 		safe_free(ctx->ipserv_mask);
+		safe_free(ctx->propagator_setting);
 	}
 	if (udb_cfg)
 	{
@@ -295,6 +305,12 @@ static int udb_settings_apply_record(UdbContext *ctx, UdbRecord *rec)
 		if (!udb_service_mask_valid(rec->data_str))
 			return 0;
 		udb_settings_replace(&ctx->ipserv_mask, rec->data_str);
+	} else if (!strcmp(rec->key, SKEY_PROPAGATOR))
+	{
+		if (!udb_setting_string_valid(rec->data_str))
+			return 0;
+		udb_settings_replace(&ctx->propagator_setting, rec->data_str);
+		ctx->propagator = NULL;
 	} else
 	{
 		return 0;
@@ -326,6 +342,11 @@ static void udb_settings_remove_record(UdbContext *ctx, UdbRecord *rec)
 		udb_settings_replace(&ctx->chanserv_mask, NULL);
 	else if (!strcmp(rec->key, SKEY_IPSERV))
 		udb_settings_replace(&ctx->ipserv_mask, NULL);
+	else if (!strcmp(rec->key, SKEY_PROPAGATOR))
+	{
+		udb_settings_replace(&ctx->propagator_setting, NULL);
+		ctx->propagator = NULL;
+	}
 }
 
 static void udb_link_apply_record(UdbContext *ctx, UdbRecord *rec)
@@ -333,7 +354,7 @@ static void udb_link_apply_record(UdbContext *ctx, UdbRecord *rec)
 	if (!rec || !rec->parent || !rec->key || strcmp(rec->key, LKEY_OPTIONS))
 		return;
 	ctx->propagator = NULL;
-	if (rec->data_str || (rec->data_num & ~(UDB_LNKOPT_DEBUG | UDB_LNKOPT_PROPAGATOR)))
+	if (rec->data_str || (rec->data_num & ~UDB_LNKOPT_DEBUG))
 		udb_log(ULOG_WARNING, "UDB_LINK_OPTIONS", NULL,
 		        "Ignoring invalid L::options for $server", log_data_string("server", rec->parent->key));
 }

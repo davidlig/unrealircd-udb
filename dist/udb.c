@@ -1,8 +1,12 @@
 /*
- * UDB - Unreal Database System for UnrealIRCd 6
- * A distributed database engine for nick/channel/IP management and sync.
- * (C) 2026 David Abuín Fontán ('davidlig')
- * License: GPLv2+
+ * UDB 4 - Unreal Database System for UnrealIRCd 6
+ * Subsystem: Standalone Bundled Distribution
+ *
+ * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
+ * Based on the original UDB concept by Trocotronic.
+ *
+ * (C) 2026 David Abuín Fontán
+ * License: GNU General Public License v2+
  */
 
 /*** <<<MODULE MANAGER START>>>
@@ -25,32 +29,29 @@ module
 *** <<<MODULE MANAGER END>>>
 */
 
-/* UDB internal module interface.
+/*
+ * UDB 4 - Unreal Database System for UnrealIRCd 6
+ * Subsystem: Internal Module Interfaces & Subsystem State
  *
- * This header is intentionally included only by the bundled implementation
- * unit. It centralizes daemon-dependent state and cross-subsystem interfaces.
+ * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
+ * Based on the original UDB concept by Trocotronic.
+ *
+ * (C) 2026 David Abuín Fontán
+ * License: GNU General Public License v2+
  */
 
 #ifndef UDB_INTERNAL_H
  #define UDB_INTERNAL_H
 
-/* UDB - Unreal Database System for UnrealIRCd 6
- * Originally by Trocotronic & MaD (UDB 3.6.1 for UnrealIRCd 3.2.8)
- * Migrated to UnrealIRCd 6 module API - 2026
+/*
+ * UDB 4 - Unreal Database System for UnrealIRCd 6
+ * Subsystem: Public Module Header & Constants
  *
- * This header defines the public UDB constants shared with module consumers.
- * Implementation-only state and cross-subsystem interfaces live in
- * udb_internal.h.
+ * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
+ * Based on the original UDB concept by Trocotronic.
  *
- * Architecture: Multiple implementation files (#include'd from udb.c)
- *   udb_core.inc.c    - Database engine, tree, hash, file I/O
- *   udb_services.inc.c - Dynamic service-client resolution and notices
- *   udb_protocol.inc.c - S2S protocol (DB command) and sync
- *   udb_nicks.inc.c   - Nick registration, identification, ghost
- *   udb_channels.inc.c - Channel registration, founder, modes
- *   udb_ips.inc.c     - IP management, clones, host overrides
- *   udb_lines.inc.c   - Distributed *lines (gline, zline, spamfilter)
- *   udb_query.inc.c   - DBQ user command for querying the database
+ * (C) 2026 David Abuín Fontán
+ * License: GNU General Public License v2+
  */
 
  #ifndef UDB_H
@@ -116,6 +117,7 @@ module
   #define SKEY_QUIT_CLONES "quit_clones"    /* Quit message for clone limit */
   #define SKEY_CHALLENGE   "challenge"      /* Global hash method */
   #define SKEY_FLOOD       "flood"          /* Password flood limit V:S */
+  #define SKEY_PROPAGATOR  "propagator"     /* Cluster authoritative propagator(s) */
 
   /* Link sub-records: L::<server>::<key> <value> */
   #define LKEY_OPTIONS "options" /* Link option flags (*N) */
@@ -157,8 +159,7 @@ module
   /* ========================================================================
  * Link Option Flags (bitmask in L::<server>::options *<value>)
  * ======================================================================== */
-  #define UDB_LNKOPT_DEBUG      0x1 /* Debug: receives all UDB mode changes */
-  #define UDB_LNKOPT_PROPAGATOR 0x2 /* Propagator: only server that can push data */
+  #define UDB_LNKOPT_DEBUG 0x1 /* Debug: receives all UDB mode changes */
 
  #endif /* UDB_H */
 
@@ -245,6 +246,7 @@ typedef struct UdbContext {
 	UdbRecord *lines;
 	UdbRecord **hash_table[UDB_NUM_BLOCKS];
 	Client *propagator;
+	char *propagator_setting;
 	char *quit_ips;
 	char *quit_clones;
 	char *encryption_key;
@@ -432,7 +434,7 @@ static inline int udb_is_debug_enabled(void)
 ModuleHeader MOD_HEADER = {
     "third/udb",
     "4.0.0",
-    "UDB - Unreal Database System (nick/channel/IP registration & sync)",
+    "UDB 4 - Unreal Database System (nick/channel/IP registration & sync)",
     "David Abuín Fontán ('davidlig')",
     "unrealircd-6"};
 
@@ -446,10 +448,14 @@ ModuleHeader MOD_HEADER = {
 /* Record store: tree, hash, path, and file persistence primitives */
 /* Inlined: udb_store.c.inc */
 /*
- * UDB record store primitives.
+ * UDB 4 - Unreal Database System for UnrealIRCd 6
+ * Subsystem: Record Tree, Indexing, Hashing & File Persistence
  *
- * These helpers only manage record trees, indexes, paths, and on-disk
- * serialization. Runtime effects remain in udb_core.c.inc.
+ * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
+ * Based on the original UDB concept by Trocotronic.
+ *
+ * (C) 2026 David Abuín Fontán
+ * License: GNU General Public License v2+
  */
 
 /* ========================================================================
@@ -574,7 +580,7 @@ static const char *udb_get_shared_subkey(const char *key)
 	    "access", "forbid", "suspended", "challenge", "founder", "topic",
 	    "options", "clones", "nolines", "host", "encryption_key", "suffix",
 	    "nickserv", "chanserv", "ipserv", "quit_ips", "quit_clones", "flood",
-	    "type", "action", "duration", "reason", NULL};
+	    "propagator", "type", "action", "duration", "reason", NULL};
 
 	for (int i = 0; known_keys[i]; i++)
 		if (!strcasecmp(known_keys[i], key))
@@ -952,7 +958,16 @@ static int udb_file_save_block(UdbContext *ctx, UdbBlock *block)
 
 /* Configuration: daemon block parsing and UDB settings state */
 /* Inlined: udb_config.c.inc */
-/* UDB configuration and settings state. */
+/*
+ * UDB 4 - Unreal Database System for UnrealIRCd 6
+ * Subsystem: Configuration Parsing, Block S Settings & Link Options
+ *
+ * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
+ * Based on the original UDB concept by Trocotronic.
+ *
+ * (C) 2026 David Abuín Fontán
+ * License: GNU General Public License v2+
+ */
 
 static UdbConfig *udb_cfg = NULL;
 
@@ -1093,6 +1108,7 @@ static void udb_config_free(UdbContext *ctx)
 		safe_free(ctx->nickserv_mask);
 		safe_free(ctx->chanserv_mask);
 		safe_free(ctx->ipserv_mask);
+		safe_free(ctx->propagator_setting);
 	}
 	if (udb_cfg)
 	{
@@ -1249,6 +1265,12 @@ static int udb_settings_apply_record(UdbContext *ctx, UdbRecord *rec)
 		if (!udb_service_mask_valid(rec->data_str))
 			return 0;
 		udb_settings_replace(&ctx->ipserv_mask, rec->data_str);
+	} else if (!strcmp(rec->key, SKEY_PROPAGATOR))
+	{
+		if (!udb_setting_string_valid(rec->data_str))
+			return 0;
+		udb_settings_replace(&ctx->propagator_setting, rec->data_str);
+		ctx->propagator = NULL;
 	} else
 	{
 		return 0;
@@ -1280,6 +1302,11 @@ static void udb_settings_remove_record(UdbContext *ctx, UdbRecord *rec)
 		udb_settings_replace(&ctx->chanserv_mask, NULL);
 	else if (!strcmp(rec->key, SKEY_IPSERV))
 		udb_settings_replace(&ctx->ipserv_mask, NULL);
+	else if (!strcmp(rec->key, SKEY_PROPAGATOR))
+	{
+		udb_settings_replace(&ctx->propagator_setting, NULL);
+		ctx->propagator = NULL;
+	}
 }
 
 static void udb_link_apply_record(UdbContext *ctx, UdbRecord *rec)
@@ -1287,7 +1314,7 @@ static void udb_link_apply_record(UdbContext *ctx, UdbRecord *rec)
 	if (!rec || !rec->parent || !rec->key || strcmp(rec->key, LKEY_OPTIONS))
 		return;
 	ctx->propagator = NULL;
-	if (rec->data_str || (rec->data_num & ~(UDB_LNKOPT_DEBUG | UDB_LNKOPT_PROPAGATOR)))
+	if (rec->data_str || (rec->data_num & ~UDB_LNKOPT_DEBUG))
 		udb_log(ULOG_WARNING, "UDB_LINK_OPTIONS", NULL,
 		        "Ignoring invalid L::options for $server", log_data_string("server", rec->parent->key));
 }
@@ -1324,8 +1351,14 @@ static void udb_config_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord
 /* Core database engine: records, checksums, sync staging, and file I/O */
 /* Inlined: udb_core.c.inc */
 /*
- * UDB Core Engine for UnrealIRCd 6
- * Implements the database lifecycle, checksums, sync staging, and record manipulation.
+ * UDB 4 - Unreal Database System for UnrealIRCd 6
+ * Subsystem: Database Core Engine & Record Manipulation
+ *
+ * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
+ * Based on the original UDB concept by Trocotronic.
+ *
+ * (C) 2026 David Abuín Fontán
+ * License: GNU General Public License v2+
  */
 
 
@@ -2244,7 +2277,16 @@ static void udb_send_to_debugs(Client *source, const char *fmt, ...)
 
 /* Dynamic connected service clients and service-originated notices */
 /* Inlined: udb_services.c.inc */
-/* UDB service-client resolution and service-originated notices. */
+/*
+ * UDB 4 - Unreal Database System for UnrealIRCd 6
+ * Subsystem: Service-Client Resolution (NickServ, ChanServ, IpServ) & Notices
+ *
+ * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
+ * Based on the original UDB concept by Trocotronic.
+ *
+ * (C) 2026 David Abuín Fontán
+ * License: GNU General Public License v2+
+ */
 
 static Client *udb_service_source(const char *service_key)
 {
@@ -2322,8 +2364,14 @@ static void udb_send_service_notice(Client *target, const char *service_key,
 /* Runtime effects: special-record dispatch only */
 /* Inlined: udb_effects.c.inc */
 /*
- * UDB Runtime Effects for UnrealIRCd 6
- * Dispatches special records to their concrete per-block effect implementations.
+ * UDB 4 - Unreal Database System for UnrealIRCd 6
+ * Subsystem: Runtime Effects Dispatch & Live State Reconciliation
+ *
+ * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
+ * Based on the original UDB concept by Trocotronic.
+ *
+ * (C) 2026 David Abuín Fontán
+ * License: GNU General Public License v2+
  */
 
 static int udb_apply_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new)
@@ -2430,7 +2478,16 @@ static void udb_remove_tree_effects(UdbContext *ctx, UdbBlock *block)
 
 /* Staged synchronization sessions: HEL capability and transfer state */
 /* Inlined: udb_sync.c.inc */
-/* UDB staged synchronization session state. */
+/*
+ * UDB 4 - Unreal Database System for UnrealIRCd 6
+ * Subsystem: Staged Synchronization Sessions & Snapshot Transfers
+ *
+ * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
+ * Based on the original UDB concept by Trocotronic.
+ *
+ * (C) 2026 David Abuín Fontán
+ * License: GNU General Public License v2+
+ */
 
 static unsigned long udb_sync_txid = 0;
 
@@ -2500,7 +2557,7 @@ static void udb_sync_hello_start(Client *server)
 	peer->deadline = time(NULL) + UDB_SYNC_TIMEOUT;
 	propagator = udb_selected_propagator(udb_ctx);
 	sendto_one(server, NULL, ":%s DB %s HEL 4 %s", me.id, server->id,
-	           propagator ? propagator : "-");
+	           propagator ? propagator : "?");
 }
 
 static int udb_sync_hello_ack(Client *server)
@@ -2716,42 +2773,62 @@ static void udb_sync_server_quit(Client *client)
 
 /* Authorized real-time mutations: validation, effects, persistence, forwarding */
 /* Inlined: udb_mutation.c.inc */
-/* UDB - authorized real-time database mutations. */
+/*
+ * UDB 4 - Unreal Database System for UnrealIRCd 6
+ * Subsystem: Real-time Database Mutations & Propagator Resolution
+ *
+ * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
+ * Based on the original UDB concept by Trocotronic.
+ *
+ * (C) 2026 David Abuín Fontán
+ * License: GNU General Public License v2+
+ */
 
 static const char *udb_selected_propagator(UdbContext *ctx)
 {
-	const char *selected = NULL;
+	static char selected_buf[512];
 	UdbRecord *link;
-	int sources = 0;
 
+	/* 1. Priority 1: Explicit local override in unrealircd.conf */
 	if (udb_cfg && udb_cfg->propagator && *udb_cfg->propagator)
+		return udb_cfg->propagator;
+
+	/* 2. Priority 2: Priority list in S::propagator */
+	if (ctx && ctx->propagator_setting && *ctx->propagator_setting)
 	{
-		selected = udb_cfg->propagator;
-		sources++;
-	}
-	if (ctx && ctx->links)
-	{
-		for (link = ctx->links->child; link; link = link->sibling)
+		char list_copy[512];
+		char *srv, *saveptr;
+		char *first_srv = NULL;
+
+		strlcpy(list_copy, ctx->propagator_setting, sizeof(list_copy));
+		for (srv = strtok_r(list_copy, ",", &saveptr); srv; srv = strtok_r(NULL, ",", &saveptr))
 		{
-			UdbRecord *options = udb_record_find(ctx, LKEY_OPTIONS, link);
-			if (options && !options->data_str &&
-			    !(options->data_num & ~(UDB_LNKOPT_DEBUG | UDB_LNKOPT_PROPAGATOR)) &&
-			    (options->data_num & UDB_LNKOPT_PROPAGATOR))
+			while (*srv == ' ')
+				srv++;
+			char *end = srv + strlen(srv) - 1;
+			while (end > srv && *end == ' ')
+				*end-- = '\0';
+			if (!*srv)
+				continue;
+
+			if (!first_srv)
+				first_srv = srv;
+
+			/* Check if online in UnrealIRCd or if it is the local server */
+			if (find_server(srv, NULL) || (me.name && !strcasecmp(srv, me.name)))
 			{
-				selected = link->key;
-				sources++;
+				strlcpy(selected_buf, srv, sizeof(selected_buf));
+				return selected_buf;
 			}
 		}
+		if (first_srv)
+		{
+			strlcpy(selected_buf, first_srv, sizeof(selected_buf));
+			return selected_buf;
+		}
 	}
-	if (sources != 1)
-	{
-		ctx->propagator = NULL;
-		udb_send_to_debugs(NULL, "propagator selection rejected");
-		udb_log(ULOG_WARNING, "UDB_PROPAGATOR_SELECTION", NULL,
-		        "Rejecting UDB writes: exactly one propagator source is required");
-		return NULL;
-	}
-	return selected;
+
+	return NULL;
 }
 
 static int udb_is_propagator(UdbContext *ctx, Client *server)
@@ -3043,8 +3120,15 @@ static void udb_mutation_opt(UdbContext *ctx, Client *client, const char *target
 
 /* S2S protocol handler: DB command parsing, routing, and server sync */
 /* Inlined: udb_protocol.c.inc */
-/* UDB - Unreal Database System for UnrealIRCd 6
- * Protocol implementation (S2S DB command and sync)
+/*
+ * UDB 4 - Unreal Database System for UnrealIRCd 6
+ * Subsystem: Server-to-Server (S2S) Protocol & HEL Capability Negotiation
+ *
+ * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
+ * Based on the original UDB concept by Trocotronic.
+ *
+ * (C) 2026 David Abuín Fontán
+ * License: GNU General Public License v2+
  */
 
 static void udb_sendto_confirmed_servers(Client *except, const char *fmt, ...)
@@ -3140,12 +3224,12 @@ CMD_FUNC(cmd_db)
 			udb_sync_hello_ack(client);
 			return;
 		}
-		if (parc != 5)
-			return;
-		udb_hello_peer(client, 1)->authorizes_us = !strcasecmp(parv[4], me.name);
+		const char *prop = (parc >= 5 && parv[4]) ? parv[4] : "?";
+		udb_hello_peer(client, 1)->authorizes_us = !strcasecmp(prop, me.name) ||
+		                                           !strcmp(prop, "?");
 		udb_log(ULOG_INFO, "UDB_HEL_AUTHORIZATION", client,
 		        "Direct peer selected $propagator as its staged-sync source",
-		        log_data_string("propagator", parv[4]));
+		        log_data_string("propagator", prop));
 		/* Each side sends its own request, so only an ACK confirms outbound data. */
 		if (!udb_has_hello(client))
 			udb_sync_hello_start(client);
@@ -3177,7 +3261,7 @@ CMD_FUNC(cmd_db)
 					udb_protocol_params_error(client, subcmd);
 					return;
 				}
-				if (!udb_is_propagator(ctx, client))
+				if (udb_selected_propagator(ctx) && !udb_is_propagator(ctx, client))
 				{
 					sendto_one(client, NULL, ":%s DB %s ERR BEGIN %d %c", me.id, client->id,
 					           UDB_ERR_FORBIDDEN, parv[3] ? *parv[3] : '0');
@@ -3210,7 +3294,7 @@ CMD_FUNC(cmd_db)
 					udb_protocol_params_error(client, subcmd);
 					return;
 				}
-				if (!udb_is_propagator(ctx, client))
+				if (udb_selected_propagator(ctx) && !udb_is_propagator(ctx, client))
 				{
 					sendto_one(client, NULL, ":%s DB %s ERR PUT %d %c", me.id, client->id,
 					           UDB_ERR_FORBIDDEN, parv[3] ? *parv[3] : '0');
@@ -3245,7 +3329,7 @@ CMD_FUNC(cmd_db)
 					udb_protocol_params_error(client, subcmd);
 					return;
 				}
-				if (!udb_is_propagator(ctx, client))
+				if (udb_selected_propagator(ctx) && !udb_is_propagator(ctx, client))
 				{
 					sendto_one(client, NULL, ":%s DB %s ERR END %d %c", me.id, client->id,
 					           UDB_ERR_FORBIDDEN, parv[3] ? *parv[3] : '0');
@@ -3498,6 +3582,17 @@ static int udb_protocol_init(ModuleInfo *modinfo)
 
 /* Nick management: registration, identification, ghost, vhost, oper */
 /* Inlined: udb_nicks.c.inc */
+/*
+ * UDB 4 - Unreal Database System for UnrealIRCd 6
+ * Subsystem: Nick Registration, SHA-256 Identification & Forced Nick Migrations
+ *
+ * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
+ * Based on the original UDB concept by Trocotronic.
+ *
+ * (C) 2026 David Abuín Fontán
+ * License: GNU General Public License v2+
+ */
+
 #include <openssl/evp.h>
 
 typedef struct UdbNickPasswordCache UdbNickPasswordCache;
@@ -4397,7 +4492,16 @@ int udb_nicks_load(ModuleInfo *modinfo)
 
 /* Channel management: registration, founder, modes, topic, access */
 /* Inlined: udb_channels.c.inc */
-/* UDB Channels Module for UnrealIRCd 6 */
+/*
+ * UDB 4 - Unreal Database System for UnrealIRCd 6
+ * Subsystem: Channel Registration, Founder +q, mlock & topiclock
+ *
+ * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
+ * Based on the original UDB concept by Trocotronic.
+ *
+ * (C) 2026 David Abuín Fontán
+ * License: GNU General Public License v2+
+ */
 
 typedef struct UdbPendingChannelAuth UdbPendingChannelAuth;
 typedef struct UdbChannelModeState UdbChannelModeState;
@@ -5424,8 +5528,15 @@ static int udb_channels_load(ModuleInfo *modinfo)
 
 /* IP management: clones, nolines, host overrides */
 /* Inlined: udb_ips.c.inc */
-/* udb_ips.inc.c
- * Implements IP and host tracking and restrictions for UDB.
+/*
+ * UDB 4 - Unreal Database System for UnrealIRCd 6
+ * Subsystem: IP Management, Cloaks, Clone Limits & Virtual Hosts
+ *
+ * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
+ * Based on the original UDB concept by Trocotronic.
+ *
+ * (C) 2026 David Abuín Fontán
+ * License: GNU General Public License v2+
  */
 
 typedef struct UdbIpHostState UdbIpHostState;
@@ -5916,8 +6027,15 @@ static void udb_ips_init(ModuleInfo *modinfo)
 
 /* Distributed *lines: glines, zlines, shuns, qlines, spamfilters */
 /* Inlined: udb_lines.c.inc */
-/* udb_lines.inc.c
- * Implements K-line, Z-line, Shun, Q-line, and Spamfilter support for UDB.
+/*
+ * UDB 4 - Unreal Database System for UnrealIRCd 6
+ * Subsystem: Distributed *lines (K, Z, Shun, Q) and Spamfilter Rules
+ *
+ * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
+ * Based on the original UDB concept by Trocotronic.
+ *
+ * (C) 2026 David Abuín Fontán
+ * License: GNU General Public License v2+
  */
 
 static UdbRecord *udb_line_owner(UdbRecord *rec)
@@ -6199,8 +6317,15 @@ static void udb_lines_init(ModuleInfo *modinfo)
 
 /* DBQ query command for users and opers */
 /* Inlined: udb_query.c.inc */
-/* udb_query.inc.c
- * Implements the DBQ command to query the database manually.
+/*
+ * UDB 4 - Unreal Database System for UnrealIRCd 6
+ * Subsystem: DBQ Query Command & Secret Redaction
+ *
+ * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
+ * Based on the original UDB concept by Trocotronic.
+ *
+ * (C) 2026 David Abuín Fontán
+ * License: GNU General Public License v2+
  */
 
 static int udb_query_is_secret(const UdbRecord *rec)
@@ -6343,7 +6468,16 @@ static void udb_query_init(ModuleInfo *modinfo)
 
 /* Engine, block, configuration, and module lifecycle coordination */
 /* Inlined: udb_lifecycle.c.inc */
-/* UDB module and database lifecycle coordination. */
+/*
+ * UDB 4 - Unreal Database System for UnrealIRCd 6
+ * Subsystem: Module and Database Lifecycle Coordination
+ *
+ * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
+ * Based on the original UDB concept by Trocotronic.
+ *
+ * (C) 2026 David Abuín Fontán
+ * License: GNU General Public License v2+
+ */
 
 static UdbBlock *udb_block_create(UdbContext *ctx, char letter, const char *name)
 {

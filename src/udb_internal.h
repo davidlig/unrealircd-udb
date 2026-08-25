@@ -1,7 +1,12 @@
-/* UDB internal module interface.
+/*
+ * UDB 4 - Unreal Database System for UnrealIRCd 6
+ * Subsystem: Internal Module Interfaces & Subsystem State
  *
- * This header is intentionally included only by the bundled implementation
- * unit. It centralizes daemon-dependent state and cross-subsystem interfaces.
+ * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
+ * Based on the original UDB concept by Trocotronic.
+ *
+ * (C) 2026 David Abuín Fontán
+ * License: GNU General Public License v2+
  */
 
 #ifndef UDB_INTERNAL_H
@@ -91,6 +96,7 @@ typedef struct UdbContext {
 	UdbRecord *lines;
 	UdbRecord **hash_table[UDB_NUM_BLOCKS];
 	Client *propagator;
+	char *propagator_setting;
 	char *quit_ips;
 	char *quit_clones;
 	char *encryption_key;

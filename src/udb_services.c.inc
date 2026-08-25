@@ -1,4 +1,13 @@
-/* UDB service-client resolution and service-originated notices. */
+/*
+ * UDB 4 - Unreal Database System for UnrealIRCd 6
+ * Subsystem: Service-Client Resolution (NickServ, ChanServ, IpServ) & Notices
+ *
+ * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
+ * Based on the original UDB concept by Trocotronic.
+ *
+ * (C) 2026 David Abuín Fontán
+ * License: GNU General Public License v2+
+ */
 
 static Client *udb_service_source(const char *service_key)
 {
