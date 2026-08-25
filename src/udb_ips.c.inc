@@ -425,8 +425,10 @@ static int udb_hook_pre_connect(Client *client)
 
 	int clone_count = 0;
 	Client *c;
-	list_for_each_entry(c, &lclient_list, lclient_node)
+	list_for_each_entry(c, &client_list, client_node)
 	{
+		if (!IsUser(c) || IsDead(c) || c == client)
+			continue;
 		if (c->ip && !strcmp(c->ip, client->ip))
 			clone_count++;
 	}
