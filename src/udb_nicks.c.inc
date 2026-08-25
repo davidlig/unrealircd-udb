@@ -133,9 +133,9 @@ static void udb_nick_grant_oper(Client *client, UdbRecord *nick_rec, UdbRecord *
 
 	if (!find_operclass(operclass))
 	{
-		unreal_log(ULOG_WARNING, "udb", "UDB_OPERCLASS_NOT_FOUND", client,
-		           "UDB: operclass '$operclass' for $client.details does not exist in unrealircd.conf",
-		           log_data_string("operclass", operclass));
+		udb_log(ULOG_WARNING, "UDB_OPERCLASS_NOT_FOUND", client,
+		        "operclass '$operclass' for $client.details does not exist in unrealircd.conf",
+		        log_data_string("operclass", operclass));
 		return;
 	}
 
@@ -463,7 +463,7 @@ static void udb_password_failure_record(UdbRecord *profile_rec, Client *client, 
 }
 
 static void udb_nick_password_failure_notice(Client *client, UdbRecord *profile_rec,
-	                                            const char *nick)
+                                             const char *nick)
 {
 	if (udb_password_flooded(profile_rec, client))
 		udb_send_service_notice(client, SKEY_NICKSERV,

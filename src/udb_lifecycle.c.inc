@@ -212,6 +212,94 @@ static void udb_engine_shutdown(void)
 	udb_ctx = NULL;
 }
 
+extern MODVAR Log *logs[NUM_LOG_DESTINATIONS];
+
+static void udb_log_snomask_filter_init(void)
+{
+	Log *ld;
+	for (ld = logs[LOG_DEST_SNOMASK]; ld; ld = ld->next)
+	{
+		LogSource *ls;
+		int already_set = 0;
+		for (ls = ld->sources; ls; ls = ls->next)
+		{
+			if (ls->negative && !strcmp(ls->subsystem, "udb"))
+			{
+				already_set = 1;
+				break;
+			}
+		}
+		if (!already_set)
+		{
+			ls = safe_alloc(sizeof(LogSource));
+			ls->loglevel = ULOG_INVALID;
+			ls->negative = 1;
+			strlcpy(ls->subsystem, "udb", sizeof(ls->subsystem));
+			AddListItem(ls, ld->sources);
+		}
+	}
+	for (ld = logs[LOG_DEST_OPER]; ld; ld = ld->next)
+	{
+		LogSource *ls;
+		int already_set = 0;
+		for (ls = ld->sources; ls; ls = ls->next)
+		{
+			if (ls->negative && !strcmp(ls->subsystem, "udb"))
+			{
+				already_set = 1;
+				break;
+			}
+		}
+		if (!already_set)
+		{
+			ls = safe_alloc(sizeof(LogSource));
+			ls->loglevel = ULOG_INVALID;
+			ls->negative = 1;
+			strlcpy(ls->subsystem, "udb", sizeof(ls->subsystem));
+			AddListItem(ls, ld->sources);
+		}
+	}
+}
+
+static void udb_log_snomask_filter_free(void)
+{
+	Log *ld;
+	for (ld = logs[LOG_DEST_SNOMASK]; ld; ld = ld->next)
+	{
+		LogSource *ls, *ls_next;
+		for (ls = ld->sources; ls; ls = ls_next)
+		{
+			ls_next = ls->next;
+			if (ls->negative && !strcmp(ls->subsystem, "udb"))
+			{
+				DelListItem(ls, ld->sources);
+				safe_free(ls);
+			}
+		}
+	}
+	for (ld = logs[LOG_DEST_OPER]; ld; ld = ld->next)
+	{
+		LogSource *ls, *ls_next;
+		for (ls = ld->sources; ls; ls = ls_next)
+		{
+			ls_next = ls->next;
+			if (ls->negative && !strcmp(ls->subsystem, "udb"))
+			{
+				DelListItem(ls, ld->sources);
+				safe_free(ls);
+			}
+		}
+	}
+}
+
+static void udb_sync_snomask_filter(void)
+{
+	if (udb_is_debug_enabled())
+		udb_log_snomask_filter_free();
+	else
+		udb_log_snomask_filter_init();
+}
+
 static int udb_module_test(ModuleInfo *modinfo)
 {
 	HookAdd(modinfo->handle, HOOKTYPE_CONFIGTEST, 0, udb_config_test);
@@ -222,6 +310,7 @@ static int udb_module_test(ModuleInfo *modinfo)
 static int udb_module_init(ModuleInfo *modinfo)
 {
 	HookAdd(modinfo->handle, HOOKTYPE_CONFIGRUN, 0, udb_config_run);
+	udb_sync_snomask_filter();
 	udb_protocol_init(modinfo);
 	udb_nicks_init(modinfo);
 	udb_channels_init(modinfo);
@@ -239,17 +328,19 @@ static int udb_module_load(ModuleInfo *modinfo)
 		config_error("[UDB] Failed to initialize database engine");
 		return MOD_FAILED;
 	}
+	udb_sync_snomask_filter();
 	udb_nicks_load(modinfo);
 	udb_channels_load(modinfo);
-	unreal_log(ULOG_INFO, "udb", "UDB_LOADED", NULL,
-	           "[UDB] Unreal Database System v" UDB_VERSION " loaded successfully");
+	udb_log(ULOG_INFO, "UDB_LOADED", NULL,
+	        "Unreal Database System v" UDB_VERSION " loaded successfully");
 	return MOD_SUCCESS;
 }
 
 static int udb_module_unload(void)
 {
-	unreal_log(ULOG_INFO, "udb", "UDB_UNLOADING", NULL,
-	           "[UDB] Saving databases and shutting down...");
+	udb_log(ULOG_INFO, "UDB_UNLOADING", NULL,
+	        "Saving databases and shutting down...");
+	udb_log_snomask_filter_free();
 	udb_blocks_save_all(udb_ctx);
 	udb_engine_shutdown();
 	return MOD_SUCCESS;

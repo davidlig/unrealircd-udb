@@ -170,10 +170,14 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 		}
 		udb_block_replace_tree(ctx, block, tree, udb_record_count_tree(tree));
 		if (!unchanged)
+		{
 			udb_apply_special_record(ctx, block, rec, 1);
+			if (block->letter == 'L')
+				udb_sync_snomask_filter();
+		}
 		char logbuf[512];
-		snprintf(logbuf, sizeof(logbuf), "[UDB] Inserted record via S2S: %s -> %s", path, data);
-		unreal_log(ULOG_INFO, "udb", "UDB_INS_RECEIVED", client, "$msg", log_data_string("msg", logbuf));
+		snprintf(logbuf, sizeof(logbuf), "Inserted record via S2S: %s -> %s", path, data);
+		udb_log(ULOG_INFO, "UDB_INS_RECEIVED", client, "$msg", log_data_string("msg", logbuf));
 		if (ctx->propagator && block->syncing_from == client)
 		{
 			udb_mutation_forward_ins(ctx->propagator, client, target, path, data);
@@ -230,6 +234,8 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, const char *target
 		udb_block_replace_tree(ctx, block, tree, record_count);
 		if (candidate_line)
 			udb_lines_apply_effect(ctx, block, candidate_line, 0);
+		if (block->letter == 'L')
+			udb_sync_snomask_filter();
 		if (ctx->propagator && block->syncing_from == client)
 		{
 			udb_mutation_forward_del(ctx->propagator, client, target, path);

@@ -139,6 +139,11 @@ static void udb_channel_do_mode(Channel *channel, MessageTag *mtags,
 	do_mode(channel, source, mtags, myparc, (const char **)myparv, 0, 1);
 	for (i = 0; i < myparc; i++)
 		safe_free(myparv[i]);
+
+	if (parameters && *parameters)
+		udb_send_to_debugs(NULL, "Mode change on %s: %s %s", channel->name, modes, parameters);
+	else
+		udb_send_to_debugs(NULL, "Mode change on %s: %s", channel->name, modes);
 }
 
 static void udb_channel_set_modes(Channel *channel, const char *value)

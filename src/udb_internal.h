@@ -247,6 +247,22 @@ static void udb_channels_init(ModuleInfo *modinfo);
 static void udb_ips_init(ModuleInfo *modinfo);
 static void udb_lines_init(ModuleInfo *modinfo);
 static void udb_query_init(ModuleInfo *modinfo);
+static void udb_sync_snomask_filter(void);
+
+static inline int udb_is_debug_enabled(void)
+{
+	if (udb_ctx && udb_ctx->links)
+	{
+		UdbRecord *me_rec = udb_record_find(udb_ctx, me.name, udb_ctx->links);
+		if (me_rec)
+		{
+			UdbRecord *opt_rec = udb_record_find(udb_ctx, LKEY_OPTIONS, me_rec);
+			if (opt_rec && (opt_rec->data_num & UDB_LNKOPT_DEBUG))
+				return 1;
+		}
+	}
+	return 0;
+}
 
 #define udb_log(level, event_id, client, msg, ...) \
 	unreal_log(level, "udb", event_id, client, "[UDB] " msg, ##__VA_ARGS__)

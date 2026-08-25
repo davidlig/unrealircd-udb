@@ -288,8 +288,7 @@ static void udb_ip_reconcile_host(const char *ip_key, const char *host)
 				snprintf(notice, sizeof(notice), "*** Your explicit IP vhost is now %s", host);
 				udb_ip_notify_host_change(client, notice);
 			}
-		}
-		else
+		} else
 		{
 			if (MyUser(client))
 				userhost_save_current(client);

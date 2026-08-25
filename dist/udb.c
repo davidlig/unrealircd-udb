@@ -401,6 +401,22 @@ static void udb_channels_init(ModuleInfo *modinfo);
 static void udb_ips_init(ModuleInfo *modinfo);
 static void udb_lines_init(ModuleInfo *modinfo);
 static void udb_query_init(ModuleInfo *modinfo);
+static void udb_sync_snomask_filter(void);
+
+static inline int udb_is_debug_enabled(void)
+{
+	if (udb_ctx && udb_ctx->links)
+	{
+		UdbRecord *me_rec = udb_record_find(udb_ctx, me.name, udb_ctx->links);
+		if (me_rec)
+		{
+			UdbRecord *opt_rec = udb_record_find(udb_ctx, LKEY_OPTIONS, me_rec);
+			if (opt_rec && (opt_rec->data_num & UDB_LNKOPT_DEBUG))
+				return 1;
+		}
+	}
+	return 0;
+}
 
  #define udb_log(level, event_id, client, msg, ...) \
 		unreal_log(level, "udb", event_id, client, "[UDB] " msg, ##__VA_ARGS__)
@@ -1938,6 +1954,8 @@ static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSessi
 	udb_sync_session_free(block);
 
 	udb_apply_tree_effects(ctx, block);
+	if (block->letter == 'L')
+		udb_sync_snomask_filter();
 	return 1;
 }
 
@@ -2089,10 +2107,10 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 			while ((ch = fgetc(fp)) != '\n' && ch != EOF)
 				;
 			snprintf(logbuf, sizeof(logbuf),
-			         "[UDB] Skipping overlong persisted record in block %c at line %u",
+			         "Skipping overlong persisted record in block %c at line %u",
 			         block->letter, line_number);
-			unreal_log(ULOG_WARNING, "udb", "UDB_FILE_LINE_REJECTED", NULL,
-			           "$msg", log_data_string("msg", logbuf));
+			udb_log(ULOG_WARNING, "UDB_FILE_LINE_REJECTED", NULL,
+			        "$msg", log_data_string("msg", logbuf));
 			continue;
 		}
 		char *p = strchr(line, '\n');
@@ -2109,10 +2127,10 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 		{
 			char logbuf[512];
 			snprintf(logbuf, sizeof(logbuf),
-			         "[UDB] Skipping malformed persisted record in block %c at line %u",
+			         "Skipping malformed persisted record in block %c at line %u",
 			         block->letter, line_number);
-			unreal_log(ULOG_WARNING, "udb", "UDB_FILE_LINE_REJECTED", NULL,
-			           "$msg", log_data_string("msg", logbuf));
+			udb_log(ULOG_WARNING, "UDB_FILE_LINE_REJECTED", NULL,
+			        "$msg", log_data_string("msg", logbuf));
 		}
 	}
 	fclose(fp);
@@ -2139,8 +2157,11 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 		block->modified_at = st.st_mtime;
 	}
 	char logbuf[512];
-	snprintf(logbuf, sizeof(logbuf), "[UDB] Loaded block %c from %s (%u records)", block->letter, block->filepath, block->record_count);
-	unreal_log(ULOG_INFO, "udb", "UDB_FILE_LOADED", NULL, "$msg", log_data_string("msg", logbuf));
+	snprintf(logbuf, sizeof(logbuf), "Loaded block %c from %s (%u records)", block->letter, block->filepath, block->record_count);
+	udb_log(ULOG_INFO, "UDB_FILE_LOADED", NULL, "$msg", log_data_string("msg", logbuf));
+
+	if (block->letter == 'L')
+		udb_sync_snomask_filter();
 
 	return 1;
 }
@@ -2183,9 +2204,12 @@ static const char *udb_get_bot_mask(const char *service_key, int force_default)
 
 static void udb_send_to_debugs(Client *source, const char *fmt, ...)
 {
-	const char *buf = "diagnostic detail redacted";
+	char buf[1024];
+	va_list va;
 
-	(void)fmt;
+	va_start(va, fmt);
+	vsnprintf(buf, sizeof(buf), fmt, va);
+	va_end(va);
 
 	Client *client;
 	list_for_each_entry(client, &client_list, client_node)
@@ -2207,22 +2231,13 @@ static void udb_send_to_debugs(Client *source, const char *fmt, ...)
 		}
 	}
 
-	// Also send to local opers if our own server has the debug option
-	if (udb_ctx && udb_ctx->links)
+	if (udb_is_debug_enabled())
 	{
-		UdbRecord *me_rec = udb_record_find(udb_ctx, me.name, udb_ctx->links);
-		if (me_rec)
-		{
-			UdbRecord *opt_rec = udb_record_find(udb_ctx, LKEY_OPTIONS, me_rec);
-			if (opt_rec && (opt_rec->data_num & UDB_LNKOPT_DEBUG))
-			{
-				unreal_log(ULOG_INFO, "udb", "UDB_DEBUG_OPER", source,
-				           "[UDB Debug] $msg", log_data_string("msg", buf));
-			}
-		}
+		udb_log(ULOG_INFO, "UDB_DEBUG", source, "$msg", log_data_string("msg", buf));
+	} else
+	{
+		unreal_log(ULOG_DEBUG, "udb", "UDB_DEBUG", source, "[UDB Debug] $msg", log_data_string("msg", buf));
 	}
-
-	unreal_log(ULOG_DEBUG, "udb", "UDB_DEBUG", source, "[UDB Debug] $msg", log_data_string("msg", buf));
 }
 
 /* End of udb_core.c.inc */
@@ -2873,10 +2888,14 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 		}
 		udb_block_replace_tree(ctx, block, tree, udb_record_count_tree(tree));
 		if (!unchanged)
+		{
 			udb_apply_special_record(ctx, block, rec, 1);
+			if (block->letter == 'L')
+				udb_sync_snomask_filter();
+		}
 		char logbuf[512];
-		snprintf(logbuf, sizeof(logbuf), "[UDB] Inserted record via S2S: %s -> %s", path, data);
-		unreal_log(ULOG_INFO, "udb", "UDB_INS_RECEIVED", client, "$msg", log_data_string("msg", logbuf));
+		snprintf(logbuf, sizeof(logbuf), "Inserted record via S2S: %s -> %s", path, data);
+		udb_log(ULOG_INFO, "UDB_INS_RECEIVED", client, "$msg", log_data_string("msg", logbuf));
 		if (ctx->propagator && block->syncing_from == client)
 		{
 			udb_mutation_forward_ins(ctx->propagator, client, target, path, data);
@@ -2933,6 +2952,8 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, const char *target
 		udb_block_replace_tree(ctx, block, tree, record_count);
 		if (candidate_line)
 			udb_lines_apply_effect(ctx, block, candidate_line, 0);
+		if (block->letter == 'L')
+			udb_sync_snomask_filter();
 		if (ctx->propagator && block->syncing_from == client)
 		{
 			udb_mutation_forward_del(ctx->propagator, client, target, path);
@@ -3612,9 +3633,9 @@ static void udb_nick_grant_oper(Client *client, UdbRecord *nick_rec, UdbRecord *
 
 	if (!find_operclass(operclass))
 	{
-		unreal_log(ULOG_WARNING, "udb", "UDB_OPERCLASS_NOT_FOUND", client,
-		           "UDB: operclass '$operclass' for $client.details does not exist in unrealircd.conf",
-		           log_data_string("operclass", operclass));
+		udb_log(ULOG_WARNING, "UDB_OPERCLASS_NOT_FOUND", client,
+		        "operclass '$operclass' for $client.details does not exist in unrealircd.conf",
+		        log_data_string("operclass", operclass));
 		return;
 	}
 
@@ -4517,6 +4538,11 @@ static void udb_channel_do_mode(Channel *channel, MessageTag *mtags,
 	do_mode(channel, source, mtags, myparc, (const char **)myparv, 0, 1);
 	for (i = 0; i < myparc; i++)
 		safe_free(myparv[i]);
+
+	if (parameters && *parameters)
+		udb_send_to_debugs(NULL, "Mode change on %s: %s %s", channel->name, modes, parameters);
+	else
+		udb_send_to_debugs(NULL, "Mode change on %s: %s", channel->name, modes);
 }
 
 static void udb_channel_set_modes(Channel *channel, const char *value)
@@ -6531,6 +6557,94 @@ static void udb_engine_shutdown(void)
 	udb_ctx = NULL;
 }
 
+extern MODVAR Log *logs[NUM_LOG_DESTINATIONS];
+
+static void udb_log_snomask_filter_init(void)
+{
+	Log *ld;
+	for (ld = logs[LOG_DEST_SNOMASK]; ld; ld = ld->next)
+	{
+		LogSource *ls;
+		int already_set = 0;
+		for (ls = ld->sources; ls; ls = ls->next)
+		{
+			if (ls->negative && !strcmp(ls->subsystem, "udb"))
+			{
+				already_set = 1;
+				break;
+			}
+		}
+		if (!already_set)
+		{
+			ls = safe_alloc(sizeof(LogSource));
+			ls->loglevel = ULOG_INVALID;
+			ls->negative = 1;
+			strlcpy(ls->subsystem, "udb", sizeof(ls->subsystem));
+			AddListItem(ls, ld->sources);
+		}
+	}
+	for (ld = logs[LOG_DEST_OPER]; ld; ld = ld->next)
+	{
+		LogSource *ls;
+		int already_set = 0;
+		for (ls = ld->sources; ls; ls = ls->next)
+		{
+			if (ls->negative && !strcmp(ls->subsystem, "udb"))
+			{
+				already_set = 1;
+				break;
+			}
+		}
+		if (!already_set)
+		{
+			ls = safe_alloc(sizeof(LogSource));
+			ls->loglevel = ULOG_INVALID;
+			ls->negative = 1;
+			strlcpy(ls->subsystem, "udb", sizeof(ls->subsystem));
+			AddListItem(ls, ld->sources);
+		}
+	}
+}
+
+static void udb_log_snomask_filter_free(void)
+{
+	Log *ld;
+	for (ld = logs[LOG_DEST_SNOMASK]; ld; ld = ld->next)
+	{
+		LogSource *ls, *ls_next;
+		for (ls = ld->sources; ls; ls = ls_next)
+		{
+			ls_next = ls->next;
+			if (ls->negative && !strcmp(ls->subsystem, "udb"))
+			{
+				DelListItem(ls, ld->sources);
+				safe_free(ls);
+			}
+		}
+	}
+	for (ld = logs[LOG_DEST_OPER]; ld; ld = ld->next)
+	{
+		LogSource *ls, *ls_next;
+		for (ls = ld->sources; ls; ls = ls_next)
+		{
+			ls_next = ls->next;
+			if (ls->negative && !strcmp(ls->subsystem, "udb"))
+			{
+				DelListItem(ls, ld->sources);
+				safe_free(ls);
+			}
+		}
+	}
+}
+
+static void udb_sync_snomask_filter(void)
+{
+	if (udb_is_debug_enabled())
+		udb_log_snomask_filter_free();
+	else
+		udb_log_snomask_filter_init();
+}
+
 static int udb_module_test(ModuleInfo *modinfo)
 {
 	HookAdd(modinfo->handle, HOOKTYPE_CONFIGTEST, 0, udb_config_test);
@@ -6541,6 +6655,7 @@ static int udb_module_test(ModuleInfo *modinfo)
 static int udb_module_init(ModuleInfo *modinfo)
 {
 	HookAdd(modinfo->handle, HOOKTYPE_CONFIGRUN, 0, udb_config_run);
+	udb_sync_snomask_filter();
 	udb_protocol_init(modinfo);
 	udb_nicks_init(modinfo);
 	udb_channels_init(modinfo);
@@ -6558,17 +6673,19 @@ static int udb_module_load(ModuleInfo *modinfo)
 		config_error("[UDB] Failed to initialize database engine");
 		return MOD_FAILED;
 	}
+	udb_sync_snomask_filter();
 	udb_nicks_load(modinfo);
 	udb_channels_load(modinfo);
-	unreal_log(ULOG_INFO, "udb", "UDB_LOADED", NULL,
-	           "[UDB] Unreal Database System v" UDB_VERSION " loaded successfully");
+	udb_log(ULOG_INFO, "UDB_LOADED", NULL,
+	        "Unreal Database System v" UDB_VERSION " loaded successfully");
 	return MOD_SUCCESS;
 }
 
 static int udb_module_unload(void)
 {
-	unreal_log(ULOG_INFO, "udb", "UDB_UNLOADING", NULL,
-	           "[UDB] Saving databases and shutting down...");
+	udb_log(ULOG_INFO, "UDB_UNLOADING", NULL,
+	        "Saving databases and shutting down...");
+	udb_log_snomask_filter_free();
 	udb_blocks_save_all(udb_ctx);
 	udb_engine_shutdown();
 	return MOD_SUCCESS;

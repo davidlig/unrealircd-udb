@@ -45,7 +45,7 @@ static Client *udb_service_source(const char *service_key)
 }
 
 static void udb_send_service_notice(Client *target, const char *service_key,
-                                   FORMAT_STRING(const char *pattern), ...)
+                                    FORMAT_STRING(const char *pattern), ...)
 {
 	Client *source;
 	char message[1024];

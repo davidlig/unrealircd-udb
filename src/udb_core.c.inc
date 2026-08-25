@@ -153,7 +153,7 @@ static int udb_oper_record_valid(const char *value)
 }
 
 static int udb_record_validate(UdbBlock *block, const char *path,
-                              const char *value)
+                               const char *value)
 {
 	const char *leaf;
 	size_t i;
@@ -629,6 +629,8 @@ static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSessi
 	udb_sync_session_free(block);
 
 	udb_apply_tree_effects(ctx, block);
+	if (block->letter == 'L')
+		udb_sync_snomask_filter();
 	return 1;
 }
 
@@ -780,10 +782,10 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 			while ((ch = fgetc(fp)) != '\n' && ch != EOF)
 				;
 			snprintf(logbuf, sizeof(logbuf),
-			         "[UDB] Skipping overlong persisted record in block %c at line %u",
+			         "Skipping overlong persisted record in block %c at line %u",
 			         block->letter, line_number);
-			unreal_log(ULOG_WARNING, "udb", "UDB_FILE_LINE_REJECTED", NULL,
-			           "$msg", log_data_string("msg", logbuf));
+			udb_log(ULOG_WARNING, "UDB_FILE_LINE_REJECTED", NULL,
+			        "$msg", log_data_string("msg", logbuf));
 			continue;
 		}
 		char *p = strchr(line, '\n');
@@ -800,10 +802,10 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 		{
 			char logbuf[512];
 			snprintf(logbuf, sizeof(logbuf),
-			         "[UDB] Skipping malformed persisted record in block %c at line %u",
+			         "Skipping malformed persisted record in block %c at line %u",
 			         block->letter, line_number);
-			unreal_log(ULOG_WARNING, "udb", "UDB_FILE_LINE_REJECTED", NULL,
-			           "$msg", log_data_string("msg", logbuf));
+			udb_log(ULOG_WARNING, "UDB_FILE_LINE_REJECTED", NULL,
+			        "$msg", log_data_string("msg", logbuf));
 		}
 	}
 	fclose(fp);
@@ -830,8 +832,11 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 		block->modified_at = st.st_mtime;
 	}
 	char logbuf[512];
-	snprintf(logbuf, sizeof(logbuf), "[UDB] Loaded block %c from %s (%u records)", block->letter, block->filepath, block->record_count);
-	unreal_log(ULOG_INFO, "udb", "UDB_FILE_LOADED", NULL, "$msg", log_data_string("msg", logbuf));
+	snprintf(logbuf, sizeof(logbuf), "Loaded block %c from %s (%u records)", block->letter, block->filepath, block->record_count);
+	udb_log(ULOG_INFO, "UDB_FILE_LOADED", NULL, "$msg", log_data_string("msg", logbuf));
+
+	if (block->letter == 'L')
+		udb_sync_snomask_filter();
 
 	return 1;
 }
@@ -874,9 +879,12 @@ static const char *udb_get_bot_mask(const char *service_key, int force_default)
 
 static void udb_send_to_debugs(Client *source, const char *fmt, ...)
 {
-	const char *buf = "diagnostic detail redacted";
+	char buf[1024];
+	va_list va;
 
-	(void)fmt;
+	va_start(va, fmt);
+	vsnprintf(buf, sizeof(buf), fmt, va);
+	va_end(va);
 
 	Client *client;
 	list_for_each_entry(client, &client_list, client_node)
@@ -898,20 +906,11 @@ static void udb_send_to_debugs(Client *source, const char *fmt, ...)
 		}
 	}
 
-	// Also send to local opers if our own server has the debug option
-	if (udb_ctx && udb_ctx->links)
+	if (udb_is_debug_enabled())
 	{
-		UdbRecord *me_rec = udb_record_find(udb_ctx, me.name, udb_ctx->links);
-		if (me_rec)
-		{
-			UdbRecord *opt_rec = udb_record_find(udb_ctx, LKEY_OPTIONS, me_rec);
-			if (opt_rec && (opt_rec->data_num & UDB_LNKOPT_DEBUG))
-			{
-				unreal_log(ULOG_INFO, "udb", "UDB_DEBUG_OPER", source,
-				           "[UDB Debug] $msg", log_data_string("msg", buf));
-			}
-		}
+		udb_log(ULOG_INFO, "UDB_DEBUG", source, "$msg", log_data_string("msg", buf));
+	} else
+	{
+		unreal_log(ULOG_DEBUG, "udb", "UDB_DEBUG", source, "[UDB Debug] $msg", log_data_string("msg", buf));
 	}
-
-	unreal_log(ULOG_DEBUG, "udb", "UDB_DEBUG", source, "[UDB Debug] $msg", log_data_string("msg", buf));
 }
