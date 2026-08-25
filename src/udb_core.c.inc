@@ -17,11 +17,17 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
-static int udb_boolean_record_valid(const char *value)
+static int udb_options_record_valid(const char *value)
 {
-	if (!value)
+	const char *p;
+	if (!value || value[0] != '*' || value[1] == '\0')
 		return 0;
-	return !strcmp(value, "*1");
+	for (p = value + 1; *p; p++)
+	{
+		if (!isdigit((unsigned char)*p))
+			return 0;
+	}
+	return 1;
 }
 
 static int udb_channel_modes_record_valid(const char *value)
@@ -203,10 +209,8 @@ static int udb_record_validate(UdbBlock *block, const char *path,
 	{
 		if (!strcasecmp(leaf, CKEY_MODES))
 			return udb_channel_modes_record_valid(value);
-		if (!strcasecmp(leaf, CKEY_PERSISTENT) ||
-		    !strcasecmp(leaf, CKEY_MLOCK) ||
-		    !strcasecmp(leaf, CKEY_TOPICLOCK))
-			return udb_boolean_record_valid(value);
+		if (!strcasecmp(leaf, CKEY_OPTIONS))
+			return udb_options_record_valid(value);
 	}
 	return 1;
 }

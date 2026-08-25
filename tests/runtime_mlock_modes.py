@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Integration tests for UDB modes validation, DEL non-reversal, mlock, topiclock, and NickServ notice."""
+"""Integration tests for UDB modes validation, DEL non-reversal, channel options (*6 lock_modes/lock_topic, *8 persistent), and NickServ notice."""
 
 import argparse
 import hashlib
@@ -297,54 +297,53 @@ def exercise(host, client_port, server_port):
                 f"No se recibió el aviso correcto de NickServ: {nick_reply!r}")
         print("PASS: aviso de NickServ con formato '/NICK <nick>:Password' emitido correctamente")
 
-        # 2. mlock test:
-        # mlock is active (*1). Neither founder nor non-founder can change modes.
+        # 2. options *6 test (lock_modes + lock_topic):
+        # Modes are locked (*2 in options *6). Neither founder nor non-founder can change modes.
         start = len(bob.lines)
         bob.send(f"MODE {CHANNEL} +s")
-        bob.wait_for(lambda line: "locked by UDB mlock" in line and (line.startswith(":ChanServ") or "ChanServ" in line),
-                     "bloqueo de modo por mlock (bob) con origen ChanServ")
-        print("PASS: mlock bloqueó cambio de modo de usuario normal vía ChanServ")
+        bob.wait_for(lambda line: "locked by UDB" in line and (line.startswith(":ChanServ") or "ChanServ" in line),
+                     "bloqueo de modo por options lock_modes (bob) con origen ChanServ")
+        print("PASS: options lock_modes bloqueó cambio de modo de usuario normal vía ChanServ")
 
         start = len(alice.lines)
         alice.send(f"MODE {CHANNEL} +s")
-        alice.wait_for(lambda line: "locked by UDB mlock" in line and (line.startswith(":ChanServ") or "ChanServ" in line),
-                       "bloqueo de modo por mlock (fundador) con origen ChanServ")
-        print("PASS: mlock bloqueó cambio de modo del fundador vía ChanServ")
+        alice.wait_for(lambda line: "locked by UDB" in line and (line.startswith(":ChanServ") or "ChanServ" in line),
+                       "bloqueo de modo por options lock_modes (fundador) con origen ChanServ")
+        print("PASS: options lock_modes bloqueó cambio de modo del fundador vía ChanServ")
 
-        # 3. topiclock test:
-        # topiclock is active (*1). Neither founder nor non-founder can change topic.
+        # 3. options *6 test (lock_topic):
+        # Topic is locked (*4 in options *6). Neither founder nor non-founder can change topic.
         start = len(bob.lines)
         bob.send(f"TOPIC {CHANNEL} :New topic by bob")
-        bob.wait_for(lambda line: "locked by UDB topiclock" in line and (line.startswith(":ChanServ") or "ChanServ" in line),
-                     "bloqueo de topic por topiclock (bob) con origen ChanServ")
-        print("PASS: topiclock bloqueó cambio de topic de bob vía ChanServ")
+        bob.wait_for(lambda line: "locked by UDB" in line and (line.startswith(":ChanServ") or "ChanServ" in line),
+                     "bloqueo de topic por options lock_topic (bob) con origen ChanServ")
+        print("PASS: options lock_topic bloqueó cambio de topic de bob vía ChanServ")
 
         start = len(alice.lines)
         alice.send(f"TOPIC {CHANNEL} :New topic by alice")
-        alice.wait_for(lambda line: "locked by UDB topiclock" in line and (line.startswith(":ChanServ") or "ChanServ" in line),
-                       "bloqueo de topic por topiclock (fundador) con origen ChanServ")
-        print("PASS: topiclock bloqueó cambio de topic del fundador vía ChanServ")
+        alice.wait_for(lambda line: "locked by UDB" in line and (line.startswith(":ChanServ") or "ChanServ" in line),
+                       "bloqueo de topic por options lock_topic (fundador) con origen ChanServ")
+        print("PASS: options lock_topic bloqueó cambio de topic del fundador vía ChanServ")
 
-        # 4. Reject boolean INS *0 on mlock/topiclock and unlock via DEL:
-        services.send_ins(f"C::{CHANNEL}::mlock", "*0")
+        # 4. Reject invalid options and unlock via INS *0 / DEL options:
+        services.send_ins(f"C::{CHANNEL}::options", "6")
         services.wait_for(lambda line: " DB " in line and " ERR " in line and " INS " in line,
-                          "rechazo de mlock *0")
-        print("PASS: INS de mlock *0 fue rechazado con ERR INS")
+                          "rechazo de options sin *")
+        print("PASS: INS de options sin '*' fue rechazado con ERR INS")
 
-        services.send_ins(f"C::{CHANNEL}::topiclock", "*0")
+        services.send_ins(f"C::{CHANNEL}::options", "*abc")
         services.wait_for(lambda line: " DB " in line and " ERR " in line and " INS " in line,
-                          "rechazo de topiclock *0")
-        print("PASS: INS de topiclock *0 fue rechazado con ERR INS")
+                          "rechazo de options *abc no numérico")
+        print("PASS: INS de options no numérico fue rechazado con ERR INS")
 
-        services.send_del(f"C::{CHANNEL}::mlock")
-        services.send_del(f"C::{CHANNEL}::topiclock")
+        services.send_ins(f"C::{CHANNEL}::options", "*0")
         time.sleep(0.2)
 
         # Now founder can change modes and topic
         start = len(alice.lines)
-        alice.request(f"MODE {CHANNEL} +s", lambda line: f"MODE {CHANNEL} +s" in line, "modo +s permitido tras DEL mlock")
-        alice.request(f"TOPIC {CHANNEL} :Unlocked topic", lambda line: f"TOPIC {CHANNEL}" in line, "topic permitido tras DEL topiclock")
-        print("PASS: DEL de mlock y topiclock permitieron modificaciones al fundador")
+        alice.request(f"MODE {CHANNEL} +s", lambda line: f"MODE {CHANNEL} +s" in line, "modo +s permitido tras options *0")
+        alice.request(f"TOPIC {CHANNEL} :Unlocked topic", lambda line: f"TOPIC {CHANNEL}" in line, "topic permitido tras options *0")
+        print("PASS: INS options *0 permitió modificaciones de modo y topic al fundador")
 
         # 5. Validation of modes with missing parameters via INS:
         start_svc = len(services.lines)
@@ -369,41 +368,35 @@ def exercise(host, client_port, server_port):
         require(not del_traffic, f"DEL de modes revirtió modos en caliente: {del_traffic!r}")
         print("PASS: DEL de modes eliminó el registro sin revertir los modos en caliente")
 
-        # 7. Persistent channel mode (+P) tests:
-        # 7a. Reject INS persistent *0
-        services.send_ins(f"C::{CHANNEL}::persistent", "*0")
-        services.wait_for(lambda line: " DB " in line and " ERR " in line and " INS " in line,
-                          "rechazo de persistent *0")
-        print("PASS: INS de persistent *0 fue rechazado con ERR INS")
-
-        # 7b. INS persistent *1 on active channel sets +P
-        services.send_ins(f"C::{CHANNEL}::persistent", "*1")
+        # 7. Persistent channel mode (+P) tests via options *8:
+        # 7a. INS options *8 on active channel sets +P
+        services.send_ins(f"C::{CHANNEL}::options", "*8")
         alice.wait_for(lambda line: f"MODE {CHANNEL} +P" in line,
-                       "aplicación de +P en canal activo tras INS persistent *1")
-        print("PASS: INS de persistent *1 estableció modo +P en canal activo")
+                       "aplicación de +P en canal activo tras INS options *8")
+        print("PASS: INS de options *8 estableció modo +P en canal activo")
 
-        # 7c. DEL persistent removes -P
-        services.send_del(f"C::{CHANNEL}::persistent")
+        # 7b. DEL options removes -P
+        services.send_del(f"C::{CHANNEL}::options")
         alice.wait_for(lambda line: f"MODE {CHANNEL} -P" in line,
-                       "remoción de -P tras DEL persistent")
-        print("PASS: DEL de persistent removió modo -P en canal activo")
+                       "remoción de -P tras DEL options")
+        print("PASS: DEL de options removió modo -P en canal activo")
 
-        # 7d. INS persistent *1 on non-existent channel creates it with +P
+        # 7c. INS options *8 on non-existent channel creates it with +P
         empty_chan = "#emptyperm"
-        services.send_ins(f"C::{empty_chan}::persistent", "*1")
+        services.send_ins(f"C::{empty_chan}::options", "*8")
         time.sleep(0.2)
         # Bob joins #emptyperm and requests MODE to see +P in 324
         bob.request(f"JOIN {empty_chan}", lambda line: " 366 " in line, "JOIN #emptyperm")
         bob.request(f"MODE {empty_chan}", lambda line: " 324 " in line and "P" in line,
                     "canal persistente instanciado con +P para canal vacío")
-        print("PASS: INS de persistent *1 instanció canal vacío con modo +P")
+        print("PASS: INS de options *8 instanció canal vacío con modo +P")
 
-        # 7e. DEL persistent on empty channel destroys it
+        # 7d. DEL options on empty channel destroys it
         bob.send(f"PART {empty_chan} :bye")
         time.sleep(0.2)
-        services.send_del(f"C::{empty_chan}::persistent")
+        services.send_del(f"C::{empty_chan}::options")
         time.sleep(0.2)
-        print("PASS: DEL de persistent en canal vacío procesado limpiamente")
+        print("PASS: DEL de options en canal vacío procesado limpiamente")
 
     finally:
         for client in clients:
@@ -448,11 +441,10 @@ def main():
         (data / "udb_C.db").write_text(
             f"{CHANNEL}::founder davidlig\n"
             f"{CHANNEL}::modes +ntM\n"
-            f"{CHANNEL}::mlock *1\n"
-            f"{CHANNEL}::topiclock *1\n"
+            f"{CHANNEL}::options *6\n"
             f"#bad1::modes +ntMl\n"
-            f"#bad2::mlock 1\n"
-            f"#bad3::topiclock 1\n",
+            f"#bad2::options 6\n"
+            f"#bad3::options *abc\n",
             encoding="ascii")
 
         client_port, server_port, tls_port = free_port(), free_port(), free_port()

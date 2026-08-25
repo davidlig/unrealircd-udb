@@ -43,18 +43,15 @@
 #define NKEY_SWHOIS    "swhois"    /* Custom SWHOIS line */
 
 /* Channel sub-records: C::<#chan>::<key> <value> */
-#define CKEY_FOUNDER    "founder"    /* Founder nick */
-#define CKEY_MODES      "modes"      /* Locked channel modes */
-#define CKEY_MLOCK      "mlock"      /* Channel mode lock flag (*1 = locked, *0 = unlocked) */
-#define CKEY_TOPICLOCK  "topiclock"  /* Channel topic lock flag (*1 = locked, *0 = unlocked) */
-#define CKEY_TOPIC      "topic"      /* Persistent topic */
-#define CKEY_ACCESS     "access"     /* Access list (has sub-records per nick) */
-#define CKEY_FORBID     "forbid"     /* Forbidden channel (value = reason) */
-#define CKEY_SUSPENDED  "suspended"  /* Suspended channel */
-#define CKEY_PASS       "pass"       /* Channel password for +ao */
-#define CKEY_CHALLENGE  "challenge"  /* Channel password hash method */
-#define CKEY_OPTIONS    "options"    /* Channel option flags (*N) */
-#define CKEY_PERSISTENT "persistent" /* Keep the channel alive through native +P (*1 or *0) */
+#define CKEY_FOUNDER   "founder"   /* Founder nick */
+#define CKEY_MODES     "modes"     /* Locked channel modes */
+#define CKEY_TOPIC     "topic"     /* Persistent topic */
+#define CKEY_ACCESS    "access"    /* Access list (has sub-records per nick) */
+#define CKEY_FORBID    "forbid"    /* Forbidden channel (value = reason) */
+#define CKEY_SUSPENDED "suspended" /* Suspended channel */
+#define CKEY_PASS      "pass"      /* Channel password for +ao */
+#define CKEY_CHALLENGE "challenge" /* Channel password hash method */
+#define CKEY_OPTIONS   "options"   /* Channel option flags (*N) */
 
 /* IP sub-records: I::<ip|host>::<key> <value> */
 #define IKEY_CLONES  "clones"  /* Max clones allowed (*N) */
@@ -105,6 +102,8 @@
  * ======================================================================== */
 #define UDB_CHOPT_PROTECT_BANS 0x1 /* Only ban author can remove their bans */
 #define UDB_CHOPT_LOCK_MODES   0x2 /* Channel modes are locked */
+#define UDB_CHOPT_LOCK_TOPIC   0x4 /* Channel topic is locked */
+#define UDB_CHOPT_PERSISTENT   0x8 /* Keep the channel alive through native +P */
 
 /* ========================================================================
  * Link Option Flags (bitmask in L::<server>::options *<value>)

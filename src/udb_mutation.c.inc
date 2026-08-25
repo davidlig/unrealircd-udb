@@ -185,7 +185,8 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 		if (old_rec && !unchanged)
 		{
 			if (block->letter != 'C' || old_rec->parent == block->tree ||
-			    (strcmp(old_rec->key, CKEY_MODES) && strcmp(old_rec->key, CKEY_TOPIC)))
+			    (strcmp(old_rec->key, CKEY_MODES) && strcmp(old_rec->key, CKEY_TOPIC) &&
+			     strcmp(old_rec->key, CKEY_OPTIONS)))
 				udb_remove_special_record(ctx, block, old_rec);
 		}
 		udb_block_replace_tree(ctx, block, tree, udb_record_count_tree(tree));

@@ -1,6 +1,6 @@
 /*
  * UDB 4 - Unreal Database System for UnrealIRCd 6
- * Subsystem: Channel Registration, Founder +q, mlock & topiclock
+ * Subsystem: Channel Registration, Founder +q & Channel Options
  *
  * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
  * Based on the original UDB concept by Trocotronic.
@@ -233,20 +233,26 @@ static void udb_channel_remove_modes(Channel *channel, const char *fallback_valu
 
 static int udb_channel_is_persistent(UdbContext *ctx, UdbRecord *chan_rec)
 {
-	UdbRecord *rec = chan_rec ? udb_record_find(ctx, CKEY_PERSISTENT, chan_rec) : NULL;
-	return rec && !rec->data_str && rec->data_num == 1;
+	UdbRecord *rec = chan_rec ? udb_record_find(ctx, CKEY_OPTIONS, chan_rec) : NULL;
+	return rec && !rec->data_str && (rec->data_num & UDB_CHOPT_PERSISTENT);
 }
 
-static int udb_channel_is_mlock(UdbContext *ctx, UdbRecord *chan_rec)
+static int udb_channel_is_lock_modes(UdbContext *ctx, UdbRecord *chan_rec)
 {
-	UdbRecord *rec = chan_rec ? udb_record_find(ctx, CKEY_MLOCK, chan_rec) : NULL;
-	return rec && !rec->data_str && rec->data_num == 1;
+	UdbRecord *rec = chan_rec ? udb_record_find(ctx, CKEY_OPTIONS, chan_rec) : NULL;
+	return rec && !rec->data_str && (rec->data_num & UDB_CHOPT_LOCK_MODES);
 }
 
-static int udb_channel_is_topiclock(UdbContext *ctx, UdbRecord *chan_rec)
+static int udb_channel_is_lock_topic(UdbContext *ctx, UdbRecord *chan_rec)
 {
-	UdbRecord *rec = chan_rec ? udb_record_find(ctx, CKEY_TOPICLOCK, chan_rec) : NULL;
-	return rec && !rec->data_str && rec->data_num == 1;
+	UdbRecord *rec = chan_rec ? udb_record_find(ctx, CKEY_OPTIONS, chan_rec) : NULL;
+	return rec && !rec->data_str && (rec->data_num & UDB_CHOPT_LOCK_TOPIC);
+}
+
+static int udb_channel_is_protect_bans(UdbContext *ctx, UdbRecord *chan_rec)
+{
+	UdbRecord *rec = chan_rec ? udb_record_find(ctx, CKEY_OPTIONS, chan_rec) : NULL;
+	return rec && !rec->data_str && (rec->data_num & UDB_CHOPT_PROTECT_BANS);
 }
 
 static void udb_channel_set_persistent(Channel *channel, int enabled)
@@ -547,7 +553,7 @@ static void udb_channel_apply_subrecord(UdbContext *ctx, Channel *channel, UdbRe
 		return;
 	}
 
-	if (!strcmp(subkey, CKEY_PERSISTENT))
+	if (!strcmp(subkey, CKEY_OPTIONS))
 	{
 		udb_channel_set_persistent(channel, udb_channel_is_persistent(ctx, chan_rec));
 		return;
@@ -582,7 +588,7 @@ static void udb_channel_remove_subrecord(UdbContext *ctx, Channel *channel, UdbR
 	{
 		UdbRecord *mode_rec = udb_record_find(ctx, CKEY_MODES, chan_rec);
 		udb_channel_remove_modes(channel, mode_rec ? mode_rec->data_str : NULL);
-	} else if (!strcmp(subkey, CKEY_PERSISTENT))
+	} else if (!strcmp(subkey, CKEY_OPTIONS))
 	{
 		udb_channel_set_persistent(channel, 0);
 	} else if (!strcmp(subkey, CKEY_PASS) || !strcmp(subkey, CKEY_CHALLENGE))
@@ -861,10 +867,9 @@ CMD_OVERRIDE_FUNC(udb_override_mode)
 {
 	Channel *channel;
 	char channel_name[CHANNELLEN + 1];
-	UdbRecord *chan_rec, *options_rec;
+	UdbRecord *chan_rec;
 	UdbBanSnapshot *snapshot = NULL;
 	int is_founder;
-	int protect_bans;
 
 	if (!MyUser(client) || parc < 3 || !IsChannelName(parv[1]))
 	{
@@ -873,7 +878,6 @@ CMD_OVERRIDE_FUNC(udb_override_mode)
 	}
 	channel = find_channel(parv[1]);
 	chan_rec = (channel && udb_ctx && udb_ctx->channels) ? udb_record_find(udb_ctx, channel->name, udb_ctx->channels) : NULL;
-	options_rec = chan_rec ? udb_record_find(udb_ctx, CKEY_OPTIONS, chan_rec) : NULL;
 	if (!chan_rec)
 	{
 		CALL_NEXT_COMMAND_OVERRIDE();
@@ -881,21 +885,14 @@ CMD_OVERRIDE_FUNC(udb_override_mode)
 	}
 	strlcpy(channel_name, channel->name, sizeof(channel_name));
 	is_founder = udb_channel_is_identified_founder(client, chan_rec);
-	if (udb_channel_is_mlock(udb_ctx, chan_rec) &&
+	if (udb_channel_is_lock_modes(udb_ctx, chan_rec) &&
 	    udb_channel_mode_has_change(parv[2]))
-	{
-		udb_send_service_notice(client, SKEY_CHANSERV, "You do not have permission to change modes in %s (locked by UDB mlock)", channel->name);
-		return;
-	}
-	if (options_rec && (options_rec->data_num & UDB_CHOPT_LOCK_MODES) &&
-	    udb_channel_mode_has_change(parv[2]) && !is_founder)
 	{
 		udb_send_service_notice(client, SKEY_CHANSERV, "You do not have permission to change modes in %s (locked by UDB)", channel->name);
 		return;
 	}
-	protect_bans = options_rec && (options_rec->data_num & UDB_CHOPT_PROTECT_BANS);
 	udb_channel_ban_owners_prune(channel);
-	if (protect_bans && !is_founder && !IsOper(client) &&
+	if (udb_channel_is_protect_bans(udb_ctx, chan_rec) && !is_founder && !IsOper(client) &&
 	    udb_channel_blocks_ban_removal(client, channel, parc, parv))
 		return;
 	/* Retain local ban ownership even before the protection option is enabled. */
@@ -935,9 +932,9 @@ CMD_OVERRIDE_FUNC(udb_override_topic)
 		CALL_NEXT_COMMAND_OVERRIDE();
 		return;
 	}
-	if (udb_channel_is_topiclock(udb_ctx, chan_rec))
+	if (udb_channel_is_lock_topic(udb_ctx, chan_rec))
 	{
-		udb_send_service_notice(client, SKEY_CHANSERV, "You do not have permission to change the topic in %s (locked by UDB topiclock)", channel->name);
+		udb_send_service_notice(client, SKEY_CHANSERV, "You do not have permission to change the topic in %s (locked by UDB)", channel->name);
 		return;
 	}
 	UdbRecord *topic_rec = udb_record_find(udb_ctx, CKEY_TOPIC, chan_rec);
@@ -962,9 +959,9 @@ static const char *udb_hook_pre_topic(Client *client, Channel *channel, const ch
 	if (!chan_rec)
 		return topic;
 
-	if (udb_channel_is_topiclock(udb_ctx, chan_rec))
+	if (udb_channel_is_lock_topic(udb_ctx, chan_rec))
 	{
-		udb_send_service_notice(client, SKEY_CHANSERV, "You do not have permission to change the topic in %s (locked by UDB topiclock)", channel->name);
+		udb_send_service_notice(client, SKEY_CHANSERV, "You do not have permission to change the topic in %s (locked by UDB)", channel->name);
 		return NULL;
 	}
 

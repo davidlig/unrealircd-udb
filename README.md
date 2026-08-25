@@ -160,13 +160,14 @@ Detailed technical documentation is available in the `doc/` directory:
   local target one five-minute, one-use entry grant. That grant bypasses only
   the UDB password check and never grants `+a`; `JOIN <channel> <password>`
   continues to grant `+a`.
-- `C::<#channel>::persistent` sets native `+P` when `chanmodes/permanent` is
-  loaded. UDB does not emulate persistence if that handler is unavailable.
-- `C::<#channel>::options *1` protects locally-added `+b` entries from removal
-  by anyone other than their recorded owner, an identified founder, or an oper.
-- `C::<#channel>::options *2` rejects every local `MODE` and `SAMODE` change
-  from anyone other than the identified founder. UDB mode locks are command
-  overrides, not a textual MODE parser.
+- `C::<#channel>::options *<value>` sets numeric bitmask channel options:
+  - `*1` (`0x1` / `UDB_CHOPT_PROTECT_BANS`): Protects locally-added `+b` entries from removal
+    by anyone other than their recorded owner, an identified founder, or an oper.
+  - `*2` (`0x2` / `UDB_CHOPT_LOCK_MODES`): Absolute mode lock that blocks all local `MODE` and `SAMODE` changes (including for the founder).
+  - `*4` (`0x4` / `UDB_CHOPT_LOCK_TOPIC`): Absolute topic lock that blocks all local `TOPIC` changes (including for the founder).
+  - `*8` (`0x8` / `UDB_CHOPT_PERSISTENT`): Sets native `+P` when `chanmodes/permanent` is
+    loaded (creates the channel on insert if non-existent, and destroys it when disabled or removed if empty).
+  - Supports flag combinations such as `*6` (`0x2 | 0x4` = lock modes + lock topic) or `*14` (`0x2 | 0x4 | 0x8`).
 
 ### IP Policies
 
@@ -228,32 +229,31 @@ Detailed technical documentation is available in the `doc/` directory:
 Run these from the UnrealIRCd source root after building `udb.so`:
 
 ```bash
-# One node: isolated nick/channel runtime harness (requires bwrap).
+# Isolated nick/channel runtime authentication and privilege harness (requires bwrap):
 python3 src/modules/third/udb/tests/runtime_channel_nick.py
 
-# Two nodes: deterministic equal-timestamp conflict resolution, staged N/K records, and authorized INS/DEL.
+# Channel options (*6 lock_modes/lock_topic, *8 persistent), modes validation, and notices:
+python3 src/modules/third/udb/tests/runtime_mlock_modes.py
+
+# Channel modes INS churn avoidance and founder +q restoration:
+python3 src/modules/third/udb/tests/runtime_channel_modes_ins.py
+
+# Global and IP clone limit throttling with custom quit messages:
+python3 src/modules/third/udb/tests/runtime_clone_limit.py
+
+# Link debug notices routing (L::<server>::options *1):
+python3 src/modules/third/udb/tests/runtime_debug_notices.py
+
+# Propagator dynamic priority list failover and auto-bootstrap:
+python3 src/modules/third/udb/tests/test_propagator_failover.py
+
+# Two nodes: deterministic equal-timestamp conflict resolution, staged N/K records, and authorized INS/DEL:
 python3 src/modules/third/udb/tests/two_node_udb.py
 
-# Two nodes: staged snapshots revoke a live UDB oper and apply loopback K-line effects.
+# Two nodes: staged snapshots revoke a live UDB oper and apply loopback K-line effects:
 python3 src/modules/third/udb/tests/staged_runtime_effects.py
 
-# Two nodes: prove a failed live INS snapshot leaves B unchanged.
-python3 src/modules/third/udb/tests/two_node_udb.py --runtime-rename-failure
-
-# Two nodes: prove a failed live OPT snapshot leaves B unchanged and returns ERR.
-python3 src/modules/third/udb/tests/two_node_udb.py --runtime-opt-rename-failure
-
-# Two nodes: prove a failed temporary snapshot fsync leaves A unchanged.
-python3 src/modules/third/udb/tests/two_node_udb.py --snapshot-fsync-failure
-
-# Two nodes: prove failed live DEL and DRP snapshots retain B's records.
-python3 src/modules/third/udb/tests/two_node_udb.py --runtime-del-rename-failure
-python3 src/modules/third/udb/tests/two_node_udb.py --runtime-drp-rename-failure
-
-# Two nodes: reject empty, partial, and overflowing END digests for an empty staged tree.
-python3 src/modules/third/udb/tests/two_node_udb.py --malformed-end-checksum
-
-# Three nodes: prove A -> B commits before B -> C propagation.
+# Three nodes: multi-hop A -> B commits before B -> C propagation:
 python3 src/modules/third/udb/tests/three_node_udb.py
 ```
 

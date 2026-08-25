@@ -50,17 +50,17 @@ Stores configurations for registered users.
 #### Block C (Channels)
 *   **founder**: Nickname of the original channel founder (granted +q automatically).
 *   **modes**: Channel modes managed by UDB. Parameters follow the mode string. Mode letters and parameter counts are strictly validated (e.g. `+ntMl` without parameters is rejected, requiring `+ntMl 50`). Deleting via `DEL` does not revert live channel modes.
-*   **mlock**: Absolute channel mode lock (`*1` on `INS`; disabled via `DEL`). When enabled (`*1`), nobody can modify channel modes via `MODE` or `SAMODE`.
-*   **topiclock**: Absolute channel topic lock (`*1` on `INS`; disabled via `DEL`). When enabled (`*1`), nobody can modify the channel topic via `TOPIC`.
 *   **topic**: The persistent channel topic.
 *   **access**: Child records keyed by the identified nicknames allowed to join.
 *   **forbid**: Channel prohibition reason.
 *   **suspended**: Disables registered-channel founder and `+r` behavior.
 *   **pass** and **challenge**: Channel-admin authentication credential.
-*   **persistent**: Sets native `+P` when the permanent-channel mode handler is loaded (`*1` on `INS`; disabled and removed via `DEL`). If the channel does not exist on insert, it is created; if empty on `DEL`, it is destroyed.
-*   **options**: Numeric channel options: `*1` protects locally-added bans,
-    and `*2` locks every local `MODE` and `SAMODE` change to the identified
-    founder.
+*   **options**: Numeric bitmask options (`*<value>`):
+    *   `*1` (`0x1` / `UDB_CHOPT_PROTECT_BANS`): Protects locally-added bans (only ban author can remove their bans).
+    *   `*2` (`0x2` / `UDB_CHOPT_LOCK_MODES`): Absolute channel mode lock (nobody can modify modes via `MODE` or `SAMODE`).
+    *   `*4` (`0x4` / `UDB_CHOPT_LOCK_TOPIC`): Absolute channel topic lock (nobody can modify topic via `TOPIC`).
+    *   `*8` (`0x8` / `UDB_CHOPT_PERSISTENT`): Sets native `+P` when the permanent-channel mode handler is loaded. If the channel does not exist on insert, it is created; if empty when disabled or removed via `DEL`, it is destroyed.
+    *   Supports any combination of flags (e.g. `*6` for `0x2 | 0x4` = lock modes + lock topic, `*14` for `0x2 | 0x4 | 0x8`, etc.).
 
 ### 1.3 Live Channel Reconciliation
 
@@ -93,11 +93,13 @@ the native MODE/TOPIC protocol while making the service client the visible
 origin. A missing or ambiguous service client falls back to the local server
 source and is logged; UDB never fabricates a client.
 
-UDB uses command overrides for `MODE` and `SAMODE`, rather than raw command
-text inspection. With channel option `*1`, locally-added `+b` masks are tracked
+UDB uses command overrides for `MODE`, `SAMODE`, and `TOPIC`, rather than raw command
+text inspection. With channel option `*1` (`UDB_CHOPT_PROTECT_BANS`), locally-added `+b` masks are tracked
 with their setter and cannot be removed by another local user, except an
-identified founder or an oper. Option `*2` rejects any local mode change by a
-non-founder; it is not limited to the modes stored in `C::<#channel>::modes`.
+identified founder or an oper.
+Option `*2` (`UDB_CHOPT_LOCK_MODES`) absolutely blocks any local mode change (including for the founder).
+Option `*4` (`UDB_CHOPT_LOCK_TOPIC`) absolutely blocks any local topic change via `TOPIC` (including for the founder).
+Option `*8` (`UDB_CHOPT_PERSISTENT`) maintains the channel permanently via native `+P`.
 
 #### Block I (IPs and Hosts)
 *   **clones**: Numeric limit of simultaneous connections (`*<number>`).

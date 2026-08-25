@@ -50,17 +50,17 @@ Almacena configuraciones para usuarios registrados.
 #### Bloque C (Canales)
 *   **founder**: Nick del fundador original del canal (se le otorga +q automáticamente).
 *   **modes**: Modos de canal gestionados por UDB. Los parámetros siguen a la cadena de modos. Se validan estrictamente las letras de modo y la cantidad de parámetros requeridos (por ejemplo, `+ntMl` sin parámetro se rechaza, requiriéndose `+ntMl 50`). Al borrarse mediante `DEL`, no se revierten en caliente en el canal.
-*   **mlock**: Bloqueo absoluto de modos de canal (`*1` en `INS`; se desactiva con `DEL`). Cuando está activo (`*1`), nadie puede modificar los modos del canal mediante `MODE` o `SAMODE`.
-*   **topiclock**: Bloqueo absoluto del topic del canal (`*1` en `INS`; se desactiva con `DEL`). Cuando está activo (`*1`), nadie puede modificar el topic del canal mediante `TOPIC`.
 *   **topic**: El tema (topic) persistente del canal.
 *   **access**: Subregistros con los nicks identificados que pueden entrar.
 *   **forbid**: Motivo de prohibición del canal.
 *   **suspended**: Desactiva el comportamiento de fundador y `+r` del canal registrado.
 *   **pass** y **challenge**: Credencial de autenticación de administrador del canal.
-*   **persistent**: Activa el `+P` nativo cuando está cargado el manejador de canales permanentes (`*1` en `INS`; se desactiva y remueve con `DEL`). Si el canal no existe al insertarse, se crea automáticamente; si queda vacío al borrarse con `DEL`, se destruye.
-*   **options**: Opciones numéricas: `*1` protege los bans locales y `*2`
-     bloquea cualquier cambio local de `MODE` o `SAMODE` salvo para el fundador
-     identificado.
+*   **options**: Máscara de bits de opciones numéricas (`*<valor>`):
+    *   `*1` (`0x1` / `UDB_CHOPT_PROTECT_BANS`): Protege los bans locales (solo el autor puede retirarlos).
+    *   `*2` (`0x2` / `UDB_CHOPT_LOCK_MODES`): Bloqueo absoluto de modos de canal (nadie puede modificarlos mediante `MODE` o `SAMODE`).
+    *   `*4` (`0x4` / `UDB_CHOPT_LOCK_TOPIC`): Bloqueo absoluto del topic del canal (nadie puede modificarlo mediante `TOPIC`).
+    *   `*8` (`0x8` / `UDB_CHOPT_PERSISTENT`): Activa el modo nativo `+P` cuando está cargado el manejador de canales permanentes. Si el canal no existe al insertarse, se crea automáticamente; si queda vacío al desactivarse o borrarse con `DEL`, se destruye.
+    *   Admite cualquier combinación de flags (por ejemplo `*6` para `0x2 | 0x4` = lock modes + lock topic, `*14` para `0x2 | 0x4 | 0x8`, etc.).
 
 ### 1.3 Reconciliación De Canales En Caliente
 
@@ -93,11 +93,12 @@ el cliente de servicio. Si el cliente de servicio no está conectado o la
 máscara es ambigua, el evento usa de forma segura el servidor local y UDB
 registra la degradación; nunca se fabrica un `Client`.
 
-UDB usa overrides de `MODE` y `SAMODE`, no inspección de texto crudo. Con la
-opción `*1`, los `+b` añadidos localmente se asocian a su autor y otro usuario
+UDB usa overrides de `MODE`, `SAMODE` y `TOPIC`, no inspección de texto crudo. Con la
+opción `*1` (`UDB_CHOPT_PROTECT_BANS`), los `+b` añadidos localmente se asocian a su autor y otro usuario
 local no puede eliminarlos, salvo un fundador identificado o un oper.
-La opción `*2` rechaza todo cambio local de modos de quien no sea el fundador;
-no se limita a los modos guardados en `C::<#canal>::modes`.
+La opción `*2` (`UDB_CHOPT_LOCK_MODES`) bloquea de forma absoluta cualquier cambio local de modos (incluyendo al fundador).
+La opción `*4` (`UDB_CHOPT_LOCK_TOPIC`) bloquea de forma absoluta cualquier cambio local del topic mediante `TOPIC` (incluyendo al fundador).
+La opción `*8` (`UDB_CHOPT_PERSISTENT`) mantiene el canal persistente mediante el modo nativo `+P`.
 
 #### Bloque I (IPs y Hosts)
 *   **clones**: Límite numérico de conexiones simultáneas (`*<numero>`).
