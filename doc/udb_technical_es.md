@@ -119,8 +119,12 @@ Define las sanciones activas en la red.
 
 #### Bloque S (Global / Setup)
 Ajustes globales de la red y comportamientos de UDB.
-Solo se admiten `quit_ips`, `quit_clones`, `flood`, `encryption_key`, `suffix`,
-`nickserv`, `chanserv` e `ipserv`.
+Solo se admiten `clones`, `quit_ips`, `quit_clones`, `flood`, `encryption_key`,
+`suffix`, `nickserv`, `chanserv`, `ipserv` y `propagator`.
+*   **clones**: Límite numérico global de clones por defecto (`*<numero>`), aplicado
+    cuando una IP no tiene límite específico configurado.
+*   **quit_clones**: Mensaje de desconexión consumido por el hook de clones.
+*   **quit_ips**: Mensaje de desconexión para subsistemas modulares de límite de IP.
 *   **flood**: Límite de fallos de contraseña `<intentos>:<segundos>`. Sustituye
     a `udb::password-flood`; al borrarlo se recupera el valor de configuración.
 *   **encryption_key** y **suffix**: Una clave HMAC de 64 caracteres hex y un
@@ -140,8 +144,6 @@ Solo se admiten `quit_ips`, `quit_clones`, `flood`, `encryption_key`, `suffix`,
     incluidos password incorrecto y bloqueo por flood. IpServ es el origen
     visible de los avisos de vhost explícito de nick, vhost derivado por IP y
     cambios o restauraciones de `I::<ip>::host`.
-*   **quit_ips** y **quit_clones**: Estado validado para mensajes de expulsión;
-    el hook de clones consume `quit_clones`.
 *   **propagator**: Autoridad o lista ordenada de servidores autorizados para emitir mutaciones y snapshots en el clúster (ej: `S::propagator "servicios.red.net,hub1.red.net"`).
 
 ##### Jerarquía de Resolución del Propagador
@@ -152,8 +154,7 @@ UDB evalúa la autoridad activa mediante un modelo jerárquico determinista y to
 
 #### Bloque L (Enlaces S2S)
 Solo se admite `L::<servidor>::options`. Su máscara numérica usa `*1` para
-notices de depuración UDB. `prefix` y `allow_clients` no son
-ajustes UDB soportados.
+notices de depuración UDB.
 
 ---
 
@@ -245,9 +246,6 @@ Mientras exista una transacción staged, `INS`, `DEL`, `DRP` y `OPT` se rechazan
 con `UDB_ERR_SYNC_ACTIVE`, incluso desde el propagador. Fuera de una transacción
 esas mutaciones siguen requiriendo el propagador configurado.
 
-`FDR` no se emite por el protocolo HEL 4 y no forma parte de la transferencia
-staged.
-
 ### 2.2 Modificación de Datos en Tiempo Real
 Para inyectar o eliminar registros en caliente, se usan los siguientes comandos (generalmente con destino `*` para broadcast).
 
@@ -299,9 +297,11 @@ configurado.
 ### 2.3 Manejo de Errores (ERR)
 `:<sid> DB <destino> ERR <subcomando> <codigo_error> <extra>`
 *   `1`: UDB_ERR_NO_BLOCK (El bloque especificado no existe)
-*   `7`: UDB_ERR_SYNC_ACTIVE (Ya hay una sincronización en curso)
-*   `8`: UDB_ERR_NO_SYNC (No se ha solicitado una sincronización)
-*   `9`: UDB_ERR_FORBIDDEN (Acción denegada por permisos)
+*   `2`: UDB_ERR_PARAMS (Parámetros insuficientes o inválidos)
+*   `3`: UDB_ERR_FATAL (Error interno fatal o fallo de persistencia)
+*   `4`: UDB_ERR_SYNC_ACTIVE (Ya hay una sincronización en curso)
+*   `5`: UDB_ERR_NO_SYNC (No se ha solicitado una sincronización)
+*   `6`: UDB_ERR_FORBIDDEN (Acción denegada por permisos / no es propagador)
 
 ### 2.4 Redacción De Secretos En DBQ
 

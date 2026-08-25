@@ -78,7 +78,7 @@ python3 src/modules/third/udb/tests/two_node_udb.py --runtime-opt-rename-failure
 
 After staged synchronization, the armed interposer fails B's snapshot rename for
 an authorized `OPT`. The harness requires B's database bytes to remain unchanged,
-no temporary file, interposer evidence, and `ERR OPT 6` returned to A.
+no temporary file, interposer evidence, and `ERR OPT 3` returned to A.
 
 To cover active record deletion and block-drop rollback, run either mode:
 

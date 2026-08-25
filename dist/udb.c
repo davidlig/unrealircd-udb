@@ -115,7 +115,6 @@ module
   #define SKEY_CLONES      "clones"         /* Global max clones (*N) */
   #define SKEY_QUIT_IPS    "quit_ips"       /* Quit message for IP limit */
   #define SKEY_QUIT_CLONES "quit_clones"    /* Quit message for clone limit */
-  #define SKEY_CHALLENGE   "challenge"      /* Global hash method */
   #define SKEY_FLOOD       "flood"          /* Password flood limit V:S */
   #define SKEY_PROPAGATOR  "propagator"     /* Cluster authoritative propagator(s) */
 
@@ -135,16 +134,12 @@ module
   /* ========================================================================
  * Error Codes (for DB ERR protocol messages)
  * ======================================================================== */
-  #define UDB_ERR_NO_BLOCK    1  /* Block does not exist */
-  #define UDB_ERR_OFFSET      2  /* Data offset mismatch */
-  #define UDB_ERR_NOT_HUB     3  /* Only hub can insert/delete */
-  #define UDB_ERR_PARAMS      4  /* Missing parameters */
-  #define UDB_ERR_CANNOT_OPEN 5  /* Cannot open block file */
-  #define UDB_ERR_FATAL       6  /* Fatal / internal error */
-  #define UDB_ERR_SYNC_ACTIVE 7  /* Sync already in progress */
-  #define UDB_ERR_NO_SYNC     8  /* No sync was requested */
-  #define UDB_ERR_FORBIDDEN   9  /* Forbidden server */
-  #define UDB_ERR_DUPLICATE   10 /* Duplicate record */
+  #define UDB_ERR_NO_BLOCK    1 /* Block does not exist */
+  #define UDB_ERR_PARAMS      2 /* Missing parameters */
+  #define UDB_ERR_FATAL       3 /* Fatal / internal error */
+  #define UDB_ERR_SYNC_ACTIVE 4 /* Sync already in progress */
+  #define UDB_ERR_NO_SYNC     5 /* No sync was requested */
+  #define UDB_ERR_FORBIDDEN   6 /* Forbidden server */
 
   /* SHA-256 is deliberately handled by UDB, not Auth_Check(). */
   #define UDB_AUTHTYPE_SHA256 1001
@@ -1229,6 +1224,10 @@ static int udb_settings_apply_record(UdbContext *ctx, UdbRecord *rec)
 		if (!udb_setting_string_valid(rec->data_str))
 			return 0;
 		udb_settings_replace(&ctx->quit_clones, rec->data_str);
+	} else if (!strcmp(rec->key, SKEY_CLONES))
+	{
+		if (rec->data_str || rec->data_num == 0)
+			return 0;
 	} else if (!strcmp(rec->key, SKEY_FLOOD))
 	{
 		if (!udb_flood_valid(rec->data_str, &attempts, &period))
@@ -1313,7 +1312,6 @@ static void udb_link_apply_record(UdbContext *ctx, UdbRecord *rec)
 {
 	if (!rec || !rec->parent || !rec->key || strcmp(rec->key, LKEY_OPTIONS))
 		return;
-	ctx->propagator = NULL;
 	if (rec->data_str || (rec->data_num & ~UDB_LNKOPT_DEBUG))
 		udb_log(ULOG_WARNING, "UDB_LINK_OPTIONS", NULL,
 		        "Ignoring invalid L::options for $server", log_data_string("server", rec->parent->key));
@@ -1321,8 +1319,8 @@ static void udb_link_apply_record(UdbContext *ctx, UdbRecord *rec)
 
 static void udb_link_remove_record(UdbContext *ctx, UdbRecord *rec)
 {
-	if (rec && rec->key && !strcmp(rec->key, LKEY_OPTIONS))
-		ctx->propagator = NULL;
+	(void)ctx;
+	(void)rec;
 }
 
 static void udb_config_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec)
@@ -3464,34 +3462,7 @@ CMD_FUNC(cmd_db)
 						return;
 					}
 
-					if (udb_has_staged_sync(client))
-					{
-						udb_sync_send_stage(client, block);
-					} else
-					{
-						FILE *fp = fopen(block->filepath, "r");
-						if (fp)
-						{
-							char line[1024];
-							while (fgets(line, sizeof(line), fp))
-							{
-								size_t len = strlen(line);
-								while (len > 0 && (line[len - 1] == '\r' || line[len - 1] == '\n'))
-								{
-									line[--len] = '\0';
-								}
-								if (len > 0)
-								{
-									if (strchr(line, ' '))
-										sendto_one(client, NULL, ":%s DB * INS %c::%s", me.id, letter, line);
-									else
-										sendto_one(client, NULL, ":%s DB * DEL %c::%s", me.id, letter, line);
-								}
-							}
-							fclose(fp);
-						}
-						sendto_one(client, NULL, ":%s DB %s FDR %c", me.id, client->id, letter);
-					}
+					udb_sync_send_stage(client, block);
 					block->syncing_from = NULL;
 
 					if (!is_broadcast)
@@ -3515,44 +3486,6 @@ CMD_FUNC(cmd_db)
 				if (parc < 4)
 					return;
 				udb_mutation_drp(ctx, client, target, *parv[3], is_for_me, is_broadcast);
-			}
-			break;
-
-		case 'F':
-			if (!strcasecmp(subcmd, "FDR"))
-			{
-				if (parc < 4)
-					return;
-				char letter = *parv[3];
-
-				if (is_for_me)
-				{
-					UdbBlock *block = udb_block_by_letter(ctx, letter);
-					if (!block)
-					{
-						sendto_one(client, NULL, ":%s DB %s ERR FDR %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
-						return;
-					}
-					if (block->session)
-					{
-						if (block->session->peer == client)
-							udb_sync_abort(block, "legacy FDR during staged sync");
-						sendto_one(client, NULL, ":%s DB %s ERR FDR %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
-						return;
-					}
-					if (block->syncing_from != client)
-					{
-						sendto_one(client, NULL, ":%s DB %s ERR FDR %d %c", me.id, client->id, UDB_ERR_NO_SYNC, letter);
-						return;
-					}
-
-					udb_file_save_block(ctx, block);
-					block->syncing_from = NULL;
-
-					if (!is_broadcast)
-						return;
-				}
-				udb_sendto_confirmed_servers(client, ":%s DB %s FDR %c", client->id, target, *parv[3]);
 			}
 			break;
 
@@ -4132,12 +4065,6 @@ static int udb_check_password(const char *pass, UdbRecord *profile_rec, Client *
 	chall_rec = udb_record_find(udb_ctx, NKEY_CHALLENGE, profile_rec);
 	if (chall_rec && chall_rec->data_str)
 		challenge = chall_rec->data_str;
-	else if (udb_ctx && udb_ctx->settings)
-	{
-		UdbRecord *global = udb_record_find(udb_ctx, SKEY_CHALLENGE, udb_ctx->settings);
-		if (global && global->data_str)
-			challenge = global->data_str;
-	}
 	stored_pass = pass_rec->data_str;
 	type = udb_password_type(challenge, stored_pass, &hash);
 	if (type == AUTHTYPE_ARGON2 && strncmp(hash, "$argon2id$", 10))

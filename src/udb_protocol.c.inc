@@ -342,34 +342,7 @@ CMD_FUNC(cmd_db)
 						return;
 					}
 
-					if (udb_has_staged_sync(client))
-					{
-						udb_sync_send_stage(client, block);
-					} else
-					{
-						FILE *fp = fopen(block->filepath, "r");
-						if (fp)
-						{
-							char line[1024];
-							while (fgets(line, sizeof(line), fp))
-							{
-								size_t len = strlen(line);
-								while (len > 0 && (line[len - 1] == '\r' || line[len - 1] == '\n'))
-								{
-									line[--len] = '\0';
-								}
-								if (len > 0)
-								{
-									if (strchr(line, ' '))
-										sendto_one(client, NULL, ":%s DB * INS %c::%s", me.id, letter, line);
-									else
-										sendto_one(client, NULL, ":%s DB * DEL %c::%s", me.id, letter, line);
-								}
-							}
-							fclose(fp);
-						}
-						sendto_one(client, NULL, ":%s DB %s FDR %c", me.id, client->id, letter);
-					}
+					udb_sync_send_stage(client, block);
 					block->syncing_from = NULL;
 
 					if (!is_broadcast)
@@ -393,44 +366,6 @@ CMD_FUNC(cmd_db)
 				if (parc < 4)
 					return;
 				udb_mutation_drp(ctx, client, target, *parv[3], is_for_me, is_broadcast);
-			}
-			break;
-
-		case 'F':
-			if (!strcasecmp(subcmd, "FDR"))
-			{
-				if (parc < 4)
-					return;
-				char letter = *parv[3];
-
-				if (is_for_me)
-				{
-					UdbBlock *block = udb_block_by_letter(ctx, letter);
-					if (!block)
-					{
-						sendto_one(client, NULL, ":%s DB %s ERR FDR %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
-						return;
-					}
-					if (block->session)
-					{
-						if (block->session->peer == client)
-							udb_sync_abort(block, "legacy FDR during staged sync");
-						sendto_one(client, NULL, ":%s DB %s ERR FDR %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
-						return;
-					}
-					if (block->syncing_from != client)
-					{
-						sendto_one(client, NULL, ":%s DB %s ERR FDR %d %c", me.id, client->id, UDB_ERR_NO_SYNC, letter);
-						return;
-					}
-
-					udb_file_save_block(ctx, block);
-					block->syncing_from = NULL;
-
-					if (!is_broadcast)
-						return;
-				}
-				udb_sendto_confirmed_servers(client, ":%s DB %s FDR %c", client->id, target, *parv[3]);
 			}
 			break;
 

@@ -548,12 +548,6 @@ static int udb_check_password(const char *pass, UdbRecord *profile_rec, Client *
 	chall_rec = udb_record_find(udb_ctx, NKEY_CHALLENGE, profile_rec);
 	if (chall_rec && chall_rec->data_str)
 		challenge = chall_rec->data_str;
-	else if (udb_ctx && udb_ctx->settings)
-	{
-		UdbRecord *global = udb_record_find(udb_ctx, SKEY_CHALLENGE, udb_ctx->settings);
-		if (global && global->data_str)
-			challenge = global->data_str;
-	}
 	stored_pass = pass_rec->data_str;
 	type = udb_password_type(challenge, stored_pass, &hash);
 	if (type == AUTHTYPE_ARGON2 && strncmp(hash, "$argon2id$", 10))

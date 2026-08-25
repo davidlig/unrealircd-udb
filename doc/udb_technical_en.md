@@ -132,8 +132,12 @@ encoded patterns are rejected and never compiled or installed.
 
 #### Block S (Global / Setup)
 Global network settings and UDB behavior.
-Only these values are supported: `quit_ips`, `quit_clones`, `flood`,
-`encryption_key`, `suffix`, `nickserv`, `chanserv`, and `ipserv`.
+Only these values are supported: `clones`, `quit_ips`, `quit_clones`, `flood`,
+`encryption_key`, `suffix`, `nickserv`, `chanserv`, `ipserv`, and `propagator`.
+*   **clones**: Numeric global clone limit default (`*<number>`), applied when
+    no IP-specific limit is set.
+*   **quit_clones**: Disconnect message used by the clone throttle hook.
+*   **quit_ips**: Disconnect message used by modular IP-limit subsystems.
 *   **flood**: `<attempts>:<seconds>` password-failure limit. It overrides
     `udb::password-flood`; deleting it restores that configured value.
 *   **encryption_key** and **suffix**: A 64-hex-character HMAC key and a valid
@@ -152,8 +156,6 @@ Only these values are supported: `quit_ips`, `quit_clones`, `flood`,
     password and password-flood notifications. IpServ is the visible source
     of explicit nick vhost, derived IP vhost, and `I::<ip>::host` change or
     restoration notices.
-*   **quit_ips** and **quit_clones**: Validated disconnect-message state; the
-    clone hook consumes `quit_clones`.
 *   **propagator**: Cluster authoritative propagator or priority list of authorized servers (e.g. `S::propagator "services.yourdomain.net,hub1.yourdomain.net"`).
 
 ##### Propagator Resolution Hierarchy
@@ -164,7 +166,7 @@ UDB resolves the active cluster propagator using a deterministic, fault-tolerant
 
 #### Block L (S2S Links)
 Only `L::<server>::options` is supported. Its numeric bitmask is `*1` for UDB
-debug notices. `prefix` and `allow_clients` are not supported settings.
+debug notices.
 
 ---
 
@@ -256,8 +258,6 @@ While a block has a staged transaction, real-time `INS`, `DEL`, `DRP`, and `OPT`
 are rejected with `UDB_ERR_SYNC_ACTIVE`, including requests from the propagator.
 Outside a transaction those mutations still require the configured propagator.
 
-`FDR` is not emitted by the HEL 4 protocol and is not part of staged transfer.
-
 ### 2.2 Real-time Data Modification
 To inject or delete records on the fly, the following commands are used (usually with target `*` for broadcast).
 
@@ -307,9 +307,11 @@ database directory.
 ### 2.3 Error Handling (ERR)
 `:<sid> DB <target> ERR <subcommand> <error_code> <extra>`
 *   `1`: UDB_ERR_NO_BLOCK (Specified block does not exist)
-*   `7`: UDB_ERR_SYNC_ACTIVE (A synchronization is already in progress)
-*   `8`: UDB_ERR_NO_SYNC (No synchronization was requested)
-*   `9`: UDB_ERR_FORBIDDEN (Action denied due to permissions)
+*   `2`: UDB_ERR_PARAMS (Missing or invalid command parameters)
+*   `3`: UDB_ERR_FATAL (Fatal internal or persistence error)
+*   `4`: UDB_ERR_SYNC_ACTIVE (A synchronization is already in progress)
+*   `5`: UDB_ERR_NO_SYNC (No synchronization was requested)
+*   `6`: UDB_ERR_FORBIDDEN (Action denied due to permissions / non-propagator)
 
 ### 2.4 DBQ Secret Redaction
 

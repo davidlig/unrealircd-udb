@@ -269,6 +269,10 @@ static int udb_settings_apply_record(UdbContext *ctx, UdbRecord *rec)
 		if (!udb_setting_string_valid(rec->data_str))
 			return 0;
 		udb_settings_replace(&ctx->quit_clones, rec->data_str);
+	} else if (!strcmp(rec->key, SKEY_CLONES))
+	{
+		if (rec->data_str || rec->data_num == 0)
+			return 0;
 	} else if (!strcmp(rec->key, SKEY_FLOOD))
 	{
 		if (!udb_flood_valid(rec->data_str, &attempts, &period))
@@ -353,7 +357,6 @@ static void udb_link_apply_record(UdbContext *ctx, UdbRecord *rec)
 {
 	if (!rec || !rec->parent || !rec->key || strcmp(rec->key, LKEY_OPTIONS))
 		return;
-	ctx->propagator = NULL;
 	if (rec->data_str || (rec->data_num & ~UDB_LNKOPT_DEBUG))
 		udb_log(ULOG_WARNING, "UDB_LINK_OPTIONS", NULL,
 		        "Ignoring invalid L::options for $server", log_data_string("server", rec->parent->key));
@@ -361,8 +364,8 @@ static void udb_link_apply_record(UdbContext *ctx, UdbRecord *rec)
 
 static void udb_link_remove_record(UdbContext *ctx, UdbRecord *rec)
 {
-	if (rec && rec->key && !strcmp(rec->key, LKEY_OPTIONS))
-		ctx->propagator = NULL;
+	(void)ctx;
+	(void)rec;
 }
 
 static void udb_config_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec)

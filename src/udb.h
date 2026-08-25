@@ -70,7 +70,6 @@
 #define SKEY_CLONES      "clones"         /* Global max clones (*N) */
 #define SKEY_QUIT_IPS    "quit_ips"       /* Quit message for IP limit */
 #define SKEY_QUIT_CLONES "quit_clones"    /* Quit message for clone limit */
-#define SKEY_CHALLENGE   "challenge"      /* Global hash method */
 #define SKEY_FLOOD       "flood"          /* Password flood limit V:S */
 #define SKEY_PROPAGATOR  "propagator"     /* Cluster authoritative propagator(s) */
 
@@ -90,16 +89,12 @@
 /* ========================================================================
  * Error Codes (for DB ERR protocol messages)
  * ======================================================================== */
-#define UDB_ERR_NO_BLOCK    1  /* Block does not exist */
-#define UDB_ERR_OFFSET      2  /* Data offset mismatch */
-#define UDB_ERR_NOT_HUB     3  /* Only hub can insert/delete */
-#define UDB_ERR_PARAMS      4  /* Missing parameters */
-#define UDB_ERR_CANNOT_OPEN 5  /* Cannot open block file */
-#define UDB_ERR_FATAL       6  /* Fatal / internal error */
-#define UDB_ERR_SYNC_ACTIVE 7  /* Sync already in progress */
-#define UDB_ERR_NO_SYNC     8  /* No sync was requested */
-#define UDB_ERR_FORBIDDEN   9  /* Forbidden server */
-#define UDB_ERR_DUPLICATE   10 /* Duplicate record */
+#define UDB_ERR_NO_BLOCK    1 /* Block does not exist */
+#define UDB_ERR_PARAMS      2 /* Missing parameters */
+#define UDB_ERR_FATAL       3 /* Fatal / internal error */
+#define UDB_ERR_SYNC_ACTIVE 4 /* Sync already in progress */
+#define UDB_ERR_NO_SYNC     5 /* No sync was requested */
+#define UDB_ERR_FORBIDDEN   6 /* Forbidden server */
 
 /* SHA-256 is deliberately handled by UDB, not Auth_Check(). */
 #define UDB_AUTHTYPE_SHA256 1001

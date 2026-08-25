@@ -178,11 +178,9 @@ Detailed technical documentation is available in the `doc/` directory:
   Live explicit and derived vhost changes are announced by the connected ULine
   client matched by `S::ipserv`.
 
-### Settings and Links
-
+- `S::clones *<limit>` defines the global default clone limit when no IP-specific limit is configured.
 - `S::quit_clones <message>` supplies the UDB clone-limit disconnect message.
-  `S::quit_ips <message>` is retained as validated settings state for IP-limit
-  handling; no separate IP-limit hook currently consumes it.
+- `S::quit_ips <message>` supplies the disconnect message for modular IP-limit subsystems.
 - `S::flood <attempts>:<seconds>` overrides the active UDB password-flood
   configuration. Removing it restores the `udb::password-flood` value.
 - `S::encryption_key <64-hex-chars>` and `S::suffix <.domain>` enable deterministic
@@ -201,10 +199,10 @@ Detailed technical documentation is available in the `doc/` directory:
   the fallback.
 - ChanServ is the source of UDB channel effects: persistent topics, managed
   channel modes, and member rank changes (`q`, `a`, `o`, `h`, and `v`).
-- The only supported `S` values are `quit_ips`, `quit_clones`, `flood`,
+- The only supported `S` values are `clones`, `quit_ips`, `quit_clones`, `flood`,
   `encryption_key`, `suffix`, `nickserv`, `chanserv`, `ipserv`, and `propagator`.
 - The only supported `L` child is `L::<server>::options`: `*1` enables UDB
-  debug notices. `prefix` and `allow_clients` are not supported UDB settings.
+  debug notices.
 - Propagator authority is resolved via a fault-tolerant priority model: local
   `udb::propagator` takes precedence, followed by the dynamic priority list in
   `S::propagator` (e.g. `services.net,hub1.net` with automatic failover via `FindServer`),
