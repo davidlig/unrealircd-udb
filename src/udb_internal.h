@@ -107,6 +107,8 @@ struct UdbSyncSession {
 	char txid[32];
 	time_t deadline;
 	UdbRecord *tree;
+	size_t received_bytes;
+	unsigned int received_puts;
 	unsigned int record_count;
 };
 

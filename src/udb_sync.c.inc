@@ -124,6 +124,9 @@ static int udb_sync_begin(UdbBlock *block, Client *peer, const char *txid)
 	session->tree->block_idx = (unsigned char)udb_block_letter_to_index(block->letter);
 	safe_strdup(session->tree->key, "UDB");
 	session->tree->is_dynamic_key = 1;
+	session->received_puts = 0;
+	session->received_bytes = 0;
+	session->record_count = 0;
 	block->session = session;
 	block->syncing_from = peer;
 	return 1;
@@ -141,16 +144,18 @@ static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid,
 			udb_sync_abort(block, "invalid PUT sequence");
 		return UDB_ERR_NO_SYNC;
 	}
-	unsigned int max_records = (udb_cfg && udb_cfg->max_staged_records) ? udb_cfg->max_staged_records : UDB_DEFAULT_MAX_STAGED_RECORDS;
-	if (++session->record_count > max_records)
-	{
-		udb_sync_abort(block, "staged record count limit exceeded");
-		return UDB_ERR_PARAMS;
-	}
+	session->received_puts++;
+	session->received_bytes += (path ? strlen(path) : 0) + (data ? strlen(data) : 0);
 	if (snprintf(line, sizeof(line), "%s %s", path, data) >= (int)sizeof(line) ||
 	    !udb_stage_parse_line(block, session, line))
 	{
 		udb_sync_abort(block, "invalid PUT payload");
+		return UDB_ERR_PARAMS;
+	}
+	unsigned int max_records = (udb_cfg && udb_cfg->max_staged_records) ? udb_cfg->max_staged_records : UDB_DEFAULT_MAX_STAGED_RECORDS;
+	if (session->record_count > max_records)
+	{
+		udb_sync_abort(block, "staged record count limit exceeded");
 		return UDB_ERR_PARAMS;
 	}
 	session->deadline = time(NULL) + UDB_SYNC_TIMEOUT;
@@ -169,6 +174,7 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer,
 			udb_sync_abort(block, "invalid END sequence");
 		return UDB_ERR_NO_SYNC;
 	}
+	session->record_count = udb_record_count_tree(session->tree);
 	*digest = udb_compute_tree_checksum(session->tree);
 	UdbSnapshotResult snap_res = UDB_SNAPSHOT_FAILED_BEFORE_COMMIT;
 	if (!udb_checksum_parse(checksum, &received_digest) ||

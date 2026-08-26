@@ -186,7 +186,7 @@ def run_tests(ircd_bin, keep=False):
         shutil.copy2(module_path, third_modules / "udb.so")
 
         # Seed initial N block with an active record
-        (data_dir / "udb_N.db").write_text("; UDB Block N\n; Saved: 1787720000\n; Records: 1\nalice::pass argon2:sample\n", encoding="ascii")
+        (data_dir / "udb_N.db").write_text("; UDB Block N\n; Saved: 1787720000\n; Records: 1\nalice::pass crypt:sample\n", encoding="ascii")
 
         client_port, server_port, tls_port = free_port(), free_port(), free_port()
         config = node / "unrealircd.conf"
@@ -212,7 +212,7 @@ def run_tests(ircd_bin, keep=False):
 
         # Verify active database in memory and on disk was NOT modified
         db_n = (data_dir / "udb_N.db").read_text(encoding="ascii")
-        if "alice::pass argon2:sample" not in db_n:
+        if "alice::pass crypt:sample" not in db_n:
             raise AssertionError(f"Active database was corrupted by aborted staged-sync:\n{db_n}")
         print("PASS: base de datos activa permaneció intacta tras aborto de staged-sync")
 
