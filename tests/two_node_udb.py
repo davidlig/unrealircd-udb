@@ -365,8 +365,8 @@ def main():
         b_db = b / "data" / "udb_N.db"
         a_k_db = a / "data" / "udb_K.db"
         b_k_db = b / "data" / "udb_K.db"
-        a_db.write_text("harness-a::marker loser\n", encoding="ascii")
-        b_db.write_text("harness-b::marker winner\n", encoding="ascii")
+        a_db.write_text("harness-a::vhost loser.test\n", encoding="ascii")
+        b_db.write_text("harness-b::vhost winner.test\n", encoding="ascii")
         a_k_db.write_text("G::*@udb-loser.test::reason loser\n", encoding="ascii")
         b_k_db.write_text(K_STAGED_RECORD + "\n", encoding="ascii")
         a_baseline = a_db.read_bytes()
@@ -438,12 +438,12 @@ def main():
             print("PASS: failed N temporary snapshot fsync left node A baseline unchanged with no tmp or ACK/commit")
             return 0
         while time.monotonic() < deadline:
-            if ("harness-b::marker winner" in a_db.read_text(errors="replace") and
+            if ("harness-b::vhost winner.test" in a_db.read_text(errors="replace") and
                     K_STAGED_RECORD in a_k_db.read_text(errors="replace") and
                     equal_timestamp_winner_observed(logs[0], logs[1])):
                 break
             time.sleep(0.25)
-        if ("harness-b::marker winner" not in a_db.read_text(errors="replace") or
+        if ("harness-b::vhost winner.test" not in a_db.read_text(errors="replace") or
                 K_STAGED_RECORD not in a_k_db.read_text(errors="replace") or
                 not equal_timestamp_winner_observed(logs[0], logs[1])):
             print_diagnostics(logs, a_db)

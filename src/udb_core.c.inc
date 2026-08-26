@@ -17,7 +17,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
-static int udb_options_record_valid(const char *value)
+static int udb_numeric_record_valid(const char *value)
 {
 	const char *p;
 	if (!value || value[0] != '*' || value[1] == '\0')
@@ -28,6 +28,11 @@ static int udb_options_record_valid(const char *value)
 			return 0;
 	}
 	return 1;
+}
+
+static int udb_options_record_valid(const char *value)
+{
+	return udb_numeric_record_valid(value);
 }
 
 static int udb_channel_modes_record_valid(const char *value)
@@ -164,56 +169,367 @@ static int udb_oper_record_valid(const char *value)
 	return 1;
 }
 
-static int udb_record_validate(UdbBlock *block, const char *path,
-                               const char *value)
+static int udb_password_hash_valid(const char *value)
 {
-	const char *leaf;
 	size_t i;
-
-	if (!block || !path)
+	if (!value || !*value)
+		return 0;
+	if (!strncmp(value, "argon2id:$argon2id$", 19))
 		return 1;
-	leaf = strrchr(path, ':');
-	leaf = leaf ? leaf + 1 : path;
-	if (block->letter == 'N' || block->letter == 'C')
+	if (!strncmp(value, "crypt:", 6))
+		return value[6] != '\0';
+	if (strncmp(value, "sha256:", 7) || strlen(value + 7) != 64)
+		return 0;
+	for (i = 7; value[i]; i++)
 	{
-		if (!strcasecmp(leaf, NKEY_CHALLENGE))
-			return value && (!strcasecmp(value, "argon2id") ||
-			                 !strcasecmp(value, "sha256") ||
-			                 !strcasecmp(value, "crypt"));
-		if (!strcasecmp(leaf, NKEY_PASS))
-		{
-			if (!value)
-				return 0;
-			if (!strncmp(value, "argon2id:$argon2id$", 19))
-				return 1;
-			if (!strncmp(value, "crypt:", 6))
-				return value[6] != '\0';
-			if (strncmp(value, "sha256:", 7) || strlen(value + 7) != 64)
-				return 0;
-			for (i = 7; value[i]; i++)
-				if (!isxdigit((unsigned char)value[i]))
-					return 0;
-			return 1;
-		}
-	}
-	if (block->letter == 'N')
-	{
-		if (!strcasecmp(leaf, NKEY_MODES))
-			return udb_user_modes_record_valid(value);
-		if (!strcasecmp(leaf, NKEY_SNOMASKS))
-			return udb_snomasks_record_valid(value);
-		if (!strcasecmp(leaf, NKEY_OPER))
-			return udb_oper_record_valid(value);
-	}
-	if (block->letter == 'C')
-	{
-		if (!strcasecmp(leaf, CKEY_MODES))
-			return udb_channel_modes_record_valid(value);
-		if (!strcasecmp(leaf, CKEY_OPTIONS))
-			return udb_options_record_valid(value);
+		if (!isxdigit((unsigned char)value[i]))
+			return 0;
 	}
 	return 1;
 }
+
+static int udb_challenge_valid(const char *value)
+{
+	return value && (!strcasecmp(value, "argon2id") ||
+	                 !strcasecmp(value, "sha256") ||
+	                 !strcasecmp(value, "crypt"));
+}
+
+static int udb_vhost_valid(const char *value)
+{
+	return value && *value && strlen(value) <= HOSTLEN && !strpbrk(value, " \t\r\n");
+}
+
+static int udb_nolines_record_valid(const char *value)
+{
+	const char *c;
+	if (!value || !*value || strlen(value) > 16)
+		return 0;
+	for (c = value; *c; c++)
+	{
+		if (!strchr("GZQSTmc", *c))
+			return 0;
+	}
+	return 1;
+}
+
+static int udb_non_empty_string_valid(const char *value)
+{
+	return value && *value && !strpbrk(value, "\r\n");
+}
+
+static int udb_nick_name_valid(const char *name)
+{
+	const char *c;
+	if (!name || !*name || strlen(name) > NICKLEN)
+		return 0;
+	if (isdigit((unsigned char)name[0]) || name[0] == '-')
+		return 0;
+	for (c = name; *c; c++)
+	{
+		if (!isalnum((unsigned char)*c) && !strchr("[]\\`_^{|}-", *c))
+			return 0;
+	}
+	return 1;
+}
+
+static int udb_channel_name_valid(const char *name)
+{
+	const char *c;
+	if (!name || strlen(name) < 2 || strlen(name) > CHANNELLEN)
+		return 0;
+	if (name[0] != '#' && name[0] != '&')
+		return 0;
+	for (c = name; *c; c++)
+	{
+		if (*c <= ' ' || *c == ',' || *c == ':' || *c == 7)
+			return 0;
+	}
+	return 1;
+}
+
+static int udb_ip_host_mask_valid(const char *mask)
+{
+	const char *c;
+	if (!mask || !*mask || strlen(mask) > HOSTLEN || strstr(mask, "::"))
+		return 0;
+	for (c = mask; *c; c++)
+	{
+		if (*c <= ' ' || (unsigned char)*c > 126)
+			return 0;
+	}
+	return 1;
+}
+
+static int udb_server_name_valid(const char *srv)
+{
+	const char *c;
+	if (!srv || !*srv || strlen(srv) > HOSTLEN || strstr(srv, "::"))
+		return 0;
+	for (c = srv; *c; c++)
+	{
+		if (*c <= ' ' || (unsigned char)*c > 126)
+			return 0;
+	}
+	return 1;
+}
+
+static int udb_flood_setting_valid(const char *value)
+{
+	int attempts = 0, period = 0;
+	return udb_flood_valid(value, &attempts, &period);
+}
+
+static int udb_tkl_type_valid(const char *type)
+{
+	return type && strlen(type) == 1 && strchr("GZSQF", type[0]);
+}
+
+static int udb_spamfilter_type_valid(const char *value)
+{
+	return value && *value && spamfilter_getconftargets(value) > 0;
+}
+
+static int udb_spamfilter_action_valid(const char *value)
+{
+	return value && *value && banact_stringtoval(value) > 0;
+}
+
+static const UdbKeyDescriptor udb_schema_n_subkeys[] = {
+    {NKEY_ACCESS, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL},
+    {NKEY_PASS, UDB_VAL_STRING, udb_password_hash_valid, 0, NULL},
+    {NKEY_VHOST, UDB_VAL_STRING, udb_vhost_valid, 0, NULL},
+    {NKEY_FORBID, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL},
+    {NKEY_SUSPENDED, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL},
+    {NKEY_OPER, UDB_VAL_STRING, udb_oper_record_valid, 0, NULL},
+    {NKEY_CHALLENGE, UDB_VAL_STRING, udb_challenge_valid, 0, NULL},
+    {NKEY_MODES, UDB_VAL_STRING, udb_user_modes_record_valid, 0, NULL},
+    {NKEY_SNOMASKS, UDB_VAL_STRING, udb_snomasks_record_valid, 0, NULL},
+    {NKEY_SWHOIS, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL}};
+
+static const UdbKeyDescriptor udb_schema_c_subkeys[] = {
+    {CKEY_FOUNDER, UDB_VAL_STRING, udb_nick_name_valid, 0, NULL},
+    {CKEY_MODES, UDB_VAL_STRING, udb_channel_modes_record_valid, 0, NULL},
+    {CKEY_TOPIC, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL},
+    {CKEY_ACCESS, UDB_VAL_ANY, NULL, 1, udb_nick_name_valid},
+    {CKEY_FORBID, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL},
+    {CKEY_SUSPENDED, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL},
+    {CKEY_PASS, UDB_VAL_STRING, udb_password_hash_valid, 0, NULL},
+    {CKEY_CHALLENGE, UDB_VAL_STRING, udb_challenge_valid, 0, NULL},
+    {CKEY_OPTIONS, UDB_VAL_NUMERIC, udb_options_record_valid, 0, NULL}};
+
+static const UdbKeyDescriptor udb_schema_i_subkeys[] = {
+    {IKEY_CLONES, UDB_VAL_NUMERIC, udb_numeric_record_valid, 0, NULL},
+    {IKEY_NOLINES, UDB_VAL_STRING, udb_nolines_record_valid, 0, NULL},
+    {IKEY_HOST, UDB_VAL_STRING, udb_vhost_valid, 0, NULL}};
+
+static const UdbKeyDescriptor udb_schema_s_subkeys[] = {
+    {SKEY_CLONES, UDB_VAL_NUMERIC, udb_numeric_record_valid, 0, NULL},
+    {SKEY_QUIT_IPS, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL},
+    {SKEY_QUIT_CLONES, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL},
+    {SKEY_FLOOD, UDB_VAL_STRING, udb_flood_setting_valid, 0, NULL},
+    {SKEY_CRYPT_KEY, UDB_VAL_STRING, udb_encryption_key_valid, 0, NULL},
+    {SKEY_SUFFIX, UDB_VAL_STRING, udb_suffix_valid, 0, NULL},
+    {SKEY_NICKSERV, UDB_VAL_STRING, udb_service_mask_valid, 0, NULL},
+    {SKEY_CHANSERV, UDB_VAL_STRING, udb_service_mask_valid, 0, NULL},
+    {SKEY_IPSERV, UDB_VAL_STRING, udb_service_mask_valid, 0, NULL},
+    {SKEY_PROPAGATOR, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL}};
+
+static const UdbKeyDescriptor udb_schema_l_subkeys[] = {
+    {LKEY_OPTIONS, UDB_VAL_NUMERIC, udb_options_record_valid, 0, NULL}};
+
+static const UdbBlockSchema udb_block_schemas[] = {
+    {UDB_BLOCK_NICKS, 1, 2, udb_nick_name_valid, udb_schema_n_subkeys, sizeof(udb_schema_n_subkeys) / sizeof(udb_schema_n_subkeys[0])},
+    {UDB_BLOCK_CHANNELS, 1, 3, udb_channel_name_valid, udb_schema_c_subkeys, sizeof(udb_schema_c_subkeys) / sizeof(udb_schema_c_subkeys[0])},
+    {UDB_BLOCK_IPS, 1, 2, udb_ip_host_mask_valid, udb_schema_i_subkeys, sizeof(udb_schema_i_subkeys) / sizeof(udb_schema_i_subkeys[0])},
+    {UDB_BLOCK_SETTINGS, 1, 1, NULL, udb_schema_s_subkeys, sizeof(udb_schema_s_subkeys) / sizeof(udb_schema_s_subkeys[0])},
+    {UDB_BLOCK_LINKS, 1, 2, udb_server_name_valid, udb_schema_l_subkeys, sizeof(udb_schema_l_subkeys) / sizeof(udb_schema_l_subkeys[0])},
+    {UDB_BLOCK_LINES, 2, 3, udb_tkl_type_valid, NULL, 0}};
+
+static const UdbBlockSchema *udb_get_block_schema(char letter)
+{
+	for (size_t i = 0; i < sizeof(udb_block_schemas) / sizeof(udb_block_schemas[0]); i++)
+	{
+		if (udb_block_schemas[i].letter == letter)
+			return &udb_block_schemas[i];
+	}
+	return NULL;
+}
+
+static int udb_record_validate(UdbBlock *block, const char *path,
+                               const char *value)
+{
+	char pathbuf[512];
+	char *parts[8];
+	int depth = 0;
+	char *p, *next;
+	const UdbBlockSchema *schema;
+	const UdbKeyDescriptor *desc = NULL;
+
+	if (!block || !path || !*path || strlen(path) >= sizeof(pathbuf))
+		return 0;
+
+	schema = udb_get_block_schema(block->letter);
+	if (!schema)
+		return 0;
+
+	strlcpy(pathbuf, path, sizeof(pathbuf));
+	p = pathbuf;
+	while (p && *p)
+	{
+		next = strstr(p, "::");
+		if (next)
+		{
+			*next = '\0';
+			next += 2;
+			if (!*next)
+				return 0;
+		}
+		if (depth >= 8)
+			return 0;
+		parts[depth++] = p;
+		p = next;
+	}
+
+	if (depth < schema->min_depth || depth > schema->max_depth)
+		return 0;
+
+	/* Special handling for Block S: depth == 1 */
+	if (block->letter == UDB_BLOCK_SETTINGS)
+	{
+		const char *key = parts[0];
+		for (size_t i = 0; i < schema->subkey_count; i++)
+		{
+			if (!strcasecmp(schema->subkeys[i].key, key))
+			{
+				desc = &schema->subkeys[i];
+				break;
+			}
+		}
+		if (!desc)
+			return 0;
+
+		if (desc->val_type == UDB_VAL_NUMERIC)
+		{
+			if (!udb_numeric_record_valid(value))
+				return 0;
+		} else if (desc->val_type == UDB_VAL_STRING)
+		{
+			if (!value || value[0] == '*' || !*value)
+				return 0;
+		}
+		if (desc->validator && !desc->validator(value))
+			return 0;
+		return 1;
+	}
+
+	/* Special handling for Block K (TKL / Spamfilter) */
+	if (block->letter == UDB_BLOCK_LINES)
+	{
+		const char *type = parts[0];
+		if (!udb_tkl_type_valid(type))
+			return 0;
+
+		if (type[0] == 'F') /* Spamfilter */
+		{
+			if (depth != 3)
+				return 0;
+			const char *pattern = parts[1];
+			const char *subkey = parts[2];
+			if (!pattern || !*pattern)
+				return 0;
+			if (!strcasecmp(subkey, KKEY_TYPE))
+				return udb_spamfilter_type_valid(value);
+			if (!strcasecmp(subkey, KKEY_ACTION))
+				return udb_spamfilter_action_valid(value);
+			if (!strcasecmp(subkey, KKEY_DURATION))
+				return udb_numeric_record_valid(value);
+			if (!strcasecmp(subkey, KKEY_REASON))
+				return udb_non_empty_string_valid(value) && value[0] != '*';
+			return 0;
+		} else /* G, Z, S, Q */
+		{
+			const char *pattern = parts[1];
+			if (!pattern || !*pattern)
+				return 0;
+			if (depth == 2)
+			{
+				return udb_non_empty_string_valid(value) && value[0] != '*';
+			} else if (depth == 3)
+			{
+				const char *subkey = parts[2];
+				if (!strcasecmp(subkey, KKEY_REASON))
+					return udb_non_empty_string_valid(value) && value[0] != '*';
+				if (!strcasecmp(subkey, KKEY_DURATION))
+					return udb_numeric_record_valid(value);
+				return 0;
+			}
+			return 0;
+		}
+	}
+
+	/* Validate root container node */
+	if (schema->root_key_validator && !schema->root_key_validator(parts[0]))
+		return 0;
+
+	/* Depth 1 is a valid root profile/container node for N, C, I, L */
+	if (depth == 1)
+		return 1;
+
+	const char *subkey = parts[1];
+	for (size_t i = 0; i < schema->subkey_count; i++)
+	{
+		if (!strcasecmp(schema->subkeys[i].key, subkey))
+		{
+			desc = &schema->subkeys[i];
+			break;
+		}
+	}
+	if (!desc)
+		return 0;
+
+	if (depth == 2)
+	{
+		if (desc->val_type == UDB_VAL_NUMERIC)
+		{
+			if (!udb_numeric_record_valid(value))
+				return 0;
+		} else if (desc->val_type == UDB_VAL_STRING)
+		{
+			if (!value || value[0] == '*' || !*value)
+				return 0;
+		} else if (desc->val_type == UDB_VAL_NONE)
+		{
+			if (value && *value)
+				return 0;
+		}
+		if (desc->validator && !desc->validator(value))
+			return 0;
+		return 1;
+	} else if (depth == 3)
+	{
+		if (!desc->allow_children)
+			return 0;
+		if (desc->child_validator && !desc->child_validator(parts[2]))
+			return 0;
+		if (value && *value)
+		{
+			if (value[0] == '*')
+			{
+				if (!udb_numeric_record_valid(value))
+					return 0;
+			} else
+			{
+				if (!udb_non_empty_string_valid(value))
+					return 0;
+			}
+		}
+		return 1;
+	}
+
+	return 0;
+}
+
 
 static void udb_block_replace_tree(UdbContext *ctx, UdbBlock *block,
                                    UdbRecord *tree, unsigned int record_count)
@@ -692,7 +1008,13 @@ static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *li
 	if (!udb_record_path_valid(line))
 		return NULL;
 	if (!udb_record_validate(block, line, value))
+	{
+		udb_log(ULOG_WARNING, "UDB_FILE_INVALID_RECORD", NULL,
+		        "Ignored invalid or unknown record in block $block: $record",
+		        log_data_string("block", (char[]){block->letter, '\0'}),
+		        log_data_string("record", line));
 		return NULL;
+	}
 
 	char *p = line;
 	UdbRecord *parent = block->tree;

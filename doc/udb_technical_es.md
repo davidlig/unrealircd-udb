@@ -264,6 +264,15 @@ propagador seleccionado, salvo frames del peer que está sirviendo la
 sincronización de ese bloque. Se rechazan mientras el bloque tenga una
 transacción staged y solo se persisten y reenvían a peers directos con HEL
 confirmado.
+
+UDB valida estrictamente mediante un sistema declarativo de esquemas que
+cualquier registro recibido vía `INS`, `PUT` o cargado desde disco pertenezca al
+catálogo de opciones válidas del bloque correspondiente y cumpla con su tipo de
+dato y formato. Claves desconocidas, anidamientos no permitidos (como rutas
+compuestas en Bloque S) o tipos incompatibles son rechazados inmediatamente con
+`ERR INS 2 <bloque>` o `ERR PUT 2 <bloque>` (`UDB_ERR_PARAMS`), y descartados
+con un aviso (`ULOG_WARNING`) durante la carga de archivos locales.
+
 Para `INS`, `DEL` y `DRP`, UDB primero clona el bloque activo y aplica el
 cambio al candidato privado. Solo después de escribir y renombrar atómicamente
 su snapshot actualiza índices, contadores y efectos en tiempo real. Al reemplazar

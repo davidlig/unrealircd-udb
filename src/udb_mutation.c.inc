@@ -161,7 +161,11 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 
 		if (!udb_record_validate(block, path + 3, data))
 		{
-			udb_protocol_params_error(client, "INS");
+			udb_log(ULOG_WARNING, "UDB_INS_SCHEMA_REJECT", client,
+			        "Rejected S2S INS for invalid or unknown record: $path",
+			        log_data_string("path", path));
+			sendto_one(client, NULL, ":%s DB %s ERR INS %d %c", me.id, client->id,
+			           UDB_ERR_PARAMS, letter);
 			return;
 		}
 		old_rec = udb_record_find_path(ctx, block, path + 3);

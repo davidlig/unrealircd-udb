@@ -276,6 +276,13 @@ After HEL 4 confirmation, real-time `INS` and `DEL` are accepted only from the
 selected propagator, except frames belonging to the peer currently serving that
 block's synchronization. They are rejected while that block has a staged
 transaction and are persisted and forwarded only to HEL-confirmed direct peers.
+
+UDB strictly validates all records received via `INS`, `PUT`, or loaded from disk
+against a declarative per-block schema catalogue. Unknown keys, invalid hierarchy
+nesting (such as composite paths in Block S), or incompatible data types are
+immediately rejected with `ERR INS 2 <block>` or `ERR PUT 2 <block>` (`UDB_ERR_PARAMS`),
+and skipped with a `ULOG_WARNING` notice during local `.db` file parsing.
+
 For `INS`, `DEL`, and `DRP`, UDB first clones the active block and applies the
 change to that private candidate. It atomically writes and renames the candidate
 snapshot before changing active indexes, counters, or runtime effects. Replacing

@@ -30,6 +30,32 @@ typedef struct UdbRecord UdbRecord;
 typedef struct UdbBlock UdbBlock;
 typedef struct UdbSyncSession UdbSyncSession;
 
+typedef enum UdbValueType {
+	UDB_VAL_NONE = 0, /* No value allowed (container node) */
+	UDB_VAL_STRING,   /* Must be a string (no '*' prefix) */
+	UDB_VAL_NUMERIC,  /* Must be a numeric string ('*' prefix followed by digits) */
+	UDB_VAL_ANY       /* Accepts both string and numeric */
+} UdbValueType;
+
+typedef int (*UdbValFunc)(const char *value);
+
+typedef struct UdbKeyDescriptor {
+	const char *key;
+	UdbValueType val_type;
+	UdbValFunc validator;
+	int allow_children;
+	UdbValFunc child_validator;
+} UdbKeyDescriptor;
+
+typedef struct UdbBlockSchema {
+	char letter;
+	int min_depth;
+	int max_depth;
+	UdbValFunc root_key_validator;
+	const UdbKeyDescriptor *subkeys;
+	size_t subkey_count;
+} UdbBlockSchema;
+
 struct UdbRecord {
 	char *key;
 	unsigned int id;

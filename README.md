@@ -233,7 +233,10 @@ Run these from the UnrealIRCd source root after building `udb.so`:
 python3 src/modules/third/udb/tests/runtime_channel_nick.py
 
 # Channel options (*6 lock_modes/lock_topic, *8 persistent), modes validation, and notices:
-python3 src/modules/third/udb/tests/runtime_mlock_modes.py
+python3 src/modules/third/udb/tests/runtime_lock_modes.py
+
+# Declarative schema validation across all blocks (rejection of unknown keys/types):
+python3 src/modules/third/udb/tests/runtime_schema_validation.py
 
 # Channel modes INS churn avoidance and founder +q restoration:
 python3 src/modules/third/udb/tests/runtime_channel_modes_ins.py
