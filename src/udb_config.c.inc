@@ -11,6 +11,8 @@
 
 static UdbConfig *udb_cfg = NULL;
 
+static int udb_flood_valid(const char *value, int *attempts, int *period);
+
 static int udb_database_directory_valid(const char *value)
 {
 	char *path = NULL;
@@ -56,7 +58,8 @@ static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
 			}
 		} else if (!strcmp(cep->name, "max-global-clones"))
 		{
-			if (!cep->value || atoi(cep->value) < 0)
+			unsigned int val;
+			if (!cep->value || !udb_parse_uint_strict(cep->value, &val, 0, 1000000))
 			{
 				config_error("%s:%i: udb::max-global-clones requires a non-negative integer",
 				             cep->file->filename, cep->line_number);
@@ -64,16 +67,17 @@ static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
 			}
 		} else if (!strcmp(cep->name, "password-flood"))
 		{
-			if (!cep->value || !strchr(cep->value, ':'))
+			int attempts, period;
+			if (!cep->value || !udb_flood_valid(cep->value, &attempts, &period))
 			{
-				config_error("%s:%i: udb::password-flood requires format attempts:seconds (e.g. 5:30)",
+				config_error("%s:%i: udb::password-flood requires format attempts:seconds with positive integers (e.g. 5:30)",
 				             cep->file->filename, cep->line_number);
 				errors++;
 			}
 		} else if (!strcmp(cep->name, "max-staged-records"))
 		{
-			int val = cep->value ? atoi(cep->value) : 0;
-			if (val < UDB_MIN_MAX_STAGED_RECORDS || val > UDB_MAX_MAX_STAGED_RECORDS)
+			unsigned int val;
+			if (!cep->value || !udb_parse_uint_strict(cep->value, &val, UDB_MIN_MAX_STAGED_RECORDS, UDB_MAX_MAX_STAGED_RECORDS))
 			{
 				config_error("%s:%i: udb::max-staged-records must be between %d and %d (default %d)",
 				             cep->file->filename, cep->line_number,
@@ -122,18 +126,17 @@ static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
 			safe_strdup(udb_cfg->propagator, cep->value);
 		} else if (!strcmp(cep->name, "max-global-clones"))
 		{
-			udb_cfg->max_global_clones = atoi(cep->value);
+			unsigned int val = 0;
+			if (udb_parse_uint_strict(cep->value, &val, 0, 1000000))
+				udb_cfg->max_global_clones = (int)val;
 		} else if (!strcmp(cep->name, "max-staged-records"))
 		{
-			udb_cfg->max_staged_records = (unsigned int)atoi(cep->value);
+			unsigned int val = 0;
+			if (udb_parse_uint_strict(cep->value, &val, UDB_MIN_MAX_STAGED_RECORDS, UDB_MAX_MAX_STAGED_RECORDS))
+				udb_cfg->max_staged_records = val;
 		} else if (!strcmp(cep->name, "password-flood"))
 		{
-			const char *colon = strchr(cep->value, ':');
-			if (colon)
-			{
-				udb_cfg->flood_attempts = atoi(cep->value);
-				udb_cfg->flood_period = atoi(colon + 1);
-			}
+			udb_flood_valid(cep->value, &udb_cfg->flood_attempts, &udb_cfg->flood_period);
 		}
 	}
 
@@ -235,21 +238,27 @@ static int udb_service_mask_valid(const char *value)
 
 static int udb_flood_valid(const char *value, int *attempts, int *period)
 {
-	char *end;
-	long parsed_attempts;
-	long parsed_period;
+	const char *colon;
+	unsigned int parsed_attempts, parsed_period;
 
 	if (!value || !*value)
 		return 0;
-	parsed_attempts = strtol(value, &end, 10);
-	if (end == value || *end++ != ':')
+	colon = strchr(value, ':');
+	if (!colon || colon == value || !colon[1])
 		return 0;
-	parsed_period = strtol(end, &end, 10);
-	if (*end || parsed_attempts <= 0 || parsed_period <= 0 ||
-	    parsed_attempts > INT_MAX || parsed_period > INT_MAX)
+	char attempts_buf[32];
+	size_t attempts_len = colon - value;
+	if (attempts_len >= sizeof(attempts_buf))
 		return 0;
-	*attempts = (int)parsed_attempts;
-	*period = (int)parsed_period;
+	memcpy(attempts_buf, value, attempts_len);
+	attempts_buf[attempts_len] = '\0';
+	if (!udb_parse_uint_strict(attempts_buf, &parsed_attempts, 1, INT_MAX) ||
+	    !udb_parse_uint_strict(colon + 1, &parsed_period, 1, INT_MAX))
+		return 0;
+	if (attempts)
+		*attempts = (int)parsed_attempts;
+	if (period)
+		*period = (int)parsed_period;
 	return 1;
 }
 

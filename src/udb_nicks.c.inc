@@ -580,8 +580,7 @@ static int udb_cidr_matches(const char *ip, const char *cidr)
 	unsigned char address[16], network[16];
 	char network_text[INET6_ADDRSTRLEN];
 	const char *slash = strchr(cidr, '/');
-	char *end;
-	long prefix;
+	unsigned int prefix;
 	int family;
 	int bytes;
 
@@ -589,8 +588,7 @@ static int udb_cidr_matches(const char *ip, const char *cidr)
 		return 0;
 	memcpy(network_text, cidr, slash - cidr);
 	network_text[slash - cidr] = '\0';
-	prefix = strtol(slash + 1, &end, 10);
-	if (end == slash + 1 || *end)
+	if (!udb_parse_uint_strict(slash + 1, &prefix, 0, 128))
 		return 0;
 	if (inet_pton(AF_INET, ip, address) == 1)
 		family = AF_INET;
@@ -599,7 +597,7 @@ static int udb_cidr_matches(const char *ip, const char *cidr)
 	else
 		return 0;
 	if (inet_pton(family, network_text, network) != 1 ||
-	    prefix < 0 || prefix > (family == AF_INET ? 32 : 128))
+	    prefix > (family == AF_INET ? 32 : 128))
 		return 0;
 	bytes = prefix / 8;
 	if (bytes && memcmp(address, network, bytes))

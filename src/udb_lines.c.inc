@@ -188,7 +188,14 @@ static void udb_line_apply_record(UdbRecord *rec, int is_new)
 		return;
 
 	dur = udb_record_find(udb_ctx, KKEY_DURATION, line_rec);
-	expires = dur && dur->data_num ? TStime() + (time_t)dur->data_num : 0;
+	if (dur && dur->data_num)
+	{
+		if (!udb_time_add(TStime(), dur->data_num, &expires))
+			expires = 0;
+	} else
+	{
+		expires = 0;
+	}
 
 	if (type == 'F')
 	{

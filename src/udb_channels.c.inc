@@ -277,13 +277,13 @@ static void udb_channel_invite_grant_set(Client *client, Channel *channel)
 	{
 		if (!strcasecmp(grant->channel, channel->name))
 		{
-			grant->expires = TStime() + UDB_INVITE_GRANT_TTL;
+			udb_time_add(TStime(), UDB_INVITE_GRANT_TTL, &grant->expires);
 			return;
 		}
 	}
 	grant = safe_alloc(sizeof(*grant));
 	strlcpy(grant->channel, channel->name, sizeof(grant->channel));
-	grant->expires = TStime() + UDB_INVITE_GRANT_TTL;
+	udb_time_add(TStime(), UDB_INVITE_GRANT_TTL, &grant->expires);
 	grant->next = moddata_local_client(client, udb_channel_invite_grant_md).ptr;
 	moddata_local_client(client, udb_channel_invite_grant_md).ptr = grant;
 }

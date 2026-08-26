@@ -48,14 +48,65 @@ static int udb_strtoul_strict(const char *s, unsigned long *out)
 	return 1;
 }
 
-static int udb_timestamp_parse(const char *s, time_t *out)
+static int udb_parse_uint_strict(const char *s, unsigned int *out, unsigned int min_val, unsigned int max_val)
+{
+	unsigned long long val;
+	if (!udb_strtoull_strict(s, &val) || val < min_val || val > max_val || val > UINT_MAX)
+		return 0;
+	if (out)
+		*out = (unsigned int)val;
+	return 1;
+}
+
+static int udb_parse_ulong_strict(const char *s, unsigned long *out, unsigned long min_val, unsigned long max_val)
+{
+	unsigned long long val;
+	if (!udb_strtoull_strict(s, &val) || val < min_val || val > max_val || val > ULONG_MAX)
+		return 0;
+	if (out)
+		*out = (unsigned long)val;
+	return 1;
+}
+
+static int udb_parse_size_strict(const char *s, size_t *out, size_t min_val, size_t max_val)
+{
+	unsigned long long val;
+	if (!udb_strtoull_strict(s, &val) || val < min_val || val > max_val || val > SIZE_MAX)
+		return 0;
+	if (out)
+		*out = (size_t)val;
+	return 1;
+}
+
+static int udb_parse_time_t(const char *s, time_t *out)
 {
 	unsigned long long val;
 	if (!udb_strtoull_strict(s, &val))
 		return 0;
+	if (sizeof(time_t) == 4 && val > 0x7FFFFFFFUL)
+		return 0;
 	if (out)
 		*out = (time_t)val;
 	return 1;
+}
+
+static int udb_time_add(time_t base, unsigned long duration, time_t *result)
+{
+	if (base < 0)
+		return 0;
+	unsigned long long sum = (unsigned long long)base + (unsigned long long)duration;
+	if (sizeof(time_t) == 4 && sum > 0x7FFFFFFFUL)
+		return 0;
+	if (sum < (unsigned long long)base)
+		return 0;
+	if (result)
+		*result = (time_t)sum;
+	return 1;
+}
+
+static int udb_timestamp_parse(const char *s, time_t *out)
+{
+	return udb_parse_time_t(s, out);
 }
 
 static int udb_checksum_parse(const char *input, unsigned long *checksum)
@@ -416,7 +467,7 @@ static int udb_record_validate(UdbBlock *block, const char *path,
                                const char *value)
 {
 	char pathbuf[UDB_RECORD_PATH_MAX];
-	char decoded_parts[8][512];
+	char decoded_parts[8][UDB_COMPONENT_MAX];
 	char *parts[8];
 	int depth = 0;
 	char *p, *next;
@@ -703,7 +754,7 @@ static UdbRecord *udb_record_insert(UdbContext *ctx, UdbBlock *block, UdbRecord 
 	// Auto-detect numeric data if it starts with *
 	if (data_str && *data_str == '*')
 	{
-		rec->data_num = atoi(data_str + 1);
+		udb_strtoul_strict(data_str + 1, &rec->data_num);
 		rec->data_str = NULL;
 	} else if (data_str)
 	{
@@ -837,7 +888,7 @@ static void udb_digest_collect(UdbRecord *rec, int depth, char *pathbuf, int pat
 {
 	size_t old_len;
 	UdbRecord *child;
-	char encoded_key[512];
+	char encoded_key[UDB_COMPONENT_MAX];
 
 	if (!rec || !rec->key)
 		return;
@@ -880,7 +931,7 @@ static unsigned long udb_compute_tree_checksum(UdbRecord *tree)
 	unsigned long crc = 0xFFFFFFFFUL;
 	unsigned int count = 0;
 	unsigned int i = 0;
-	char pathbuf[4096] = "";
+	char pathbuf[UDB_RECORD_PATH_MAX] = "";
 
 	if (!tree)
 		return 0;
@@ -897,13 +948,8 @@ static unsigned long udb_compute_tree_checksum(UdbRecord *tree)
 	{
 		crc = udb_crc32_step(crc, sorted[i]->line, strlen(sorted[i]->line));
 		crc = udb_crc32_step(crc, "\n", 1);
-	}
-	for (line = lines; line;)
-	{
-		UdbDigestLine *next = line->next;
-		safe_free(line->line);
-		safe_free(line);
-		line = next;
+		safe_free(sorted[i]->line);
+		safe_free(sorted[i]);
 	}
 	safe_free(sorted);
 	return crc ^ 0xFFFFFFFFUL;
@@ -934,8 +980,8 @@ static UdbRecord *udb_stage_insert(UdbRecord *parent, const char *key,
 
 static int udb_stage_parse_line(UdbBlock *block, UdbSyncSession *session, const char *input)
 {
-	char line[4096];
-	char decoded_part[512];
+	char line[UDB_RECORD_LINE_MAX];
+	char decoded_part[UDB_COMPONENT_MAX];
 	char *value, *part, *next;
 	UdbRecord *parent;
 
@@ -1007,11 +1053,12 @@ static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSessi
 	if (!block || !session || block->session != session)
 		return 0;
 	/* Persistence succeeded before this point; only now may active state move. */
+	unsigned int real_count = udb_record_count_tree(session->tree);
 	udb_block_reset(ctx, block);
 	udb_record_free_tree(block->tree);
 	block->tree = session->tree;
 	session->tree = NULL;
-	block->record_count = session->record_count;
+	block->record_count = real_count;
 	ctx->total_records += block->record_count;
 	for (rec = block->tree->child; rec; rec = rec->sibling)
 		udb_hash_insert_record(ctx, rec, udb_block_letter_to_index(block->letter), rec->key);
@@ -1045,8 +1092,8 @@ static int udb_record_path_valid(const char *path)
 		{
 			if (p == component || p[1] != ':' || !p[2])
 				return 0;
-			char decoded[512];
-			char comp_buf[512];
+			char decoded[UDB_COMPONENT_MAX];
+			char comp_buf[UDB_COMPONENT_MAX];
 			size_t clen = p - component;
 			if (clen >= sizeof(comp_buf))
 				return 0;
@@ -1060,7 +1107,7 @@ static int udb_record_path_valid(const char *path)
 	}
 	if (!*component)
 		return 0;
-	char decoded[512];
+	char decoded[UDB_COMPONENT_MAX];
 	if (!udb_path_decode_component(component, decoded, sizeof(decoded)))
 		return 0;
 	return 1;
@@ -1101,7 +1148,7 @@ static UdbRecord *udb_file_parse_line_to_tree(UdbBlock *block, UdbRecord *tree, 
 	UdbRecord *leaf_rec = NULL;
 	while (p && *p)
 	{
-		char decoded_part[512];
+		char decoded_part[UDB_COMPONENT_MAX];
 		char *next = strstr(p, "::");
 		if (next)
 		{
