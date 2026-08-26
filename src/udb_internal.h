@@ -24,7 +24,10 @@
 #define UDB_COMPONENT_MAX              4096
 #define UDB_RECORD_VALUE_MAX           4096
 #define UDB_RECORD_LINE_MAX            (UDB_RECORD_PATH_MAX + UDB_RECORD_VALUE_MAX + 32)
-#define UDB_SYNC_TIMEOUT               60
+#define UDB_SYNC_INACTIVITY_TIMEOUT    60
+#define UDB_SYNC_ABSOLUTE_TIMEOUT      300
+#define UDB_SYNC_TIMEOUT               UDB_SYNC_INACTIVITY_TIMEOUT
+#define UDB_DEFAULT_MAX_STAGED_BYTES   (64 * 1024 * 1024) /* 64 MB */
 #define UDB_DEFAULT_MAX_STAGED_RECORDS 500000
 #define UDB_MIN_MAX_STAGED_RECORDS     1000
 #define UDB_MAX_MAX_STAGED_RECORDS     10000000
@@ -108,7 +111,10 @@ struct UdbBlock {
 struct UdbSyncSession {
 	Client *peer;
 	char txid[32];
+	time_t started_at;
+	time_t last_activity;
 	time_t deadline;
+	time_t absolute_deadline;
 	UdbRecord *tree;
 	size_t received_bytes;
 	unsigned int received_puts;

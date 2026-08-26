@@ -119,7 +119,10 @@ static int udb_sync_begin(UdbBlock *block, Client *peer, const char *txid)
 	session = safe_alloc(sizeof(*session));
 	session->peer = peer;
 	strlcpy(session->txid, txid, sizeof(session->txid));
-	session->deadline = time(NULL) + UDB_SYNC_TIMEOUT;
+	session->started_at = time(NULL);
+	session->last_activity = session->started_at;
+	session->deadline = session->started_at + UDB_SYNC_INACTIVITY_TIMEOUT;
+	session->absolute_deadline = session->started_at + UDB_SYNC_ABSOLUTE_TIMEOUT;
 	session->tree = udb_record_create(NULL);
 	session->tree->block_idx = (unsigned char)udb_block_letter_to_index(block->letter);
 	safe_strdup(session->tree->key, "UDB");
@@ -136,7 +139,8 @@ static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid,
                         const char *path, const char *data)
 {
 	UdbSyncSession *session = block ? block->session : NULL;
-	char line[4096];
+	char line[UDB_RECORD_LINE_MAX];
+	time_t now = time(NULL);
 
 	if (!session || session->peer != peer || strcmp(session->txid, txid))
 	{
@@ -144,8 +148,19 @@ static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid,
 			udb_sync_abort(block, "invalid PUT sequence");
 		return UDB_ERR_NO_SYNC;
 	}
+	if (now >= session->absolute_deadline)
+	{
+		udb_sync_abort(block, "absolute sync timeout exceeded");
+		return UDB_ERR_PARAMS;
+	}
 	session->received_puts++;
-	session->received_bytes += (path ? strlen(path) : 0) + (data ? strlen(data) : 0);
+	size_t payload_len = (path ? strlen(path) : 0) + (data ? strlen(data) : 0);
+	session->received_bytes += payload_len;
+	if (session->received_bytes > UDB_DEFAULT_MAX_STAGED_BYTES)
+	{
+		udb_sync_abort(block, "staged byte limit exceeded");
+		return UDB_ERR_PARAMS;
+	}
 	if (snprintf(line, sizeof(line), "%s %s", path, data) >= (int)sizeof(line) ||
 	    !udb_stage_parse_line(block, session, line))
 	{
@@ -158,7 +173,8 @@ static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid,
 		udb_sync_abort(block, "staged record count limit exceeded");
 		return UDB_ERR_PARAMS;
 	}
-	session->deadline = time(NULL) + UDB_SYNC_TIMEOUT;
+	session->last_activity = now;
+	session->deadline = now + UDB_SYNC_INACTIVITY_TIMEOUT;
 	return 0;
 }
 
@@ -248,8 +264,15 @@ EVENT(udb_sync_timeout_event)
 	time_t now = time(NULL);
 
 	for (block = udb_ctx ? udb_ctx->block_list : NULL; block; block = block->next)
-		if (block->session && block->session->deadline <= now)
-			udb_sync_abort(block, "timeout");
+	{
+		if (block->session)
+		{
+			if (block->session->deadline <= now)
+				udb_sync_abort(block, "inactivity timeout");
+			else if (block->session->absolute_deadline <= now)
+				udb_sync_abort(block, "absolute timeout");
+		}
+	}
 	for (peer = udb_hello_peers; peer; peer = next)
 	{
 		next = peer->next;
