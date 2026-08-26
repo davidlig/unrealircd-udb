@@ -311,6 +311,13 @@ def exercise(host, client_port, server_port):
                        "bloqueo de modo por options lock_modes (fundador) con origen ChanServ")
         print("PASS: options lock_modes bloqueó cambio de modo del fundador vía ChanServ")
 
+        # List modes (+b, +e, +I) must not be blocked by lock_modes
+        alice.request(f"MODE {CHANNEL} +b *!*@lockexempt.test", lambda line: f"MODE {CHANNEL} +b *!*@lockexempt.test" in line,
+                      "list mode +b permitido con lock_modes activo")
+        alice.request(f"MODE {CHANNEL} -b *!*@lockexempt.test", lambda line: f"MODE {CHANNEL} -b *!*@lockexempt.test" in line,
+                      "list mode -b permitido con lock_modes activo")
+        print("PASS: options lock_modes no bloqueó modos de lista (+b / -b)")
+
         # 3. options *6 test (lock_topic):
         # Topic is locked (*4 in options *6). Neither founder nor non-founder can change topic.
         start = len(bob.lines)
@@ -397,6 +404,38 @@ def exercise(host, client_port, server_port):
         services.send_del(f"C::{empty_chan}::options")
         time.sleep(0.2)
         print("PASS: DEL de options en canal vacío procesado limpiamente")
+
+        # 8. Channel options *1 (protect_bans):
+        charlie = IrcClient(host, client_port, "charlie")
+        clients.append(charlie)
+        charlie.request(f"JOIN {CHANNEL}", lambda line: " 366 " in line, "charlie JOIN")
+
+        # Give op (+o) to bob and charlie
+        alice.request(f"MODE {CHANNEL} +oo bob charlie", lambda line: f"MODE {CHANNEL} +oo bob charlie" in line, "op bob charlie")
+        time.sleep(0.2)
+
+        # Enable protect_bans (*1)
+        services.send_ins(f"C::{CHANNEL}::options", "*1")
+        time.sleep(0.2)
+
+        # Bob adds a ban
+        bob.request(f"MODE {CHANNEL} +b *!*@evil.test", lambda line: f"MODE {CHANNEL} +b *!*@evil.test" in line, "bob ban add")
+
+        # Charlie (non-author op) tries to remove Bob's ban -> blocked by ChanServ notice
+        charlie.send(f"MODE {CHANNEL} -b *!*@evil.test")
+        charlie.wait_for(lambda line: "You may not remove the UDB-protected ban" in line and "evil.test" in line and "ChanServ" in line,
+                         "bloqueo de remoción de ban protegido por ChanServ")
+        print("PASS: options protect_bans (*1) bloqueó remoción de baneo a operador no autor")
+
+        # Bob (author) removes his own ban -> allowed
+        bob.request(f"MODE {CHANNEL} -b *!*@evil.test", lambda line: f"MODE {CHANNEL} -b *!*@evil.test" in line, "bob ban remove")
+        print("PASS: options protect_bans (*1) permitió remoción de baneo al autor original")
+
+        # Bob adds another ban, Alice (founder) removes it -> allowed (founder bypass)
+        bob.request(f"MODE {CHANNEL} +b *!*@other.test", lambda line: f"MODE {CHANNEL} +b *!*@other.test" in line, "bob ban add 2")
+        alice.request(f"MODE {CHANNEL} -b *!*@other.test", lambda line: f"MODE {CHANNEL} -b *!*@other.test" in line, "founder ban remove")
+        print("PASS: options protect_bans (*1) permitió remoción de baneo al fundador")
+
 
     finally:
         for client in clients:

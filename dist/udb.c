@@ -5186,7 +5186,29 @@ static int udb_hook_remote_join(Client *client, Channel *channel, MessageTag *mt
 
 static int udb_channel_mode_has_change(const char *modes)
 {
-	return modes && (strchr(modes, '+') || strchr(modes, '-'));
+	int what = 0;
+
+	for (; modes && *modes; modes++)
+	{
+		if (*modes == '+')
+		{
+			what = MODE_ADD;
+			continue;
+		}
+		if (*modes == '-')
+		{
+			what = MODE_DEL;
+			continue;
+		}
+		if (what != 0)
+		{
+			/* List modes b, e, I are channel lists and are not locked by lock_modes */
+			if (*modes == 'b' || *modes == 'e' || *modes == 'I')
+				continue;
+			return 1;
+		}
+	}
+	return 0;
 }
 
 static int udb_channel_mode_has_ban_add(const char *modes)
@@ -5227,9 +5249,15 @@ static int udb_channel_blocks_ban_removal(Client *client, Channel *channel,
 			what = MODE_DEL;
 			continue;
 		}
-		handler = find_channel_mode_handler(*modes);
-		takes_parameter = handler && handler->paracount &&
-		                  (what == MODE_ADD || handler->unset_with_param);
+		if (*modes == 'b' || *modes == 'e' || *modes == 'I')
+		{
+			takes_parameter = 1;
+		} else
+		{
+			handler = find_channel_mode_handler(*modes);
+			takes_parameter = handler && handler->paracount &&
+			                  (what == MODE_ADD || handler->unset_with_param);
+		}
 		if (!takes_parameter || param >= parc)
 			continue;
 		if (*modes == 'b' && what == MODE_DEL)
@@ -5239,7 +5267,7 @@ static int udb_channel_blocks_ban_removal(Client *client, Channel *channel,
 			UdbBanOwner *owner = udb_channel_ban_owner_find(channel, ban);
 			if (owner && strcasecmp(owner->owner, client->name))
 			{
-				udb_send_service_notice(client, SKEY_CHANSERV, "You may not remove the UDB-protected ban %s", ban);
+				udb_send_service_notice(client, SKEY_CHANSERV, "You may not remove the UDB-protected ban %s", ban ? ban : parv[param]);
 				return 1;
 			}
 		}
@@ -5295,6 +5323,7 @@ CMD_OVERRIDE_FUNC(udb_override_mode)
 	UdbRecord *chan_rec;
 	UdbBanSnapshot *snapshot = NULL;
 	int is_founder;
+	int had_ban_add = 0;
 
 	if (!MyUser(client) || parc < 3 || !IsChannelName(parv[1]))
 	{
@@ -5322,10 +5351,13 @@ CMD_OVERRIDE_FUNC(udb_override_mode)
 		return;
 	/* Retain local ban ownership even before the protection option is enabled. */
 	if (udb_channel_mode_has_ban_add(parv[2]))
+	{
+		had_ban_add = 1;
 		snapshot = udb_channel_ban_snapshot(channel);
+	}
 	CALL_NEXT_COMMAND_OVERRIDE();
 	channel = find_channel(channel_name);
-	if (snapshot)
+	if (had_ban_add)
 	{
 		if (channel)
 			udb_channel_track_new_bans(channel, client, snapshot);
