@@ -15,6 +15,7 @@ static UdbBlock *udb_block_create(UdbContext *ctx, char letter, const char *name
 
 	b->letter = letter;
 	b->version = 1;
+	b->load_state = UDB_LOAD_UNINITIALIZED;
 	b->tree = udb_record_create(NULL);
 	b->tree->block_idx = (unsigned char)udb_block_letter_to_index(letter);
 	safe_strdup(b->tree->key, name);
@@ -132,18 +133,40 @@ static void udb_block_unload(UdbContext *ctx, UdbBlock *block)
 	}
 }
 
-static void udb_blocks_load_all(UdbContext *ctx)
+static int udb_blocks_load_all(UdbContext *ctx)
 {
 	UdbBlock *b;
+	if (!ctx)
+		return 0;
 	for (b = ctx->block_list; b; b = b->next)
-		udb_block_load(ctx, b);
+	{
+		if (!udb_block_load(ctx, b))
+			return 0;
+	}
+	return 1;
 }
 
-static void udb_blocks_save_all(UdbContext *ctx)
+static int udb_blocks_save_all(UdbContext *ctx)
 {
 	UdbBlock *b;
+	int success = 1;
+
+	if (!ctx)
+		return 0;
 	for (b = ctx->block_list; b; b = b->next)
-		udb_file_save_block(ctx, b);
+	{
+		if (b->load_state == UDB_LOAD_FAILED)
+		{
+			udb_log(ULOG_ERROR, "UDB_BLOCK_SAVE_SKIPPED", NULL,
+			        "Skipping save of block $block because its load failed",
+			        log_data_string("block", (char[]){b->letter, '\0'}));
+			success = 0;
+			continue;
+		}
+		if (!udb_file_save_block(ctx, b))
+			success = 0;
+	}
+	return success;
 }
 
 static UdbBlock *udb_block_by_letter(UdbContext *ctx, char letter)
@@ -160,6 +183,8 @@ static int udb_engine_init(void)
 		udb_cfg = safe_alloc(sizeof(UdbConfig));
 	if (!udb_cfg->db_directory)
 		safe_strdup(udb_cfg->db_directory, UDB_DEFAULT_DB_DIRECTORY);
+	if (udb_cfg->max_staged_records == 0)
+		udb_cfg->max_staged_records = UDB_DEFAULT_MAX_STAGED_RECORDS;
 	udb_ctx = safe_alloc(sizeof(UdbContext));
 	udb_hash_init(udb_ctx);
 	dir = udb_cfg && udb_cfg->db_directory ? udb_cfg->db_directory : NULL;
@@ -194,7 +219,11 @@ static int udb_engine_init(void)
 	udb_block_set_context_root(udb_ctx, udb_ctx->blocks['S']);
 	udb_block_set_context_root(udb_ctx, udb_ctx->blocks['L']);
 	udb_block_set_context_root(udb_ctx, udb_ctx->blocks['K']);
-	udb_blocks_load_all(udb_ctx);
+	if (!udb_blocks_load_all(udb_ctx))
+	{
+		udb_engine_shutdown();
+		return 0;
+	}
 	return 1;
 }
 
@@ -350,7 +379,6 @@ static int udb_module_unload(void)
 	udb_log(ULOG_INFO, "UDB_UNLOADING", NULL,
 	        "Saving databases and shutting down...");
 	udb_log_snomask_filter_free();
-	udb_blocks_save_all(udb_ctx);
 	udb_engine_shutdown();
 	return MOD_SUCCESS;
 }

@@ -40,7 +40,7 @@ static const char *udb_selected_propagator(UdbContext *ctx)
 				first_srv = srv;
 
 			/* Check if online in UnrealIRCd or if it is the local server */
-			if (find_server(srv, NULL) || (me.name && !strcasecmp(srv, me.name)))
+			if (find_server(srv, NULL) || (me.name[0] && !strcasecmp(srv, me.name)))
 			{
 				strlcpy(selected_buf, srv, sizeof(selected_buf));
 				return selected_buf;
@@ -82,7 +82,7 @@ static UdbBlock *udb_mutation_path_block(UdbContext *ctx, const char *path)
 		return NULL;
 
 	len = strlen(path);
-	if (len < 4 || len >= 512 || path[1] != ':' || path[2] != ':' || !path[3])
+	if (len < 4 || len >= UDB_RECORD_PATH_MAX || path[1] != ':' || path[2] != ':' || !path[3])
 		return NULL;
 
 	block = udb_block_by_letter(ctx, path[0]);
@@ -94,8 +94,20 @@ static UdbBlock *udb_mutation_path_block(UdbContext *ctx, const char *path)
 	{
 		if (separator == component || !separator[2])
 			return NULL;
+		char decoded[512];
+		char comp_buf[512];
+		size_t clen = separator - component;
+		if (clen >= sizeof(comp_buf))
+			return NULL;
+		memcpy(comp_buf, component, clen);
+		comp_buf[clen] = '\0';
+		if (!udb_path_decode_component(comp_buf, decoded, sizeof(decoded)))
+			return NULL;
 		component = separator + 2;
 	}
+	char decoded[512];
+	if (!*component || !udb_path_decode_component(component, decoded, sizeof(decoded)))
+		return NULL;
 
 	return block;
 }
@@ -170,6 +182,18 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 		}
 		old_rec = udb_record_find_path(ctx, block, path + 3);
 		unchanged = old_rec && udb_record_data_equals(old_rec, data);
+		if (unchanged)
+		{
+			if (ctx->propagator && block->syncing_from == client)
+			{
+				udb_mutation_forward_ins(ctx->propagator, client, target, path, data);
+				return;
+			}
+			if (!is_broadcast)
+				return;
+			udb_mutation_forward_ins(client, client, target, path, data);
+			return;
+		}
 		tree = udb_record_clone_tree(block->tree, old_rec, &rec);
 		rec = udb_record_insert_path(tree, path + 3, data);
 		if (!rec)
@@ -178,7 +202,8 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 			udb_mutation_persist_error(client, "INS", letter);
 			return;
 		}
-		if (!udb_file_write_snapshot(block, tree, udb_record_count_tree(tree)))
+		UdbSnapshotResult snap_res = udb_file_write_snapshot(block, tree, udb_record_count_tree(tree));
+		if (snap_res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
 		{
 			udb_record_free_tree(tree);
 			udb_mutation_persist_error(client, "INS", letter);
@@ -238,6 +263,18 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, const char *target
 			return;
 		}
 		UdbRecord *old_rec = udb_record_find_path(ctx, block, path + 3);
+		if (!old_rec)
+		{
+			if (ctx->propagator && block->syncing_from == client)
+			{
+				udb_mutation_forward_del(ctx->propagator, client, target, path);
+				return;
+			}
+			if (!is_broadcast)
+				return;
+			udb_mutation_forward_del(client, client, target, path);
+			return;
+		}
 		UdbRecord *candidate_rec = NULL;
 		UdbRecord *candidate_line = NULL;
 		UdbRecord *tree = udb_record_clone_tree(block->tree, old_rec, &candidate_rec);
@@ -248,7 +285,8 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, const char *target
 		if (candidate_rec)
 			udb_record_delete_tree(candidate_rec);
 		record_count = udb_record_count_tree(tree);
-		if (!udb_file_write_snapshot(block, tree, record_count))
+		UdbSnapshotResult snap_res = udb_file_write_snapshot(block, tree, record_count);
+		if (snap_res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
 		{
 			udb_record_free_tree(tree);
 			udb_mutation_persist_error(client, "DEL", letter);
@@ -293,10 +331,18 @@ static void udb_mutation_drp(UdbContext *ctx, Client *client, const char *target
 			sendto_one(client, NULL, ":%s DB %s ERR DRP %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 			return;
 		}
+		if (!block->tree->child)
+		{
+			if (!is_broadcast)
+				return;
+			udb_sendto_confirmed_servers(client, ":%s DB %s DRP %c", client->id, target, letter);
+			return;
+		}
 		UdbRecord *tree = udb_record_clone_tree(block->tree, NULL, NULL);
 		while (tree->child)
 			udb_record_delete_tree(tree->child);
-		if (!udb_file_write_snapshot(block, tree, 0))
+		UdbSnapshotResult snap_res = udb_file_write_snapshot(block, tree, 0);
+		if (snap_res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
 		{
 			udb_record_free_tree(tree);
 			udb_mutation_persist_error(client, "DRP", letter);

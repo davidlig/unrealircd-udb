@@ -18,8 +18,13 @@ static void udb_sendto_confirmed_servers(Client *except, const char *fmt, ...)
 	va_start(args, fmt);
 	vsnprintf(line, sizeof(line), fmt, args);
 	va_end(args);
-	list_for_each_entry(server, &client_list, client_node) if (server != except && IsServer(server) && MyConnect(server) && udb_has_hello(server))
-	    sendto_one(server, NULL, "%s", line);
+	list_for_each_entry(server, &server_list, special_node)
+	{
+		if (server == except || (except && server == except->direction))
+			continue;
+		if (IsServer(server) && MyConnect(server) && udb_has_hello(server))
+			sendto_one(server, NULL, "%s", line);
+	}
 }
 
 static void udb_protocol_params_error(Client *client, const char *subcmd)
@@ -40,6 +45,16 @@ static void udb_sync_to_server(Client *server)
 		block = block->next;
 	}
 }
+static Client *udb_direct_peer(Client *client)
+{
+	if (!client)
+		return NULL;
+	if (MyConnect(client))
+		return client;
+	if (client->direction && MyConnect(client->direction))
+		return client->direction;
+	return NULL;
+}
 
 /* Server SIDs identify servers independently of names, links, and frame order. */
 static int udb_remote_wins_equal_timestamp(Client *server)
@@ -56,11 +71,8 @@ static int udb_hook_server_sync(Client *client)
 	return 0;
 }
 
-static int udb_hook_server_quit(Client *client, MessageTag *mtags)
+int udb_hook_server_quit(Client *client, MessageTag *mtags)
 {
-	if (!udb_ctx || !client)
-		return 0;
-
 	if (udb_ctx->propagator == client)
 		udb_ctx->propagator = NULL;
 	udb_sync_server_quit(client);
@@ -80,6 +92,7 @@ CMD_FUNC(cmd_db)
 	const char *target = parv[1];
 	const char *subcmd = parv[2];
 	UdbContext *ctx = udb_ctx;
+	Client *direct_peer = udb_direct_peer(client);
 	char logbuf[512];
 
 	if (!target || !*target || !subcmd || !*subcmd)
@@ -115,7 +128,7 @@ CMD_FUNC(cmd_db)
 		return;
 	}
 
-	if (!udb_has_hello(client))
+	if (!direct_peer || !udb_has_hello(direct_peer))
 	{
 		sendto_one(client, NULL, ":%s DB %s ERR %s %d 0", me.id, client->id,
 		           subcmd, UDB_ERR_FORBIDDEN);
@@ -127,6 +140,9 @@ CMD_FUNC(cmd_db)
 
 	int is_broadcast = !strcmp(target, "*");
 	int is_for_me = is_broadcast || !strcmp(target, me.id) || !strcmp(target, me.name);
+
+	if (!is_broadcast && !is_for_me)
+		return;
 
 	switch (toupper((unsigned char)subcmd[0]))
 	{
@@ -236,9 +252,11 @@ CMD_FUNC(cmd_db)
 					return;
 				if (is_for_me)
 				{
-					int errcode = atoi(parv[4]);
+					unsigned long errcode = 0;
+					if (!udb_strtoul_strict(parv[4], &errcode) || errcode > 255)
+						errcode = UDB_ERR_FATAL;
 					udb_log(ULOG_INFO, "UDB_EVENT", client, "Error from $client: cmd=$cmd err=$errcode",
-					        log_data_client("client", client), log_data_string("cmd", parv[3]), log_data_integer("errcode", errcode));
+					        log_data_client("client", client), log_data_string("cmd", parv[3]), log_data_integer("errcode", (int)errcode));
 					if (!is_broadcast)
 						return;
 				}
@@ -275,20 +293,29 @@ CMD_FUNC(cmd_db)
 			if (!strcasecmp(subcmd, "INF"))
 			{
 				if (parc < 6)
+				{
+					udb_protocol_params_error(client, subcmd);
 					return;
+				}
 				char letter = *parv[3];
 				UdbBlock *block = udb_block_by_letter(ctx, letter);
+				unsigned long crc32 = 0;
+				time_t remote_ts = 0;
+
+				if (!block)
+				{
+					if (is_for_me)
+						sendto_one(client, NULL, ":%s DB %s ERR INF %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
+					return;
+				}
+				if (!udb_checksum_parse(parv[4], &crc32) || !udb_timestamp_parse(parv[5], &remote_ts))
+				{
+					udb_protocol_params_error(client, "INF");
+					return;
+				}
 
 				if (is_for_me)
 				{
-					if (!block)
-					{
-						sendto_one(client, NULL, ":%s DB %s ERR INF %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
-						return;
-					}
-					unsigned long crc32 = strtoul(parv[4], NULL, 16);
-					time_t remote_ts = atol(parv[5]);
-
 					if (crc32 != block->checksum)
 					{
 						if (remote_ts > block->modified_at)
@@ -303,7 +330,7 @@ CMD_FUNC(cmd_db)
 					if (!is_broadcast)
 						return;
 				}
-				udb_sendto_confirmed_servers(client, ":%s DB %s INF %c %s %s", client->id, target, letter, parv[4], parv[5]);
+				udb_sendto_confirmed_servers(client, ":%s DB %s INF %c %08lX %lu", client->id, target, letter, crc32, (unsigned long)remote_ts);
 			} else if (!strcasecmp(subcmd, "INS"))
 			{
 				if (parc < 5)

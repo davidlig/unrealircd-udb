@@ -137,11 +137,11 @@ def main():
 
         # Seed Node A with S block having propagator setting
         s_file_a = node_a / "data/udb_S.db"
-        s_file_a.write_text("S::propagator hub-a.test,hub-b.test\nS::flood 5:30\n", encoding="ascii")
+        s_file_a.write_text("; UDB Block S\n; Saved: 1787720000\n; Records: 2\npropagator hub-a.test,hub-b.test\nflood 5:30\n", encoding="ascii")
 
         # Seed Node A with an N record
         n_file_a = node_a / "data/udb_N.db"
-        n_file_a.write_text("N::davidlig::vhost root.admin.net\n", encoding="ascii")
+        n_file_a.write_text("; UDB Block N\n; Saved: 1787720000\n; Records: 1\ndavidlig::vhost root.admin.net\n", encoding="ascii")
 
         ports_a = (free_port(), free_port(), free_port())
         ports_b = (free_port(), free_port(), free_port())
@@ -159,22 +159,30 @@ def main():
                      [("hub-a.test", ports_a[1], True)],
                      node_b / "data", propagator=None, link_password=link_pw)
 
+        log_a = node_a / "ircd.log"
+        log_b = node_b / "ircd.log"
+        out_a = log_a.open("w")
+        out_b = log_b.open("w")
+
         proc_a = subprocess.Popen(bwrap_command(node_a, ircd, config_a),
-                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                  stdout=out_a, stderr=subprocess.STDOUT)
         processes.append(proc_a)
         wait_for_daemon(proc_a, "127.0.0.1", ports_a[0])
 
         proc_b = subprocess.Popen(bwrap_command(node_b, ircd, config_b),
-                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                  stdout=out_b, stderr=subprocess.STDOUT)
         processes.append(proc_b)
         wait_for_daemon(proc_b, "127.0.0.1", ports_b[0])
 
         # Wait for S2S autoconnect and UDB sync
-        time.sleep(3)
-
-        # Verify that Leaf B received block S (including S::propagator) and block N via auto-bootstrap
         s_file_b = node_b / "data/udb_S.db"
         n_file_b = node_b / "data/udb_N.db"
+
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if s_file_b.exists() and n_file_b.exists() and s_file_b.stat().st_size > 0 and n_file_b.stat().st_size > 0:
+                break
+            time.sleep(0.2)
 
         if not s_file_b.exists() or not n_file_b.exists():
             raise AssertionError("FAIL: Leaf B did not persist synced UDB database blocks!")
@@ -182,8 +190,8 @@ def main():
         content_s = s_file_b.read_text(encoding="ascii")
         content_n = n_file_b.read_text(encoding="ascii")
 
-        assert "S::propagator hub-a.test,hub-b.test" in content_s, f"S::propagator missing in B: {content_s}"
-        assert "N::davidlig::vhost root.admin.net" in content_n, f"N::davidlig missing in B: {content_n}"
+        assert "propagator hub-a.test,hub-b.test" in content_s, f"propagator missing in B: {content_s}"
+        assert "davidlig::vhost root.admin.net" in content_n, f"davidlig missing in B: {content_n}"
 
         print("PASS: Clean Leaf B successfully auto-bootstrapped and synchronized S::propagator & N block from Hub A without local propagator config!")
         print("ALL TESTS PASSED: UDB S::propagator priority list and Auto-Bootstrap verified successfully.")
@@ -192,6 +200,11 @@ def main():
     finally:
         for p in processes:
             stop(p)
+        if sys.exc_info()[0] is not None:
+            if log_a.exists():
+                print(f"--- Hub A Log ---\n{log_a.read_text(errors='replace')}", file=sys.stderr)
+            if log_b.exists():
+                print(f"--- Leaf B Log ---\n{log_b.read_text(errors='replace')}", file=sys.stderr)
         shutil.rmtree(temp_root, ignore_errors=True)
 
 

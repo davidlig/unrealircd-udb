@@ -8,7 +8,7 @@ Este documento está diseñado para desarrolladores que deseen implementar clien
 
 UDB utiliza una estructura de árbol en memoria y almacenamiento en archivos de texto plano para persistencia. La base de datos se divide en "Bloques", identificados por una letra (N, C, I, K, S, L).
 
-### 1.1 Formato de Almacenamiento (Texto Plano)
+### 1.1 Formato de Almacenamiento (Texto Plano) y Codificación de Rutas
 El almacenamiento en disco (`udb_X.db`) sigue una estructura jerárquica plana:
 ```text
 ; UDB Block N - Version 1
@@ -19,18 +19,32 @@ davidlig::vhost admin.davidlig.net
 davidlig::oper netadmin
 ```
 *   Los subniveles se separan mediante el delimitador `::`.
-*   Un prefijo `*` en el valor indica que el dato es numérico (entero).
+*   Para garantizar la compatibilidad con direcciones IPv6 (ej. `2001:db8::1`) y caracteres especiales, los componentes de ruta individuales se codifican canónicamente mediante percent-encoding (`%XX`, ej. `2001%3Adb8%3A%3A1`) en disco, en frames S2S y en digests HMAC. En memoria, UDB decodifica transparentemente los componentes para permitir matching nativo de IPs y hosts.
+*   Un prefijo `*` en el valor indica que el dato es numérico (entero de 64 bits con validación estricta de formato y límites).
 *   La ausencia de `*` indica que el dato es una cadena de texto (String).
 
-### 1.2 Directorio de la Base de Datos
-`udb::database-directory` selecciona el directorio que contiene todos los
-archivos de bloque: `udb_N.db`, `udb_C.db`, `udb_I.db`, `udb_S.db`, `udb_L.db` y
-`udb_K.db`. Las rutas locales absolutas se usan tal cual. Las rutas relativas se
-resuelven bajo `PERMDATADIR` de UnrealIRCd. La opción rechaza URLs, saltos de
-línea y rutas que no pueden contener de forma segura un nombre de bloque. UDB
-crea el directorio final con modo `0700` cuando es necesario y rechaza iniciar
-si no es un directorio o no puede crearlo. Si se omite, se conserva la ubicación
-heredada: el propio `PERMDATADIR`.
+### 1.2 Directorio de la Base de Datos, Configuración y Loader Transaccional
+
+#### Directivas en el bloque `udb { }`:
+*   `database-directory "<ruta>";`: Selecciona el directorio que contiene los
+    archivos de bloque (`udb_N.db`, `udb_C.db`, `udb_I.db`, `udb_S.db`, `udb_L.db`, `udb_K.db`).
+    Las rutas locales absolutas se usan tal cual. Las relativas se resuelven bajo `PERMDATADIR`.
+    UDB crea el directorio con permisos `0700` de forma segura. Si se omite, se usa `PERMDATADIR`.
+*   `propagator "<servidor>";`: Servidor autorizado para propagar sincronizaciones y mutaciones.
+*   `max-staged-records <número>;`: Límite máximo de registros permitidos por bloque en una sesión
+    de sincronización transaccional (*staged sync*). Protege contra ataques DoS y agotamiento de
+    memoria (OOM). Rango permitido: `1000` a `10000000` (por defecto `500000`).
+*   `max-global-clones <número>;`: Límite global de conexiones/clones por IP.
+*   `password-flood <intentos>:<segundos>;`: Protección de fuerza bruta en contraseñas (por defecto `5:60`).
+
+**Loader Transaccional:** Durante el arranque, UDB lee cada archivo en un árbol
+candidato temporal. Solo si el archivo se lee y valida completamente sin errores
+se conmuta atómicamente el árbol activo en memoria. Si un archivo no existe
+(`ENOENT`), UDB inicia con una base de datos vacía limpia. Si un archivo no se
+puede abrir o leer por fallos de permisos (`EACCES`) o errores de E/S de disco,
+UDB aborta la inicialización (`MOD_FAILED`) y marca el bloque con estado
+`UDB_LOAD_FAILED`, impidiendo terminantemente que el módulo sobreescriba o
+destruya los archivos existentes en disco.
 
 ### 1.3 Bloques Soportados y sus Opciones
 

@@ -8,7 +8,7 @@ This document is designed for developers who wish to implement clients, IRC Serv
 
 UDB uses an in-memory tree structure and flat-text file storage for persistence. The database is divided into "Blocks", identified by a letter (N, C, I, K, S, L).
 
-### 1.1 Storage Format (Plain Text)
+### 1.1 Storage Format (Plain Text) & Path Encoding
 Disk storage (`udb_X.db`) follows a flat hierarchical structure:
 ```text
 ; UDB Block N - Version 1
@@ -19,18 +19,31 @@ davidlig::vhost admin.davidlig.net
 davidlig::oper netadmin
 ```
 *   Sub-levels are separated by the `::` delimiter.
-*   An asterisk `*` prefix in the value indicates that the data is numeric (integer).
+*   To support IPv6 addresses (e.g. `2001:db8::1`) and special characters without ambiguity, individual path components are canonically percent-encoded (`%XX`, e.g. `2001%3Adb8%3A%3A1`) in disk files, S2S frames, and HMAC checksum digests. In memory, UDB transparently decodes path components to enable native IP matching and lookups.
+*   An asterisk `*` prefix in the value indicates that the data is numeric (64-bit integer with strict format validation).
 *   The absence of `*` indicates that the data is a text string.
 
-### 1.2 Database Directory
-`udb::database-directory` selects the directory containing every block file:
-`udb_N.db`, `udb_C.db`, `udb_I.db`, `udb_S.db`, `udb_L.db`, and `udb_K.db`.
-Absolute local paths are used as written. Relative paths resolve beneath
-UnrealIRCd's `PERMDATADIR`. The setting rejects URLs, line breaks, and paths
-that cannot safely contain a block filename. UDB creates the final directory
-with mode `0700` when needed and refuses to start if it is not a directory or
-cannot be created. Omitting the setting preserves the legacy location:
-`PERMDATADIR` itself.
+### 1.2 Database Directory, Configuration & Transactional Loader
+
+#### Directives in the `udb { }` block:
+*   `database-directory "<path>";`: Selects the directory containing all block files
+    (`udb_N.db`, `udb_C.db`, `udb_I.db`, `udb_S.db`, `udb_L.db`, `udb_K.db`).
+    Absolute local paths are used as written. Relative paths resolve beneath `PERMDATADIR`.
+    UDB creates the directory with `0700` permissions. Defaults to `PERMDATADIR`.
+*   `propagator "<server>";`: Server authorized to propagate database syncs and live mutations.
+*   `max-staged-records <number>;`: Maximum number of records allowed per block during a single
+    staged sync transaction. Protects against DoS attacks and memory exhaustion (OOM).
+    Allowed range: `1000` to `10000000` (default `500000`).
+*   `max-global-clones <number>;`: Global limit of connections/clones per IP.
+*   `password-flood <attempts>:<seconds>;`: Password brute-force flood protection (default `5:60`).
+
+**Transactional Loader:** During startup, UDB reads each block file into a staging
+candidate tree. The active in-memory database is swapped atomically only after the
+file is completely read and validated without errors. If a block file does not
+exist (`ENOENT`), UDB initializes cleanly with an empty database. If a file cannot
+be opened or read due to permission errors (`EACCES`) or disk I/O errors, UDB aborts
+module startup (`MOD_FAILED`) and marks the block with `UDB_LOAD_FAILED`, strictly
+preventing the module from overwriting or destroying existing database files on disk.
 
 ### 1.3 Supported Blocks and Their Options
 

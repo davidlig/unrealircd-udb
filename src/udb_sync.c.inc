@@ -141,6 +141,12 @@ static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid,
 			udb_sync_abort(block, "invalid PUT sequence");
 		return UDB_ERR_NO_SYNC;
 	}
+	unsigned int max_records = (udb_cfg && udb_cfg->max_staged_records) ? udb_cfg->max_staged_records : UDB_DEFAULT_MAX_STAGED_RECORDS;
+	if (++session->record_count > max_records)
+	{
+		udb_sync_abort(block, "staged record count limit exceeded");
+		return UDB_ERR_PARAMS;
+	}
 	if (snprintf(line, sizeof(line), "%s %s", path, data) >= (int)sizeof(line) ||
 	    !udb_stage_parse_line(block, session, line))
 	{
@@ -149,22 +155,6 @@ static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid,
 	}
 	session->deadline = time(NULL) + UDB_SYNC_TIMEOUT;
 	return 0;
-}
-
-static int udb_checksum_parse(const char *input, unsigned long *checksum)
-{
-	char *end;
-	const char *p;
-
-	if (!input || !*input)
-		return 0;
-	for (p = input; *p; p++)
-		if (!((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f') ||
-		      (*p >= 'A' && *p <= 'F')))
-			return 0;
-	errno = 0;
-	*checksum = strtoul(input, &end, 16);
-	return errno != ERANGE && *end == '\0';
 }
 
 static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer,
@@ -180,9 +170,10 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer,
 		return UDB_ERR_NO_SYNC;
 	}
 	*digest = udb_compute_tree_checksum(session->tree);
+	UdbSnapshotResult snap_res = UDB_SNAPSHOT_FAILED_BEFORE_COMMIT;
 	if (!udb_checksum_parse(checksum, &received_digest) ||
 	    *digest != received_digest ||
-	    !udb_file_write_snapshot(block, session->tree, session->record_count) ||
+	    (snap_res = udb_file_write_snapshot(block, session->tree, session->record_count)) == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT ||
 	    !udb_block_commit_stage(ctx, block, session, *digest))
 	{
 		udb_sync_abort(block, "digest or persistence failure");
@@ -202,13 +193,16 @@ static void udb_sync_send_tree(Client *server, UdbRecord *rec, int depth,
 {
 	size_t old_len;
 	UdbRecord *child;
+	char encoded_key[512];
 
 	if (!rec || !rec->key)
 		return;
 	old_len = strlen(pathbuf);
+	if (!udb_path_encode_component(rec->key, encoded_key, sizeof(encoded_key)))
+		return;
 	if (depth > 0)
 		strlcat(pathbuf, "::", pathlen);
-	strlcat(pathbuf, rec->key, pathlen);
+	strlcat(pathbuf, encoded_key, pathlen);
 	if (rec->data_str || rec->data_num > 0 || !rec->child)
 	{
 		if (rec->data_str)

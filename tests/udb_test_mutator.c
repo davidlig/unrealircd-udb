@@ -115,7 +115,7 @@ EVENT(udb_test_mutator_event)
 			mutator_state = -1;
 			return;
 		}
-		sendto_one(mutator_peer, NULL, ":%s DB %s DRP N", me.id, mutator_peer->id);
+		sendto_one(mutator_peer, NULL, ":%s DB * DRP N", me.id);
 		mutator_state = 2;
 		unreal_log(ULOG_INFO, "udb-test-mutator", "UDB_TEST_MUTATOR", mutator_peer,
 		           "[UDB_TEST_MUTATOR] emitted authorized DRP", NULL);
@@ -130,7 +130,7 @@ EVENT(udb_test_mutator_event)
 			           "[UDB_TEST_MUTATOR] peer disappeared before mutation", NULL);
 			return;
 		}
-		sendto_one(mutator_peer, NULL, ":%s DB %s OPT N %lld", me.id, mutator_peer->id,
+		sendto_one(mutator_peer, NULL, ":%s DB * OPT N %lld", me.id,
 		           (long long)TStime());
 		mutator_state = 2;
 		unreal_log(ULOG_INFO, "udb-test-mutator", "UDB_TEST_MUTATOR", mutator_peer,
@@ -145,7 +145,7 @@ EVENT(udb_test_mutator_event)
 			mutator_state = -1;
 			return;
 		}
-		sendto_one(mutator_peer, NULL, ":%s DB %s DEL " MUTATOR_PATH, me.id, mutator_peer->id);
+		sendto_one(mutator_peer, NULL, ":%s DB * DEL " MUTATOR_PATH, me.id);
 		mutator_state = 2;
 		unreal_log(ULOG_INFO, "udb-test-mutator", "UDB_TEST_MUTATOR", mutator_peer,
 		           "[UDB_TEST_MUTATOR] emitted authorized DEL", NULL);
@@ -162,8 +162,8 @@ EVENT(udb_test_mutator_event)
 		return;
 	}
 
-	sendto_one(mutator_peer, NULL, ":%s DB %s INS " MUTATOR_PATH " %s",
-	           me.id, mutator_peer->id, mutator_value);
+	sendto_one(mutator_peer, NULL, ":%s DB * INS " MUTATOR_PATH " %s",
+	           me.id, mutator_value);
 	mutator_state = 1;
 	mutator_deadline = TStime() + SETTLEMENT_DELAY;
 	unreal_log(ULOG_INFO, "udb-test-mutator", "UDB_TEST_MUTATOR", mutator_peer,

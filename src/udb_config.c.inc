@@ -70,6 +70,17 @@ static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
 				             cep->file->filename, cep->line_number);
 				errors++;
 			}
+		} else if (!strcmp(cep->name, "max-staged-records"))
+		{
+			int val = cep->value ? atoi(cep->value) : 0;
+			if (val < UDB_MIN_MAX_STAGED_RECORDS || val > UDB_MAX_MAX_STAGED_RECORDS)
+			{
+				config_error("%s:%i: udb::max-staged-records must be between %d and %d (default %d)",
+				             cep->file->filename, cep->line_number,
+				             UDB_MIN_MAX_STAGED_RECORDS, UDB_MAX_MAX_STAGED_RECORDS,
+				             UDB_DEFAULT_MAX_STAGED_RECORDS);
+				errors++;
+			}
 		} else
 		{
 			config_error("%s:%i: unknown directive udb::%s",
@@ -112,6 +123,9 @@ static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
 		} else if (!strcmp(cep->name, "max-global-clones"))
 		{
 			udb_cfg->max_global_clones = atoi(cep->value);
+		} else if (!strcmp(cep->name, "max-staged-records"))
+		{
+			udb_cfg->max_staged_records = (unsigned int)atoi(cep->value);
 		} else if (!strcmp(cep->name, "password-flood"))
 		{
 			const char *colon = strchr(cep->value, ':');
@@ -127,6 +141,8 @@ static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
 	if (!udb_cfg->db_directory)
 		safe_strdup(udb_cfg->db_directory, UDB_DEFAULT_DB_DIRECTORY);
 	convert_to_absolute_path(&udb_cfg->db_directory, PERMDATADIR);
+	if (udb_cfg->max_staged_records == 0)
+		udb_cfg->max_staged_records = UDB_DEFAULT_MAX_STAGED_RECORDS;
 	if (udb_cfg->flood_attempts == 0)
 		udb_cfg->flood_attempts = 5;
 	if (udb_cfg->flood_period == 0)

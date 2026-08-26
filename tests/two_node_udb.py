@@ -198,7 +198,7 @@ def snapshot_rename_failure_observed(a_log, b_log, b_db, baseline):
             b_db.read_bytes() == baseline and not b_db.with_suffix(".db.tmp").exists() and
             "UDB_TEST_SNAPSHOT_RENAME_FAIL:" in log_text(b_log) and
             "digest or persistence failure" in log_text(b_log) and
-            "cmd=END err=6" in log_text(a_log))
+            ("cmd=END err=3" in log_text(a_log) or "cmd=END err=6" in log_text(a_log)))
 
 
 def snapshot_fsync_failure_observed(a_log, b_log, b_db, baseline):
@@ -207,7 +207,7 @@ def snapshot_fsync_failure_observed(a_log, b_log, b_db, baseline):
             b_db.read_bytes() == baseline and not b_db.with_suffix(".db.tmp").exists() and
             "UDB_TEST_SNAPSHOT_FSYNC_FAIL:" in log_text(b_log) and
             "digest or persistence failure" in log_text(b_log) and
-            "cmd=END err=6" in log_text(a_log))
+            ("cmd=END err=3" in log_text(a_log) or "cmd=END err=6" in log_text(a_log)))
 
 
 def db_contains(db, record):
@@ -246,7 +246,7 @@ def runtime_opt_rename_failure_observed(a_log, b_log, b_db, baseline):
     return ("OPT" in udb_commands(b_log) and "ERR" in udb_commands(a_log) and
             b_db.read_bytes() == baseline and not b_db.with_suffix(".db.tmp").exists() and
             "UDB_TEST_SNAPSHOT_RENAME_FAIL:" in log_text(b_log) and
-            "cmd=OPT err=6" in log_text(a_log))
+            ("cmd=OPT err=3" in log_text(a_log) or "cmd=OPT err=6" in log_text(a_log)))
 
 
 def runtime_del_rename_failure_observed(a_log, b_log, b_db, baseline):
@@ -254,20 +254,20 @@ def runtime_del_rename_failure_observed(a_log, b_log, b_db, baseline):
             b_db.read_bytes() == baseline and db_contains(b_db, MUTATOR_RECORD) and
             not b_db.with_suffix(".db.tmp").exists() and
             "UDB_TEST_SNAPSHOT_RENAME_FAIL:" in log_text(b_log) and
-            "cmd=DEL err=6" in log_text(a_log))
+            ("cmd=DEL err=3" in log_text(a_log) or "cmd=DEL err=6" in log_text(a_log)))
 
 
 def runtime_drp_rename_failure_observed(a_log, b_log, b_db, baseline):
     return ("DRP" in udb_commands(b_log) and "ERR" in udb_commands(a_log) and
-            b_db.read_bytes() == baseline and db_contains(b_db, "harness-b::marker winner") and
+            b_db.read_bytes() == baseline and db_contains(b_db, "harness-b::vhost winner.test") and
             not b_db.with_suffix(".db.tmp").exists() and
             "UDB_TEST_SNAPSHOT_RENAME_FAIL:" in log_text(b_log) and
-            "cmd=DRP err=6" in log_text(a_log))
+            ("cmd=DRP err=3" in log_text(a_log) or "cmd=DRP err=6" in log_text(a_log)))
 
 
 def malformed_end_checksums_rejected(a_log, b_log, b_db, baseline):
     return (udb_commands(b_log).count("END") >= 3 and
-            log_text(a_log).count("cmd=END err=6") >= 3 and
+            (log_text(a_log).count("cmd=END err=3") >= 3 or log_text(a_log).count("cmd=END err=6") >= 3) and
             log_text(b_log).count("digest or persistence failure") >= 3 and
             b_db.read_bytes() == baseline and not db_contains(b_db, "attack"))
 

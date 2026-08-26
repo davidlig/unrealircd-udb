@@ -162,13 +162,16 @@ module
  #include <errno.h>
  #include <openssl/hmac.h>
 
- #define UDB_DEFAULT_DB_DIRECTORY   PERMDATADIR
- #define UDB_BLOCK_PATH_MAX         512
- #define UDB_RECORD_PATH_MAX        4096
- #define UDB_SYNC_TIMEOUT           60
- #define UDB_HASH_SIZE              2048
- #define UDB_HASH_MASK              (UDB_HASH_SIZE - 1)
- #define UDB_PASSWORD_FAILURE_SLOTS 256
+ #define UDB_DEFAULT_DB_DIRECTORY       PERMDATADIR
+ #define UDB_BLOCK_PATH_MAX             512
+ #define UDB_RECORD_PATH_MAX            4096
+ #define UDB_SYNC_TIMEOUT               60
+ #define UDB_DEFAULT_MAX_STAGED_RECORDS 500000
+ #define UDB_MIN_MAX_STAGED_RECORDS     1000
+ #define UDB_MAX_MAX_STAGED_RECORDS     10000000
+ #define UDB_HASH_SIZE                  2048
+ #define UDB_HASH_MASK                  (UDB_HASH_SIZE - 1)
+ #define UDB_PASSWORD_FAILURE_SLOTS     256
 
 typedef struct UdbRecord UdbRecord;
 typedef struct UdbBlock UdbBlock;
@@ -214,6 +217,19 @@ struct UdbRecord {
 	unsigned int is_dynamic_key : 1;
 };
 
+typedef enum UdbBlockLoadState {
+	UDB_LOAD_UNINITIALIZED = 0,
+	UDB_LOAD_SUCCESS,
+	UDB_LOAD_EMPTY,
+	UDB_LOAD_FAILED
+} UdbBlockLoadState;
+
+typedef enum UdbSnapshotResult {
+	UDB_SNAPSHOT_FAILED_BEFORE_COMMIT = 0,
+	UDB_SNAPSHOT_COMMITTED = 1,
+	UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN = 2
+} UdbSnapshotResult;
+
 struct UdbBlock {
 	UdbRecord *tree;
 	UdbBlock *next;
@@ -227,6 +243,7 @@ struct UdbBlock {
 	unsigned int record_count;
 	char letter;
 	unsigned int version;
+	UdbBlockLoadState load_state;
 };
 
 struct UdbSyncSession {
@@ -253,6 +270,7 @@ typedef struct UdbConfig {
 	int flood_period;
 	int config_flood_attempts;
 	int config_flood_period;
+	unsigned int max_staged_records;
 } UdbConfig;
 
 typedef struct UdbContext {
@@ -298,9 +316,16 @@ static void udb_block_set_context_root(UdbContext *ctx, UdbBlock *block);
 static int udb_block_load(UdbContext *ctx, UdbBlock *block);
 static void udb_block_unload(UdbContext *ctx, UdbBlock *block);
 static void udb_block_reset(UdbContext *ctx, UdbBlock *block);
-static void udb_blocks_load_all(UdbContext *ctx);
-static void udb_blocks_save_all(UdbContext *ctx);
+static int udb_blocks_load_all(UdbContext *ctx);
+static int udb_blocks_save_all(UdbContext *ctx);
 static UdbBlock *udb_block_by_letter(UdbContext *ctx, char letter);
+static int udb_path_encode_component(const char *raw, char *buf, size_t bufsz);
+static int udb_path_decode_component(const char *encoded, char *buf, size_t bufsz);
+static int udb_path_append_component(char *pathbuf, size_t bufsz, const char *raw_component);
+static int udb_strtoull_strict(const char *s, unsigned long long *out);
+static int udb_strtoul_strict(const char *s, unsigned long *out);
+static int udb_timestamp_parse(const char *s, time_t *out);
+static int udb_checksum_parse(const char *input, unsigned long *checksum);
 static UdbRecord *udb_record_find(UdbContext *ctx, const char *key, UdbRecord *parent);
 static UdbRecord *udb_record_create(UdbRecord *parent);
 static UdbRecord *udb_record_insert(UdbContext *ctx, UdbBlock *block, UdbRecord *parent,
@@ -320,8 +345,8 @@ static void udb_hash_destroy(UdbContext *ctx);
 static void udb_hash_insert_record(UdbContext *ctx, UdbRecord *rec, int block_idx, const char *key);
 static int udb_hash_remove_record(UdbContext *ctx, UdbRecord *rec, int block_idx, const char *key);
 static UdbRecord *udb_hash_find(UdbContext *ctx, int block_idx, const char *key);
-static int udb_file_write_snapshot(UdbBlock *block, UdbRecord *tree,
-                                   unsigned int record_count);
+static UdbSnapshotResult udb_file_write_snapshot(UdbBlock *block, UdbRecord *tree,
+                                                 unsigned int record_count);
 static int udb_file_save_block(UdbContext *ctx, UdbBlock *block);
 static void udb_block_replace_tree(UdbContext *ctx, UdbBlock *block,
                                    UdbRecord *tree, unsigned int record_count);
@@ -636,14 +661,122 @@ static UdbRecord *udb_record_find(UdbContext *ctx, const char *key, UdbRecord *p
 	return NULL;
 }
 
+/* ========================================================================
+ * Path Component Encoding & Decoding
+ * ======================================================================== */
+static int udb_path_encode_component(const char *raw, char *buf, size_t bufsz)
+{
+	static const char hex[] = "0123456789ABCDEF";
+	const unsigned char *p;
+	size_t out_len = 0;
+
+	if (!raw || !buf || bufsz == 0)
+		return 0;
+
+	for (p = (const unsigned char *)raw; *p; p++)
+	{
+		if (*p == ':' || *p == '%' || *p <= 32 || *p >= 127)
+		{
+			if (out_len + 3 >= bufsz)
+				return 0;
+			buf[out_len++] = '%';
+			buf[out_len++] = hex[(*p >> 4) & 0x0F];
+			buf[out_len++] = hex[*p & 0x0F];
+		} else
+		{
+			if (out_len + 1 >= bufsz)
+				return 0;
+			buf[out_len++] = (char)*p;
+		}
+	}
+	buf[out_len] = '\0';
+	return 1;
+}
+
+static int udb_path_decode_component(const char *encoded, char *buf, size_t bufsz)
+{
+	const char *p;
+	size_t out_len = 0;
+
+	if (!encoded || !buf || bufsz == 0)
+		return 0;
+
+	for (p = encoded; *p; p++)
+	{
+		if (*p == '%')
+		{
+			int high, low;
+			if (!p[1] || !p[2])
+				return 0;
+			if (p[1] >= '0' && p[1] <= '9')
+				high = p[1] - '0';
+			else if (p[1] >= 'a' && p[1] <= 'f')
+				high = p[1] - 'a' + 10;
+			else if (p[1] >= 'A' && p[1] <= 'F')
+				high = p[1] - 'A' + 10;
+			else
+				return 0;
+
+			if (p[2] >= '0' && p[2] <= '9')
+				low = p[2] - '0';
+			else if (p[2] >= 'a' && p[2] <= 'f')
+				low = p[2] - 'a' + 10;
+			else if (p[2] >= 'A' && p[2] <= 'F')
+				low = p[2] - 'A' + 10;
+			else
+				return 0;
+
+			unsigned char val = (unsigned char)((high << 4) | low);
+			if (val == 0) /* Embedded null byte is rejected */
+				return 0;
+			if (out_len + 1 >= bufsz)
+				return 0;
+			buf[out_len++] = (char)val;
+			p += 2;
+		} else
+		{
+			if (out_len + 1 >= bufsz)
+				return 0;
+			buf[out_len++] = *p;
+		}
+	}
+	buf[out_len] = '\0';
+	return 1;
+}
+
+static int udb_path_append_component(char *pathbuf, size_t bufsz, const char *raw_component)
+{
+	char encoded[512];
+	size_t cur_len;
+	size_t enc_len;
+
+	if (!pathbuf || !raw_component || !udb_path_encode_component(raw_component, encoded, sizeof(encoded)))
+		return 0;
+	cur_len = strlen(pathbuf);
+	enc_len = strlen(encoded);
+	if (cur_len > 0)
+	{
+		if (cur_len + 2 + enc_len >= bufsz)
+			return 0;
+		strlcat(pathbuf, "::", bufsz);
+	} else
+	{
+		if (enc_len >= bufsz)
+			return 0;
+	}
+	strlcat(pathbuf, encoded, bufsz);
+	return 1;
+}
+
 static UdbRecord *udb_record_find_path(UdbContext *ctx, UdbBlock *block, const char *path)
 {
-	char pathbuf[512];
+	char decoded_part[512];
+	char pathbuf[UDB_RECORD_PATH_MAX];
 	char *cur;
 	char *ds;
 	UdbRecord *rec;
 
-	if (!block || !block->tree || !path)
+	if (!block || !block->tree || !path || strlen(path) >= sizeof(pathbuf))
 		return NULL;
 	strlcpy(pathbuf, path, sizeof(pathbuf));
 	cur = pathbuf;
@@ -651,12 +784,16 @@ static UdbRecord *udb_record_find_path(UdbContext *ctx, UdbBlock *block, const c
 	while ((ds = strstr(cur, "::")))
 	{
 		*ds = '\0';
-		rec = udb_record_find(ctx, cur, rec);
+		if (!udb_path_decode_component(cur, decoded_part, sizeof(decoded_part)))
+			return NULL;
+		rec = udb_record_find(ctx, decoded_part, rec);
 		if (!rec)
 			return NULL;
 		cur = ds + 2;
 	}
-	return udb_record_find(ctx, cur, rec);
+	if (!udb_path_decode_component(cur, decoded_part, sizeof(decoded_part)))
+		return NULL;
+	return udb_record_find(ctx, decoded_part, rec);
 }
 
 static void udb_record_free_tree(UdbRecord *rec)
@@ -729,7 +866,8 @@ static unsigned int udb_record_count_tree(UdbRecord *rec)
 static UdbRecord *udb_record_insert_path(UdbRecord *tree, const char *path,
                                          const char *data)
 {
-	char pathbuf[512];
+	char pathbuf[UDB_RECORD_PATH_MAX];
+	char decoded_part[512];
 	char *part;
 	char *next;
 	UdbRecord *parent = tree;
@@ -749,11 +887,13 @@ static UdbRecord *udb_record_insert_path(UdbRecord *tree, const char *path,
 		}
 		if (!*part)
 			return NULL;
-		UdbRecord *rec = udb_record_find(NULL, part, parent);
+		if (!udb_path_decode_component(part, decoded_part, sizeof(decoded_part)))
+			return NULL;
+		UdbRecord *rec = udb_record_find(NULL, decoded_part, parent);
 		if (!rec)
 		{
 			rec = udb_record_create(parent);
-			safe_strdup(rec->key, part);
+			safe_strdup(rec->key, decoded_part);
 			rec->is_dynamic_key = 1;
 		}
 		parent = rec;
@@ -798,13 +938,16 @@ static void udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbu
 {
 	UdbRecord *child;
 	size_t old_len;
+	char encoded_key[512];
 
-	if (!rec)
+	if (!rec || !rec->key)
 		return;
 	old_len = strlen(pathbuf);
+	if (!udb_path_encode_component(rec->key, encoded_key, sizeof(encoded_key)))
+		return;
 	if (depth > 0)
 		strlcat(pathbuf, "::", pathlen);
-	strlcat(pathbuf, rec->key, pathlen);
+	strlcat(pathbuf, encoded_key, pathlen);
 	if (rec->data_str || rec->data_num > 0 || !rec->child)
 	{
 		if (rec->data_str)
@@ -872,8 +1015,8 @@ static int udb_file_cleanup_snapshot_temp(UdbBlock *block)
 	return 1;
 }
 
-static int udb_file_write_snapshot(UdbBlock *block, UdbRecord *tree,
-                                   unsigned int record_count)
+static UdbSnapshotResult udb_file_write_snapshot(UdbBlock *block, UdbRecord *tree,
+                                                 unsigned int record_count)
 {
 	char dir_path[UDB_BLOCK_PATH_MAX];
 	char tmp_path[UDB_BLOCK_PATH_MAX];
@@ -885,11 +1028,12 @@ static int udb_file_write_snapshot(UdbBlock *block, UdbRecord *tree,
 	int fd = -1;
 	int flags = O_WRONLY | O_CREAT | O_EXCL;
 	int tmp_created = 0;
+	int saved_errno;
 
 	if (!block || !block->filepath)
-		return 0;
+		return UDB_SNAPSHOT_FAILED_BEFORE_COMMIT;
 	if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", block->filepath) >= sizeof(tmp_path))
-		return 0;
+		return UDB_SNAPSHOT_FAILED_BEFORE_COMMIT;
 	strlcpy(dir_path, block->filepath, sizeof(dir_path));
 	slash = strrchr(dir_path, '/');
 	if (!slash)
@@ -904,7 +1048,7 @@ static int udb_file_write_snapshot(UdbBlock *block, UdbRecord *tree,
 #endif
 	fd = open(tmp_path, flags, 0600);
 	if (fd < 0)
-		return 0;
+		return UDB_SNAPSHOT_FAILED_BEFORE_COMMIT;
 	tmp_created = 1;
 	dir_fd = open(dir_path, O_RDONLY
 #ifdef O_DIRECTORY
@@ -939,14 +1083,32 @@ static int udb_file_write_snapshot(UdbBlock *block, UdbRecord *tree,
 		goto cleanup;
 	tmp_created = 0;
 	if (fsync(dir_fd) != 0)
-		goto cleanup;
+	{
+		saved_errno = errno;
+		udb_log(ULOG_ERROR, "UDB_SNAPSHOT_DIR_FSYNC_FAILED", NULL,
+		        "Failed to fsync directory for block $block after commit: $error",
+		        log_data_string("block", block->filepath),
+		        log_data_string("error", strerror(saved_errno)));
+		if (close(dir_fd) != 0)
+		{
+			saved_errno = errno;
+			udb_log(ULOG_ERROR, "UDB_SNAPSHOT_DIR_CLOSE_FAILED", NULL,
+			        "Failed to close directory descriptor for block $block after commit: $error",
+			        log_data_string("block", block->filepath),
+			        log_data_string("error", strerror(saved_errno)));
+		}
+		return UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN;
+	}
 	if (close(dir_fd) != 0)
 	{
-		dir_fd = -1;
-		return 0;
+		saved_errno = errno;
+		udb_log(ULOG_ERROR, "UDB_SNAPSHOT_DIR_CLOSE_FAILED", NULL,
+		        "Failed to close directory descriptor for block $block after commit: $error",
+		        log_data_string("block", block->filepath),
+		        log_data_string("error", strerror(saved_errno)));
+		return UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN;
 	}
-	dir_fd = -1;
-	return 1;
+	return UDB_SNAPSHOT_COMMITTED;
 
 cleanup:
 	if (fp)
@@ -957,14 +1119,18 @@ cleanup:
 		close(dir_fd);
 	if (tmp_created)
 		unlink(tmp_path);
-	return 0;
+	return UDB_SNAPSHOT_FAILED_BEFORE_COMMIT;
 }
 
 static int udb_file_save_block(UdbContext *ctx, UdbBlock *block)
 {
 	struct stat st;
+	UdbSnapshotResult res;
 
-	if (!block || !udb_file_write_snapshot(block, block->tree, block->record_count))
+	if (!block)
+		return 0;
+	res = udb_file_write_snapshot(block, block->tree, block->record_count);
+	if (res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
 		return 0;
 	(void)ctx;
 	block->checksum = udb_compute_block_checksum(block);
@@ -1050,6 +1216,17 @@ static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
 				             cep->file->filename, cep->line_number);
 				errors++;
 			}
+		} else if (!strcmp(cep->name, "max-staged-records"))
+		{
+			int val = cep->value ? atoi(cep->value) : 0;
+			if (val < UDB_MIN_MAX_STAGED_RECORDS || val > UDB_MAX_MAX_STAGED_RECORDS)
+			{
+				config_error("%s:%i: udb::max-staged-records must be between %d and %d (default %d)",
+				             cep->file->filename, cep->line_number,
+				             UDB_MIN_MAX_STAGED_RECORDS, UDB_MAX_MAX_STAGED_RECORDS,
+				             UDB_DEFAULT_MAX_STAGED_RECORDS);
+				errors++;
+			}
 		} else
 		{
 			config_error("%s:%i: unknown directive udb::%s",
@@ -1092,6 +1269,9 @@ static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
 		} else if (!strcmp(cep->name, "max-global-clones"))
 		{
 			udb_cfg->max_global_clones = atoi(cep->value);
+		} else if (!strcmp(cep->name, "max-staged-records"))
+		{
+			udb_cfg->max_staged_records = (unsigned int)atoi(cep->value);
 		} else if (!strcmp(cep->name, "password-flood"))
 		{
 			const char *colon = strchr(cep->value, ':');
@@ -1107,6 +1287,8 @@ static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
 	if (!udb_cfg->db_directory)
 		safe_strdup(udb_cfg->db_directory, UDB_DEFAULT_DB_DIRECTORY);
 	convert_to_absolute_path(&udb_cfg->db_directory, PERMDATADIR);
+	if (udb_cfg->max_staged_records == 0)
+		udb_cfg->max_staged_records = UDB_DEFAULT_MAX_STAGED_RECORDS;
 	if (udb_cfg->flood_attempts == 0)
 		udb_cfg->flood_attempts = 5;
 	if (udb_cfg->flood_period == 0)
@@ -1392,17 +1574,73 @@ static void udb_config_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord
 #include <sys/stat.h>
 #include <sys/types.h>
 
-static int udb_numeric_record_valid(const char *value)
+static int udb_strtoull_strict(const char *s, unsigned long long *out)
 {
-	const char *p;
-	if (!value || value[0] != '*' || value[1] == '\0')
+	char *end;
+	unsigned long long val;
+
+	if (!s || !*s)
 		return 0;
-	for (p = value + 1; *p; p++)
+	for (const char *p = s; *p; p++)
 	{
 		if (!isdigit((unsigned char)*p))
 			return 0;
 	}
+	errno = 0;
+	val = strtoull(s, &end, 10);
+	if (errno == ERANGE || *end != '\0')
+		return 0;
+	if (out)
+		*out = val;
 	return 1;
+}
+
+static int udb_strtoul_strict(const char *s, unsigned long *out)
+{
+	unsigned long long val;
+	if (!udb_strtoull_strict(s, &val) || val > ULONG_MAX)
+		return 0;
+	if (out)
+		*out = (unsigned long)val;
+	return 1;
+}
+
+static int udb_timestamp_parse(const char *s, time_t *out)
+{
+	unsigned long long val;
+	if (!udb_strtoull_strict(s, &val))
+		return 0;
+	if (out)
+		*out = (time_t)val;
+	return 1;
+}
+
+static int udb_checksum_parse(const char *input, unsigned long *checksum)
+{
+	char *end;
+	const char *p;
+
+	if (!input || !*input || strlen(input) > 8)
+		return 0;
+	for (p = input; *p; p++)
+		if (!isxdigit((unsigned char)*p))
+			return 0;
+	errno = 0;
+	unsigned long val = strtoul(input, &end, 16);
+	if (errno == ERANGE || *end != '\0')
+		return 0;
+	if (checksum)
+		*checksum = val;
+	return 1;
+}
+
+static int udb_numeric_record_valid(const char *value)
+{
+	unsigned long val;
+
+	if (!value || value[0] != '*' || value[1] == '\0')
+		return 0;
+	return udb_strtoul_strict(value + 1, &val);
 }
 
 static int udb_options_record_valid(const char *value)
@@ -1626,7 +1864,7 @@ static int udb_channel_name_valid(const char *name)
 static int udb_ip_host_mask_valid(const char *mask)
 {
 	const char *c;
-	if (!mask || !*mask || strlen(mask) > HOSTLEN || strstr(mask, "::"))
+	if (!mask || !*mask || strlen(mask) > HOSTLEN)
 		return 0;
 	for (c = mask; *c; c++)
 	{
@@ -1639,7 +1877,7 @@ static int udb_ip_host_mask_valid(const char *mask)
 static int udb_server_name_valid(const char *srv)
 {
 	const char *c;
-	if (!srv || !*srv || strlen(srv) > HOSTLEN || strstr(srv, "::"))
+	if (!srv || !*srv || strlen(srv) > HOSTLEN)
 		return 0;
 	for (c = srv; *c; c++)
 	{
@@ -1734,7 +1972,8 @@ static const UdbBlockSchema *udb_get_block_schema(char letter)
 static int udb_record_validate(UdbBlock *block, const char *path,
                                const char *value)
 {
-	char pathbuf[512];
+	char pathbuf[UDB_RECORD_PATH_MAX];
+	char decoded_parts[8][512];
 	char *parts[8];
 	int depth = 0;
 	char *p, *next;
@@ -1762,7 +2001,10 @@ static int udb_record_validate(UdbBlock *block, const char *path,
 		}
 		if (depth >= 8)
 			return 0;
-		parts[depth++] = p;
+		if (!udb_path_decode_component(p, decoded_parts[depth], sizeof(decoded_parts[depth])))
+			return 0;
+		parts[depth] = decoded_parts[depth];
+		depth++;
 		p = next;
 	}
 
@@ -1966,7 +2208,8 @@ static UdbRecord *udb_record_insert(UdbContext *ctx, UdbBlock *block, UdbRecord 
 			safe_strdup(rec->data_str, data_str);
 			rec->data_num = 0;
 		}
-		if (!udb_file_write_snapshot(block, candidate, udb_record_count_tree(candidate)))
+		UdbSnapshotResult res = udb_file_write_snapshot(block, candidate, udb_record_count_tree(candidate));
+		if (res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
 		{
 			udb_record_free_tree(candidate);
 			return NULL;
@@ -2054,7 +2297,8 @@ static UdbRecord *udb_record_delete(UdbContext *ctx, UdbBlock *block, UdbRecord 
 		    candidate_rec->parent->parent != candidate)
 			candidate_line = candidate_rec->parent;
 		udb_record_delete_tree(candidate_rec);
-		if (!udb_file_write_snapshot(block, candidate, udb_record_count_tree(candidate)))
+		UdbSnapshotResult res = udb_file_write_snapshot(block, candidate, udb_record_count_tree(candidate));
+		if (res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
 		{
 			udb_record_free_tree(candidate);
 			return rec;
@@ -2150,13 +2394,16 @@ static void udb_digest_collect(UdbRecord *rec, int depth, char *pathbuf, int pat
 {
 	size_t old_len;
 	UdbRecord *child;
+	char encoded_key[512];
 
 	if (!rec || !rec->key)
 		return;
 	old_len = strlen(pathbuf);
+	if (!udb_path_encode_component(rec->key, encoded_key, sizeof(encoded_key)))
+		return;
 	if (depth > 0)
 		strlcat(pathbuf, "::", pathlen);
-	strlcat(pathbuf, rec->key, pathlen);
+	strlcat(pathbuf, encoded_key, pathlen);
 	if (rec->data_str || rec->data_num > 0 || !rec->child)
 	{
 		UdbDigestLine *line = safe_alloc(sizeof(*line));
@@ -2245,6 +2492,7 @@ static UdbRecord *udb_stage_insert(UdbRecord *parent, const char *key,
 static int udb_stage_parse_line(UdbBlock *block, UdbSyncSession *session, const char *input)
 {
 	char line[4096];
+	char decoded_part[512];
 	char *value, *part, *next;
 	UdbRecord *parent;
 
@@ -2272,7 +2520,9 @@ static int udb_stage_parse_line(UdbBlock *block, UdbSyncSession *session, const 
 		}
 		if (!*part)
 			return 0;
-		parent = udb_stage_insert(parent, part, session);
+		if (!udb_path_decode_component(part, decoded_part, sizeof(decoded_part)))
+			return 0;
+		parent = udb_stage_insert(parent, decoded_part, session);
 		part = next;
 	}
 	if (value && *value == '*')
@@ -2352,14 +2602,28 @@ static int udb_record_path_valid(const char *path)
 		{
 			if (p == component || p[1] != ':' || !p[2])
 				return 0;
+			char decoded[512];
+			char comp_buf[512];
+			size_t clen = p - component;
+			if (clen >= sizeof(comp_buf))
+				return 0;
+			memcpy(comp_buf, component, clen);
+			comp_buf[clen] = '\0';
+			if (!udb_path_decode_component(comp_buf, decoded, sizeof(decoded)))
+				return 0;
 			p++;
 			component = p + 1;
 		}
 	}
+	if (!*component)
+		return 0;
+	char decoded[512];
+	if (!udb_path_decode_component(component, decoded, sizeof(decoded)))
+		return 0;
 	return 1;
 }
 
-static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *line)
+static UdbRecord *udb_file_parse_line_to_tree(UdbBlock *block, UdbRecord *tree, char *line)
 {
 	if (!line || !*line || *line == ';')
 		return NULL;
@@ -2373,7 +2637,11 @@ static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *li
 		*value++ = '\0';
 		if (*value == '*')
 		{
-			data_num = strtoul(value + 1, NULL, 10);
+			char *end;
+			errno = 0;
+			data_num = strtoul(value + 1, &end, 10);
+			if (end == value + 1 || *end || errno == ERANGE)
+				return NULL;
 		} else
 		{
 			data_str = value;
@@ -2382,64 +2650,56 @@ static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *li
 	/* Validate before lookup/allocation: an empty component would leave rec->key NULL. */
 	if (!udb_record_path_valid(line))
 		return NULL;
-	if (!udb_record_validate(block, line, value))
-	{
-		udb_log(ULOG_WARNING, "UDB_FILE_INVALID_RECORD", NULL,
-		        "Ignored invalid or unknown record in block $block: $record",
-		        log_data_string("block", (char[]){block->letter, '\0'}),
-		        log_data_string("record", line));
+	if (!udb_record_validate(block, line, value ? (*value == '*' ? value : data_str) : NULL))
 		return NULL;
-	}
 
 	char *p = line;
-	UdbRecord *parent = block->tree;
+	UdbRecord *parent = tree;
 	UdbRecord *leaf_rec = NULL;
 	while (p && *p)
 	{
+		char decoded_part[512];
 		char *next = strstr(p, "::");
 		if (next)
 		{
 			*next = '\0';
 			next += 2;
+			if (!*next)
+				return NULL;
 		}
+		if (!*p)
+			return NULL;
+		if (!udb_path_decode_component(p, decoded_part, sizeof(decoded_part)))
+			return NULL;
 
-		UdbRecord *rec = udb_record_find(ctx, p, parent);
+		UdbRecord *rec = udb_record_find(NULL, decoded_part, parent);
 		if (!rec)
 		{
 			rec = udb_record_create(parent);
-			if (p && *p)
+			if (parent == tree)
 			{
-				if (parent == block->tree)
+				safe_strdup(rec->key, decoded_part);
+				rec->is_dynamic_key = 1;
+			} else
+			{
+				const char *shared = udb_get_shared_subkey(decoded_part);
+				if (shared)
 				{
-					safe_strdup(rec->key, p);
-					rec->is_dynamic_key = 1;
+					rec->key = (char *)shared;
+					rec->is_dynamic_key = 0;
 				} else
 				{
-					const char *shared = udb_get_shared_subkey(p);
-					if (shared)
-					{
-						rec->key = (char *)shared;
-						rec->is_dynamic_key = 0;
-					} else
-					{
-						safe_strdup(rec->key, p);
-						rec->is_dynamic_key = 1;
-					}
+					safe_strdup(rec->key, decoded_part);
+					rec->is_dynamic_key = 1;
 				}
 			}
-			if (parent == block->tree)
-			{
-				udb_hash_insert_record(ctx, rec, udb_block_letter_to_index(block->letter), p);
-			}
-			block->record_count++;
-			ctx->total_records++;
 		}
 
 		if (!next)
 		{
-			if (data_str && *data_str == '*')
+			if (value && *value == '*')
 			{
-				rec->data_num = atoi(data_str + 1);
+				rec->data_num = data_num;
 				if (rec->data_str)
 				{
 					safe_free(rec->data_str);
@@ -2447,6 +2707,8 @@ static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *li
 				}
 			} else if (data_str)
 			{
+				if (rec->data_str)
+					safe_free(rec->data_str);
 				safe_strdup(rec->data_str, data_str);
 				rec->data_num = 0;
 			} else
@@ -2456,7 +2718,7 @@ static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *li
 					safe_free(rec->data_str);
 					rec->data_str = NULL;
 				}
-				rec->data_num = data_num;
+				rec->data_num = 0;
 			}
 			leaf_rec = rec;
 		}
@@ -2467,17 +2729,48 @@ static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *li
 	return leaf_rec;
 }
 
+static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *line)
+{
+	(void)ctx;
+	return udb_file_parse_line_to_tree(block, block->tree, line);
+}
 
 static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 {
 	if (!block || !block->filepath)
 		return 0;
+
 	FILE *fp = fopen(block->filepath, "r");
 	if (!fp)
+	{
+		if (errno == ENOENT)
+		{
+			udb_block_reset(ctx, block);
+			block->load_state = UDB_LOAD_EMPTY;
+			block->checksum = 0;
+			block->modified_at = 0;
+			block->filesize = 0;
+			return 1;
+		}
+		int saved_errno = errno;
+		block->load_state = UDB_LOAD_FAILED;
+		udb_log(ULOG_ERROR, "UDB_FILE_OPEN_FAILED", NULL,
+		        "Cannot open database file $file for block $block: $error",
+		        log_data_string("file", block->filepath),
+		        log_data_string("block", (char[]){block->letter, '\0'}),
+		        log_data_string("error", strerror(saved_errno)));
 		return 0;
+	}
 
 	char line[4096];
 	unsigned int line_number = 0;
+	int parse_failed = 0;
+	UdbRecord *candidate = udb_record_create(NULL);
+	candidate->block_idx = (unsigned char)udb_block_letter_to_index(block->letter);
+	safe_strdup(candidate->key, block->tree && block->tree->key ? block->tree->key : "UDB");
+	candidate->is_dynamic_key = 1;
+	candidate->data_num = 1;
+
 	while (fgets(line, sizeof(line), fp))
 	{
 		int overlong = !strchr(line, '\n') && !feof(fp);
@@ -2505,7 +2798,7 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 		if (line[0] == ';' || line[0] == '\0')
 			continue;
 
-		if (!udb_file_parse_line(ctx, block, line))
+		if (!udb_file_parse_line_to_tree(block, candidate, line))
 		{
 			char logbuf[512];
 			snprintf(logbuf, sizeof(logbuf),
@@ -2513,23 +2806,35 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 			         block->letter, line_number);
 			udb_log(ULOG_WARNING, "UDB_FILE_LINE_REJECTED", NULL,
 			        "$msg", log_data_string("msg", logbuf));
+			continue;
 		}
+	}
+
+	if (ferror(fp))
+	{
+		int saved_errno = errno;
+		udb_log(ULOG_ERROR, "UDB_FILE_READ_ERROR", NULL,
+		        "Read error occurred on block $block file $file: $error",
+		        log_data_string("block", (char[]){block->letter, '\0'}),
+		        log_data_string("file", block->filepath),
+		        log_data_string("error", strerror(saved_errno)));
+		udb_record_free_tree(candidate);
+		block->load_state = UDB_LOAD_FAILED;
+		return 0;
 	}
 	fclose(fp);
 
-	UdbRecord *curr = block->tree->child;
-	while (curr)
+	unsigned int record_count = udb_record_count_tree(candidate);
+	udb_block_replace_tree(ctx, block, candidate, record_count);
+
+	for (UdbRecord *curr = block->tree->child; curr; curr = curr->sibling)
 	{
-		UdbRecord *sub = curr->child;
-		while (sub)
-		{
+		for (UdbRecord *sub = curr->child; sub; sub = sub->sibling)
 			udb_apply_special_record(ctx, block, sub, 1);
-			sub = sub->sibling;
-		}
 		udb_apply_special_record(ctx, block, curr, 1);
-		curr = curr->sibling;
 	}
 
+	block->load_state = UDB_LOAD_SUCCESS;
 	block->checksum = udb_compute_block_checksum(block);
 
 	struct stat st;
@@ -2538,6 +2843,7 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 		block->filesize = st.st_size;
 		block->modified_at = st.st_mtime;
 	}
+
 	char logbuf[512];
 	snprintf(logbuf, sizeof(logbuf), "Loaded block %c from %s (%u records)", block->letter, block->filepath, block->record_count);
 	udb_log(ULOG_INFO, "UDB_FILE_LOADED", NULL, "$msg", log_data_string("msg", logbuf));
@@ -2970,6 +3276,12 @@ static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid,
 			udb_sync_abort(block, "invalid PUT sequence");
 		return UDB_ERR_NO_SYNC;
 	}
+	unsigned int max_records = (udb_cfg && udb_cfg->max_staged_records) ? udb_cfg->max_staged_records : UDB_DEFAULT_MAX_STAGED_RECORDS;
+	if (++session->record_count > max_records)
+	{
+		udb_sync_abort(block, "staged record count limit exceeded");
+		return UDB_ERR_PARAMS;
+	}
 	if (snprintf(line, sizeof(line), "%s %s", path, data) >= (int)sizeof(line) ||
 	    !udb_stage_parse_line(block, session, line))
 	{
@@ -2978,22 +3290,6 @@ static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid,
 	}
 	session->deadline = time(NULL) + UDB_SYNC_TIMEOUT;
 	return 0;
-}
-
-static int udb_checksum_parse(const char *input, unsigned long *checksum)
-{
-	char *end;
-	const char *p;
-
-	if (!input || !*input)
-		return 0;
-	for (p = input; *p; p++)
-		if (!((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f') ||
-		      (*p >= 'A' && *p <= 'F')))
-			return 0;
-	errno = 0;
-	*checksum = strtoul(input, &end, 16);
-	return errno != ERANGE && *end == '\0';
 }
 
 static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer,
@@ -3009,9 +3305,10 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer,
 		return UDB_ERR_NO_SYNC;
 	}
 	*digest = udb_compute_tree_checksum(session->tree);
+	UdbSnapshotResult snap_res = UDB_SNAPSHOT_FAILED_BEFORE_COMMIT;
 	if (!udb_checksum_parse(checksum, &received_digest) ||
 	    *digest != received_digest ||
-	    !udb_file_write_snapshot(block, session->tree, session->record_count) ||
+	    (snap_res = udb_file_write_snapshot(block, session->tree, session->record_count)) == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT ||
 	    !udb_block_commit_stage(ctx, block, session, *digest))
 	{
 		udb_sync_abort(block, "digest or persistence failure");
@@ -3031,13 +3328,16 @@ static void udb_sync_send_tree(Client *server, UdbRecord *rec, int depth,
 {
 	size_t old_len;
 	UdbRecord *child;
+	char encoded_key[512];
 
 	if (!rec || !rec->key)
 		return;
 	old_len = strlen(pathbuf);
+	if (!udb_path_encode_component(rec->key, encoded_key, sizeof(encoded_key)))
+		return;
 	if (depth > 0)
 		strlcat(pathbuf, "::", pathlen);
-	strlcat(pathbuf, rec->key, pathlen);
+	strlcat(pathbuf, encoded_key, pathlen);
 	if (rec->data_str || rec->data_num > 0 || !rec->child)
 	{
 		if (rec->data_str)
@@ -3164,7 +3464,7 @@ static const char *udb_selected_propagator(UdbContext *ctx)
 				first_srv = srv;
 
 			/* Check if online in UnrealIRCd or if it is the local server */
-			if (find_server(srv, NULL) || (me.name && !strcasecmp(srv, me.name)))
+			if (find_server(srv, NULL) || (me.name[0] && !strcasecmp(srv, me.name)))
 			{
 				strlcpy(selected_buf, srv, sizeof(selected_buf));
 				return selected_buf;
@@ -3206,7 +3506,7 @@ static UdbBlock *udb_mutation_path_block(UdbContext *ctx, const char *path)
 		return NULL;
 
 	len = strlen(path);
-	if (len < 4 || len >= 512 || path[1] != ':' || path[2] != ':' || !path[3])
+	if (len < 4 || len >= UDB_RECORD_PATH_MAX || path[1] != ':' || path[2] != ':' || !path[3])
 		return NULL;
 
 	block = udb_block_by_letter(ctx, path[0]);
@@ -3218,8 +3518,20 @@ static UdbBlock *udb_mutation_path_block(UdbContext *ctx, const char *path)
 	{
 		if (separator == component || !separator[2])
 			return NULL;
+		char decoded[512];
+		char comp_buf[512];
+		size_t clen = separator - component;
+		if (clen >= sizeof(comp_buf))
+			return NULL;
+		memcpy(comp_buf, component, clen);
+		comp_buf[clen] = '\0';
+		if (!udb_path_decode_component(comp_buf, decoded, sizeof(decoded)))
+			return NULL;
 		component = separator + 2;
 	}
+	char decoded[512];
+	if (!*component || !udb_path_decode_component(component, decoded, sizeof(decoded)))
+		return NULL;
 
 	return block;
 }
@@ -3294,6 +3606,18 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 		}
 		old_rec = udb_record_find_path(ctx, block, path + 3);
 		unchanged = old_rec && udb_record_data_equals(old_rec, data);
+		if (unchanged)
+		{
+			if (ctx->propagator && block->syncing_from == client)
+			{
+				udb_mutation_forward_ins(ctx->propagator, client, target, path, data);
+				return;
+			}
+			if (!is_broadcast)
+				return;
+			udb_mutation_forward_ins(client, client, target, path, data);
+			return;
+		}
 		tree = udb_record_clone_tree(block->tree, old_rec, &rec);
 		rec = udb_record_insert_path(tree, path + 3, data);
 		if (!rec)
@@ -3302,7 +3626,8 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 			udb_mutation_persist_error(client, "INS", letter);
 			return;
 		}
-		if (!udb_file_write_snapshot(block, tree, udb_record_count_tree(tree)))
+		UdbSnapshotResult snap_res = udb_file_write_snapshot(block, tree, udb_record_count_tree(tree));
+		if (snap_res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
 		{
 			udb_record_free_tree(tree);
 			udb_mutation_persist_error(client, "INS", letter);
@@ -3362,6 +3687,18 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, const char *target
 			return;
 		}
 		UdbRecord *old_rec = udb_record_find_path(ctx, block, path + 3);
+		if (!old_rec)
+		{
+			if (ctx->propagator && block->syncing_from == client)
+			{
+				udb_mutation_forward_del(ctx->propagator, client, target, path);
+				return;
+			}
+			if (!is_broadcast)
+				return;
+			udb_mutation_forward_del(client, client, target, path);
+			return;
+		}
 		UdbRecord *candidate_rec = NULL;
 		UdbRecord *candidate_line = NULL;
 		UdbRecord *tree = udb_record_clone_tree(block->tree, old_rec, &candidate_rec);
@@ -3372,7 +3709,8 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, const char *target
 		if (candidate_rec)
 			udb_record_delete_tree(candidate_rec);
 		record_count = udb_record_count_tree(tree);
-		if (!udb_file_write_snapshot(block, tree, record_count))
+		UdbSnapshotResult snap_res = udb_file_write_snapshot(block, tree, record_count);
+		if (snap_res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
 		{
 			udb_record_free_tree(tree);
 			udb_mutation_persist_error(client, "DEL", letter);
@@ -3417,10 +3755,18 @@ static void udb_mutation_drp(UdbContext *ctx, Client *client, const char *target
 			sendto_one(client, NULL, ":%s DB %s ERR DRP %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 			return;
 		}
+		if (!block->tree->child)
+		{
+			if (!is_broadcast)
+				return;
+			udb_sendto_confirmed_servers(client, ":%s DB %s DRP %c", client->id, target, letter);
+			return;
+		}
 		UdbRecord *tree = udb_record_clone_tree(block->tree, NULL, NULL);
 		while (tree->child)
 			udb_record_delete_tree(tree->child);
-		if (!udb_file_write_snapshot(block, tree, 0))
+		UdbSnapshotResult snap_res = udb_file_write_snapshot(block, tree, 0);
+		if (snap_res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
 		{
 			udb_record_free_tree(tree);
 			udb_mutation_persist_error(client, "DRP", letter);
@@ -3494,8 +3840,13 @@ static void udb_sendto_confirmed_servers(Client *except, const char *fmt, ...)
 	va_start(args, fmt);
 	vsnprintf(line, sizeof(line), fmt, args);
 	va_end(args);
-	list_for_each_entry(server, &client_list, client_node) if (server != except && IsServer(server) && MyConnect(server) && udb_has_hello(server))
-	    sendto_one(server, NULL, "%s", line);
+	list_for_each_entry(server, &server_list, special_node)
+	{
+		if (server == except || (except && server == except->direction))
+			continue;
+		if (IsServer(server) && MyConnect(server) && udb_has_hello(server))
+			sendto_one(server, NULL, "%s", line);
+	}
 }
 
 static void udb_protocol_params_error(Client *client, const char *subcmd)
@@ -3516,6 +3867,16 @@ static void udb_sync_to_server(Client *server)
 		block = block->next;
 	}
 }
+static Client *udb_direct_peer(Client *client)
+{
+	if (!client)
+		return NULL;
+	if (MyConnect(client))
+		return client;
+	if (client->direction && MyConnect(client->direction))
+		return client->direction;
+	return NULL;
+}
 
 /* Server SIDs identify servers independently of names, links, and frame order. */
 static int udb_remote_wins_equal_timestamp(Client *server)
@@ -3532,11 +3893,8 @@ static int udb_hook_server_sync(Client *client)
 	return 0;
 }
 
-static int udb_hook_server_quit(Client *client, MessageTag *mtags)
+int udb_hook_server_quit(Client *client, MessageTag *mtags)
 {
-	if (!udb_ctx || !client)
-		return 0;
-
 	if (udb_ctx->propagator == client)
 		udb_ctx->propagator = NULL;
 	udb_sync_server_quit(client);
@@ -3556,6 +3914,7 @@ CMD_FUNC(cmd_db)
 	const char *target = parv[1];
 	const char *subcmd = parv[2];
 	UdbContext *ctx = udb_ctx;
+	Client *direct_peer = udb_direct_peer(client);
 	char logbuf[512];
 
 	if (!target || !*target || !subcmd || !*subcmd)
@@ -3591,7 +3950,7 @@ CMD_FUNC(cmd_db)
 		return;
 	}
 
-	if (!udb_has_hello(client))
+	if (!direct_peer || !udb_has_hello(direct_peer))
 	{
 		sendto_one(client, NULL, ":%s DB %s ERR %s %d 0", me.id, client->id,
 		           subcmd, UDB_ERR_FORBIDDEN);
@@ -3603,6 +3962,9 @@ CMD_FUNC(cmd_db)
 
 	int is_broadcast = !strcmp(target, "*");
 	int is_for_me = is_broadcast || !strcmp(target, me.id) || !strcmp(target, me.name);
+
+	if (!is_broadcast && !is_for_me)
+		return;
 
 	switch (toupper((unsigned char)subcmd[0]))
 	{
@@ -3712,9 +4074,11 @@ CMD_FUNC(cmd_db)
 					return;
 				if (is_for_me)
 				{
-					int errcode = atoi(parv[4]);
+					unsigned long errcode = 0;
+					if (!udb_strtoul_strict(parv[4], &errcode) || errcode > 255)
+						errcode = UDB_ERR_FATAL;
 					udb_log(ULOG_INFO, "UDB_EVENT", client, "Error from $client: cmd=$cmd err=$errcode",
-					        log_data_client("client", client), log_data_string("cmd", parv[3]), log_data_integer("errcode", errcode));
+					        log_data_client("client", client), log_data_string("cmd", parv[3]), log_data_integer("errcode", (int)errcode));
 					if (!is_broadcast)
 						return;
 				}
@@ -3751,20 +4115,29 @@ CMD_FUNC(cmd_db)
 			if (!strcasecmp(subcmd, "INF"))
 			{
 				if (parc < 6)
+				{
+					udb_protocol_params_error(client, subcmd);
 					return;
+				}
 				char letter = *parv[3];
 				UdbBlock *block = udb_block_by_letter(ctx, letter);
+				unsigned long crc32 = 0;
+				time_t remote_ts = 0;
+
+				if (!block)
+				{
+					if (is_for_me)
+						sendto_one(client, NULL, ":%s DB %s ERR INF %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
+					return;
+				}
+				if (!udb_checksum_parse(parv[4], &crc32) || !udb_timestamp_parse(parv[5], &remote_ts))
+				{
+					udb_protocol_params_error(client, "INF");
+					return;
+				}
 
 				if (is_for_me)
 				{
-					if (!block)
-					{
-						sendto_one(client, NULL, ":%s DB %s ERR INF %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
-						return;
-					}
-					unsigned long crc32 = strtoul(parv[4], NULL, 16);
-					time_t remote_ts = atol(parv[5]);
-
 					if (crc32 != block->checksum)
 					{
 						if (remote_ts > block->modified_at)
@@ -3779,7 +4152,7 @@ CMD_FUNC(cmd_db)
 					if (!is_broadcast)
 						return;
 				}
-				udb_sendto_confirmed_servers(client, ":%s DB %s INF %c %s %s", client->id, target, letter, parv[4], parv[5]);
+				udb_sendto_confirmed_servers(client, ":%s DB %s INF %c %08lX %lu", client->id, target, letter, crc32, (unsigned long)remote_ts);
 			} else if (!strcasecmp(subcmd, "INS"))
 			{
 				if (parc < 5)
@@ -6799,6 +7172,7 @@ static UdbBlock *udb_block_create(UdbContext *ctx, char letter, const char *name
 
 	b->letter = letter;
 	b->version = 1;
+	b->load_state = UDB_LOAD_UNINITIALIZED;
 	b->tree = udb_record_create(NULL);
 	b->tree->block_idx = (unsigned char)udb_block_letter_to_index(letter);
 	safe_strdup(b->tree->key, name);
@@ -6916,18 +7290,40 @@ static void udb_block_unload(UdbContext *ctx, UdbBlock *block)
 	}
 }
 
-static void udb_blocks_load_all(UdbContext *ctx)
+static int udb_blocks_load_all(UdbContext *ctx)
 {
 	UdbBlock *b;
+	if (!ctx)
+		return 0;
 	for (b = ctx->block_list; b; b = b->next)
-		udb_block_load(ctx, b);
+	{
+		if (!udb_block_load(ctx, b))
+			return 0;
+	}
+	return 1;
 }
 
-static void udb_blocks_save_all(UdbContext *ctx)
+static int udb_blocks_save_all(UdbContext *ctx)
 {
 	UdbBlock *b;
+	int success = 1;
+
+	if (!ctx)
+		return 0;
 	for (b = ctx->block_list; b; b = b->next)
-		udb_file_save_block(ctx, b);
+	{
+		if (b->load_state == UDB_LOAD_FAILED)
+		{
+			udb_log(ULOG_ERROR, "UDB_BLOCK_SAVE_SKIPPED", NULL,
+			        "Skipping save of block $block because its load failed",
+			        log_data_string("block", (char[]){b->letter, '\0'}));
+			success = 0;
+			continue;
+		}
+		if (!udb_file_save_block(ctx, b))
+			success = 0;
+	}
+	return success;
 }
 
 static UdbBlock *udb_block_by_letter(UdbContext *ctx, char letter)
@@ -6944,6 +7340,8 @@ static int udb_engine_init(void)
 		udb_cfg = safe_alloc(sizeof(UdbConfig));
 	if (!udb_cfg->db_directory)
 		safe_strdup(udb_cfg->db_directory, UDB_DEFAULT_DB_DIRECTORY);
+	if (udb_cfg->max_staged_records == 0)
+		udb_cfg->max_staged_records = UDB_DEFAULT_MAX_STAGED_RECORDS;
 	udb_ctx = safe_alloc(sizeof(UdbContext));
 	udb_hash_init(udb_ctx);
 	dir = udb_cfg && udb_cfg->db_directory ? udb_cfg->db_directory : NULL;
@@ -6978,7 +7376,11 @@ static int udb_engine_init(void)
 	udb_block_set_context_root(udb_ctx, udb_ctx->blocks['S']);
 	udb_block_set_context_root(udb_ctx, udb_ctx->blocks['L']);
 	udb_block_set_context_root(udb_ctx, udb_ctx->blocks['K']);
-	udb_blocks_load_all(udb_ctx);
+	if (!udb_blocks_load_all(udb_ctx))
+	{
+		udb_engine_shutdown();
+		return 0;
+	}
 	return 1;
 }
 
@@ -7134,7 +7536,6 @@ static int udb_module_unload(void)
 	udb_log(ULOG_INFO, "UDB_UNLOADING", NULL,
 	        "Saving databases and shutting down...");
 	udb_log_snomask_filter_free();
-	udb_blocks_save_all(udb_ctx);
 	udb_engine_shutdown();
 	return MOD_SUCCESS;
 }

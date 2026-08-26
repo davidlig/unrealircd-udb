@@ -18,13 +18,16 @@
 #include <errno.h>
 #include <openssl/hmac.h>
 
-#define UDB_DEFAULT_DB_DIRECTORY   PERMDATADIR
-#define UDB_BLOCK_PATH_MAX         512
-#define UDB_RECORD_PATH_MAX        4096
-#define UDB_SYNC_TIMEOUT           60
-#define UDB_HASH_SIZE              2048
-#define UDB_HASH_MASK              (UDB_HASH_SIZE - 1)
-#define UDB_PASSWORD_FAILURE_SLOTS 256
+#define UDB_DEFAULT_DB_DIRECTORY       PERMDATADIR
+#define UDB_BLOCK_PATH_MAX             512
+#define UDB_RECORD_PATH_MAX            4096
+#define UDB_SYNC_TIMEOUT               60
+#define UDB_DEFAULT_MAX_STAGED_RECORDS 500000
+#define UDB_MIN_MAX_STAGED_RECORDS     1000
+#define UDB_MAX_MAX_STAGED_RECORDS     10000000
+#define UDB_HASH_SIZE                  2048
+#define UDB_HASH_MASK                  (UDB_HASH_SIZE - 1)
+#define UDB_PASSWORD_FAILURE_SLOTS     256
 
 typedef struct UdbRecord UdbRecord;
 typedef struct UdbBlock UdbBlock;
@@ -70,6 +73,19 @@ struct UdbRecord {
 	unsigned int is_dynamic_key : 1;
 };
 
+typedef enum UdbBlockLoadState {
+	UDB_LOAD_UNINITIALIZED = 0,
+	UDB_LOAD_SUCCESS,
+	UDB_LOAD_EMPTY,
+	UDB_LOAD_FAILED
+} UdbBlockLoadState;
+
+typedef enum UdbSnapshotResult {
+	UDB_SNAPSHOT_FAILED_BEFORE_COMMIT = 0,
+	UDB_SNAPSHOT_COMMITTED = 1,
+	UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN = 2
+} UdbSnapshotResult;
+
 struct UdbBlock {
 	UdbRecord *tree;
 	UdbBlock *next;
@@ -83,6 +99,7 @@ struct UdbBlock {
 	unsigned int record_count;
 	char letter;
 	unsigned int version;
+	UdbBlockLoadState load_state;
 };
 
 struct UdbSyncSession {
@@ -109,6 +126,7 @@ typedef struct UdbConfig {
 	int flood_period;
 	int config_flood_attempts;
 	int config_flood_period;
+	unsigned int max_staged_records;
 } UdbConfig;
 
 typedef struct UdbContext {
@@ -154,9 +172,16 @@ static void udb_block_set_context_root(UdbContext *ctx, UdbBlock *block);
 static int udb_block_load(UdbContext *ctx, UdbBlock *block);
 static void udb_block_unload(UdbContext *ctx, UdbBlock *block);
 static void udb_block_reset(UdbContext *ctx, UdbBlock *block);
-static void udb_blocks_load_all(UdbContext *ctx);
-static void udb_blocks_save_all(UdbContext *ctx);
+static int udb_blocks_load_all(UdbContext *ctx);
+static int udb_blocks_save_all(UdbContext *ctx);
 static UdbBlock *udb_block_by_letter(UdbContext *ctx, char letter);
+static int udb_path_encode_component(const char *raw, char *buf, size_t bufsz);
+static int udb_path_decode_component(const char *encoded, char *buf, size_t bufsz);
+static int udb_path_append_component(char *pathbuf, size_t bufsz, const char *raw_component);
+static int udb_strtoull_strict(const char *s, unsigned long long *out);
+static int udb_strtoul_strict(const char *s, unsigned long *out);
+static int udb_timestamp_parse(const char *s, time_t *out);
+static int udb_checksum_parse(const char *input, unsigned long *checksum);
 static UdbRecord *udb_record_find(UdbContext *ctx, const char *key, UdbRecord *parent);
 static UdbRecord *udb_record_create(UdbRecord *parent);
 static UdbRecord *udb_record_insert(UdbContext *ctx, UdbBlock *block, UdbRecord *parent,
@@ -176,8 +201,8 @@ static void udb_hash_destroy(UdbContext *ctx);
 static void udb_hash_insert_record(UdbContext *ctx, UdbRecord *rec, int block_idx, const char *key);
 static int udb_hash_remove_record(UdbContext *ctx, UdbRecord *rec, int block_idx, const char *key);
 static UdbRecord *udb_hash_find(UdbContext *ctx, int block_idx, const char *key);
-static int udb_file_write_snapshot(UdbBlock *block, UdbRecord *tree,
-                                   unsigned int record_count);
+static UdbSnapshotResult udb_file_write_snapshot(UdbBlock *block, UdbRecord *tree,
+                                                 unsigned int record_count);
 static int udb_file_save_block(UdbContext *ctx, UdbBlock *block);
 static void udb_block_replace_tree(UdbContext *ctx, UdbBlock *block,
                                    UdbRecord *tree, unsigned int record_count);
