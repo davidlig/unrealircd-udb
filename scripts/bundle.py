@@ -50,7 +50,18 @@ module
 */
 """
 
+def format_sources():
+    src_files = []
+    for root, _, files in os.walk(SRC_DIR):
+        for file in files:
+            if file.endswith((".c", ".h", ".inc")):
+                src_files.append(os.path.join(root, file))
+    if src_files:
+        subprocess.run(["clang-format", "-i"] + sorted(src_files), check=True)
+        print(f"[+] Formatted {len(src_files)} source files in {SRC_DIR}")
+
 def bundle_sources():
+    format_sources()
     os.makedirs(DIST_DIR, exist_ok=True)
     
     # Read public and implementation-only headers.
