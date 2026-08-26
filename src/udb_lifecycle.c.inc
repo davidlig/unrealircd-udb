@@ -50,8 +50,7 @@ static char *udb_block_filepath(char letter)
 	if (path_length > UDB_BLOCK_PATH_MAX)
 		return NULL;
 	path = safe_alloc(path_length);
-	snprintf(path, path_length, "%s%sudb_%c.db", directory,
-	         directory[directory_length - 1] == '/' ? "" : "/", letter);
+	snprintf(path, path_length, "%s%sudb_%c.db", directory, directory[directory_length - 1] == '/' ? "" : "/", letter);
 	return path;
 }
 
@@ -61,24 +60,24 @@ static void udb_block_set_context_root(UdbContext *ctx, UdbBlock *block)
 		return;
 	switch (block->letter)
 	{
-		case 'N':
-			ctx->nicks = block->tree;
-			break;
-		case 'C':
-			ctx->channels = block->tree;
-			break;
-		case 'I':
-			ctx->ips = block->tree;
-			break;
-		case 'S':
-			ctx->settings = block->tree;
-			break;
-		case 'L':
-			ctx->links = block->tree;
-			break;
-		case 'K':
-			ctx->lines = block->tree;
-			break;
+	case 'N':
+		ctx->nicks = block->tree;
+		break;
+	case 'C':
+		ctx->channels = block->tree;
+		break;
+	case 'I':
+		ctx->ips = block->tree;
+		break;
+	case 'S':
+		ctx->settings = block->tree;
+		break;
+	case 'L':
+		ctx->links = block->tree;
+		break;
+	case 'K':
+		ctx->lines = block->tree;
+		break;
 	}
 }
 
@@ -158,8 +157,8 @@ static int udb_blocks_save_all(UdbContext *ctx)
 		if (b->load_state != UDB_LOAD_SUCCESS && b->load_state != UDB_LOAD_EMPTY)
 		{
 			udb_log(ULOG_ERROR, "UDB_BLOCK_SAVE_SKIPPED", NULL,
-			        "Skipping save of block $block because it is not in safe initialized state",
-			        log_data_string("block", (char[]){b->letter, '\0'}));
+					"Skipping save of block $block because it is not in safe initialized state",
+					log_data_string("block", (char[]){b->letter, '\0'}));
 			success = 0;
 			continue;
 		}
@@ -218,20 +217,21 @@ static int udb_engine_init(void)
 		if (mkdir(dir, 0700) != 0)
 		{
 			udb_log(ULOG_ERROR, "UDB_DIRECTORY_CREATE_FAILED", NULL,
-			        "Cannot create database directory $directory: $error",
-			        log_data_string("directory", dir), log_data_string("error", strerror(errno)));
+					"Cannot create database directory $directory: $error", log_data_string("directory", dir),
+					log_data_string("error", strerror(errno)));
 			return 0;
 		}
-	} else if (!S_ISDIR(st.st_mode))
+	}
+	else if (!S_ISDIR(st.st_mode))
 	{
-		udb_log(ULOG_ERROR, "UDB_DIRECTORY_INVALID", NULL,
-		        "Database directory $directory is not a directory", log_data_string("directory", dir));
+		udb_log(ULOG_ERROR, "UDB_DIRECTORY_INVALID", NULL, "Database directory $directory is not a directory",
+				log_data_string("directory", dir));
 		return 0;
 	}
 
 	if (!udb_block_create(udb_ctx, 'N', "Nicks") || !udb_block_create(udb_ctx, 'C', "Channels") ||
-	    !udb_block_create(udb_ctx, 'I', "IPs") || !udb_block_create(udb_ctx, 'S', "Settings") ||
-	    !udb_block_create(udb_ctx, 'L', "Links") || !udb_block_create(udb_ctx, 'K', "Lines"))
+		!udb_block_create(udb_ctx, 'I', "IPs") || !udb_block_create(udb_ctx, 'S', "Settings") ||
+		!udb_block_create(udb_ctx, 'L', "Links") || !udb_block_create(udb_ctx, 'K', "Lines"))
 	{
 		udb_engine_cleanup(udb_ctx);
 		return 0;
@@ -377,15 +377,13 @@ static int udb_module_load(ModuleInfo *modinfo)
 	udb_sync_snomask_filter();
 	udb_nicks_load(modinfo);
 	udb_channels_load(modinfo);
-	udb_log(ULOG_INFO, "UDB_LOADED", NULL,
-	        "Unreal Database System v" UDB_VERSION " loaded successfully");
+	udb_log(ULOG_INFO, "UDB_LOADED", NULL, "Unreal Database System v" UDB_VERSION " loaded successfully");
 	return MOD_SUCCESS;
 }
 
 static int udb_module_unload(void)
 {
-	udb_log(ULOG_INFO, "UDB_UNLOADING", NULL,
-	        "Saving databases and shutting down...");
+	udb_log(ULOG_INFO, "UDB_UNLOADING", NULL, "Saving databases and shutting down...");
 	udb_log_snomask_filter_free();
 	udb_engine_shutdown();
 	return MOD_SUCCESS;

@@ -13,7 +13,8 @@ static unsigned long udb_sync_txid = 0;
 
 typedef struct UdbHelloPeer UdbHelloPeer;
 
-struct UdbHelloPeer {
+struct UdbHelloPeer
+{
 	Client *peer;
 	time_t deadline;
 	int state;
@@ -21,8 +22,8 @@ struct UdbHelloPeer {
 	UdbHelloPeer *next;
 };
 
-#define UDB_HEL_WAITING     1
-#define UDB_HEL_CONFIRMED   2
+#define UDB_HEL_WAITING 1
+#define UDB_HEL_CONFIRMED 2
 #define UDB_HEL_UNSUPPORTED 3
 
 static UdbHelloPeer *udb_hello_peers = NULL;
@@ -47,8 +48,7 @@ static int udb_has_hello(Client *server)
 {
 	UdbHelloPeer *peer = udb_hello_peer(server, 0);
 
-	return server && IsServer(server) && MyConnect(server) && peer &&
-	       peer->state == UDB_HEL_CONFIRMED;
+	return server && IsServer(server) && MyConnect(server) && peer && peer->state == UDB_HEL_CONFIRMED;
 }
 
 static int udb_has_staged_sync(Client *server)
@@ -76,8 +76,7 @@ static void udb_sync_hello_start(Client *server)
 	peer->state = UDB_HEL_WAITING;
 	peer->deadline = time(NULL) + UDB_SYNC_TIMEOUT;
 	propagator = udb_selected_propagator(udb_ctx);
-	sendto_one(server, NULL, ":%s DB %s HEL 4 %s", me.id, server->id,
-	           propagator ? propagator : "?");
+	sendto_one(server, NULL, ":%s DB %s HEL 4 %s", me.id, server->id, propagator ? propagator : "?");
 }
 
 static int udb_sync_hello_ack(Client *server)
@@ -87,8 +86,7 @@ static int udb_sync_hello_ack(Client *server)
 	if (peer->state != UDB_HEL_WAITING)
 		return 0;
 	peer->state = UDB_HEL_CONFIRMED;
-	udb_log(ULOG_INFO, "UDB_HEL_CONFIRMED", server,
-	        "UDB HEL 4 capability confirmed for directly linked server");
+	udb_log(ULOG_INFO, "UDB_HEL_CONFIRMED", server, "UDB HEL 4 capability confirmed for directly linked server");
 	udb_sync_to_server(server);
 	return 1;
 }
@@ -97,10 +95,8 @@ static void udb_sync_abort(UdbBlock *block, const char *reason)
 {
 	if (!block || !block->session)
 		return;
-	udb_log(ULOG_WARNING, "UDB_SYNC_ABORT", block->session->peer,
-	        "Aborted staged sync of block $block: $reason",
-	        log_data_string("block", (char[]){block->letter, '\0'}),
-	        log_data_string("reason", reason));
+	udb_log(ULOG_WARNING, "UDB_SYNC_ABORT", block->session->peer, "Aborted staged sync of block $block: $reason",
+			log_data_string("block", (char[]){block->letter, '\0'}), log_data_string("reason", reason));
 	udb_sync_session_free(block);
 }
 
@@ -135,8 +131,7 @@ static int udb_sync_begin(UdbBlock *block, Client *peer, const char *txid)
 	return 1;
 }
 
-static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid,
-                        const char *path, const char *data)
+static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid, const char *path, const char *data)
 {
 	UdbSyncSession *session = block ? block->session : NULL;
 	char line[UDB_RECORD_LINE_MAX];
@@ -162,12 +157,13 @@ static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid,
 		return UDB_ERR_PARAMS;
 	}
 	if (snprintf(line, sizeof(line), "%s %s", path, data) >= (int)sizeof(line) ||
-	    !udb_stage_parse_line(block, session, line))
+		!udb_stage_parse_line(block, session, line))
 	{
 		udb_sync_abort(block, "invalid PUT payload");
 		return UDB_ERR_PARAMS;
 	}
-	unsigned int max_records = (udb_cfg && udb_cfg->max_staged_records) ? udb_cfg->max_staged_records : UDB_DEFAULT_MAX_STAGED_RECORDS;
+	unsigned int max_records =
+		(udb_cfg && udb_cfg->max_staged_records) ? udb_cfg->max_staged_records : UDB_DEFAULT_MAX_STAGED_RECORDS;
 	if (session->record_count > max_records)
 	{
 		udb_sync_abort(block, "staged record count limit exceeded");
@@ -178,8 +174,8 @@ static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid,
 	return 0;
 }
 
-static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer,
-                        const char *txid, const char *checksum, unsigned long *digest)
+static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, const char *txid, const char *checksum,
+						unsigned long *digest)
 {
 	UdbSyncSession *session = block ? block->session : NULL;
 	unsigned long received_digest;
@@ -193,10 +189,10 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer,
 	session->record_count = udb_record_count_tree(session->tree);
 	*digest = udb_compute_tree_checksum(session->tree);
 	UdbSnapshotResult snap_res = UDB_SNAPSHOT_FAILED_BEFORE_COMMIT;
-	if (!udb_checksum_parse(checksum, &received_digest) ||
-	    *digest != received_digest ||
-	    (snap_res = udb_file_write_snapshot(block, session->tree, session->record_count)) == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT ||
-	    !udb_block_commit_stage(ctx, block, session, *digest))
+	if (!udb_checksum_parse(checksum, &received_digest) || *digest != received_digest ||
+		(snap_res = udb_file_write_snapshot(block, session->tree, session->record_count)) ==
+			UDB_SNAPSHOT_FAILED_BEFORE_COMMIT ||
+		!udb_block_commit_stage(ctx, block, session, *digest))
 	{
 		udb_sync_abort(block, "digest or persistence failure");
 		return UDB_ERR_FATAL;
@@ -206,12 +202,12 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer,
 
 static void udb_sync_ack(Client *peer, const char *block)
 {
-	udb_log(ULOG_INFO, "UDB_SYNC_ACK", peer,
-	        "Staged sync acknowledged for block $block", log_data_string("block", block));
+	udb_log(ULOG_INFO, "UDB_SYNC_ACK", peer, "Staged sync acknowledged for block $block",
+			log_data_string("block", block));
 }
 
-static void udb_sync_send_tree(Client *server, UdbRecord *rec, int depth,
-                               char *pathbuf, int pathlen, char letter, const char *txid)
+static void udb_sync_send_tree(Client *server, UdbRecord *rec, int depth, char *pathbuf, int pathlen, char letter,
+							   const char *txid)
 {
 	size_t old_len;
 	UdbRecord *child;
@@ -228,11 +224,11 @@ static void udb_sync_send_tree(Client *server, UdbRecord *rec, int depth,
 	if (rec->data_str || rec->data_num > 0 || !rec->child)
 	{
 		if (rec->data_str)
-			sendto_one(server, NULL, ":%s DB %s PUT %c %s %s :%s", me.id, server->id,
-			           letter, txid, pathbuf, rec->data_str);
+			sendto_one(server, NULL, ":%s DB %s PUT %c %s %s :%s", me.id, server->id, letter, txid, pathbuf,
+					   rec->data_str);
 		else
-			sendto_one(server, NULL, ":%s DB %s PUT %c %s %s *%lu", me.id, server->id,
-			           letter, txid, pathbuf, rec->data_num);
+			sendto_one(server, NULL, ":%s DB %s PUT %c %s %s *%lu", me.id, server->id, letter, txid, pathbuf,
+					   rec->data_num);
 	}
 	for (child = rec->child; child; child = child->sibling)
 		udb_sync_send_tree(server, child, depth + 1, pathbuf, pathlen, letter, txid);
@@ -249,12 +245,10 @@ static void udb_sync_send_stage(Client *server, UdbBlock *block)
 	if (!udb_peer_authorizes_us(server))
 		return;
 	snprintf(txid, sizeof(txid), "%08lx", ++udb_sync_txid);
-	sendto_one(server, NULL, ":%s DB %s BEGIN %c %s %08lX", me.id, server->id,
-	           block->letter, txid, block->checksum);
+	sendto_one(server, NULL, ":%s DB %s BEGIN %c %s %08lX", me.id, server->id, block->letter, txid, block->checksum);
 	for (rec = block->tree->child; rec; rec = rec->sibling)
 		udb_sync_send_tree(server, rec, 0, pathbuf, sizeof(pathbuf), block->letter, txid);
-	sendto_one(server, NULL, ":%s DB %s END %c %s %08lX", me.id, server->id,
-	           block->letter, txid, block->checksum);
+	sendto_one(server, NULL, ":%s DB %s END %c %s %08lX", me.id, server->id, block->letter, txid, block->checksum);
 }
 
 EVENT(udb_sync_timeout_event)
@@ -281,7 +275,7 @@ EVENT(udb_sync_timeout_event)
 			Client *c = peer->peer;
 			peer->state = UDB_HEL_UNSUPPORTED;
 			udb_log(ULOG_ERROR, "UDB_HEL_TIMEOUT", c,
-			        "No UDB HEL 4 acknowledgement from directly linked server; link aborted");
+					"No UDB HEL 4 acknowledgement from directly linked server; link aborted");
 			if (c)
 			{
 				exit_client_fmt(c, NULL, "Link aborted: server does not support UDB protocol (HEL timeout)");

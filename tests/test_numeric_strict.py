@@ -42,6 +42,9 @@ def free_port():
 def write_config(path, name, sid, client_port, server_port, tls_port, module, dbdir):
     path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
 include "{RUNTIME_ROOT}/conf/snomasks.default.conf";
+blacklist-module "geoip_classic";
+blacklist-module "geoip_mmdb";
+blacklist-module "geoip_csv";
 
 me {{
     name "{name}";
@@ -80,10 +83,14 @@ udb {{
 
 
 def bwrap_command(node, ircd, config):
+    for sub in ("runtime-data", "tmp", "cache", "logs"):
+        (node / sub).mkdir(parents=True, exist_ok=True)
     return ["bwrap", "--die-with-parent", "--ro-bind", "/", "/",
             "--bind", str(node), str(node),
             "--bind", str(node / "runtime-data"), str(RUNTIME_ROOT / "data"),
             "--bind", str(node / "tmp"), str(RUNTIME_ROOT / "tmp"),
+            "--bind", str(node / "cache"), str(RUNTIME_ROOT / "cache"),
+            "--bind", str(node / "logs"), str(RUNTIME_ROOT / "logs"),
             "--ro-bind", str(node / "modules" / "third"), str(RUNTIME_ROOT / "modules/third"),
             "--dev-bind", "/dev", "/dev", "--proc", "/proc",
             str(ircd), "-F", "-f", str(config)]
@@ -163,9 +170,22 @@ class MockServices:
         self.sock.close()
 
 
+def find_module_path():
+    env_path = os.environ.get("UDB_MODULE_PATH")
+    if env_path and os.path.isfile(env_path):
+        return pathlib.Path(env_path)
+    local_path = pathlib.Path(__file__).resolve().parent.parent / "src" / "udb.so"
+    if local_path.is_file():
+        return local_path
+    runtime_path = RUNTIME_ROOT / "modules/third/udb.so"
+    if runtime_path.is_file():
+        return runtime_path
+    return local_path
+
+
 def run_tests(ircd_bin, keep=False):
     tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="udb-numeric-test-"))
-    module_path = ROOT / "src/modules/third/udb/src/udb.so"
+    module_path = find_module_path()
     proc = None
 
     try:
@@ -197,20 +217,20 @@ def run_tests(ircd_bin, keep=False):
         # Non-hex checksum
         services.send_inf("N", "ZZZZZZZZ", "1787720000")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INF " in l,
-                          "rechazo de INF con checksum no hexadecimal")
-        print("PASS: INF con checksum no hexadecimal fue rechazado con ERR INF")
+                          "rejection of INF with non-hex checksum")
+        print("PASS: INF with non-hex checksum was rejected with ERR INF")
 
         # Negative timestamp
         services.send_inf("N", "A1B2C3D4", "-100")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INF " in l,
-                          "rechazo de INF con timestamp negativo")
-        print("PASS: INF con timestamp negativo fue rechazado con ERR INF")
+                          "rejection of INF with negative timestamp")
+        print("PASS: INF with negative timestamp was rejected with ERR INF")
 
         # Overflowing timestamp
         services.send_inf("N", "A1B2C3D4", "999999999999999999999999999999999999")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INF " in l,
-                          "rechazo de INF con timestamp desbordante")
-        print("PASS: INF con timestamp desbordante fue rechazado con ERR INF")
+                          "rejection of INF with overflowing timestamp")
+        print("PASS: INF with overflowing timestamp was rejected with ERR INF")
 
         # -------------------------------------------------------------
         # Test 2: INS numeric record validation with invalid numeric payloads
@@ -218,26 +238,26 @@ def run_tests(ircd_bin, keep=False):
         # Empty numeric payload '*'
         services.send_ins("I::127.0.0.1::clones", "*")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " I" in l,
-                          "rechazo de valor numérico vacío (*)")
-        print("PASS: valor numérico vacío (*) fue rechazado con ERR INS")
+                          "rejection of empty numeric payload (*)")
+        print("PASS: Empty numeric value (*) was rejected with ERR INS")
 
         # Non-digit in numeric payload (*123a)
         services.send_ins("I::127.0.0.1::clones", "*123a")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " I" in l,
-                          "rechazo de valor numérico con caracteres no numéricos (*123a)")
-        print("PASS: valor numérico con caracteres no numéricos (*123a) fue rechazado con ERR INS")
+                          "rejection of numeric payload with non-digit chars (*123a)")
+        print("PASS: Numeric value with non-digits (*123a) was rejected with ERR INS")
 
         # Negative in numeric payload (*-5)
         services.send_ins("I::127.0.0.1::clones", "*-5")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " I" in l,
-                          "rechazo de valor numérico negativo (*-5)")
-        print("PASS: valor numérico negativo (*-5) fue rechazado con ERR INS")
+                          "rejection of negative numeric payload (*-5)")
+        print("PASS: Negative numeric value (*-5) was rejected with ERR INS")
 
         # Overflowing numeric payload
         services.send_ins("I::127.0.0.1::clones", "*999999999999999999999999999999999999")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " I" in l,
-                          "rechazo de valor numérico con desbordamiento")
-        print("PASS: valor numérico con desbordamiento fue rechazado con ERR INS")
+                          "rejection of overflowing numeric payload")
+        print("PASS: Numeric value with overflow was rejected with ERR INS")
 
         # Valid numeric payload (*5)
         services.send_ins("I::127.0.0.1::clones", "*5")
@@ -251,7 +271,7 @@ def run_tests(ircd_bin, keep=False):
         db_i = (data_dir / "udb_I.db").read_text(encoding="ascii")
         if "127.0.0.1::clones *5" not in db_i:
             raise AssertionError(f"Valid numeric record not found in udb_I.db:\n{db_i}")
-        print("PASS: valor numérico válido (*5) fue persistido correctamente")
+        print("PASS: Valid numeric value (*5) was persisted successfully")
 
     finally:
         if proc:

@@ -42,6 +42,9 @@ def free_port():
 def write_config(path, name, sid, client_port, server_port, tls_port, module, dbdir):
     path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
 include "{RUNTIME_ROOT}/conf/snomasks.default.conf";
+blacklist-module "geoip_classic";
+blacklist-module "geoip_mmdb";
+blacklist-module "geoip_csv";
 
 me {{
     name "{name}";
@@ -80,10 +83,14 @@ udb {{
 
 
 def bwrap_command(node, ircd, config):
+    for sub in ("runtime-data", "tmp", "cache", "logs"):
+        (node / sub).mkdir(parents=True, exist_ok=True)
     return ["bwrap", "--die-with-parent", "--ro-bind", "/", "/",
             "--bind", str(node), str(node),
             "--bind", str(node / "runtime-data"), str(RUNTIME_ROOT / "data"),
             "--bind", str(node / "tmp"), str(RUNTIME_ROOT / "tmp"),
+            "--bind", str(node / "cache"), str(RUNTIME_ROOT / "cache"),
+            "--bind", str(node / "logs"), str(RUNTIME_ROOT / "logs"),
             "--ro-bind", str(node / "modules" / "third"), str(RUNTIME_ROOT / "modules/third"),
             "--dev-bind", "/dev", "/dev", "--proc", "/proc",
             str(ircd), "-F", "-f", str(config)]
@@ -163,9 +170,22 @@ class MockServices:
         self.sock.close()
 
 
+def find_module_path():
+    env_path = os.environ.get("UDB_MODULE_PATH")
+    if env_path and os.path.isfile(env_path):
+        return pathlib.Path(env_path)
+    local_path = pathlib.Path(__file__).resolve().parent.parent / "src" / "udb.so"
+    if local_path.is_file():
+        return local_path
+    runtime_path = RUNTIME_ROOT / "modules/third/udb.so"
+    if runtime_path.is_file():
+        return runtime_path
+    return local_path
+
+
 def run_tests(ircd_bin, keep=False):
     tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="udb-ipv6-test-"))
-    module_path = ROOT / "src/modules/third/udb/src/udb.so"
+    module_path = find_module_path()
     proc = None
 
     try:
@@ -215,33 +235,33 @@ def run_tests(ircd_bin, keep=False):
         # Missing hex digits after %
         services.send_ins("I::2001%3::clones", "*5")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " I" in l,
-                          "rechazo de escape de porcentaje incompleto")
-        print("PASS: escape de porcentaje incompleto fue rechazado con ERR INS")
+                          "rejection of incomplete percent-escape")
+        print("PASS: Incomplete percent-escape was rejected with ERR INS")
 
         # Embedded null byte %00
         services.send_ins("I::test%00bad::clones", "*5")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " I" in l,
-                          "rechazo de byte nulo embebido (%00)")
-        print("PASS: byte nulo embebido (%00) fue rechazado con ERR INS")
+                          "rejection of embedded null byte (%00)")
+        print("PASS: Embedded null byte (%00) was rejected with ERR INS")
 
         # Double separator ::::
         services.send_ins("I::::bad::clones", "*5")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " I" in l,
-                          "rechazo de separador doble (::::)")
-        print("PASS: separador doble (::::) fue rechazado con ERR INS")
+                          "rejection of double separator (::::)")
+        print("PASS: Double separator (::::) was rejected with ERR INS")
 
         # Trailing separator ::
         services.send_ins("I::trailing::", "*5")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " I" in l,
-                          "rechazo de separador final (::)")
-        print("PASS: separador final (::) fue rechazado con ERR INS")
+                          "rejection of trailing separator (::)")
+        print("PASS: Trailing separator (::) was rejected with ERR INS")
 
         # Overlong path (> UDB_RECORD_PATH_MAX)
         overlong_key = "x" * 4096
         services.send_ins(f"I::{overlong_key}::clones", "*5")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " I" in l,
-                          "rechazo de ruta excesivamente larga")
-        print("PASS: ruta excesivamente larga fue rechazada con ERR INS")
+                          "rejection of overlong path")
+        print("PASS: Overlong path was rejected with ERR INS")
 
         services.close()
         stop(proc)
@@ -264,7 +284,7 @@ def run_tests(ircd_bin, keep=False):
         if "G::*@2001%3Adb8%3A%3A3::reason IPv6 G-line test" not in db_k:
             raise AssertionError(f"IPv6 G-line record not correctly persisted in udb_K.db:\n{db_k}")
 
-        print("PASS: registros IPv6 persistieron con serialización canónica percent-encoded en disco")
+        print("PASS: IPv6 records persisted with canonical percent-encoded serialization to disk")
 
         # Restart server and verify clean load of IPv6 records from disk
         proc = subprocess.Popen(bwrap_command(node, ircd_bin, config),
@@ -276,7 +296,7 @@ def run_tests(ircd_bin, keep=False):
 
         stop(proc)
         proc = None
-        print("PASS: servidor recargó limpiamente los registros IPv6 desde disco tras reinicio")
+        print("PASS: Server cleanly reloaded IPv6 records from disk after restart")
 
     finally:
         if proc:

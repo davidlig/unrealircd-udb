@@ -14,13 +14,26 @@ import tempfile
 import time
 
 
-ROOT = pathlib.Path(__file__).resolve().parents[5]
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 RUNTIME_ROOT = pathlib.Path(os.environ.get("UDB_TEST_IRCD_ROOT", pathlib.Path.home() / "unrealircd"))
 DEFAULT_IRCD = RUNTIME_ROOT / "bin/unrealircd"
 CLOAK_KEYS = ("aB3" * 30, "cD4" * 30, "eF5" * 30)
 
-MUTATOR_SOURCE = ROOT / "src/modules/third/udb/tests/udb_test_mutator.c"
+MUTATOR_SOURCE = pathlib.Path(__file__).resolve().parent / "udb_test_mutator.c"
 MUTATOR_MODULE = MUTATOR_SOURCE.with_suffix(".so")
+
+
+def find_module_path():
+    env_path = os.environ.get("UDB_MODULE_PATH")
+    if env_path and os.path.isfile(env_path):
+        return pathlib.Path(env_path)
+    local_path = REPO_ROOT / "src" / "udb.so"
+    if local_path.is_file():
+        return local_path
+    runtime_path = RUNTIME_ROOT / "modules/third/udb.so"
+    if runtime_path.is_file():
+        return runtime_path
+    return local_path
 
 
 class EnvironmentUnavailable(Exception):
@@ -32,10 +45,21 @@ def skip(message):
     return 77
 
 
+def free_ports(count):
+    socks = []
+    ports = []
+    for _ in range(count):
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        socks.append(s)
+        ports.append(s.getsockname()[1])
+    for s in socks:
+        s.close()
+    return ports
+
+
 def free_port():
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+    return free_ports(1)[0]
 
 
 def write_config(path, name, sid, ports, links, module, dbdir, propagator, link_password, load_mutator=False):
@@ -51,6 +75,9 @@ def write_config(path, name, sid, ports, links, module, dbdir, propagator, link_
 '''
     path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
 include "{RUNTIME_ROOT}/conf/snomasks.default.conf";
+blacklist-module "geoip_classic";
+blacklist-module "geoip_mmdb";
+blacklist-module "geoip_csv";
 
 me {{
     name "{name}";
@@ -82,10 +109,14 @@ udb {{
 
 
 def bwrap_command(node, ircd, config):
+    for sub in ("runtime-data", "tmp", "cache", "logs"):
+        (node / sub).mkdir(parents=True, exist_ok=True)
     return ["bwrap", "--die-with-parent", "--ro-bind", "/", "/",
             "--bind", str(node), str(node),
             "--bind", str(node / "runtime-data"), str(RUNTIME_ROOT / "data"),
             "--bind", str(node / "tmp"), str(RUNTIME_ROOT / "tmp"),
+            "--bind", str(node / "cache"), str(RUNTIME_ROOT / "cache"),
+            "--bind", str(node / "logs"), str(RUNTIME_ROOT / "logs"),
             "--ro-bind", str(node / "modules" / "third"), str(RUNTIME_ROOT / "modules/third"),
             "--dev-bind", "/dev", "/dev", "--proc", "/proc",
             "--setenv", "UDB_TEST_MUTATOR_DIRECTORY", str(node / "data"),
@@ -124,7 +155,7 @@ def wait_for_links(processes, targets, timeout):
 
 def run_tests(ircd_bin, keep=False):
     tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="udb-multihop-"))
-    module_path = ROOT / "src/modules/third/udb/src/udb.so"
+    module_path = find_module_path()
     processes = []
 
     try:
@@ -139,7 +170,8 @@ def run_tests(ircd_bin, keep=False):
             if MUTATOR_MODULE.exists():
                 shutil.copy2(MUTATOR_MODULE, third_modules / "udb_test_mutator.so")
 
-        ports = [tuple(free_port() for _ in range(3)) for _ in range(3)]
+        raw_ports = free_ports(9)
+        ports = [tuple(raw_ports[i * 3:(i + 1) * 3]) for i in range(3)]
         a_conf, b_conf, c_conf = a / "unrealircd.conf", b / "unrealircd.conf", c / "unrealircd.conf"
         link_password = "udb-multihop-" + secrets.token_hex(16)
 
@@ -170,7 +202,7 @@ def run_tests(ircd_bin, keep=False):
         if not wait_for_links(processes, ((logs["B"], 2), (logs["C"], 1)), 15):
             raise AssertionError("B-C link failed to form in time")
 
-        print("PASS: red A-B-C establecida y sincronizada correctamente")
+        print("PASS: A-B-C network established and synchronized successfully")
 
         # Arm and trigger authorized INS at Node A
         time.sleep(1.0)
@@ -196,7 +228,7 @@ def run_tests(ircd_bin, keep=False):
         if "udb-test-mutator" not in c_text:
             raise AssertionError(f"Node C did not apply and persist the multi-hop A->B->C INS:\n{c_text}")
 
-        print("PASS: mutación INS propagada multi-hop A -> B -> C y persistida en disco en todos los nodos")
+        print("PASS: INS mutation propagated multi-hop A -> B -> C and persisted to disk across all nodes")
 
         # Arm and trigger authorized DEL at Node A
         (a / "data" / "udb-test-mutator-del-go").touch()
@@ -216,7 +248,7 @@ def run_tests(ircd_bin, keep=False):
         if "udb-test-mutator" in c_text:
             raise AssertionError(f"Node C did not remove record on multi-hop DEL:\n{c_text}")
 
-        print("PASS: mutación DEL propagada multi-hop A -> B -> C y persistida en disco en todos los nodos")
+        print("PASS: DEL mutation propagated multi-hop A -> B -> C and persisted to disk across all nodes")
 
     finally:
         for p in processes:

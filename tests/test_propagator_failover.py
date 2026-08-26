@@ -22,10 +22,21 @@ class EnvironmentUnavailable(Exception):
     pass
 
 
+def free_ports(count):
+    socks = []
+    ports = []
+    for _ in range(count):
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        socks.append(s)
+        ports.append(s.getsockname()[1])
+    for s in socks:
+        s.close()
+    return ports
+
+
 def free_port():
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+    return free_ports(1)[0]
 
 
 def write_config(path, name, sid, ports, links, dbdir, propagator=None, link_password=""):
@@ -46,6 +57,9 @@ def write_config(path, name, sid, ports, links, dbdir, propagator=None, link_pas
 
     path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
 include "{RUNTIME_ROOT}/conf/snomasks.default.conf";
+blacklist-module "geoip_classic";
+blacklist-module "geoip_mmdb";
+blacklist-module "geoip_csv";
 
 me {{
     name "{name}";
@@ -73,10 +87,14 @@ loadmodule "third/udb";
 
 
 def bwrap_command(node, ircd, config, configtest=False):
+    for sub in ("runtime-data", "tmp", "cache", "logs"):
+        (node / sub).mkdir(parents=True, exist_ok=True)
     command = ["bwrap", "--die-with-parent", "--ro-bind", "/", "/",
                 "--bind", str(node), str(node),
                 "--bind", str(node / "runtime-data"), str(RUNTIME_ROOT / "data"),
                 "--bind", str(node / "tmp"), str(RUNTIME_ROOT / "tmp"),
+                "--bind", str(node / "cache"), str(RUNTIME_ROOT / "cache"),
+                "--bind", str(node / "logs"), str(RUNTIME_ROOT / "logs"),
                 "--ro-bind", str(node / "modules" / "third"), str(RUNTIME_ROOT / "modules/third"),
                 "--dev-bind", "/dev", "/dev", "--proc", "/proc",
                 str(ircd), "-f", str(config)]
@@ -109,13 +127,27 @@ def stop(process):
             process.wait(timeout=5)
 
 
+def find_module_path():
+    env_path = os.environ.get("UDB_MODULE_PATH")
+    if env_path and os.path.isfile(env_path):
+        return pathlib.Path(env_path)
+    for candidate in (
+        pathlib.Path(__file__).resolve().parent.parent / "src" / "udb.so",
+        pathlib.Path(__file__).resolve().parent.parent / "dist" / "udb.so",
+        RUNTIME_ROOT / "modules/third/udb.so",
+    ):
+        if candidate.is_file():
+            return candidate
+    return pathlib.Path(__file__).resolve().parent.parent / "src" / "udb.so"
+
+
 def main():
     ircd = DEFAULT_IRCD
     if not ircd.is_file():
         print(f"SKIP: unrealircd binary not found at {ircd}")
         return 77
 
-    module = ROOT / "src/modules/third/udb/dist/udb.so"
+    module = find_module_path()
     if not module.is_file():
         print(f"SKIP: udb.so not built at {module}")
         return 77
@@ -143,8 +175,9 @@ def main():
         n_file_a = node_a / "data/udb_N.db"
         n_file_a.write_text("; UDB Block N\n; Saved: 1787720000\n; Records: 1\ndavidlig::vhost root.admin.net\n", encoding="ascii")
 
-        ports_a = (free_port(), free_port(), free_port())
-        ports_b = (free_port(), free_port(), free_port())
+        all_ports = free_ports(6)
+        ports_a = tuple(all_ports[0:3])
+        ports_b = tuple(all_ports[3:6])
         link_pw = secrets.token_hex(16)
 
         config_a = node_a / "unrealircd.conf"

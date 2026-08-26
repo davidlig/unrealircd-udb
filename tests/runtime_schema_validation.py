@@ -14,10 +14,24 @@ import tempfile
 import time
 
 
-ROOT = pathlib.Path(__file__).resolve().parents[5]
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 RUNTIME_ROOT = pathlib.Path(os.environ.get("UDB_TEST_IRCD_ROOT", pathlib.Path.home() / "unrealircd"))
 DEFAULT_IRCD = RUNTIME_ROOT / "bin/unrealircd"
 CLOAK_KEYS = ("aB3" * 30, "cD4" * 30, "eF5" * 30)
+
+
+def find_module_path():
+    env_path = os.environ.get("UDB_MODULE_PATH")
+    if env_path and os.path.isfile(env_path):
+        return pathlib.Path(env_path)
+    for candidate in (
+        REPO_ROOT / "src" / "udb.so",
+        REPO_ROOT / "dist" / "udb.so",
+        RUNTIME_ROOT / "modules/third/udb.so",
+    ):
+        if candidate.is_file():
+            return candidate
+    return REPO_ROOT / "src" / "udb.so"
 
 SERVICES_NAME = "udb-svc.test"
 SERVICES_SID = "002"
@@ -44,6 +58,9 @@ def free_port():
 def write_config(path, name, sid, client_port, server_port, tls_port, module, dbdir):
     path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
 include "{RUNTIME_ROOT}/conf/snomasks.default.conf";
+blacklist-module "geoip_classic";
+blacklist-module "geoip_mmdb";
+blacklist-module "geoip_csv";
 
 me {{
     name "{name}";
@@ -82,10 +99,14 @@ udb {{
 
 
 def bwrap_command(node, ircd, config, configtest=False):
+    for sub in ("runtime-data", "tmp", "cache", "logs"):
+        (node / sub).mkdir(parents=True, exist_ok=True)
     command = ["bwrap", "--die-with-parent", "--ro-bind", "/", "/",
                "--bind", str(node), str(node),
                "--bind", str(node / "runtime-data"), str(RUNTIME_ROOT / "data"),
                "--bind", str(node / "tmp"), str(RUNTIME_ROOT / "tmp"),
+               "--bind", str(node / "cache"), str(RUNTIME_ROOT / "cache"),
+               "--bind", str(node / "logs"), str(RUNTIME_ROOT / "logs"),
                "--ro-bind", str(node / "modules" / "third"), str(RUNTIME_ROOT / "modules/third"),
                "--dev-bind", "/dev", "/dev", "--proc", "/proc",
                str(ircd), "-f", str(config)]
@@ -155,7 +176,7 @@ class IrcClient:
             if matches:
                 return self.lines[start:]
             self.receive(deadline)
-        raise AssertionError(f"{self.nick}: no se recibió {description}; líneas={self.lines[start:]!r}")
+        raise AssertionError(f"{self.nick}: did not receive {description}; lines={self.lines[start:]!r}")
 
     def request(self, command, terminator, description):
         start = len(self.lines)
@@ -220,7 +241,7 @@ class FakeServicesServer:
             if matches:
                 return self.lines[start:]
             self.receive(deadline)
-        raise AssertionError(f"services: no se recibió {description}; líneas={self.lines[start:]!r}")
+        raise AssertionError(f"services: did not receive {description}; lines={self.lines[start:]!r}")
 
     def send_uid(self, nick):
         self.uid_counter += 1
@@ -256,9 +277,7 @@ def run_tests(ircd_bin, keep=False):
         for d in (data_dir, runtime_data, tmp_dir, mods_third):
             d.mkdir(parents=True, exist_ok=True)
 
-        module_so = ROOT / "src/modules/third/udb/src/udb.so"
-        if not module_so.is_file():
-            module_so = ROOT / "src/modules/third/udb.so"
+        module_so = find_module_path()
         shutil.copy2(module_so, mods_third / "udb.so")
 
         client_port = free_port()
@@ -284,31 +303,31 @@ def run_tests(ircd_bin, keep=False):
         # -------------------------------------------------------------
         services.send_ins(f"C::{CHANNEL}::testunknownkey", "valor")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " C" in l,
-                          "rechazo de clave desconocida testunknownkey en Bloque C")
-        print("PASS: INS de clave desconocida testunknownkey en Bloque C fue rechazada con ERR INS 2 C")
+                          "rejection of unknown key testunknownkey in Block C")
+        print("PASS: INS of unknown key testunknownkey in Block C was rejected with ERR INS 2 C")
 
         services.send_ins(f"C::{CHANNEL}::testkey", "*1")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " C" in l,
-                          "rechazo de clave desconocida testkey en Bloque C")
-        print("PASS: INS de clave desconocida testkey en Bloque C fue rechazada con ERR INS 2 C")
+                          "rejection of unknown key testkey in Block C")
+        print("PASS: INS of unknown key testkey in Block C was rejected with ERR INS 2 C")
 
         services.send_ins(f"C::{CHANNEL}::testinvalidkey", "ascac")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " C" in l,
-                          "rechazo de clave desconocida testinvalidkey en Bloque C")
-        print("PASS: INS de clave desconocida testinvalidkey en Bloque C fue rechazada con ERR INS 2 C")
+                          "rejection of unknown key testinvalidkey in Block C")
+        print("PASS: INS of unknown key testinvalidkey in Block C was rejected with ERR INS 2 C")
 
         # -------------------------------------------------------------
         # Test 2: Rejection of wrong data types in Block C
         # -------------------------------------------------------------
         services.send_ins(f"C::{CHANNEL}::founder", "*123")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " C" in l,
-                          "rechazo de tipo numérico en founder")
-        print("PASS: INS de founder con valor numérico fue rechazado")
+                          "rejection of numeric type in founder")
+        print("PASS: INS of founder with numeric value was rejected")
 
         services.send_ins(f"C::{CHANNEL}::options", "noval")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " C" in l,
-                          "rechazo de tipo texto en options")
-        print("PASS: INS de options sin formato numérico '*' fue rechazado")
+                          "rejection of string type in options")
+        print("PASS: INS of options without numeric '*' format was rejected")
 
         # -------------------------------------------------------------
         # Test 3: Acceptance of valid keys in Block C
@@ -317,68 +336,68 @@ def run_tests(ircd_bin, keep=False):
         services.send_ins(f"C::{CHANNEL}::options", "*3")
         services.send_ins(f"C::{CHANNEL}::access::davidlig", "*1")
         time.sleep(0.2)
-        print("PASS: INS de claves válidas en Bloque C (founder, options, access) fueron aceptadas")
+        print("PASS: INS of valid keys in Block C (founder, options, access) were accepted")
 
         # -------------------------------------------------------------
         # Test 4: Rejection of invalid nested paths in Block S
         # -------------------------------------------------------------
         services.send_ins("S::#test::testunknownkey", "ascac")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " S" in l,
-                          "rechazo de ruta anidada en Bloque S")
-        print("PASS: INS de ruta anidada S::#test::testunknownkey fue rechazada con ERR INS 2 S")
+                          "rejection of nested path in Block S")
+        print("PASS: INS of nested path S::#test::testunknownkey was rejected with ERR INS 2 S")
 
         services.send_ins("S::testunknownkey", "ascac")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " S" in l,
-                          "rechazo de clave desconocida en Bloque S")
-        print("PASS: INS de clave desconocida testunknownkey en Bloque S fue rechazada con ERR INS 2 S")
+                          "rejection of unknown key in Block S")
+        print("PASS: INS of unknown key testunknownkey in Block S was rejected with ERR INS 2 S")
 
         services.send_ins("S::clones", "textvalue")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " S" in l,
-                          "rechazo de clones no numérico en Bloque S")
-        print("PASS: INS de clones con texto en Bloque S fue rechazado")
+                          "rejection of non-numeric clones in Block S")
+        print("PASS: INS of clones with text in Block S was rejected")
 
         # -------------------------------------------------------------
         # Test 5: Acceptance of valid keys in Block S
         # -------------------------------------------------------------
         services.send_ins("S::clones", "*5")
-        services.send_ins("S::quit_clones", "Demasiadas conexiones")
+        services.send_ins("S::quit_clones", "Too many connections")
         time.sleep(0.2)
-        print("PASS: INS de claves válidas en Bloque S (clones *5, quit_clones) fueron aceptadas")
+        print("PASS: INS of valid keys in Block S (clones *5, quit_clones) were accepted")
 
         # -------------------------------------------------------------
         # Test 6: Rejection of unknown keys in Block N, I, L, K
         # -------------------------------------------------------------
         services.send_ins("N::davidlig::testunknownkey", "valor")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " N" in l,
-                          "rechazo de clave desconocida en Bloque N")
-        print("PASS: INS de clave desconocida en Bloque N fue rechazada con ERR INS 2 N")
+                          "rejection of unknown key in Block N")
+        print("PASS: INS of unknown key in Block N was rejected with ERR INS 2 N")
 
         services.send_ins("I::127.0.0.1::testunknownkey", "*1")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " I" in l,
-                          "rechazo de clave desconocida en Bloque I")
-        print("PASS: INS de clave desconocida en Bloque I fue rechazada con ERR INS 2 I")
+                          "rejection of unknown key in Block I")
+        print("PASS: INS of unknown key in Block I was rejected with ERR INS 2 I")
 
         services.send_ins(f"L::{SERVICES_NAME}::testunknownkey", "*1")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " L" in l,
-                          "rechazo de clave desconocida en Bloque L")
-        print("PASS: INS de clave desconocida en Bloque L fue rechazada con ERR INS 2 L")
+                          "rejection of unknown key in Block L")
+        print("PASS: INS of unknown key in Block L was rejected with ERR INS 2 L")
 
         services.send_ins("K::X::*@bad.test::reason", "bad")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " K" in l,
-                          "rechazo de tipo de TKL inválido en Bloque K")
-        print("PASS: INS de tipo de TKL inválido 'X' en Bloque K fue rechazado con ERR INS 2 K")
+                          "rejection of invalid TKL type in Block K")
+        print("PASS: INS of invalid TKL type 'X' in Block K was rejected with ERR INS 2 K")
 
         services.send_ins("K::G::*@bad.test::testunknownkey", "bad")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " K" in l,
-                          "rechazo de subclave desconocida en Bloque K")
-        print("PASS: INS de subclave desconocida en Bloque K fue rechazada con ERR INS 2 K")
+                          "rejection of unknown subkey in Block K")
+        print("PASS: INS of unknown subkey in Block K was rejected with ERR INS 2 K")
 
         services.close()
         stop(proc)
         proc = None
 
         # -------------------------------------------------------------
-        # Test 7: File parsing on boot discards unknown/corrupted keys
+        # Test 7: File parsing on boot rejects unknown/corrupted keys transactionally
         # -------------------------------------------------------------
         db_c = data_dir / "udb_C.db"
         db_c.write_text("""; UDB Block C - Version 1
@@ -390,23 +409,20 @@ def run_tests(ircd_bin, keep=False):
 #channel::options *3
 #channel::testkey *1
 """, encoding="ascii")
+        orig_bytes = db_c.read_bytes()
 
         proc = subprocess.Popen(bwrap_command(node, ircd_bin, config),
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         time.sleep(1.0)
-        if proc.poll() is not None:
-            stdout, _ = proc.communicate()
-            raise RuntimeError(f"ircd failed to start with corrupted udb_C.db:\n{stdout}")
-
-        # Connect IRC client to verify DB state:
-        client = IrcClient("127.0.0.1", client_port, "alice")
-        client.request("JOIN #channel", lambda l: " 353 " in l or "JOIN" in l, "join #channel")
-        client.request("MODE #channel", lambda l: " 324 " in l, "channel mode check")
-        client.close()
-
         stop(proc)
+        stdout, _ = proc.communicate()
+
+        if "Malformed persisted record in block C" not in stdout and "Failed to initialize database engine" not in stdout:
+            raise RuntimeError(f"Expected transactional abort error in stdout, got:\n{stdout}")
+        if db_c.read_bytes() != orig_bytes:
+            raise AssertionError("Corrupted udb_C.db was overwritten after failed load!")
         proc = None
-        print("PASS: arranque de servidor ignoró limpiamente claves desconocidas en udb_C.db y cargó registros válidos")
+        print("PASS: Server startup aborted transactionally on corrupted records in udb_C.db")
 
     finally:
         if proc:

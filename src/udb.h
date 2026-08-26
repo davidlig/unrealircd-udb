@@ -17,12 +17,12 @@
 /* ========================================================================
  * Block Identifiers
  * ======================================================================== */
-#define UDB_BLOCK_NICKS    'N'
+#define UDB_BLOCK_NICKS 'N'
 #define UDB_BLOCK_CHANNELS 'C'
-#define UDB_BLOCK_IPS      'I'
+#define UDB_BLOCK_IPS 'I'
 #define UDB_BLOCK_SETTINGS 'S'
-#define UDB_BLOCK_LINKS    'L'
-#define UDB_BLOCK_LINES    'K'
+#define UDB_BLOCK_LINKS 'L'
+#define UDB_BLOCK_LINES 'K'
 
 #define UDB_NUM_BLOCKS 6
 
@@ -31,79 +31,78 @@
  * ======================================================================== */
 
 /* Nick sub-records: N::<nick>::<key> <value> */
-#define NKEY_ACCESS    "access"    /* IP/CIDR access restriction */
-#define NKEY_PASS      "pass"      /* Password hash */
-#define NKEY_VHOST     "vhost"     /* Virtual host */
-#define NKEY_FORBID    "forbid"    /* Forbidden nick (value = reason) */
+#define NKEY_ACCESS "access"	   /* IP/CIDR access restriction */
+#define NKEY_PASS "pass"		   /* Password hash */
+#define NKEY_VHOST "vhost"		   /* Virtual host */
+#define NKEY_FORBID "forbid"	   /* Forbidden nick (value = reason) */
 #define NKEY_SUSPENDED "suspended" /* Suspended nick (value = reason) */
-#define NKEY_OPER      "oper"      /* Operclass name string (e.g. "locop", "netadmin-with-override") */
+#define NKEY_OPER "oper"		   /* Operclass name string (e.g. "locop", "netadmin-with-override") */
 #define NKEY_CHALLENGE "challenge" /* Password hash method */
-#define NKEY_MODES     "modes"     /* Allowed oper modes */
-#define NKEY_SNOMASKS  "snomasks"  /* Allowed snomasks */
-#define NKEY_SWHOIS    "swhois"    /* Custom SWHOIS line */
+#define NKEY_MODES "modes"		   /* Allowed oper modes */
+#define NKEY_SNOMASKS "snomasks"   /* Allowed snomasks */
+#define NKEY_SWHOIS "swhois"	   /* Custom SWHOIS line */
 
 /* Channel sub-records: C::<#chan>::<key> <value> */
-#define CKEY_FOUNDER   "founder"   /* Founder nick */
-#define CKEY_MODES     "modes"     /* Locked channel modes */
-#define CKEY_TOPIC     "topic"     /* Persistent topic */
-#define CKEY_ACCESS    "access"    /* Access list (has sub-records per nick) */
-#define CKEY_FORBID    "forbid"    /* Forbidden channel (value = reason) */
+#define CKEY_FOUNDER "founder"	   /* Founder nick */
+#define CKEY_MODES "modes"		   /* Locked channel modes */
+#define CKEY_TOPIC "topic"		   /* Persistent topic */
+#define CKEY_ACCESS "access"	   /* Access list (has sub-records per nick) */
+#define CKEY_FORBID "forbid"	   /* Forbidden channel (value = reason) */
 #define CKEY_SUSPENDED "suspended" /* Suspended channel */
-#define CKEY_PASS      "pass"      /* Channel password for +ao */
+#define CKEY_PASS "pass"		   /* Channel password for +ao */
 #define CKEY_CHALLENGE "challenge" /* Channel password hash method */
-#define CKEY_OPTIONS   "options"   /* Channel option flags (*N) */
+#define CKEY_OPTIONS "options"	   /* Channel option flags (*N) */
 
 /* IP sub-records: I::<ip|host>::<key> <value> */
-#define IKEY_CLONES  "clones"  /* Max clones allowed (*N) */
+#define IKEY_CLONES "clones"   /* Max clones allowed (*N) */
 #define IKEY_NOLINES "nolines" /* Ban exception types (eg. GZQSTmc) */
-#define IKEY_HOST    "host"    /* Reverse DNS override */
+#define IKEY_HOST "host"	   /* Reverse DNS override */
 
 /* Settings sub-records: S::<key> <value> */
-#define SKEY_CRYPT_KEY   "encryption_key" /* Host cloaking key */
-#define SKEY_SUFFIX      "suffix"         /* Virtual host suffix */
-#define SKEY_NICKSERV    "nickserv"       /* NickServ bot mask */
-#define SKEY_CHANSERV    "chanserv"       /* ChanServ bot mask */
-#define SKEY_IPSERV      "ipserv"         /* IpServ bot mask */
-#define SKEY_CLONES      "clones"         /* Global max clones (*N) */
-#define SKEY_QUIT_IPS    "quit_ips"       /* Quit message for IP limit */
-#define SKEY_QUIT_CLONES "quit_clones"    /* Quit message for clone limit */
-#define SKEY_FLOOD       "flood"          /* Password flood limit V:S */
-#define SKEY_PROPAGATOR  "propagator"     /* Cluster authoritative propagator(s) */
+#define SKEY_CRYPT_KEY "encryption_key" /* Host cloaking key */
+#define SKEY_SUFFIX "suffix"			/* Virtual host suffix */
+#define SKEY_NICKSERV "nickserv"		/* NickServ bot mask */
+#define SKEY_CHANSERV "chanserv"		/* ChanServ bot mask */
+#define SKEY_IPSERV "ipserv"			/* IpServ bot mask */
+#define SKEY_CLONES "clones"			/* Global max clones (*N) */
+#define SKEY_QUIT_IPS "quit_ips"		/* Quit message for IP limit */
+#define SKEY_QUIT_CLONES "quit_clones"	/* Quit message for clone limit */
+#define SKEY_FLOOD "flood"				/* Password flood limit V:S */
+#define SKEY_PROPAGATOR "propagator"	/* Cluster authoritative propagator(s) */
 
 /* Link sub-records: L::<server>::<key> <value> */
 #define LKEY_OPTIONS "options" /* Link option flags (*N) */
 
 /* Line sub-records: K::<type>::<pattern>::<key> <value> */
-#define KKEY_TYPE     "type"     /* Spamfilter target type */
-#define KKEY_ACTION   "action"   /* Spamfilter action */
+#define KKEY_TYPE "type"		 /* Spamfilter target type */
+#define KKEY_ACTION "action"	 /* Spamfilter action */
 #define KKEY_DURATION "duration" /* TKL duration */
-#define KKEY_REASON   "reason"   /* Ban reason */
+#define KKEY_REASON "reason"	 /* Ban reason */
 
 /* Spamfilter pattern encoding: K::F::b64:<RFC 4648 base64>::... */
-#define UDB_SPAMFILTER_B64_PREFIX  "b64:"
+#define UDB_SPAMFILTER_B64_PREFIX "b64:"
 #define UDB_SPAMFILTER_PATTERN_MAX 3072
 
 /* ========================================================================
  * Error Codes (for DB ERR protocol messages)
  * ======================================================================== */
-#define UDB_ERR_NO_BLOCK    1 /* Block does not exist */
-#define UDB_ERR_PARAMS      2 /* Missing parameters */
-#define UDB_ERR_FATAL       3 /* Fatal / internal error */
+#define UDB_ERR_NO_BLOCK 1	  /* Block does not exist */
+#define UDB_ERR_PARAMS 2	  /* Missing parameters */
+#define UDB_ERR_FATAL 3		  /* Fatal / internal error */
 #define UDB_ERR_SYNC_ACTIVE 4 /* Sync already in progress */
-#define UDB_ERR_NO_SYNC     5 /* No sync was requested */
-#define UDB_ERR_FORBIDDEN   6 /* Forbidden server */
+#define UDB_ERR_NO_SYNC 5	  /* No sync was requested */
+#define UDB_ERR_FORBIDDEN 6	  /* Forbidden server */
 
 /* SHA-256 is deliberately handled by UDB, not Auth_Check(). */
 #define UDB_AUTHTYPE_SHA256 1001
-
 
 /* ========================================================================
  * Channel Option Flags (bitmask in C::<#chan>::options *<value>)
  * ======================================================================== */
 #define UDB_CHOPT_PROTECT_BANS 0x1 /* Only ban author can remove their bans */
-#define UDB_CHOPT_LOCK_MODES   0x2 /* Channel modes are locked */
-#define UDB_CHOPT_LOCK_TOPIC   0x4 /* Channel topic is locked */
-#define UDB_CHOPT_PERSISTENT   0x8 /* Keep the channel alive through native +P */
+#define UDB_CHOPT_LOCK_MODES 0x2   /* Channel modes are locked */
+#define UDB_CHOPT_LOCK_TOPIC 0x4   /* Channel topic is locked */
+#define UDB_CHOPT_PERSISTENT 0x8   /* Keep the channel alive through native +P */
 
 /* ========================================================================
  * Link Option Flags (bitmask in L::<server>::options *<value>)

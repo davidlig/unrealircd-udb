@@ -11,7 +11,8 @@
 
 static int udb_query_is_secret(const UdbRecord *rec)
 {
-	return rec && rec->key && (!strcmp(rec->key, NKEY_PASS) || !strcmp(rec->key, NKEY_CHALLENGE) || !strcmp(rec->key, SKEY_CRYPT_KEY));
+	return rec && rec->key &&
+		   (!strcmp(rec->key, NKEY_PASS) || !strcmp(rec->key, NKEY_CHALLENGE) || !strcmp(rec->key, SKEY_CRYPT_KEY));
 }
 
 CMD_FUNC(cmd_dbq)
@@ -32,8 +33,8 @@ CMD_FUNC(cmd_dbq)
 
 	if (parc < 2)
 	{
-		sendto_one(client, NULL, ":%s 339 %s :Insufficient parameters. Syntax: /DBQ [server] <block>[::path]",
-		           me.name, client->name);
+		sendto_one(client, NULL, ":%s 339 %s :Insufficient parameters. Syntax: /DBQ [server] <block>[::path]", me.name,
+				   client->name);
 		return;
 	}
 
@@ -49,7 +50,8 @@ CMD_FUNC(cmd_dbq)
 			return;
 		}
 		safe_strdup(query_str, parv[2]);
-	} else
+	}
+	else
 	{
 		safe_strdup(query_str, parv[1]);
 	}
@@ -57,8 +59,7 @@ CMD_FUNC(cmd_dbq)
 	block = udb_block_by_letter(udb_ctx, query_str[0]);
 	if (!block)
 	{
-		sendto_one(client, NULL, ":%s 339 %s :Block %c does not exist.",
-		           me.name, client->name, query_str[0]);
+		sendto_one(client, NULL, ":%s 339 %s :Block %c does not exist.", me.name, client->name, query_str[0]);
 		safe_free(query_str);
 		return;
 	}
@@ -66,11 +67,9 @@ CMD_FUNC(cmd_dbq)
 	/* Query for block summary only (e.g. "/DBQ N") */
 	if (query_str[1] == '\0')
 	{
-		sendto_one(client, NULL, ":%s 339 %s :%c %u %lu %lu %lX %s",
-		           me.name, client->name,
-		           block->letter, block->record_count, block->filesize,
-		           (unsigned long)block->modified_at, block->checksum,
-		           block->syncing_from ? "*" : "");
+		sendto_one(client, NULL, ":%s 339 %s :%c %u %lu %lu %lX %s", me.name, client->name, block->letter,
+				   block->record_count, block->filesize, (unsigned long)block->modified_at, block->checksum,
+				   block->syncing_from ? "*" : "");
 		safe_free(query_str);
 		return;
 	}
@@ -79,8 +78,7 @@ CMD_FUNC(cmd_dbq)
 	cur = query_str + 1;
 	if (cur[0] != ':' || cur[1] != ':' || cur[2] == '\0')
 	{
-		sendto_one(client, NULL, ":%s 339 %s :Invalid block format.",
-		           me.name, client->name);
+		sendto_one(client, NULL, ":%s 339 %s :Invalid block format.", me.name, client->name);
 		safe_free(query_str);
 		return;
 	}
@@ -100,8 +98,7 @@ CMD_FUNC(cmd_dbq)
 	if (!rec)
 	{
 	notfound:
-		sendto_one(client, NULL, ":%s 339 %s :Block not found: %s",
-		           me.name, client->name, query_str);
+		sendto_one(client, NULL, ":%s 339 %s :Block not found: %s", me.name, client->name, query_str);
 		safe_free(query_str);
 		return;
 	}
@@ -109,31 +106,30 @@ CMD_FUNC(cmd_dbq)
 	/* Display the found record */
 	if (rec->data_str)
 	{
-		sendto_one(client, NULL, ":%s 339 %s :DBQ %s %s",
-		           me.name, client->name, query_str,
-		           udb_query_is_secret(rec) ? "<redacted>" : rec->data_str);
-	} else if (rec->data_num)
+		sendto_one(client, NULL, ":%s 339 %s :DBQ %s %s", me.name, client->name, query_str,
+				   udb_query_is_secret(rec) ? "<redacted>" : rec->data_str);
+	}
+	else if (rec->data_num)
 	{
-		sendto_one(client, NULL, ":%s 339 %s :DBQ %s %lu",
-		           me.name, client->name, query_str, rec->data_num);
-	} else
+		sendto_one(client, NULL, ":%s 339 %s :DBQ %s %lu", me.name, client->name, query_str, rec->data_num);
+	}
+	else
 	{
 		UdbRecord *child;
 		for (child = rec->child; child; child = child->sibling)
 		{
 			if (child->data_str)
-				sendto_one(client, NULL, ":%s 339 %s :DBQ %s::%s %s",
-				           me.name, client->name, query_str, child->key,
-				           udb_query_is_secret(child) ? "<redacted>" : child->data_str);
+				sendto_one(client, NULL, ":%s 339 %s :DBQ %s::%s %s", me.name, client->name, query_str, child->key,
+						   udb_query_is_secret(child) ? "<redacted>" : child->data_str);
 			else if (child->data_num)
-				sendto_one(client, NULL, ":%s 339 %s :DBQ %s::%s %lu",
-				           me.name, client->name, query_str, child->key, child->data_num);
+				sendto_one(client, NULL, ":%s 339 %s :DBQ %s::%s %lu", me.name, client->name, query_str, child->key,
+						   child->data_num);
 			else if (child->child)
-				sendto_one(client, NULL, ":%s 339 %s :DBQ %s::%s (has sub-records)",
-				           me.name, client->name, query_str, child->key);
+				sendto_one(client, NULL, ":%s 339 %s :DBQ %s::%s (has sub-records)", me.name, client->name, query_str,
+						   child->key);
 			else
-				sendto_one(client, NULL, ":%s 339 %s :DBQ %s::%s (empty)",
-				           me.name, client->name, query_str, child->key);
+				sendto_one(client, NULL, ":%s 339 %s :DBQ %s::%s (empty)", me.name, client->name, query_str,
+						   child->key);
 		}
 	}
 

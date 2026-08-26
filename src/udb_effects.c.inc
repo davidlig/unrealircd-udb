@@ -21,16 +21,20 @@ static int udb_apply_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord 
 		{
 			udb_nick_apply(client, nick_rec, is_new);
 		}
-	} else if (block->letter == 'C')
+	}
+	else if (block->letter == 'C')
 	{
 		udb_channel_apply_record(ctx, block, rec, is_new);
-	} else if (block->letter == 'I')
+	}
+	else if (block->letter == 'I')
 	{
 		udb_ips_apply_effect(ctx, block, rec, is_new);
-	} else if (block->letter == 'S' || block->letter == 'L')
+	}
+	else if (block->letter == 'S' || block->letter == 'L')
 	{
 		udb_config_apply_effect(ctx, block, rec);
-	} else if (block->letter == 'K')
+	}
+	else if (block->letter == 'K')
 	{
 		udb_lines_apply_effect(ctx, block, rec, is_new);
 	}
@@ -44,23 +48,26 @@ static void udb_remove_special_record(UdbContext *ctx, UdbBlock *block, UdbRecor
 	if (block->letter == 'N')
 	{
 		udb_nick_remove_record(block, rec);
-	} else if (block->letter == 'C')
+	}
+	else if (block->letter == 'C')
 	{
 		udb_channel_remove_record(ctx, block, rec);
-	} else if (block->letter == 'I')
+	}
+	else if (block->letter == 'I')
 	{
 		udb_ips_remove_effect(ctx, block, rec);
-	} else if (block->letter == 'S' || block->letter == 'L')
+	}
+	else if (block->letter == 'S' || block->letter == 'L')
 	{
 		udb_config_remove_effect(ctx, block, rec);
-	} else if (block->letter == 'K')
+	}
+	else if (block->letter == 'K')
 	{
 		udb_lines_remove_effect(ctx, block, rec);
 	}
 }
 
-static void udb_tree_effects_walk(UdbContext *ctx, UdbBlock *block, UdbRecord *rec,
-                                  unsigned int depth, int remove)
+static void udb_tree_effects_walk(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, unsigned int depth, int remove)
 {
 	UdbRecord *child;
 	int apply = 0;
@@ -73,20 +80,20 @@ static void udb_tree_effects_walk(UdbContext *ctx, UdbBlock *block, UdbRecord *r
 	/* Select each runtime owner once; K patterns are below their line type. */
 	switch (block->letter)
 	{
-		case 'N':
-			apply = depth == 1;
-			break;
-		case 'C':
-		case 'I':
-			apply = depth == (remove ? 1 : 2);
-			break;
-		case 'K':
-			apply = depth == 2;
-			break;
-		case 'S':
-		case 'L':
-			apply = 1;
-			break;
+	case 'N':
+		apply = depth == 1;
+		break;
+	case 'C':
+	case 'I':
+		apply = depth == (remove ? 1 : 2);
+		break;
+	case 'K':
+		apply = depth == 2;
+		break;
+	case 'S':
+	case 'L':
+		apply = 1;
+		break;
 	}
 	if (apply)
 	{

@@ -1,0 +1,77 @@
+name: UDB CI & Test Suite
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  UDB_MODULE_PATH: ${{ github.workspace }}/src/udb.so
+  UDB_TEST_IRCD_ROOT: /home/runner/unrealircd
+
+jobs:
+  test:
+    name: Build & Test Suite
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        run: |
+          git clone --depth 1 "https://github.com/${{ github.repository }}.git" .
+          git fetch origin "${{ github.sha }}" --depth 1 || true
+          git checkout "${{ github.sha }}" || true
+
+      - name: Install dependencies & configure bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap libssl-dev libargon2-dev libsodium-dev libpcre2-dev libc-ares-dev libjansson-dev clang-format python3-pytest
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+          sudo chmod u+s $(which bwrap) || true
+
+      - name: Set up UnrealIRCd development environment
+        run: |
+          mkdir -p ~/unrealircd-src
+          wget -q https://www.unrealircd.org/downloads/unrealircd-6.2.6.tar.gz -O /tmp/unrealircd.tar.gz
+          tar -xzf /tmp/unrealircd.tar.gz --strip-components=1 -C ~/unrealircd-src
+          cd ~/unrealircd-src
+          ./Config --with-show-opermot=no --with-bindir=$HOME/unrealircd/bin --with-datadir=$HOME/unrealircd/data --with-confdir=$HOME/unrealircd/conf --with-modulesdir=$HOME/unrealircd/modules --with-logdir=$HOME/unrealircd/logs --with-cachedir=$HOME/unrealircd/cache --with-docdir=$HOME/unrealircd/doc --with-tmpdir=$HOME/unrealircd/tmp --with-privatelibdir=$HOME/unrealircd/lib --with-includedir=$HOME/unrealircd/include
+          make -j$(nproc)
+          make install
+          mkdir -p $HOME/unrealircd/conf/tls
+          openssl req -x509 -nodes -newkey rsa:2048 -keyout $HOME/unrealircd/conf/tls/server.key.pem -out $HOME/unrealircd/conf/tls/server.cert.pem -days 365 -subj "/CN=udb-ci.test"
+
+      - name: Build UDB and Test Modules
+        run: |
+          mkdir -p ~/unrealircd-src/src/modules/third
+          ln -s "$GITHUB_WORKSPACE" ~/unrealircd-src/src/modules/third/udb
+          cd ~/unrealircd-src
+          make custommodule MODULEFILE=udb/src/udb
+          mkdir -p ~/unrealircd/modules/third
+          cp src/modules/third/udb/src/udb.so ~/unrealircd/modules/third/
+          make custommodule MODULEFILE=udb/tests/udb_test_mutator
+          cp src/modules/third/udb/tests/udb_test_mutator.so ~/unrealircd/modules/third/
+
+      - name: Verify Bundle Integrity
+        run: |
+          python3 scripts/bundle.py
+          git diff --exit-code dist/udb.c
+
+      - name: Run Core Test Suites
+        run: |
+          python3 tests/test_loader_fail_safe.py
+          python3 tests/test_numeric_strict.py
+          python3 tests/test_ipv6_and_paths.py
+          python3 tests/test_staged_sync_caps.py
+
+      - name: Run Integration & Multi-Hop Test Suites
+        run: |
+          python3 tests/test_multihop_mutations.py
+          python3 tests/test_propagator_failover.py
+          python3 tests/runtime_clone_limit.py
+          python3 tests/runtime_channel_modes_ins.py
+          python3 tests/runtime_debug_notices.py
+          python3 tests/runtime_lock_modes.py
+          python3 tests/runtime_schema_validation.py
+          python3 tests/staged_runtime_effects.py

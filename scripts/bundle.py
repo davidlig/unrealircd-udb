@@ -108,6 +108,12 @@ def bundle_sources():
 
     subprocess.run(["clang-format", "-i", OUT_C_FILE], check=True)
 
+    with open(OUT_C_FILE, "r", encoding="utf-8") as f:
+        content = f.read()
+    if not content.endswith("\n"):
+        with open(OUT_C_FILE, "a", encoding="utf-8") as f:
+            f.write("\n")
+
     print(f"[+] Successfully bundled standalone C file -> {OUT_C_FILE}")
     return OUT_C_FILE
 

@@ -16,21 +16,35 @@ import tempfile
 import time
 
 
-ROOT = pathlib.Path(__file__).resolve().parents[5]
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 RUNTIME_ROOT = pathlib.Path(os.environ.get("UDB_TEST_IRCD_ROOT", pathlib.Path.home() / "unrealircd"))
 DEFAULT_IRCD = RUNTIME_ROOT / "bin/unrealircd"
 CLOAK_KEYS = ("aB3" * 30, "cD4" * 30, "eF5" * 30)
-MUTATOR_SOURCE = ROOT / "src/modules/third/udb/tests/udb_test_mutator.c"
+MUTATOR_SOURCE = pathlib.Path(__file__).resolve().parent / "udb_test_mutator.c"
 MUTATOR_MODULE = MUTATOR_SOURCE.with_suffix(".so")
 MUTATOR_RECORD = "udb-test-mutator authorized-insert"
 MUTATOR_INS_TRIGGER = "udb-test-mutator-ins-go"
 MUTATOR_DEL_TRIGGER = "udb-test-mutator-del-go"
 MUTATOR_DRP_TRIGGER = "udb-test-mutator-drp-go"
-RENAME_FAIL_SOURCE = ROOT / "src/modules/third/udb/tests/udb_snapshot_rename_fail.c"
+RENAME_FAIL_SOURCE = pathlib.Path(__file__).resolve().parent / "udb_snapshot_rename_fail.c"
 RENAME_FAIL_MODULE = RENAME_FAIL_SOURCE.with_suffix(".so")
 MUTATOR_OPT_TRIGGER = "udb-test-mutator-opt-go"
 MUTATOR_END_TRIGGER = "udb-test-mutator-end-go"
 K_STAGED_RECORD = "G::*@udb-staged.test::reason staged-sync-k-effect"
+
+
+def find_module_path():
+    env_path = os.environ.get("UDB_MODULE_PATH")
+    if env_path and os.path.isfile(env_path):
+        return pathlib.Path(env_path)
+    for candidate in (
+        REPO_ROOT / "src" / "udb.so",
+        REPO_ROOT / "dist" / "udb.so",
+        RUNTIME_ROOT / "modules/third/udb.so",
+    ):
+        if candidate.is_file():
+            return candidate
+    return REPO_ROOT / "src" / "udb.so"
 
 
 def skip(message):
@@ -38,10 +52,21 @@ def skip(message):
     return 77
 
 
+def free_ports(count):
+    socks = []
+    ports = []
+    for _ in range(count):
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        socks.append(s)
+        ports.append(s.getsockname()[1])
+    for s in socks:
+        s.close()
+    return ports
+
+
 def free_port():
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+    return free_ports(1)[0]
 
 
 def write_config(path, name, sid, client_port, server_port, tls_port, peer, peer_port, module, dbdir,
@@ -50,6 +75,9 @@ def write_config(path, name, sid, client_port, server_port, tls_port, peer, peer
                 'options { autoconnect; } }\n') if autoconnect else ""
     path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
 include "{RUNTIME_ROOT}/conf/snomasks.default.conf";
+blacklist-module "geoip_classic";
+blacklist-module "geoip_mmdb";
+blacklist-module "geoip_csv";
 
 me {{
     name "{name}";
@@ -90,10 +118,14 @@ def bwrap_command(node, ircd, config, module, mutator=None, configtest=False, re
                    rename_failure_arm=False, fsync_failure=False):
     # A read-only host root leaves dependencies and installed modules available.
     # The runtime data mount isolates UnrealIRCd's control socket; UDB uses data/.
+    for sub in ("runtime-data", "tmp", "cache", "logs"):
+        (node / sub).mkdir(parents=True, exist_ok=True)
     command = ["bwrap", "--die-with-parent", "--ro-bind", "/", "/",
                 "--bind", str(node), str(node),
                 "--bind", str(node / "runtime-data"), str(RUNTIME_ROOT / "data"),
                 "--bind", str(node / "tmp"), str(RUNTIME_ROOT / "tmp"),
+                "--bind", str(node / "cache"), str(RUNTIME_ROOT / "cache"),
+                "--bind", str(node / "logs"), str(RUNTIME_ROOT / "logs"),
                 "--ro-bind", str(node / "modules" / "third"), str(RUNTIME_ROOT / "modules/third"),
                 "--dev-bind", "/dev", "/dev", "--proc", "/proc",
                 "--setenv", "UDB_TEST_MUTATOR_DIRECTORY", str(node / "data")]
@@ -124,7 +156,10 @@ def run_configtest(node, ircd, config, module, mutator=None):
 
 
 def build_mutator():
-    result = subprocess.run(["make", "custommodule", "MODULEFILE=udb/tests/udb_test_mutator"], cwd=ROOT,
+    if MUTATOR_MODULE.is_file():
+        return
+    src_root = pathlib.Path(os.environ.get("UNREALIRCD_SRC_ROOT", REPO_ROOT.parents[3] if len(REPO_ROOT.parents) > 3 and (REPO_ROOT.parents[3] / "Makefile").is_file() else REPO_ROOT))
+    result = subprocess.run(["make", "custommodule", "MODULEFILE=udb/tests/udb_test_mutator"], cwd=src_root,
                             text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
     if result.returncode or not MUTATOR_MODULE.is_file():
         raise RuntimeError(f"test mutator build failed:\n{result.stdout}")
@@ -132,8 +167,10 @@ def build_mutator():
 
 
 def build_rename_fail_interposer():
+    if RENAME_FAIL_MODULE.is_file():
+        return
     result = subprocess.run(["cc", "-shared", "-fPIC", "-o", str(RENAME_FAIL_MODULE),
-                             str(RENAME_FAIL_SOURCE), "-ldl"], cwd=ROOT, text=True,
+                             str(RENAME_FAIL_SOURCE), "-ldl"], cwd=REPO_ROOT, text=True,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
     if result.returncode or not RENAME_FAIL_MODULE.is_file():
         raise RuntimeError(f"snapshot rename-failure interposer build failed:\n{result.stdout}")
@@ -312,7 +349,7 @@ def main():
     parser.add_argument("--ircd", type=pathlib.Path, default=DEFAULT_IRCD,
                         help="UnrealIRCd binary (default: installed binary)")
     parser.add_argument("--module", type=pathlib.Path,
-                        default=ROOT / "src/modules/third/udb/src/udb.so",
+                        default=find_module_path(),
                         help="compiled UDB module to load")
     parser.add_argument("--timeout", type=int, default=15, help="S2S wait time in seconds")
     parser.add_argument("--keep", action="store_true", help="preserve temporary node directories")
@@ -375,7 +412,7 @@ def main():
         for db in (a_db, b_db, a_k_db, b_k_db):
             os.utime(db, (tie_time, tie_time))
 
-        a_client, a_server, a_tls, b_client, b_server, b_tls = (free_port() for _ in range(6))
+        a_client, a_server, a_tls, b_client, b_server, b_tls = free_ports(6)
         a_conf, b_conf = a / "unrealircd.conf", b / "unrealircd.conf"
         link_password = "udb-test-" + secrets.token_hex(32)
         write_config(a_conf, "udb-a.test", "0A1", a_client, a_server, a_tls,

@@ -20,10 +20,24 @@ import tempfile
 import time
 
 
-ROOT = pathlib.Path(__file__).resolve().parents[5]
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 RUNTIME_ROOT = pathlib.Path(os.environ.get("UDB_TEST_IRCD_ROOT", pathlib.Path.home() / "unrealircd"))
 DEFAULT_IRCD = RUNTIME_ROOT / "bin/unrealircd"
 CLOAK_KEYS = ("aB3" * 30, "cD4" * 30, "eF5" * 30)
+
+
+def find_module_path():
+    env_path = os.environ.get("UDB_MODULE_PATH")
+    if env_path and os.path.isfile(env_path):
+        return pathlib.Path(env_path)
+    for candidate in (
+        REPO_ROOT / "src" / "udb.so",
+        REPO_ROOT / "dist" / "udb.so",
+        RUNTIME_ROOT / "modules/third/udb.so",
+    ):
+        if candidate.is_file():
+            return candidate
+    return REPO_ROOT / "src" / "udb.so"
 
 SERVICES_NAME = "udb-svc.test"
 SERVICES_SID = "002"
@@ -57,6 +71,9 @@ def sha256(password):
 def write_config(path, name, sid, client_port, server_port, tls_port, module, dbdir):
     path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
 include "{RUNTIME_ROOT}/conf/snomasks.default.conf";
+blacklist-module "geoip_classic";
+blacklist-module "geoip_mmdb";
+blacklist-module "geoip_csv";
 
 me {{
     name "{name}";
@@ -95,10 +112,14 @@ udb {{
 
 
 def bwrap_command(node, ircd, config, configtest=False):
+    for sub in ("runtime-data", "tmp", "cache", "logs"):
+        (node / sub).mkdir(parents=True, exist_ok=True)
     command = ["bwrap", "--die-with-parent", "--ro-bind", "/", "/",
                "--bind", str(node), str(node),
                "--bind", str(node / "runtime-data"), str(RUNTIME_ROOT / "data"),
                "--bind", str(node / "tmp"), str(RUNTIME_ROOT / "tmp"),
+               "--bind", str(node / "cache"), str(RUNTIME_ROOT / "cache"),
+               "--bind", str(node / "logs"), str(RUNTIME_ROOT / "logs"),
                "--ro-bind", str(node / "modules" / "third"), str(RUNTIME_ROOT / "modules/third"),
                "--dev-bind", "/dev", "/dev", "--proc", "/proc",
                str(ircd), "-f", str(config)]
@@ -168,7 +189,7 @@ class IrcClient:
             if matches:
                 return self.lines[start:]
             self.receive(deadline)
-        raise AssertionError(f"{self.nick}: no se recibió {description}; líneas={self.lines[start:]!r}")
+        raise AssertionError(f"{self.nick}: did not receive {description}; lines={self.lines[start:]!r}")
 
     def request(self, command, terminator, description):
         start = len(self.lines)
@@ -228,11 +249,11 @@ class FakeServices:
             if matches:
                 return matches
             self.receive(deadline)
-        raise AssertionError(f"services: no se recibió {description}; líneas={self.lines!r}")
+        raise AssertionError(f"services: did not receive {description}; lines={self.lines!r}")
 
     def wait_hel(self):
         self.wait_for(lambda line: line.startswith(f":{self.ircd_sid} DB {self.sid} HEL 4 "),
-                      "UDB HEL del servidor")
+                      "server UDB HEL")
 
     def hel_ack(self):
         self.send(f"DB {self.ircd_sid} HEL 4 ACK")
@@ -314,7 +335,7 @@ def exercise(host, client_port, server_port, c_db):
         alice = IrcClient(host, client_port, "alice-setup")
         clients.append(alice)
         alice.request("NICK alice:secret", lambda line: " NICK :alice" in line,
-                      "cambio al nick registrado")
+                      "nick change to registered nick")
         alice.wait_for(lambda line: " MODE alice " in line and "+r" in line, "nick registration +r")
         alice.wait_for(lambda line: line.startswith(f"{IPSERV_PREFIX} NOTICE alice :") and
                        "Your vhost is now alice.test" in line,
@@ -371,21 +392,21 @@ def exercise(host, client_port, server_port, c_db):
             time.sleep(0.05)
         mode_traffic = [line for line in alice.lines[start:] if f"MODE {CHANNEL}" in line]
         require(not mode_traffic,
-                f"INS idéntico de modes generó cambios de modos: {mode_traffic!r}")
+                f"identical modes INS generated mode changes: {mode_traffic!r}")
         require(any("~alice" in line for line in names(alice)),
-                f"INS idéntico de modes quitó el +q del fundador: {names(alice)!r}")
+                f"identical modes INS removed founder +q: {names(alice)!r}")
 
         # Phase 2: a changed modes value must apply, still without touching +q.
         start = len(alice.lines)
         services.send_ins(f"C::{CHANNEL}::modes", "+ntm")
         alice.wait_for(lambda line: f"MODE {CHANNEL}" in line and "+m" in line,
-                       "aplicación del nuevo valor de modes", start=start)
+                       "application of new modes value", start=start)
         require(not any("-q" in line for line in alice.lines[start:]),
-                f"cambio de modes revocó +q del fundador: {alice.lines[start:]!r}")
+                f"modes change revoked founder +q: {alice.lines[start:]!r}")
         require(any("~alice" in line for line in names(alice)),
-                f"cambio de modes quitó el +q del fundador: {names(alice)!r}")
+                f"modes change removed founder +q: {names(alice)!r}")
         require(wait_for_file_content(c_db, f"{CHANNEL}::modes +ntm", 5),
-                f"el valor cambiado de modes no se persistió en {c_db}")
+                f"changed modes value was not persisted in {c_db}")
 
         # Every UDB-managed member rank, including generic C::modes ranks, must
         # be emitted by ChanServ when the target is already present.
@@ -416,15 +437,15 @@ def exercise(host, client_port, server_port, c_db):
         start = len(alice.lines)
         services.send_ins(f"C::{CHANNEL}", "*123")
         alice.wait_for(lambda line: f"MODE {CHANNEL}" in line and "+q alice" in line,
-                       "restauración del founder +q tras el INS del canal", start=start)
+                       "restoration of founder +q after channel INS", start=start)
         require(any(line.startswith(f"{CHANSERV_PREFIX} MODE {CHANNEL} ") and "-q alice" in line
                     for line in alice.lines[start:]),
-                f"el INS del canal no revocó el +q previo: {alice.lines[start:]!r}")
+                f"channel INS did not revoke previous +q: {alice.lines[start:]!r}")
         require(any(line.startswith(f"{CHANSERV_PREFIX} MODE {CHANNEL} ") and "+q alice" in line
                     for line in alice.lines[start:]),
                 f"the founder +q restoration was not originated by ChanServ: {alice.lines[start:]!r}")
         require(any("~alice" in line for line in names(alice)),
-                f"el INS del canal no restauró el +q del fundador: {names(alice)!r}")
+                f"channel INS did not restore founder +q: {names(alice)!r}")
 
         services.send_del(f"C::{CHANNEL}::topic")
         alice.wait_for(lambda line: line.startswith(f"{CHANSERV_PREFIX} TOPIC {CHANNEL} :"),
@@ -449,8 +470,8 @@ def exercise(host, client_port, server_port, c_db):
                      ("explicit IP vhost has been removed" in line or
                       "IP-derived vhost is now" in line),
                      "explicit IP vhost reversion")
-        print("PASS: INS idéntico sin churn ni pérdida de +q, modos aplicados al cambiar y "
-              "fundador restaurado tras el INS del perfil de canal")
+        print("PASS: Identical INS avoided churn and preserved +q, modes applied on change, and "
+              "founder restored after channel profile INS")
     finally:
         if services:
             services.close()
@@ -462,7 +483,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ircd", type=pathlib.Path, default=DEFAULT_IRCD,
                         help="UnrealIRCd binary (default: UDB_TEST_IRCD_ROOT/bin/unrealircd)")
-    parser.add_argument("--module", type=pathlib.Path, default=ROOT / "src/modules/third/udb/src/udb.so",
+    parser.add_argument("--module", type=pathlib.Path, default=find_module_path(),
                         help="compiled UDB module")
     parser.add_argument("--timeout", type=int, default=15, help="daemon readiness timeout in seconds")
     parser.add_argument("--keep", action="store_true", help="preserve the temporary node directory")

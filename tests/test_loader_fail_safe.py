@@ -38,6 +38,9 @@ def free_port():
 def write_config(path, name, sid, client_port, tls_port, module, dbdir):
     path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
 include "{RUNTIME_ROOT}/conf/snomasks.default.conf";
+blacklist-module "geoip_classic";
+blacklist-module "geoip_mmdb";
+blacklist-module "geoip_csv";
 
 me {{
     name "{name}";
@@ -65,10 +68,14 @@ udb {{
 
 
 def bwrap_command(node, ircd, config, configtest=False):
+    for sub in ("runtime-data", "tmp", "cache", "logs"):
+        (node / sub).mkdir(parents=True, exist_ok=True)
     command = ["bwrap", "--die-with-parent", "--ro-bind", "/", "/",
                "--bind", str(node), str(node),
                "--bind", str(node / "runtime-data"), str(RUNTIME_ROOT / "data"),
                "--bind", str(node / "tmp"), str(RUNTIME_ROOT / "tmp"),
+               "--bind", str(node / "cache"), str(RUNTIME_ROOT / "cache"),
+               "--bind", str(node / "logs"), str(RUNTIME_ROOT / "logs"),
                "--ro-bind", str(node / "modules" / "third"), str(RUNTIME_ROOT / "modules/third"),
                "--dev-bind", "/dev", "/dev", "--proc", "/proc",
                str(ircd), "-f", str(config)]
@@ -86,9 +93,22 @@ def stop(process):
             process.wait()
 
 
+def find_module_path():
+    env_path = os.environ.get("UDB_MODULE_PATH")
+    if env_path and os.path.isfile(env_path):
+        return pathlib.Path(env_path)
+    local_path = pathlib.Path(__file__).resolve().parent.parent / "src" / "udb.so"
+    if local_path.is_file():
+        return local_path
+    runtime_path = RUNTIME_ROOT / "modules/third/udb.so"
+    if runtime_path.is_file():
+        return runtime_path
+    return local_path
+
+
 def run_tests(ircd_bin, keep=False):
     tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="udb-loader-test-"))
-    module_path = ROOT / "src/modules/third/udb/src/udb.so"
+    module_path = find_module_path()
 
     try:
         # -------------------------------------------------------------
@@ -115,7 +135,7 @@ def run_tests(ircd_bin, keep=False):
             raise RuntimeError(f"ircd failed to start with empty DB directory:\n{stdout}")
 
         stop(proc)
-        print("PASS: ENOENT en directorio de base de datos arrancó limpiamente")
+        print("PASS: ENOENT on database directory started cleanly")
 
         # -------------------------------------------------------------
         # Test 2: EACCES on one block file aborts module load
@@ -151,7 +171,7 @@ def run_tests(ircd_bin, keep=False):
         if unreadable_db.read_bytes() != original_bytes:
             raise AssertionError("Original database file was modified after failed load!")
 
-        print("PASS: EACCES en archivo de bloque abortó la carga de UDB y protegió el archivo original contra sobreescritura")
+        print("PASS: EACCES on block file aborted UDB load and protected original file against overwrite")
 
         # -------------------------------------------------------------
         # Test 3: Malformed record in middle aborts load and keeps file intact
@@ -182,7 +202,7 @@ def run_tests(ircd_bin, keep=False):
 
         if corrupt_db.read_bytes() != original_bytes3:
             raise AssertionError("Corrupted database file was modified after failed transactional load!")
-        print("PASS: Registro malformado en base de datos abortó la carga y preservó el archivo original")
+        print("PASS: Malformed database record aborted load and preserved original file")
 
         # -------------------------------------------------------------
         # Test 4: Overlong record aborts load and preserves disk
@@ -213,7 +233,7 @@ def run_tests(ircd_bin, keep=False):
 
         if overlong_db.read_bytes() != original_bytes4:
             raise AssertionError("Overlong database file was modified after failed transactional load!")
-        print("PASS: Línea excesivamente larga abortó la carga y preservó el archivo original")
+        print("PASS: Overlong line aborted load and preserved original file")
 
         # -------------------------------------------------------------
         # Test 5: Multi-block init failure does not persist other blocks
@@ -249,7 +269,7 @@ def run_tests(ircd_bin, keep=False):
 
         if nicks_db.read_bytes() != nicks_bytes or channels_db.read_bytes() != channels_bytes:
             raise AssertionError("Database files were modified during failed multi-block initialization!")
-        print("PASS: Fallo de inicialización multi-bloque protegió todos los archivos .db contra persistencia indebida")
+        print("PASS: Multi-block initialization failure protected all .db files against unwarranted persistence")
 
     finally:
         if not keep:

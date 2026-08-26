@@ -112,8 +112,8 @@ static UdbBlock *udb_mutation_path_block(UdbContext *ctx, const char *path)
 	return block;
 }
 
-static void udb_mutation_forward_ins(Client *source, Client *except, const char *target,
-                                     const char *path, const char *data)
+static void udb_mutation_forward_ins(Client *source, Client *except, const char *target, const char *path,
+									 const char *data)
 {
 	udb_sendto_confirmed_servers(except, ":%s DB %s INS %s %s", source->id, target, path, data);
 }
@@ -133,20 +133,18 @@ static int udb_record_data_equals(UdbRecord *rec, const char *data)
 	return !strcmp(rec->data_str, data);
 }
 
-static void udb_mutation_forward_del(Client *source, Client *except, const char *target,
-                                     const char *path)
+static void udb_mutation_forward_del(Client *source, Client *except, const char *target, const char *path)
 {
 	udb_sendto_confirmed_servers(except, ":%s DB %s DEL %s", source->id, target, path);
 }
 
 static void udb_mutation_persist_error(Client *client, const char *subcmd, char letter)
 {
-	sendto_one(client, NULL, ":%s DB %s ERR %s %d %c", me.id, client->id,
-	           subcmd, UDB_ERR_FATAL, letter);
+	sendto_one(client, NULL, ":%s DB %s ERR %s %d %c", me.id, client->id, subcmd, UDB_ERR_FATAL, letter);
 }
 
-static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target,
-                             const char *path, const char *data, int is_for_me, int is_broadcast)
+static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target, const char *path, const char *data,
+							 int is_for_me, int is_broadcast)
 {
 	UdbBlock *block = udb_mutation_path_block(ctx, path);
 	char letter = path && *path ? path[0] : '0';
@@ -176,10 +174,8 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 		if (!udb_record_validate(block, path + 3, data))
 		{
 			udb_log(ULOG_WARNING, "UDB_INS_SCHEMA_REJECT", client,
-			        "Rejected S2S INS for invalid or unknown record: $path",
-			        log_data_string("path", path));
-			sendto_one(client, NULL, ":%s DB %s ERR INS %d %c", me.id, client->id,
-			           UDB_ERR_PARAMS, letter);
+					"Rejected S2S INS for invalid or unknown record: $path", log_data_string("path", path));
+			sendto_one(client, NULL, ":%s DB %s ERR INS %d %c", me.id, client->id, UDB_ERR_PARAMS, letter);
 			return;
 		}
 		old_rec = udb_record_find_path(ctx, block, path + 3);
@@ -216,8 +212,8 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 		if (old_rec && !unchanged)
 		{
 			if (block->letter != 'C' || old_rec->parent == block->tree ||
-			    (strcmp(old_rec->key, CKEY_MODES) && strcmp(old_rec->key, CKEY_TOPIC) &&
-			     strcmp(old_rec->key, CKEY_OPTIONS)))
+				(strcmp(old_rec->key, CKEY_MODES) && strcmp(old_rec->key, CKEY_TOPIC) &&
+				 strcmp(old_rec->key, CKEY_OPTIONS)))
 				udb_remove_special_record(ctx, block, old_rec);
 		}
 		udb_block_replace_tree(ctx, block, tree, udb_record_count_tree(tree));
@@ -241,8 +237,8 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 	udb_mutation_forward_ins(client, client, target, path, data);
 }
 
-static void udb_mutation_del(UdbContext *ctx, Client *client, const char *target,
-                             const char *path, int is_for_me, int is_broadcast)
+static void udb_mutation_del(UdbContext *ctx, Client *client, const char *target, const char *path, int is_for_me,
+							 int is_broadcast)
 {
 	UdbBlock *block = udb_mutation_path_block(ctx, path);
 	char letter = path && *path ? path[0] : '0';
@@ -281,8 +277,8 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, const char *target
 		UdbRecord *candidate_line = NULL;
 		UdbRecord *tree = udb_record_clone_tree(block->tree, old_rec, &candidate_rec);
 		unsigned int record_count;
-		if (block->letter == 'K' && candidate_rec && candidate_rec->parent &&
-		    candidate_rec->parent->parent && candidate_rec->parent->parent != tree)
+		if (block->letter == 'K' && candidate_rec && candidate_rec->parent && candidate_rec->parent->parent &&
+			candidate_rec->parent->parent != tree)
 			candidate_line = candidate_rec->parent;
 		if (candidate_rec)
 			udb_record_delete_tree(candidate_rec);
@@ -312,8 +308,8 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, const char *target
 	udb_mutation_forward_del(client, client, target, path);
 }
 
-static void udb_mutation_drp(UdbContext *ctx, Client *client, const char *target,
-                             char letter, int is_for_me, int is_broadcast)
+static void udb_mutation_drp(UdbContext *ctx, Client *client, const char *target, char letter, int is_for_me,
+							 int is_broadcast)
 {
 	if (is_for_me)
 	{
@@ -359,8 +355,8 @@ static void udb_mutation_drp(UdbContext *ctx, Client *client, const char *target
 	udb_sendto_confirmed_servers(client, ":%s DB %s DRP %c", client->id, target, letter);
 }
 
-static void udb_mutation_opt(UdbContext *ctx, Client *client, const char *target,
-                             char letter, const char *modified_at, int is_for_me, int is_broadcast)
+static void udb_mutation_opt(UdbContext *ctx, Client *client, const char *target, char letter, const char *modified_at,
+							 int is_for_me, int is_broadcast)
 {
 	if (is_for_me)
 	{

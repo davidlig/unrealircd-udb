@@ -16,20 +16,20 @@ static int udb_block_letter_to_index(char letter)
 {
 	switch (letter)
 	{
-		case 'N':
-			return 0;
-		case 'C':
-			return 1;
-		case 'I':
-			return 2;
-		case 'S':
-			return 3;
-		case 'L':
-			return 4;
-		case 'K':
-			return 5;
-		default:
-			return 0;
+	case 'N':
+		return 0;
+	case 'C':
+		return 1;
+	case 'I':
+		return 2;
+	case 'S':
+		return 3;
+	case 'L':
+		return 4;
+	case 'K':
+		return 5;
+	default:
+		return 0;
 	}
 }
 
@@ -126,12 +126,11 @@ static UdbRecord *udb_hash_find(UdbContext *ctx, int block_idx, const char *key)
  * ======================================================================== */
 static const char *udb_get_shared_subkey(const char *key)
 {
-	static const char *known_keys[] = {
-	    "pass", "vhost", "oper", "swhois", "snomasks", "modes",
-	    "access", "forbid", "suspended", "challenge", "founder", "topic",
-	    "options", "clones", "nolines", "host", "encryption_key", "suffix",
-	    "nickserv", "chanserv", "ipserv", "quit_ips", "quit_clones", "flood",
-	    "propagator", "type", "action", "duration", "reason", NULL};
+	static const char *known_keys[] = {"pass",		 "vhost",	 "oper",	  "swhois",	   "snomasks",		 "modes",
+									   "access",	 "forbid",	 "suspended", "challenge", "founder",		 "topic",
+									   "options",	 "clones",	 "nolines",	  "host",	   "encryption_key", "suffix",
+									   "nickserv",	 "chanserv", "ipserv",	  "quit_ips",  "quit_clones",	 "flood",
+									   "propagator", "type",	 "action",	  "duration",  "reason",		 NULL};
 
 	for (int i = 0; known_keys[i]; i++)
 		if (!strcasecmp(known_keys[i], key))
@@ -188,7 +187,8 @@ static int udb_path_encode_component(const char *raw, char *buf, size_t bufsz)
 			buf[out_len++] = '%';
 			buf[out_len++] = hex[(*p >> 4) & 0x0F];
 			buf[out_len++] = hex[*p & 0x0F];
-		} else
+		}
+		else
 		{
 			if (out_len + 1 >= bufsz)
 				return 0;
@@ -239,7 +239,8 @@ static int udb_path_decode_component(const char *encoded, char *buf, size_t bufs
 				return 0;
 			buf[out_len++] = (char)val;
 			p += 2;
-		} else
+		}
+		else
 		{
 			if (out_len + 1 >= bufsz)
 				return 0;
@@ -266,7 +267,8 @@ static int udb_path_append(char *dst, size_t dst_size, size_t *used, const char 
 			return 0;
 		memcpy(dst + cur_len, "::", 2);
 		cur_len += 2;
-	} else
+	}
+	else
 	{
 		if (enc_len >= dst_size)
 			return 0;
@@ -333,8 +335,7 @@ static void udb_record_free_tree(UdbRecord *rec)
 }
 
 /* Candidate trees are deliberately unindexed: they are private until persisted. */
-static UdbRecord *udb_record_clone_tree(UdbRecord *rec, UdbRecord *needle,
-                                        UdbRecord **needle_clone)
+static UdbRecord *udb_record_clone_tree(UdbRecord *rec, UdbRecord *needle, UdbRecord **needle_clone)
 {
 	UdbRecord *copy;
 	UdbRecord **child;
@@ -378,8 +379,7 @@ static unsigned int udb_record_count_tree(UdbRecord *rec)
 	return count;
 }
 
-static UdbRecord *udb_record_insert_path(UdbRecord *tree, const char *path,
-                                         const char *data)
+static UdbRecord *udb_record_insert_path(UdbRecord *tree, const char *path, const char *data)
 {
 	char pathbuf[UDB_RECORD_PATH_MAX];
 	char decoded_part[UDB_COMPONENT_MAX];
@@ -419,7 +419,8 @@ static UdbRecord *udb_record_insert_path(UdbRecord *tree, const char *path,
 	{
 		udb_strtoul_strict(data + 1, &parent->data_num);
 		parent->data_str = NULL;
-	} else if (data)
+	}
+	else if (data)
 	{
 		safe_strdup(parent->data_str, data);
 		parent->data_num = 0;
@@ -466,7 +467,8 @@ static int udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbuf
 		if (old_len + 2 + enc_len >= pathlen)
 			return 0;
 		strlcat(pathbuf, "::", pathlen);
-	} else
+	}
+	else
 	{
 		if (enc_len >= pathlen)
 			return 0;
@@ -507,9 +509,8 @@ static int udb_file_cleanup_snapshot_temp(UdbBlock *block)
 		return 1;
 	if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", block->filepath) >= (int)sizeof(tmp_path))
 	{
-		udb_log(ULOG_WARNING, "UDB_SNAPSHOT_TEMP_CLEANUP", NULL,
-		        "Temporary snapshot path is too long for block $block",
-		        log_data_string("block", block->filepath));
+		udb_log(ULOG_WARNING, "UDB_SNAPSHOT_TEMP_CLEANUP", NULL, "Temporary snapshot path is too long for block $block",
+				log_data_string("block", block->filepath));
 		return 0;
 	}
 
@@ -518,23 +519,20 @@ static int udb_file_cleanup_snapshot_temp(UdbBlock *block)
 		if (ENOENT == errno)
 			return 1;
 		saved_errno = errno;
-		udb_log(ULOG_WARNING, "UDB_SNAPSHOT_TEMP_CLEANUP", NULL,
-		        "Cannot inspect temporary snapshot $path: $error",
-		        log_data_string("path", tmp_path), log_data_string("error", strerror(saved_errno)));
+		udb_log(ULOG_WARNING, "UDB_SNAPSHOT_TEMP_CLEANUP", NULL, "Cannot inspect temporary snapshot $path: $error",
+				log_data_string("path", tmp_path), log_data_string("error", strerror(saved_errno)));
 		return 0;
 	}
 	if (S_ISLNK(st.st_mode))
 	{
-		udb_log(ULOG_WARNING, "UDB_SNAPSHOT_TEMP_CLEANUP", NULL,
-		        "Refusing to remove symlink temporary snapshot $path",
-		        log_data_string("path", tmp_path));
+		udb_log(ULOG_WARNING, "UDB_SNAPSHOT_TEMP_CLEANUP", NULL, "Refusing to remove symlink temporary snapshot $path",
+				log_data_string("path", tmp_path));
 		return 0;
 	}
 	if (!S_ISREG(st.st_mode))
 	{
 		udb_log(ULOG_WARNING, "UDB_SNAPSHOT_TEMP_CLEANUP", NULL,
-		        "Refusing to remove non-regular temporary snapshot $path",
-		        log_data_string("path", tmp_path));
+				"Refusing to remove non-regular temporary snapshot $path", log_data_string("path", tmp_path));
 		return 0;
 	}
 
@@ -543,17 +541,15 @@ static int udb_file_cleanup_snapshot_temp(UdbBlock *block)
 		if (ENOENT == errno)
 			return 1;
 		saved_errno = errno;
-		udb_log(ULOG_WARNING, "UDB_SNAPSHOT_TEMP_CLEANUP", NULL,
-		        "Cannot remove temporary snapshot $path: $error",
-		        log_data_string("path", tmp_path), log_data_string("error", strerror(saved_errno)));
+		udb_log(ULOG_WARNING, "UDB_SNAPSHOT_TEMP_CLEANUP", NULL, "Cannot remove temporary snapshot $path: $error",
+				log_data_string("path", tmp_path), log_data_string("error", strerror(saved_errno)));
 		return 0;
 	}
 
 	return 1;
 }
 
-static UdbSnapshotResult udb_file_write_snapshot(UdbBlock *block, UdbRecord *tree,
-                                                 unsigned int record_count)
+static UdbSnapshotResult udb_file_write_snapshot(UdbBlock *block, UdbRecord *tree, unsigned int record_count)
 {
 	char dir_path[UDB_BLOCK_PATH_MAX];
 	char tmp_path[UDB_BLOCK_PATH_MAX];
@@ -589,7 +585,7 @@ static UdbSnapshotResult udb_file_write_snapshot(UdbBlock *block, UdbRecord *tre
 	tmp_created = 1;
 	dir_fd = open(dir_path, O_RDONLY
 #ifdef O_DIRECTORY
-	                            | O_DIRECTORY
+								| O_DIRECTORY
 #endif
 	);
 	if (dir_fd < 0)
@@ -601,8 +597,7 @@ static UdbSnapshotResult udb_file_write_snapshot(UdbBlock *block, UdbRecord *tre
 		goto cleanup;
 	fd = -1;
 	if (fprintf(fp, "; UDB Block %c - Version %d\n", block->letter, block->version) < 0 ||
-	    fprintf(fp, "; Saved: %ld\n", (long)time(NULL)) < 0 ||
-	    fprintf(fp, "; Records: %u\n", record_count) < 0)
+		fprintf(fp, "; Saved: %ld\n", (long)time(NULL)) < 0 || fprintf(fp, "; Records: %u\n", record_count) < 0)
 		goto cleanup;
 	if (tree)
 	{
@@ -629,16 +624,14 @@ static UdbSnapshotResult udb_file_write_snapshot(UdbBlock *block, UdbRecord *tre
 	{
 		saved_errno = errno;
 		udb_log(ULOG_ERROR, "UDB_SNAPSHOT_DIR_FSYNC_FAILED", NULL,
-		        "Failed to fsync directory for block $block after commit: $error",
-		        log_data_string("block", block->filepath),
-		        log_data_string("error", strerror(saved_errno)));
+				"Failed to fsync directory for block $block after commit: $error",
+				log_data_string("block", block->filepath), log_data_string("error", strerror(saved_errno)));
 		if (close(dir_fd) != 0)
 		{
 			saved_errno = errno;
 			udb_log(ULOG_ERROR, "UDB_SNAPSHOT_DIR_CLOSE_FAILED", NULL,
-			        "Failed to close directory descriptor for block $block after commit: $error",
-			        log_data_string("block", block->filepath),
-			        log_data_string("error", strerror(saved_errno)));
+					"Failed to close directory descriptor for block $block after commit: $error",
+					log_data_string("block", block->filepath), log_data_string("error", strerror(saved_errno)));
 		}
 		return UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN;
 	}
@@ -646,9 +639,8 @@ static UdbSnapshotResult udb_file_write_snapshot(UdbBlock *block, UdbRecord *tre
 	{
 		saved_errno = errno;
 		udb_log(ULOG_ERROR, "UDB_SNAPSHOT_DIR_CLOSE_FAILED", NULL,
-		        "Failed to close directory descriptor for block $block after commit: $error",
-		        log_data_string("block", block->filepath),
-		        log_data_string("error", strerror(saved_errno)));
+				"Failed to close directory descriptor for block $block after commit: $error",
+				log_data_string("block", block->filepath), log_data_string("error", strerror(saved_errno)));
 		return UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN;
 	}
 	return UDB_SNAPSHOT_COMMITTED;

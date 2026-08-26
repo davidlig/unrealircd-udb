@@ -14,10 +14,24 @@ import tempfile
 import time
 
 
-ROOT = pathlib.Path(__file__).resolve().parents[5]
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 RUNTIME_ROOT = pathlib.Path(os.environ.get("UDB_TEST_IRCD_ROOT", pathlib.Path.home() / "unrealircd"))
 DEFAULT_IRCD = RUNTIME_ROOT / "bin/unrealircd"
 CLOAK_KEYS = ("aB3" * 30, "cD4" * 30, "eF5" * 30)
+
+
+def find_module_path():
+    env_path = os.environ.get("UDB_MODULE_PATH")
+    if env_path and os.path.isfile(env_path):
+        return pathlib.Path(env_path)
+    for candidate in (
+        REPO_ROOT / "src" / "udb.so",
+        REPO_ROOT / "dist" / "udb.so",
+        RUNTIME_ROOT / "modules/third/udb.so",
+    ):
+        if candidate.is_file():
+            return candidate
+    return REPO_ROOT / "src" / "udb.so"
 
 SERVICES_NAME = "udb-svc.test"
 SERVICES_SID = "002"
@@ -51,6 +65,9 @@ def sha256(password):
 def write_config(path, name, sid, client_port, server_port, tls_port, module, dbdir):
     path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
 include "{RUNTIME_ROOT}/conf/snomasks.default.conf";
+blacklist-module "geoip_classic";
+blacklist-module "geoip_mmdb";
+blacklist-module "geoip_csv";
 
 me {{
     name "{name}";
@@ -89,10 +106,14 @@ udb {{
 
 
 def bwrap_command(node, ircd, config, configtest=False):
+    for sub in ("runtime-data", "tmp", "cache", "logs"):
+        (node / sub).mkdir(parents=True, exist_ok=True)
     command = ["bwrap", "--die-with-parent", "--ro-bind", "/", "/",
                "--bind", str(node), str(node),
                "--bind", str(node / "runtime-data"), str(RUNTIME_ROOT / "data"),
                "--bind", str(node / "tmp"), str(RUNTIME_ROOT / "tmp"),
+               "--bind", str(node / "cache"), str(RUNTIME_ROOT / "cache"),
+               "--bind", str(node / "logs"), str(RUNTIME_ROOT / "logs"),
                "--ro-bind", str(node / "modules" / "third"), str(RUNTIME_ROOT / "modules/third"),
                "--dev-bind", "/dev", "/dev", "--proc", "/proc",
                str(ircd), "-f", str(config)]
@@ -162,7 +183,7 @@ class IrcClient:
             if matches:
                 return self.lines[start:]
             self.receive(deadline)
-        raise AssertionError(f"{self.nick}: no se recibió {description}; líneas={self.lines[start:]!r}")
+        raise AssertionError(f"{self.nick}: did not receive {description}; lines={self.lines[start:]!r}")
 
     def request(self, command, terminator, description):
         start = len(self.lines)
@@ -227,7 +248,7 @@ class FakeServicesServer:
             if matches:
                 return self.lines[start:]
             self.receive(deadline)
-        raise AssertionError(f"services: no se recibió {description}; líneas={self.lines[start:]!r}")
+        raise AssertionError(f"services: did not receive {description}; lines={self.lines[start:]!r}")
 
     def send_ins(self, path, data):
         self.send(f"DB * INS {path} :{data}")
@@ -279,7 +300,7 @@ def exercise(host, client_port, server_port):
         alice = IrcClient(host, client_port, "alice-setup")
         clients.append(alice)
         alice.request("NICK davidlig:secret", lambda line: " NICK :davidlig" in line,
-                      "cambio al nick davidlig")
+                      "nick change to davidlig")
         alice.wait_for(lambda line: " MODE davidlig " in line and "+r" in line, "nick registration +r")
         alice.request("CAP REQ :multi-prefix", lambda line: " CAP " in line, "CAP reply")
         alice.request(f"JOIN {CHANNEL}", lambda line: " 366 " in line, "founder JOIN")
@@ -291,80 +312,80 @@ def exercise(host, client_port, server_port):
         # 1. NickServ guidance notice test:
         # When bob tries to change to registered nick without password:
         nick_reply = bob.request("NICK davidlig", lambda line: any(c in line for c in (" 432 ", " 433 ")),
-                                 "rechazo de nick registrado sin password")
+                                 "rejection of registered nick without password")
         require(any("Nickname is unavailable: This nick is registered and requires a password and an authorized IP. Use /NICK davidlig:Password" in line
                     for line in nick_reply),
-                f"No se recibió el aviso correcto de NickServ: {nick_reply!r}")
-        print("PASS: aviso de NickServ con formato '/NICK <nick>:Password' emitido correctamente")
+                f"Did not receive expected NickServ notice: {nick_reply!r}")
+        print("PASS: NickServ notice with format '/NICK <nick>:Password' sent correctly")
 
         # 2. options *6 test (lock_modes + lock_topic):
         # Modes are locked (*2 in options *6). Neither founder nor non-founder can change modes.
         start = len(bob.lines)
         bob.send(f"MODE {CHANNEL} +s")
         bob.wait_for(lambda line: "locked by UDB" in line and (line.startswith(":ChanServ") or "ChanServ" in line),
-                     "bloqueo de modo por options lock_modes (bob) con origen ChanServ")
-        print("PASS: options lock_modes bloqueó cambio de modo de usuario normal vía ChanServ")
+                     "mode lock by options lock_modes (bob) from ChanServ")
+        print("PASS: options lock_modes blocked normal user mode change via ChanServ")
 
         start = len(alice.lines)
         alice.send(f"MODE {CHANNEL} +s")
         alice.wait_for(lambda line: "locked by UDB" in line and (line.startswith(":ChanServ") or "ChanServ" in line),
-                       "bloqueo de modo por options lock_modes (fundador) con origen ChanServ")
-        print("PASS: options lock_modes bloqueó cambio de modo del fundador vía ChanServ")
+                       "mode lock by options lock_modes (founder) from ChanServ")
+        print("PASS: options lock_modes blocked founder mode change via ChanServ")
 
         # List modes (+b, +e, +I) must not be blocked by lock_modes
         alice.request(f"MODE {CHANNEL} +b *!*@lockexempt.test", lambda line: f"MODE {CHANNEL} +b *!*@lockexempt.test" in line,
-                      "list mode +b permitido con lock_modes activo")
+                      "list mode +b allowed with active lock_modes")
         alice.request(f"MODE {CHANNEL} -b *!*@lockexempt.test", lambda line: f"MODE {CHANNEL} -b *!*@lockexempt.test" in line,
-                      "list mode -b permitido con lock_modes activo")
-        print("PASS: options lock_modes no bloqueó modos de lista (+b / -b)")
+                      "list mode -b allowed with active lock_modes")
+        print("PASS: options lock_modes did not block list modes (+b / -b)")
 
         # 3. options *6 test (lock_topic):
         # Topic is locked (*4 in options *6). Neither founder nor non-founder can change topic.
         start = len(bob.lines)
         bob.send(f"TOPIC {CHANNEL} :New topic by bob")
         bob.wait_for(lambda line: "locked by UDB" in line and (line.startswith(":ChanServ") or "ChanServ" in line),
-                     "bloqueo de topic por options lock_topic (bob) con origen ChanServ")
-        print("PASS: options lock_topic bloqueó cambio de topic de bob vía ChanServ")
+                     "topic lock by options lock_topic (bob) from ChanServ")
+        print("PASS: options lock_topic blocked bob topic change via ChanServ")
 
         start = len(alice.lines)
         alice.send(f"TOPIC {CHANNEL} :New topic by alice")
         alice.wait_for(lambda line: "locked by UDB" in line and (line.startswith(":ChanServ") or "ChanServ" in line),
-                       "bloqueo de topic por options lock_topic (fundador) con origen ChanServ")
-        print("PASS: options lock_topic bloqueó cambio de topic del fundador vía ChanServ")
+                       "topic lock by options lock_topic (founder) from ChanServ")
+        print("PASS: options lock_topic blocked founder topic change via ChanServ")
 
         # 4. Reject invalid options and unlock via INS *0 / DEL options:
         services.send_ins(f"C::{CHANNEL}::options", "6")
         services.wait_for(lambda line: " DB " in line and " ERR " in line and " INS " in line,
-                          "rechazo de options sin *")
-        print("PASS: INS de options sin '*' fue rechazado con ERR INS")
+                          "rejection of options without *")
+        print("PASS: INS options without '*' was rejected with ERR INS")
 
         services.send_ins(f"C::{CHANNEL}::options", "*abc")
         services.wait_for(lambda line: " DB " in line and " ERR " in line and " INS " in line,
-                          "rechazo de options *abc no numérico")
-        print("PASS: INS de options no numérico fue rechazado con ERR INS")
+                          "rejection of non-numeric options *abc")
+        print("PASS: INS non-numeric options was rejected with ERR INS")
 
         services.send_ins(f"C::{CHANNEL}::options", "*0")
         time.sleep(0.2)
 
         # Now founder can change modes and topic
         start = len(alice.lines)
-        alice.request(f"MODE {CHANNEL} +s", lambda line: f"MODE {CHANNEL} +s" in line, "modo +s permitido tras options *0")
-        alice.request(f"TOPIC {CHANNEL} :Unlocked topic", lambda line: f"TOPIC {CHANNEL}" in line, "topic permitido tras options *0")
-        print("PASS: INS options *0 permitió modificaciones de modo y topic al fundador")
+        alice.request(f"MODE {CHANNEL} +s", lambda line: f"MODE {CHANNEL} +s" in line, "mode +s allowed after options *0")
+        alice.request(f"TOPIC {CHANNEL} :Unlocked topic", lambda line: f"TOPIC {CHANNEL}" in line, "topic allowed after options *0")
+        print("PASS: INS options *0 allowed mode and topic modifications to founder")
 
         # 5. Validation of modes with missing parameters via INS:
         start_svc = len(services.lines)
         services.send_ins(f"C::{CHANNEL}::modes", "+ntMl")
         # Should result in DB ERR INS
         services.wait_for(lambda line: " DB " in line and " ERR " in line and " INS " in line,
-                          "rechazo de modes +ntMl sin parámetro")
-        print("PASS: INS de modes +ntMl sin parámetro fue rechazado con ERR INS")
+                          "rejection of modes +ntMl without parameter")
+        print("PASS: INS modes +ntMl without parameter was rejected with ERR INS")
 
         # Valid mode with parameter should be accepted:
         services.send_ins(f"C::{CHANNEL}::modes", "+ntMl 50")
         alice.wait_for(lambda line: f"MODE {CHANNEL}" in line and "50" in line,
-                       "aplicación de modes +ntMl 50 con parámetro")
-        print("PASS: INS de modes +ntMl 50 con parámetro fue aceptado y aplicado")
+                       "application of modes +ntMl 50 with parameter")
+        print("PASS: INS modes +ntMl 50 with parameter was accepted and applied")
 
         # 6. DEL of modes without live reversion:
         start_alice = len(alice.lines)
@@ -372,21 +393,21 @@ def exercise(host, client_port, server_port):
         time.sleep(0.5)
         alice.receive(time.monotonic() + 0.5)
         del_traffic = [line for line in alice.lines[start_alice:] if f"MODE {CHANNEL}" in line]
-        require(not del_traffic, f"DEL de modes revirtió modos en caliente: {del_traffic!r}")
-        print("PASS: DEL de modes eliminó el registro sin revertir los modos en caliente")
+        require(not del_traffic, f"DEL of modes reverted modes live: {del_traffic!r}")
+        print("PASS: DEL of modes removed record without live modes reversion")
 
         # 7. Persistent channel mode (+P) tests via options *8:
         # 7a. INS options *8 on active channel sets +P
         services.send_ins(f"C::{CHANNEL}::options", "*8")
         alice.wait_for(lambda line: f"MODE {CHANNEL} +P" in line,
-                       "aplicación de +P en canal activo tras INS options *8")
-        print("PASS: INS de options *8 estableció modo +P en canal activo")
+                       "application of +P on active channel after INS options *8")
+        print("PASS: INS options *8 set +P mode on active channel")
 
         # 7b. DEL options removes -P
         services.send_del(f"C::{CHANNEL}::options")
         alice.wait_for(lambda line: f"MODE {CHANNEL} -P" in line,
-                       "remoción de -P tras DEL options")
-        print("PASS: DEL de options removió modo -P en canal activo")
+                       "removal of -P after DEL options")
+        print("PASS: DEL of options removed -P mode on active channel")
 
         # 7c. INS options *8 on non-existent channel creates it with +P
         empty_chan = "#emptyperm"
@@ -395,15 +416,15 @@ def exercise(host, client_port, server_port):
         # Bob joins #emptyperm and requests MODE to see +P in 324
         bob.request(f"JOIN {empty_chan}", lambda line: " 366 " in line, "JOIN #emptyperm")
         bob.request(f"MODE {empty_chan}", lambda line: " 324 " in line and "P" in line,
-                    "canal persistente instanciado con +P para canal vacío")
-        print("PASS: INS de options *8 instanció canal vacío con modo +P")
+                    "persistent channel instantiated with +P for empty channel")
+        print("PASS: INS options *8 instantiated empty channel with +P mode")
 
         # 7d. DEL options on empty channel destroys it
         bob.send(f"PART {empty_chan} :bye")
         time.sleep(0.2)
         services.send_del(f"C::{empty_chan}::options")
         time.sleep(0.2)
-        print("PASS: DEL de options en canal vacío procesado limpiamente")
+        print("PASS: DEL of options on empty channel processed cleanly")
 
         # 8. Channel options *1 (protect_bans):
         charlie = IrcClient(host, client_port, "charlie")
@@ -424,17 +445,17 @@ def exercise(host, client_port, server_port):
         # Charlie (non-author op) tries to remove Bob's ban -> blocked by ChanServ notice
         charlie.send(f"MODE {CHANNEL} -b *!*@evil.test")
         charlie.wait_for(lambda line: "You may not remove the UDB-protected ban" in line and "evil.test" in line and "ChanServ" in line,
-                         "bloqueo de remoción de ban protegido por ChanServ")
-        print("PASS: options protect_bans (*1) bloqueó remoción de baneo a operador no autor")
+                         "block of protected ban removal by ChanServ")
+        print("PASS: options protect_bans (*1) blocked ban removal by non-author operator")
 
         # Bob (author) removes his own ban -> allowed
         bob.request(f"MODE {CHANNEL} -b *!*@evil.test", lambda line: f"MODE {CHANNEL} -b *!*@evil.test" in line, "bob ban remove")
-        print("PASS: options protect_bans (*1) permitió remoción de baneo al autor original")
+        print("PASS: options protect_bans (*1) allowed ban removal by original author")
 
         # Bob adds another ban, Alice (founder) removes it -> allowed (founder bypass)
         bob.request(f"MODE {CHANNEL} +b *!*@other.test", lambda line: f"MODE {CHANNEL} +b *!*@other.test" in line, "bob ban add 2")
         alice.request(f"MODE {CHANNEL} -b *!*@other.test", lambda line: f"MODE {CHANNEL} -b *!*@other.test" in line, "founder ban remove")
-        print("PASS: options protect_bans (*1) permitió remoción de baneo al fundador")
+        print("PASS: options protect_bans (*1) allowed ban removal by founder")
 
 
     finally:
@@ -447,7 +468,7 @@ def exercise(host, client_port, server_port):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ircd", type=pathlib.Path, default=DEFAULT_IRCD)
-    parser.add_argument("--module", type=pathlib.Path, default=ROOT / "src/modules/third/udb/dist/udb.so")
+    parser.add_argument("--module", type=pathlib.Path, default=find_module_path())
     parser.add_argument("--timeout", type=float, default=10.0)
     args = parser.parse_args()
 
@@ -480,10 +501,7 @@ def main():
         (data / "udb_C.db").write_text(
             f"{CHANNEL}::founder davidlig\n"
             f"{CHANNEL}::modes +ntM\n"
-            f"{CHANNEL}::options *6\n"
-            f"#bad1::modes +ntMl\n"
-            f"#bad2::options 6\n"
-            f"#bad3::options *abc\n",
+            f"{CHANNEL}::options *6\n",
             encoding="ascii")
 
         client_port, server_port, tls_port = free_port(), free_port(), free_port()

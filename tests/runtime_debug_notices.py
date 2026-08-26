@@ -14,10 +14,24 @@ import tempfile
 import time
 
 
-ROOT = pathlib.Path(__file__).resolve().parents[5]
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 RUNTIME_ROOT = pathlib.Path(os.environ.get("UDB_TEST_IRCD_ROOT", pathlib.Path.home() / "unrealircd"))
 DEFAULT_IRCD = RUNTIME_ROOT / "bin/unrealircd"
 CLOAK_KEYS = ("aB3" * 30, "cD4" * 30, "eF5" * 30)
+
+
+def find_module_path():
+    env_path = os.environ.get("UDB_MODULE_PATH")
+    if env_path and os.path.isfile(env_path):
+        return pathlib.Path(env_path)
+    for candidate in (
+        REPO_ROOT / "src" / "udb.so",
+        REPO_ROOT / "dist" / "udb.so",
+        RUNTIME_ROOT / "modules/third/udb.so",
+    ):
+        if candidate.is_file():
+            return candidate
+    return REPO_ROOT / "src" / "udb.so"
 
 
 class EnvironmentUnavailable(Exception):
@@ -38,6 +52,9 @@ def write_config(path, name, sid, client_port, server_port, tls_port, module, db
     path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
 include "{RUNTIME_ROOT}/conf/operclass.default.conf";
 include "{RUNTIME_ROOT}/conf/snomasks.default.conf";
+blacklist-module "geoip_classic";
+blacklist-module "geoip_mmdb";
+blacklist-module "geoip_csv";
 
 me {{
     name "{name}";
@@ -68,10 +85,14 @@ udb {{
 
 
 def bwrap_command(node, ircd, config, configtest=False):
+    for sub in ("runtime-data", "tmp", "cache", "logs"):
+        (node / sub).mkdir(parents=True, exist_ok=True)
     command = ["bwrap", "--die-with-parent", "--ro-bind", "/", "/",
                "--bind", str(node), str(node),
                "--bind", str(node / "runtime-data"), str(RUNTIME_ROOT / "data"),
                "--bind", str(node / "tmp"), str(RUNTIME_ROOT / "tmp"),
+               "--bind", str(node / "cache"), str(RUNTIME_ROOT / "cache"),
+               "--bind", str(node / "logs"), str(RUNTIME_ROOT / "logs"),
                "--ro-bind", str(node / "modules" / "third"), str(RUNTIME_ROOT / "modules/third"),
                "--dev-bind", "/dev", "/dev", "--proc", "/proc",
                str(ircd), "-f", str(config)]
@@ -141,7 +162,7 @@ class IrcClient:
             if matches:
                 return self.lines[start:]
             self.receive(deadline)
-        raise AssertionError(f"{self.nick}: no se recibió {description}; líneas={self.lines[start:]!r}")
+        raise AssertionError(f"{self.nick}: did not receive {description}; lines={self.lines[start:]!r}")
 
     def collect(self, timeout=1.0):
         deadline = time.monotonic() + timeout
@@ -245,7 +266,7 @@ def main():
     parser = argparse.ArgumentParser(description="UDB debug notice filtering integration harness")
     parser.add_argument("--ircd", type=pathlib.Path, default=DEFAULT_IRCD, help="path to unrealircd binary")
     parser.add_argument("--module", type=pathlib.Path,
-                        default=ROOT / "src/modules/third/udb/dist/udb.so",
+                        default=find_module_path(),
                         help="path to compiled udb.so")
     args = parser.parse_args()
 

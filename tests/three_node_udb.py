@@ -15,18 +15,32 @@ import tempfile
 import time
 
 
-ROOT = pathlib.Path(__file__).resolve().parents[5]
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 RUNTIME_ROOT = pathlib.Path(os.environ.get("UDB_TEST_IRCD_ROOT", pathlib.Path.home() / "unrealircd"))
 DEFAULT_IRCD = RUNTIME_ROOT / "bin/unrealircd"
 CLOAK_KEYS = ("aB3" * 30, "cD4" * 30, "eF5" * 30)
 N_MARKER = "harness-a::vhost propagated.test\n"
-MUTATOR_SOURCE = ROOT / "src/modules/third/udb/tests/udb_test_mutator.c"
+MUTATOR_SOURCE = pathlib.Path(__file__).resolve().parent / "udb_test_mutator.c"
 MUTATOR_MODULE = MUTATOR_SOURCE.with_suffix(".so")
 MUTATOR_RECORDS = {
     "A-B": "udb-test-mutator authorized-insert",
     "B-C": "udb-test-mutator authorized-insert-b-c",
 }
 STAGED_AUTH_TRIGGER = "udb-test-mutator-staged-authorization-go"
+
+
+def find_module_path():
+    env_path = os.environ.get("UDB_MODULE_PATH")
+    if env_path and os.path.isfile(env_path):
+        return pathlib.Path(env_path)
+    for candidate in (
+        REPO_ROOT / "src" / "udb.so",
+        REPO_ROOT / "dist" / "udb.so",
+        RUNTIME_ROOT / "modules/third/udb.so",
+    ):
+        if candidate.is_file():
+            return candidate
+    return REPO_ROOT / "src" / "udb.so"
 
 
 class EnvironmentUnavailable(Exception):
@@ -38,10 +52,21 @@ def skip(message):
     return 77
 
 
+def free_ports(count):
+    socks = []
+    ports = []
+    for _ in range(count):
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        socks.append(s)
+        ports.append(s.getsockname()[1])
+    for s in socks:
+        s.close()
+    return ports
+
+
 def free_port():
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+    return free_ports(1)[0]
 
 
 def write_config(path, name, sid, ports, links, module, dbdir, propagator, link_password,
@@ -58,6 +83,9 @@ def write_config(path, name, sid, ports, links, module, dbdir, propagator, link_
 '''
     path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
 include "{RUNTIME_ROOT}/conf/snomasks.default.conf";
+blacklist-module "geoip_classic";
+blacklist-module "geoip_mmdb";
+blacklist-module "geoip_csv";
 
 me {{
     name "{name}";
@@ -89,10 +117,14 @@ udb {{
 
 
 def bwrap_command(node, ircd, config, configtest=False):
+    for sub in ("runtime-data", "tmp", "cache", "logs"):
+        (node / sub).mkdir(parents=True, exist_ok=True)
     command = ["bwrap", "--die-with-parent", "--ro-bind", "/", "/",
                 "--bind", str(node), str(node),
                 "--bind", str(node / "runtime-data"), str(RUNTIME_ROOT / "data"),
                 "--bind", str(node / "tmp"), str(RUNTIME_ROOT / "tmp"),
+                "--bind", str(node / "cache"), str(RUNTIME_ROOT / "cache"),
+                "--bind", str(node / "logs"), str(RUNTIME_ROOT / "logs"),
                 "--ro-bind", str(node / "modules" / "third"), str(RUNTIME_ROOT / "modules/third"),
                 "--dev-bind", "/dev", "/dev", "--proc", "/proc",
                 "--setenv", "UDB_TEST_MUTATOR_DIRECTORY", str(node / "data"),
@@ -117,7 +149,10 @@ def run_configtest(node, ircd, config):
 
 
 def build_mutator():
-    result = subprocess.run(["make", "custommodule", "MODULEFILE=udb/tests/udb_test_mutator"], cwd=ROOT,
+    if MUTATOR_MODULE.is_file():
+        return
+    src_root = pathlib.Path(os.environ.get("UNREALIRCD_SRC_ROOT", REPO_ROOT.parents[3] if len(REPO_ROOT.parents) > 3 and (REPO_ROOT.parents[3] / "Makefile").is_file() else REPO_ROOT))
+    result = subprocess.run(["make", "custommodule", "MODULEFILE=udb/tests/udb_test_mutator"], cwd=src_root,
                             text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
     if result.returncode or not MUTATOR_MODULE.is_file():
         raise RuntimeError(f"test mutator build failed:\n{result.stdout}")
@@ -246,7 +281,7 @@ def stop(processes):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ircd", type=pathlib.Path, default=DEFAULT_IRCD)
-    parser.add_argument("--module", type=pathlib.Path, default=ROOT / "src/modules/third/udb/src/udb.so")
+    parser.add_argument("--module", type=pathlib.Path, default=find_module_path())
     parser.add_argument("--timeout", type=int, default=15, help="per-link and per-stage wait in seconds")
     parser.add_argument("--keep", action="store_true", help="preserve temporary node directories")
     args = parser.parse_args()
@@ -281,7 +316,8 @@ def main():
             old_time = time.time() - 60
             os.utime(db, (old_time, old_time))
 
-        ports = [tuple(free_port() for _ in range(3)) for _ in range(3)]
+        raw_ports = free_ports(9)
+        ports = [tuple(raw_ports[i * 3:(i + 1) * 3]) for i in range(3)]
         a_conf, b_conf, c_conf = (node / "unrealircd.conf" for node in (a, b, c))
         link_password = "udb-test-" + secrets.token_hex(32)
         write_config(a_conf, "udb-a.test", "0A1", ports[0], (("udb-b.test", ports[1][1], True),),

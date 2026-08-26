@@ -42,6 +42,9 @@ def free_port():
 def write_config(path, name, sid, client_port, server_port, tls_port, module, dbdir):
     path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
 include "{RUNTIME_ROOT}/conf/snomasks.default.conf";
+blacklist-module "geoip_classic";
+blacklist-module "geoip_mmdb";
+blacklist-module "geoip_csv";
 
 me {{
     name "{name}";
@@ -80,10 +83,14 @@ udb {{
 
 
 def bwrap_command(node, ircd, config):
+    for sub in ("runtime-data", "tmp", "cache", "logs"):
+        (node / sub).mkdir(parents=True, exist_ok=True)
     return ["bwrap", "--die-with-parent", "--ro-bind", "/", "/",
             "--bind", str(node), str(node),
             "--bind", str(node / "runtime-data"), str(RUNTIME_ROOT / "data"),
             "--bind", str(node / "tmp"), str(RUNTIME_ROOT / "tmp"),
+            "--bind", str(node / "cache"), str(RUNTIME_ROOT / "cache"),
+            "--bind", str(node / "logs"), str(RUNTIME_ROOT / "logs"),
             "--ro-bind", str(node / "modules" / "third"), str(RUNTIME_ROOT / "modules/third"),
             "--dev-bind", "/dev", "/dev", "--proc", "/proc",
             str(ircd), "-F", "-f", str(config)]
@@ -170,9 +177,22 @@ class MockServices:
         self.sock.close()
 
 
+def find_module_path():
+    env_path = os.environ.get("UDB_MODULE_PATH")
+    if env_path and os.path.isfile(env_path):
+        return pathlib.Path(env_path)
+    local_path = pathlib.Path(__file__).resolve().parent.parent / "src" / "udb.so"
+    if local_path.is_file():
+        return local_path
+    runtime_path = RUNTIME_ROOT / "modules/third/udb.so"
+    if runtime_path.is_file():
+        return runtime_path
+    return local_path
+
+
 def run_tests(ircd_bin, keep=False):
     tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="udb-staged-caps-"))
-    module_path = ROOT / "src/modules/third/udb/src/udb.so"
+    module_path = find_module_path()
     proc = None
 
     try:
@@ -207,14 +227,14 @@ def run_tests(ircd_bin, keep=False):
         services.send_begin("N", "tx-abort-1", "00000000")
         services.send_put("N", "tx-abort-1", "N::invalid%zzpath", "some_data")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " PUT " in l,
-                          "rechazo de PUT inválido con ERR PUT")
-        print("PASS: payload inválido en sesión de staged-sync abortó limpiamente con ERR PUT")
+                          "rejection of invalid PUT with ERR PUT")
+        print("PASS: Invalid payload in staged-sync session aborted cleanly with ERR PUT")
 
         # Verify active database in memory and on disk was NOT modified
         db_n = (data_dir / "udb_N.db").read_text(encoding="ascii")
         if "alice::pass crypt:sample" not in db_n:
             raise AssertionError(f"Active database was corrupted by aborted staged-sync:\n{db_n}")
-        print("PASS: base de datos activa permaneció intacta tras aborto de staged-sync")
+        print("PASS: Active database remained intact after staged-sync abort")
 
         # -------------------------------------------------------------
         # Test 2: Subsequent valid staged-sync commits empty tree cleanly
@@ -222,8 +242,8 @@ def run_tests(ircd_bin, keep=False):
         services.send_begin("N", "tx-valid-empty", "00000000")
         services.send_end("N", "tx-valid-empty", "00000000")
         services.wait_for(lambda l: " DB " in l and " ACK " in l and " N " in l,
-                          "confirmación de ACK de staged-sync")
-        print("PASS: sesión válida de staged-sync completó y confirmó con ACK")
+                          "confirmation of ACK for staged-sync")
+        print("PASS: Valid staged-sync session completed and acknowledged with ACK")
 
         # -------------------------------------------------------------
         # Test 3: Live INS after staged sync succeeds
@@ -239,7 +259,7 @@ def run_tests(ircd_bin, keep=False):
         db_n = (data_dir / "udb_N.db").read_text(encoding="ascii")
         if "bob::pass crypt:sample_bob" not in db_n:
             raise AssertionError(f"Valid INS did not commit after prior staged sync:\n{db_n}")
-        print("PASS: mutación posterior completó e hizo commit atómico con éxito")
+        print("PASS: Subsequent mutation completed and committed atomically with success")
 
     finally:
         if proc:

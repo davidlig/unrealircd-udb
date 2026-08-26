@@ -11,18 +11,15 @@
 
 static UdbRecord *udb_line_owner(UdbRecord *rec)
 {
-	while (rec && rec->parent && rec->parent->parent &&
-	       rec->parent->parent->parent)
+	while (rec && rec->parent && rec->parent->parent && rec->parent->parent->parent)
 		rec = rec->parent;
 
-	if (!rec || !rec->parent || !rec->parent->parent ||
-	    rec->parent->parent->parent)
+	if (!rec || !rec->parent || !rec->parent->parent || rec->parent->parent->parent)
 		return NULL;
 	return rec;
 }
 
-static void udb_line_split_mask(const char *mask, char *user, size_t usersz,
-                                char *host, size_t hostsz)
+static void udb_line_split_mask(const char *mask, char *user, size_t usersz, char *host, size_t hostsz)
 {
 	const char *at = strchr(mask, '@');
 
@@ -34,7 +31,8 @@ static void udb_line_split_mask(const char *mask, char *user, size_t usersz,
 		memcpy(user, mask, userlen);
 		user[userlen] = '\0';
 		strlcpy(host, at + 1, hostsz);
-	} else
+	}
+	else
 	{
 		strlcpy(user, "*", usersz);
 		strlcpy(host, mask, hostsz);
@@ -48,8 +46,7 @@ static int udb_spamfilter_pattern(const char *stored, char *pattern, size_t patt
 	char canonical[UDB_SPAMFILTER_PATTERN_MAX * 4 / 3 + 5];
 	int n;
 
-	if (strncmp(stored, UDB_SPAMFILTER_B64_PREFIX,
-	            strlen(UDB_SPAMFILTER_B64_PREFIX)))
+	if (strncmp(stored, UDB_SPAMFILTER_B64_PREFIX, strlen(UDB_SPAMFILTER_B64_PREFIX)))
 	{
 		if (!*stored || strlen(stored) >= patternsz)
 			return 0;
@@ -59,8 +56,7 @@ static int udb_spamfilter_pattern(const char *stored, char *pattern, size_t patt
 
 	encoded = stored + strlen(UDB_SPAMFILTER_B64_PREFIX);
 	encoded_len = strlen(encoded);
-	if (!encoded_len || encoded_len % 4 ||
-	    encoded_len > ((patternsz - 1 + 2) / 3) * 4)
+	if (!encoded_len || encoded_len % 4 || encoded_len > ((patternsz - 1 + 2) / 3) * 4)
 		return 0;
 	if (encoded[encoded_len - 1] == '=')
 		padding++;
@@ -85,9 +81,8 @@ static int udb_spamfilter_pattern(const char *stored, char *pattern, size_t patt
 	if (n < 0 || (size_t)n != decoded_len || memchr(pattern, '\0', decoded_len))
 		return 0;
 	pattern[decoded_len] = '\0';
-	if (b64_encode((unsigned char *)pattern, decoded_len, canonical,
-	               sizeof(canonical)) != (int)encoded_len ||
-	    strcmp(canonical, encoded))
+	if (b64_encode((unsigned char *)pattern, decoded_len, canonical, sizeof(canonical)) != (int)encoded_len ||
+		strcmp(canonical, encoded))
 		return 0;
 	return 1;
 }
@@ -99,21 +94,18 @@ static int udb_line_matches_tkl(TKL *tkl, char type, const char *pattern)
 	if (!tkl || !tkl->set_by || strcmp(tkl->set_by, "UDB"))
 		return 0;
 	if (type == 'F')
-		return TKLIsSpamfilter(tkl) && (tkl->type & TKL_GLOBAL) &&
-		       tkl->ptr.spamfilter && tkl->ptr.spamfilter->match &&
-		       !strcmp(tkl->ptr.spamfilter->match->str, pattern);
+		return TKLIsSpamfilter(tkl) && (tkl->type & TKL_GLOBAL) && tkl->ptr.spamfilter && tkl->ptr.spamfilter->match &&
+			   !strcmp(tkl->ptr.spamfilter->match->str, pattern);
 	if (type == 'Q')
-		return TKLIsNameBan(tkl) && (tkl->type & TKL_GLOBAL) &&
-		       tkl->ptr.nameban && !strcasecmp(tkl->ptr.nameban->name, pattern);
+		return TKLIsNameBan(tkl) && (tkl->type & TKL_GLOBAL) && tkl->ptr.nameban &&
+			   !strcasecmp(tkl->ptr.nameban->name, pattern);
 
 	udb_line_split_mask(pattern, user, sizeof(user), host, sizeof(host));
 	return TKLIsServerBan(tkl) && (tkl->type & TKL_GLOBAL) &&
-	       ((type == 'G' && (tkl->type & TKL_KILL)) ||
-	        (type == 'Z' && (tkl->type & TKL_ZAP)) ||
-	        (type == 'S' && (tkl->type & TKL_SHUN))) &&
-	       tkl->ptr.serverban &&
-	       !strcasecmp(tkl->ptr.serverban->usermask, user) &&
-	       !strcasecmp(tkl->ptr.serverban->hostmask, host);
+		   ((type == 'G' && (tkl->type & TKL_KILL)) || (type == 'Z' && (tkl->type & TKL_ZAP)) ||
+			(type == 'S' && (tkl->type & TKL_SHUN))) &&
+		   tkl->ptr.serverban && !strcasecmp(tkl->ptr.serverban->usermask, user) &&
+		   !strcasecmp(tkl->ptr.serverban->hostmask, host);
 }
 
 static void udb_line_remove_owned(char type, const char *pattern)
@@ -164,9 +156,8 @@ static void udb_line_apply_record(UdbRecord *rec, int is_new)
 		return;
 	if (type == 'F' && !udb_spamfilter_pattern(line_rec->key, pattern, sizeof(pattern)))
 	{
-		udb_log(ULOG_ERROR, "UDB_SPAMF_PATTERN", NULL,
-		        "Invalid spamfilter pattern: $pattern",
-		        log_data_string("pattern", line_rec->key), NULL);
+		udb_log(ULOG_ERROR, "UDB_SPAMF_PATTERN", NULL, "Invalid spamfilter pattern: $pattern",
+				log_data_string("pattern", line_rec->key), NULL);
 		return;
 	}
 	if (type != 'F')
@@ -179,7 +170,8 @@ static void udb_line_apply_record(UdbRecord *rec, int is_new)
 	if (raz && raz->data_str)
 	{
 		reason = raz->data_str;
-	} else if (line_rec->data_str)
+	}
+	else if (line_rec->data_str)
 	{
 		reason = line_rec->data_str;
 	}
@@ -192,7 +184,8 @@ static void udb_line_apply_record(UdbRecord *rec, int is_new)
 	{
 		if (!udb_time_add(TStime(), dur->data_num, &expires))
 			expires = 0;
-	} else
+	}
+	else
 	{
 		expires = 0;
 	}
@@ -212,17 +205,17 @@ static void udb_line_apply_record(UdbRecord *rec, int is_new)
 			Match *match = target > 0 && action ? unreal_create_match(MATCH_PCRE_REGEX, pattern, &err) : NULL;
 			if (match)
 			{
-				tkl_add_spamfilter(TKL_SPAMF | TKL_GLOBAL, pattern, target, action, match,
-				                   pattern, NULL, "UDB", expires, TStime(),
-				                   dur ? (time_t)dur->data_num : 0, reason, 0, 0, 0);
-			} else
+				tkl_add_spamfilter(TKL_SPAMF | TKL_GLOBAL, pattern, target, action, match, pattern, NULL, "UDB",
+								   expires, TStime(), dur ? (time_t)dur->data_num : 0, reason, 0, 0, 0);
+			}
+			else
 			{
 				udb_log(ULOG_ERROR, "UDB_SPAMF_ERROR", NULL, "Failed to compile spamfilter regex: $regex ($err)",
-				        log_data_string("regex", pattern),
-				        log_data_string("err", err ? err : "unknown error"), NULL);
+						log_data_string("regex", pattern), log_data_string("err", err ? err : "unknown error"), NULL);
 			}
 		}
-	} else
+	}
+	else
 	{
 		char user[128];
 		char host[128];
@@ -230,20 +223,19 @@ static void udb_line_apply_record(UdbRecord *rec, int is_new)
 
 		if (type == 'G')
 		{
-			tkl_add_serverban(TKL_KILL | TKL_GLOBAL, user, host, NULL,
-			                  reason, "UDB", expires, TStime(), 0, 0);
-		} else if (type == 'Z')
+			tkl_add_serverban(TKL_KILL | TKL_GLOBAL, user, host, NULL, reason, "UDB", expires, TStime(), 0, 0);
+		}
+		else if (type == 'Z')
 		{
-			tkl_add_serverban(TKL_ZAP | TKL_GLOBAL, user, host, NULL,
-			                  reason, "UDB", expires, TStime(), 0, 0);
-		} else if (type == 'S')
+			tkl_add_serverban(TKL_ZAP | TKL_GLOBAL, user, host, NULL, reason, "UDB", expires, TStime(), 0, 0);
+		}
+		else if (type == 'S')
 		{
-			tkl_add_serverban(TKL_SHUN | TKL_GLOBAL, user, host, NULL,
-			                  reason, "UDB", expires, TStime(), 0, 0);
-		} else if (type == 'Q')
+			tkl_add_serverban(TKL_SHUN | TKL_GLOBAL, user, host, NULL, reason, "UDB", expires, TStime(), 0, 0);
+		}
+		else if (type == 'Q')
 		{
-			tkl_add_nameban(TKL_NAME | TKL_GLOBAL, pattern, 0, reason, "UDB",
-			                expires, TStime(), 0);
+			tkl_add_nameban(TKL_NAME | TKL_GLOBAL, pattern, 0, reason, "UDB", expires, TStime(), 0);
 		}
 	}
 }
@@ -264,15 +256,15 @@ static void udb_line_remove_record(UdbRecord *rec)
 	{
 		if (!udb_spamfilter_pattern(line_rec->key, pattern, sizeof(pattern)))
 			return;
-	} else
+	}
+	else
 	{
 		strlcpy(pattern, line_rec->key, sizeof(pattern));
 	}
 	udb_line_remove_owned(type, pattern);
 }
 
-static void udb_lines_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec,
-                                   int is_new)
+static void udb_lines_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new)
 {
 	if (!ctx || !block || !rec)
 		return;
