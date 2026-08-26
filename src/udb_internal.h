@@ -166,6 +166,7 @@ static int udb_module_init(ModuleInfo *modinfo);
 static int udb_module_load(ModuleInfo *modinfo);
 static int udb_module_unload(void);
 static int udb_engine_init(void);
+static void udb_engine_cleanup(UdbContext *ctx);
 static void udb_engine_shutdown(void);
 static UdbBlock *udb_block_create(UdbContext *ctx, char letter, const char *name);
 static void udb_block_set_context_root(UdbContext *ctx, UdbBlock *block);

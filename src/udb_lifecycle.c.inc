@@ -155,10 +155,10 @@ static int udb_blocks_save_all(UdbContext *ctx)
 		return 0;
 	for (b = ctx->block_list; b; b = b->next)
 	{
-		if (b->load_state == UDB_LOAD_FAILED)
+		if (b->load_state != UDB_LOAD_SUCCESS && b->load_state != UDB_LOAD_EMPTY)
 		{
 			udb_log(ULOG_ERROR, "UDB_BLOCK_SAVE_SKIPPED", NULL,
-			        "Skipping save of block $block because its load failed",
+			        "Skipping save of block $block because it is not in safe initialized state",
 			        log_data_string("block", (char[]){b->letter, '\0'}));
 			success = 0;
 			continue;
@@ -172,6 +172,29 @@ static int udb_blocks_save_all(UdbContext *ctx)
 static UdbBlock *udb_block_by_letter(UdbContext *ctx, char letter)
 {
 	return ctx ? ctx->blocks[(unsigned char)letter] : NULL;
+}
+
+static void udb_engine_cleanup(UdbContext *ctx)
+{
+	UdbBlock *b;
+
+	if (!ctx)
+		return;
+	udb_ips_shutdown();
+	for (b = ctx->block_list; b;)
+	{
+		UdbBlock *next = b->next;
+		udb_sync_session_free(b);
+		udb_block_unload(ctx, b);
+		safe_free(b->filepath);
+		safe_free(b);
+		b = next;
+	}
+	udb_hash_destroy(ctx);
+	udb_config_free(ctx);
+	safe_free(ctx);
+	if (udb_ctx == ctx)
+		udb_ctx = NULL;
 }
 
 static int udb_engine_init(void)
@@ -210,7 +233,7 @@ static int udb_engine_init(void)
 	    !udb_block_create(udb_ctx, 'I', "IPs") || !udb_block_create(udb_ctx, 'S', "Settings") ||
 	    !udb_block_create(udb_ctx, 'L', "Links") || !udb_block_create(udb_ctx, 'K', "Lines"))
 	{
-		udb_engine_shutdown();
+		udb_engine_cleanup(udb_ctx);
 		return 0;
 	}
 	udb_block_set_context_root(udb_ctx, udb_ctx->blocks['N']);
@@ -221,7 +244,7 @@ static int udb_engine_init(void)
 	udb_block_set_context_root(udb_ctx, udb_ctx->blocks['K']);
 	if (!udb_blocks_load_all(udb_ctx))
 	{
-		udb_engine_shutdown();
+		udb_engine_cleanup(udb_ctx);
 		return 0;
 	}
 	return 1;
@@ -229,25 +252,10 @@ static int udb_engine_init(void)
 
 static void udb_engine_shutdown(void)
 {
-	UdbBlock *b;
-
 	if (!udb_ctx)
 		return;
 	udb_blocks_save_all(udb_ctx);
-	udb_ips_shutdown();
-	for (b = udb_ctx->block_list; b;)
-	{
-		UdbBlock *next = b->next;
-		udb_sync_session_free(b);
-		udb_block_unload(udb_ctx, b);
-		safe_free(b->filepath);
-		safe_free(b);
-		b = next;
-	}
-	udb_hash_destroy(udb_ctx);
-	udb_config_free(udb_ctx);
-	safe_free(udb_ctx);
-	udb_ctx = NULL;
+	udb_engine_cleanup(udb_ctx);
 }
 
 extern MODVAR Log *logs[NUM_LOG_DESTINATIONS];
