@@ -1220,16 +1220,14 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 		line_number++;
 		if (overlong)
 		{
-			int ch;
 			char logbuf[512];
-			while ((ch = fgetc(fp)) != '\n' && ch != EOF)
-				;
 			snprintf(logbuf, sizeof(logbuf),
-			         "Skipping overlong persisted record in block %c at line %u",
+			         "Overlong persisted record in block %c at line %u",
 			         block->letter, line_number);
-			udb_log(ULOG_WARNING, "UDB_FILE_LINE_REJECTED", NULL,
+			udb_log(ULOG_ERROR, "UDB_FILE_LINE_REJECTED", NULL,
 			        "$msg", log_data_string("msg", logbuf));
-			continue;
+			parse_failed = 1;
+			break;
 		}
 		char *p = strchr(line, '\n');
 		if (p)
@@ -1245,19 +1243,37 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 		{
 			char logbuf[512];
 			snprintf(logbuf, sizeof(logbuf),
-			         "Skipping malformed persisted record in block %c at line %u",
+			         "Malformed persisted record in block %c at line %u",
 			         block->letter, line_number);
-			udb_log(ULOG_WARNING, "UDB_FILE_LINE_REJECTED", NULL,
+			udb_log(ULOG_ERROR, "UDB_FILE_LINE_REJECTED", NULL,
 			        "$msg", log_data_string("msg", logbuf));
-			continue;
+			parse_failed = 1;
+			break;
 		}
 	}
 
-	if (ferror(fp))
+	if (parse_failed || ferror(fp))
 	{
 		int saved_errno = errno;
-		udb_log(ULOG_ERROR, "UDB_FILE_READ_ERROR", NULL,
-		        "Read error occurred on block $block file $file: $error",
+		if (ferror(fp))
+		{
+			udb_log(ULOG_ERROR, "UDB_FILE_READ_ERROR", NULL,
+			        "Read error occurred on block $block file $file: $error",
+			        log_data_string("block", (char[]){block->letter, '\0'}),
+			        log_data_string("file", block->filepath),
+			        log_data_string("error", strerror(saved_errno)));
+		}
+		udb_record_free_tree(candidate);
+		block->load_state = UDB_LOAD_FAILED;
+		fclose(fp);
+		return 0;
+	}
+
+	if (fclose(fp) != 0)
+	{
+		int saved_errno = errno;
+		udb_log(ULOG_ERROR, "UDB_FILE_CLOSE_ERROR", NULL,
+		        "Close error occurred on block $block file $file: $error",
 		        log_data_string("block", (char[]){block->letter, '\0'}),
 		        log_data_string("file", block->filepath),
 		        log_data_string("error", strerror(saved_errno)));
@@ -1265,7 +1281,6 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 		block->load_state = UDB_LOAD_FAILED;
 		return 0;
 	}
-	fclose(fp);
 
 	unsigned int record_count = udb_record_count_tree(candidate);
 	udb_block_replace_tree(ctx, block, candidate, record_count);

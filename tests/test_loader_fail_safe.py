@@ -153,6 +153,104 @@ def run_tests(ircd_bin, keep=False):
 
         print("PASS: EACCES en archivo de bloque abortó la carga de UDB y protegió el archivo original contra sobreescritura")
 
+        # -------------------------------------------------------------
+        # Test 3: Malformed record in middle aborts load and keeps file intact
+        # -------------------------------------------------------------
+        node3 = tmpdir / "node3"
+        data_dir3 = node3 / "data"
+        data_dir3.mkdir(parents=True)
+        (node3 / "runtime-data").mkdir()
+        (node3 / "tmp").mkdir()
+        third_modules3 = node3 / "modules" / "third"
+        third_modules3.mkdir(parents=True)
+        shutil.copy2(module_path, third_modules3 / "udb.so")
+
+        corrupt_db = data_dir3 / "udb_N.db"
+        corrupt_content = "; UDB Block N - Version 1\nalice::vhost secret.test\nmalformed:::entry\nbob::vhost admin.test\n"
+        corrupt_db.write_text(corrupt_content, encoding="ascii")
+        original_bytes3 = corrupt_db.read_bytes()
+
+        client_port3, tls_port3 = free_port(), free_port()
+        config3 = node3 / "unrealircd.conf"
+        write_config(config3, "udb-node3.test", "0A3", client_port3, tls_port3, module_path, data_dir3)
+
+        proc3 = subprocess.Popen(bwrap_command(node3, ircd_bin, config3),
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        time.sleep(1.0)
+        stop(proc3)
+        stdout3, _ = proc3.communicate()
+
+        if corrupt_db.read_bytes() != original_bytes3:
+            raise AssertionError("Corrupted database file was modified after failed transactional load!")
+        print("PASS: Registro malformado en base de datos abortó la carga y preservó el archivo original")
+
+        # -------------------------------------------------------------
+        # Test 4: Overlong record aborts load and preserves disk
+        # -------------------------------------------------------------
+        node4 = tmpdir / "node4"
+        data_dir4 = node4 / "data"
+        data_dir4.mkdir(parents=True)
+        (node4 / "runtime-data").mkdir()
+        (node4 / "tmp").mkdir()
+        third_modules4 = node4 / "modules" / "third"
+        third_modules4.mkdir(parents=True)
+        shutil.copy2(module_path, third_modules4 / "udb.so")
+
+        overlong_db = data_dir4 / "udb_N.db"
+        overlong_content = "; UDB Block N - Version 1\nalice::vhost valid.test\n" + ("x" * 5000) + "\n"
+        overlong_db.write_text(overlong_content, encoding="ascii")
+        original_bytes4 = overlong_db.read_bytes()
+
+        client_port4, tls_port4 = free_port(), free_port()
+        config4 = node4 / "unrealircd.conf"
+        write_config(config4, "udb-node4.test", "0A4", client_port4, tls_port4, module_path, data_dir4)
+
+        proc4 = subprocess.Popen(bwrap_command(node4, ircd_bin, config4),
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        time.sleep(1.0)
+        stop(proc4)
+        stdout4, _ = proc4.communicate()
+
+        if overlong_db.read_bytes() != original_bytes4:
+            raise AssertionError("Overlong database file was modified after failed transactional load!")
+        print("PASS: Línea excesivamente larga abortó la carga y preservó el archivo original")
+
+        # -------------------------------------------------------------
+        # Test 5: Multi-block init failure does not persist other blocks
+        # -------------------------------------------------------------
+        node5 = tmpdir / "node5"
+        data_dir5 = node5 / "data"
+        data_dir5.mkdir(parents=True)
+        (node5 / "runtime-data").mkdir()
+        (node5 / "tmp").mkdir()
+        third_modules5 = node5 / "modules" / "third"
+        third_modules5.mkdir(parents=True)
+        shutil.copy2(module_path, third_modules5 / "udb.so")
+
+        nicks_db = data_dir5 / "udb_N.db"
+        nicks_content = "; UDB Block N - Version 1\nalice::vhost admin.test\n"
+        nicks_db.write_text(nicks_content, encoding="ascii")
+        nicks_bytes = nicks_db.read_bytes()
+
+        channels_db = data_dir5 / "udb_C.db"
+        channels_content = "; UDB Block C - Version 1\n#channel::topic::text Hello\ncorrupt:::channel\n"
+        channels_db.write_text(channels_content, encoding="ascii")
+        channels_bytes = channels_db.read_bytes()
+
+        client_port5, tls_port5 = free_port(), free_port()
+        config5 = node5 / "unrealircd.conf"
+        write_config(config5, "udb-node5.test", "0A5", client_port5, tls_port5, module_path, data_dir5)
+
+        proc5 = subprocess.Popen(bwrap_command(node5, ircd_bin, config5),
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        time.sleep(1.0)
+        stop(proc5)
+        stdout5, _ = proc5.communicate()
+
+        if nicks_db.read_bytes() != nicks_bytes or channels_db.read_bytes() != channels_bytes:
+            raise AssertionError("Database files were modified during failed multi-block initialization!")
+        print("PASS: Fallo de inicialización multi-bloque protegió todos los archivos .db contra persistencia indebida")
+
     finally:
         if not keep:
             shutil.rmtree(tmpdir, ignore_errors=True)
