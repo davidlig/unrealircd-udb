@@ -19,8 +19,11 @@
 #include <openssl/hmac.h>
 
 #define UDB_DEFAULT_DB_DIRECTORY       PERMDATADIR
-#define UDB_BLOCK_PATH_MAX             512
-#define UDB_RECORD_PATH_MAX            4096
+#define UDB_BLOCK_PATH_MAX             1024
+#define UDB_RECORD_PATH_MAX            8192
+#define UDB_COMPONENT_MAX              4096
+#define UDB_RECORD_VALUE_MAX           4096
+#define UDB_RECORD_LINE_MAX            (UDB_RECORD_PATH_MAX + UDB_RECORD_VALUE_MAX + 32)
 #define UDB_SYNC_TIMEOUT               60
 #define UDB_DEFAULT_MAX_STAGED_RECORDS 500000
 #define UDB_MIN_MAX_STAGED_RECORDS     1000
@@ -180,9 +183,15 @@ static int udb_blocks_save_all(UdbContext *ctx);
 static UdbBlock *udb_block_by_letter(UdbContext *ctx, char letter);
 static int udb_path_encode_component(const char *raw, char *buf, size_t bufsz);
 static int udb_path_decode_component(const char *encoded, char *buf, size_t bufsz);
+static int udb_path_append(char *dst, size_t dst_size, size_t *used, const char *component);
 static int udb_path_append_component(char *pathbuf, size_t bufsz, const char *raw_component);
 static int udb_strtoull_strict(const char *s, unsigned long long *out);
 static int udb_strtoul_strict(const char *s, unsigned long *out);
+static int udb_parse_uint_strict(const char *s, unsigned int *out, unsigned int min_val, unsigned int max_val);
+static int udb_parse_ulong_strict(const char *s, unsigned long *out, unsigned long min_val, unsigned long max_val);
+static int udb_parse_size_strict(const char *s, size_t *out, size_t min_val, size_t max_val);
+static int udb_parse_time_t(const char *s, time_t *out);
+static int udb_time_add(time_t base, unsigned long duration, time_t *result);
 static int udb_timestamp_parse(const char *s, time_t *out);
 static int udb_checksum_parse(const char *input, unsigned long *checksum);
 static UdbRecord *udb_record_find(UdbContext *ctx, const char *key, UdbRecord *parent);
@@ -211,8 +220,8 @@ static void udb_block_replace_tree(UdbContext *ctx, UdbBlock *block,
                                    UdbRecord *tree, unsigned int record_count);
 static int udb_file_load_block(UdbContext *ctx, UdbBlock *block);
 static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *line);
-static void udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbuf,
-                               int pathlen);
+static int udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbuf,
+                              size_t pathlen);
 static unsigned long udb_crc32(const char *data, size_t len);
 static unsigned long udb_compute_block_checksum(UdbBlock *block);
 static unsigned long udb_compute_tree_checksum(UdbRecord *tree);

@@ -94,8 +94,8 @@ static UdbBlock *udb_mutation_path_block(UdbContext *ctx, const char *path)
 	{
 		if (separator == component || !separator[2])
 			return NULL;
-		char decoded[512];
-		char comp_buf[512];
+		char decoded[UDB_COMPONENT_MAX];
+		char comp_buf[UDB_COMPONENT_MAX];
 		size_t clen = separator - component;
 		if (clen >= sizeof(comp_buf))
 			return NULL;
@@ -105,7 +105,7 @@ static UdbBlock *udb_mutation_path_block(UdbContext *ctx, const char *path)
 			return NULL;
 		component = separator + 2;
 	}
-	char decoded[512];
+	char decoded[UDB_COMPONENT_MAX];
 	if (!*component || !udb_path_decode_component(component, decoded, sizeof(decoded)))
 		return NULL;
 
@@ -122,10 +122,12 @@ static void udb_mutation_forward_ins(Client *source, Client *except, const char 
  * may change: an identical INS must never revoke and re-apply effects. */
 static int udb_record_data_equals(UdbRecord *rec, const char *data)
 {
+	unsigned long val;
+
 	if (!rec || !data)
 		return 0;
 	if (*data == '*')
-		return !rec->data_str && rec->data_num == strtoul(data + 1, NULL, 10);
+		return !rec->data_str && udb_strtoul_strict(data + 1, &val) && rec->data_num == val;
 	if (!rec->data_str)
 		return 0;
 	return !strcmp(rec->data_str, data);

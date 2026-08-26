@@ -250,33 +250,42 @@ static int udb_path_decode_component(const char *encoded, char *buf, size_t bufs
 	return 1;
 }
 
-static int udb_path_append_component(char *pathbuf, size_t bufsz, const char *raw_component)
+static int udb_path_append(char *dst, size_t dst_size, size_t *used, const char *component)
 {
-	char encoded[512];
+	char encoded[UDB_COMPONENT_MAX];
 	size_t cur_len;
 	size_t enc_len;
 
-	if (!pathbuf || !raw_component || !udb_path_encode_component(raw_component, encoded, sizeof(encoded)))
+	if (!dst || !component || !udb_path_encode_component(component, encoded, sizeof(encoded)))
 		return 0;
-	cur_len = strlen(pathbuf);
+	cur_len = used ? *used : strlen(dst);
 	enc_len = strlen(encoded);
 	if (cur_len > 0)
 	{
-		if (cur_len + 2 + enc_len >= bufsz)
+		if (cur_len + 2 + enc_len >= dst_size)
 			return 0;
-		strlcat(pathbuf, "::", bufsz);
+		memcpy(dst + cur_len, "::", 2);
+		cur_len += 2;
 	} else
 	{
-		if (enc_len >= bufsz)
+		if (enc_len >= dst_size)
 			return 0;
 	}
-	strlcat(pathbuf, encoded, bufsz);
+	memcpy(dst + cur_len, encoded, enc_len + 1);
+	cur_len += enc_len;
+	if (used)
+		*used = cur_len;
 	return 1;
+}
+
+static int udb_path_append_component(char *pathbuf, size_t bufsz, const char *raw_component)
+{
+	return udb_path_append(pathbuf, bufsz, NULL, raw_component);
 }
 
 static UdbRecord *udb_record_find_path(UdbContext *ctx, UdbBlock *block, const char *path)
 {
-	char decoded_part[512];
+	char decoded_part[UDB_COMPONENT_MAX];
 	char pathbuf[UDB_RECORD_PATH_MAX];
 	char *cur;
 	char *ds;
@@ -373,7 +382,7 @@ static UdbRecord *udb_record_insert_path(UdbRecord *tree, const char *path,
                                          const char *data)
 {
 	char pathbuf[UDB_RECORD_PATH_MAX];
-	char decoded_part[512];
+	char decoded_part[UDB_COMPONENT_MAX];
 	char *part;
 	char *next;
 	UdbRecord *parent = tree;
@@ -408,7 +417,7 @@ static UdbRecord *udb_record_insert_path(UdbRecord *tree, const char *path,
 		safe_free(parent->data_str);
 	if (data && *data == '*')
 	{
-		parent->data_num = strtoul(data + 1, NULL, 10);
+		udb_strtoul_strict(data + 1, &parent->data_num);
 		parent->data_str = NULL;
 	} else if (data)
 	{
@@ -440,30 +449,52 @@ static void udb_record_delete_tree(UdbRecord *rec)
 #include <sys/stat.h>
 #include <unistd.h>
 
-static void udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbuf, int pathlen)
+static int udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbuf, size_t pathlen)
 {
 	UdbRecord *child;
 	size_t old_len;
-	char encoded_key[512];
+	char encoded_key[UDB_COMPONENT_MAX];
 
 	if (!rec || !rec->key)
-		return;
+		return 1;
 	old_len = strlen(pathbuf);
 	if (!udb_path_encode_component(rec->key, encoded_key, sizeof(encoded_key)))
-		return;
+		return 0;
+	size_t enc_len = strlen(encoded_key);
 	if (depth > 0)
+	{
+		if (old_len + 2 + enc_len >= pathlen)
+			return 0;
 		strlcat(pathbuf, "::", pathlen);
+	} else
+	{
+		if (enc_len >= pathlen)
+			return 0;
+	}
 	strlcat(pathbuf, encoded_key, pathlen);
 	if (rec->data_str || rec->data_num > 0 || !rec->child)
 	{
+		int ret;
 		if (rec->data_str)
-			fprintf(fp, "%s %s\n", pathbuf, rec->data_str);
-		else if (rec->data_num > 0 || !rec->child)
-			fprintf(fp, "%s *%lu\n", pathbuf, rec->data_num);
+			ret = fprintf(fp, "%s %s\n", pathbuf, rec->data_str);
+		else
+			ret = fprintf(fp, "%s *%lu\n", pathbuf, rec->data_num);
+		if (ret < 0 || ferror(fp))
+		{
+			pathbuf[old_len] = '\0';
+			return 0;
+		}
 	}
 	for (child = rec->child; child; child = child->sibling)
-		udb_serialize_tree(child, depth + 1, fp, pathbuf, pathlen);
+	{
+		if (!udb_serialize_tree(child, depth + 1, fp, pathbuf, pathlen))
+		{
+			pathbuf[old_len] = '\0';
+			return 0;
+		}
+	}
 	pathbuf[old_len] = '\0';
+	return 1;
 }
 
 static int udb_file_cleanup_snapshot_temp(UdbBlock *block)
@@ -474,7 +505,7 @@ static int udb_file_cleanup_snapshot_temp(UdbBlock *block)
 
 	if (!block || !block->filepath)
 		return 1;
-	if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", block->filepath) >= sizeof(tmp_path))
+	if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", block->filepath) >= (int)sizeof(tmp_path))
 	{
 		udb_log(ULOG_WARNING, "UDB_SNAPSHOT_TEMP_CLEANUP", NULL,
 		        "Temporary snapshot path is too long for block $block",
@@ -526,7 +557,7 @@ static UdbSnapshotResult udb_file_write_snapshot(UdbBlock *block, UdbRecord *tre
 {
 	char dir_path[UDB_BLOCK_PATH_MAX];
 	char tmp_path[UDB_BLOCK_PATH_MAX];
-	char pathbuf[4096] = "";
+	char pathbuf[UDB_RECORD_PATH_MAX] = "";
 	char *slash;
 	FILE *fp = NULL;
 	UdbRecord *rec;
@@ -538,7 +569,7 @@ static UdbSnapshotResult udb_file_write_snapshot(UdbBlock *block, UdbRecord *tre
 
 	if (!block || !block->filepath)
 		return UDB_SNAPSHOT_FAILED_BEFORE_COMMIT;
-	if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", block->filepath) >= sizeof(tmp_path))
+	if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", block->filepath) >= (int)sizeof(tmp_path))
 		return UDB_SNAPSHOT_FAILED_BEFORE_COMMIT;
 	strlcpy(dir_path, block->filepath, sizeof(dir_path));
 	slash = strrchr(dir_path, '/');
@@ -569,12 +600,18 @@ static UdbSnapshotResult udb_file_write_snapshot(UdbBlock *block, UdbRecord *tre
 	if (!fp)
 		goto cleanup;
 	fd = -1;
-	fprintf(fp, "; UDB Block %c - Version %d\n", block->letter, block->version);
-	fprintf(fp, "; Saved: %ld\n", (long)time(NULL));
-	fprintf(fp, "; Records: %u\n", record_count);
+	if (fprintf(fp, "; UDB Block %c - Version %d\n", block->letter, block->version) < 0 ||
+	    fprintf(fp, "; Saved: %ld\n", (long)time(NULL)) < 0 ||
+	    fprintf(fp, "; Records: %u\n", record_count) < 0)
+		goto cleanup;
 	if (tree)
+	{
 		for (rec = tree->child; rec; rec = rec->sibling)
-			udb_serialize_tree(rec, 0, fp, pathbuf, sizeof(pathbuf));
+		{
+			if (!udb_serialize_tree(rec, 0, fp, pathbuf, sizeof(pathbuf)))
+				goto cleanup;
+		}
+	}
 	if (fflush(fp) != 0 || ferror(fp))
 		goto cleanup;
 	if (fsync(fileno(fp)) != 0)

@@ -199,7 +199,7 @@ static void udb_sync_send_tree(Client *server, UdbRecord *rec, int depth,
 {
 	size_t old_len;
 	UdbRecord *child;
-	char encoded_key[512];
+	char encoded_key[UDB_COMPONENT_MAX];
 
 	if (!rec || !rec->key)
 		return;
@@ -226,7 +226,7 @@ static void udb_sync_send_tree(Client *server, UdbRecord *rec, int depth,
 static void udb_sync_send_stage(Client *server, UdbBlock *block)
 {
 	char txid[32];
-	char pathbuf[4096] = "";
+	char pathbuf[UDB_RECORD_PATH_MAX] = "";
 	UdbRecord *rec;
 
 	/* HEL confirms protocol support; snapshots require the selected data source. */
