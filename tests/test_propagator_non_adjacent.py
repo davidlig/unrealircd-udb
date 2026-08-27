@@ -177,35 +177,34 @@ def main():
         # Cluster configuration in S block: hub-a.test,hub-b.test
         propagator_list = "hub-a.test,hub-b.test"
 
-        # Seed Node A (Root Propagator) with S block and latest N block
-        (node_a / "data/udb_S.db").write_text(
-            f"; UDB Block S\n; Saved: 1787720000\n; Records: 2\npropagator {propagator_list}\nflood 5:30\n",
-            encoding="ascii"
-        )
+        # Initialize all 6 blocks with S block on nodes A, B, C
+        for n in (node_a, node_b, node_c):
+            for letter in ('N', 'C', 'I', 'S', 'L', 'K'):
+                (n / f"data/udb_{letter}.db").write_text(f"; UDB Block {letter} - Version 1\n", encoding="ascii")
+            (n / "data/udb_S.db").write_text(
+                f"; UDB Block S\n; Saved: 1787720000\n; Records: 2\npropagator {propagator_list}\nflood 5:30\n",
+                encoding="ascii"
+            )
+            (n / "data/.udb_state").write_text("STATE=READY\nLAST_SYNC=1787720000\n", encoding="ascii")
+
+        # Seed Node A (Root Propagator) with latest N block
         (node_a / "data/udb_N.db").write_text(
             "; UDB Block N\n; Saved: 1787720000\n; Records: 2\nalice::vhost official.alice.net\nbob::vhost official.bob.net\n",
             encoding="ascii"
         )
-        (node_a / "data/.udb_state").write_text("STATE=READY\nLAST_SYNC=1787720000\n", encoding="ascii")
+        new_time = time.time() + 60
+        os.utime(node_a / "data/udb_N.db", (new_time, new_time))
+        os.utime(node_a / "data/.udb_state", (new_time, new_time))
 
-        # Seed Node B (Relay) with S block
-        (node_b / "data/udb_S.db").write_text(
-            f"; UDB Block S\n; Saved: 1787720000\n; Records: 2\npropagator {propagator_list}\nflood 5:30\n",
-            encoding="ascii"
-        )
-
-        # Seed Node C (Leaf) with PERSISTED S block BEFORE connecting to network!
-        # This guarantees auto-bootstrap with '?' does not mask non-adjacent selection.
-        (node_c / "data/udb_S.db").write_text(
-            f"; UDB Block S\n; Saved: 1787720000\n; Records: 2\npropagator {propagator_list}\nflood 5:30\n",
-            encoding="ascii"
-        )
-        # Node C starts with an older, outdated N.db
+        # Seed Node C (Leaf) with older, outdated N.db
         (node_c / "data/udb_N.db").write_text(
             "; UDB Block N\n; Saved: 1787710000\n; Records: 1\nolduser::vhost outdated.vhost.net\n",
             encoding="ascii"
         )
         (node_c / "data/.udb_state").write_text("STATE=READY\nLAST_SYNC=1787710000\n", encoding="ascii")
+        old_time = time.time() - 120
+        os.utime(node_c / "data/udb_N.db", (old_time, old_time))
+        os.utime(node_c / "data/.udb_state", (old_time, old_time))
 
         all_ports = free_ports(9)
         ports_a = tuple(all_ports[0:3])

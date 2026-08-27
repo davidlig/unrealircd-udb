@@ -262,6 +262,30 @@ Detailed technical documentation is available in the `doc/` directory:
 Run these from the UnrealIRCd source root after building `udb.so`:
 
 ```bash
+# Core bootstrap readiness, crash safety, and convergence test suite:
+python3 src/modules/third/udb/tests/test_bootstrap_readiness_and_convergence.py
+
+# Multi-hop hub, leaf, and persistence lifecycle test suite:
+python3 src/modules/third/udb/tests/test_hub_multihop_and_persistence.py
+
+# Health state machine (OK / DEGRADED / STALE) and recovery test suite:
+python3 src/modules/third/udb/tests/test_convergence_degraded_stale.py
+
+# Staged sync ownership, transaction isolation, and foreign injection protection:
+python3 src/modules/third/udb/tests/test_staged_sync_ownership.py
+
+# Multi-hop live mutations across 3-node network:
+python3 src/modules/third/udb/tests/test_multihop_mutations.py
+
+# Non-adjacent propagator selection and hop-by-hop resolution:
+python3 src/modules/third/udb/tests/test_propagator_non_adjacent.py
+
+# Dynamic runtime failover and primary recovery:
+python3 src/modules/third/udb/tests/test_propagator_runtime_failover.py
+
+# Fail-safe transactional database loader and permission error protection:
+python3 src/modules/third/udb/tests/test_loader_fail_safe.py
+
 # Isolated nick/channel runtime authentication and privilege harness (requires bwrap):
 python3 src/modules/third/udb/tests/runtime_channel_nick.py
 
@@ -279,9 +303,6 @@ python3 src/modules/third/udb/tests/runtime_clone_limit.py
 
 # Link debug notices routing (L::<server>::options *1):
 python3 src/modules/third/udb/tests/runtime_debug_notices.py
-
-# Propagator dynamic priority list failover and auto-bootstrap:
-python3 src/modules/third/udb/tests/test_propagator_failover.py
 
 # Two nodes: deterministic equal-timestamp conflict resolution, staged N/K records, and authorized INS/DEL:
 python3 src/modules/third/udb/tests/two_node_udb.py

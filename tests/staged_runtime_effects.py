@@ -292,6 +292,9 @@ def main():
         (a / "data" / "udb_K.db").write_text(
             "G::*@127.0.0.1::reason staged loopback ban\n"
             "Q::banned::reason staged fresh-client rejection\n", encoding="ascii")
+        for n in (a, b):
+            for letter in ('C', 'I', 'S', 'L'):
+                (n / "data" / f"udb_{letter}.db").write_text(f"; UDB Block {letter} - Version 1\n", encoding="ascii")
         (a / "data" / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787720000\n", encoding="ascii")
         (b / "data" / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787710000\n", encoding="ascii")
         old_time = time.time() - 120

@@ -16,22 +16,6 @@ static const char *udb_propagator_policy(UdbContext *ctx)
 	return ctx && ctx->propagator_setting && *ctx->propagator_setting ? ctx->propagator_setting : NULL;
 }
 
-static int udb_propagator_in_policy(UdbContext *ctx, const char *server_name)
-{
-	const char *cursor = udb_propagator_policy(ctx);
-	char name[HOSTLEN + 1];
-	int result;
-
-	if (!server_name || !*server_name)
-		return 0;
-	while (cursor && (result = udb_propagator_list_next(&cursor, name)) > 0)
-	{
-		if (!strcasecmp(name, server_name))
-			return 1;
-	}
-	return 0;
-}
-
 static int udb_propagator_policy_present(UdbContext *ctx)
 {
 	return udb_propagator_policy(ctx) != NULL;

@@ -212,7 +212,7 @@ CMD_FUNC(cmd_db)
 		}
 		else if (udb_server_name_valid(prop))
 		{
-			new_auth = !strcasecmp(prop, me.name) || udb_propagator_in_policy(ctx, prop);
+			new_auth = !strcasecmp(prop, me.name);
 		}
 		else
 		{
@@ -235,7 +235,7 @@ CMD_FUNC(cmd_db)
 			udb_sync_hello_start(client);
 		udb_send_db_to_one(client, ":%s DB %s HEL 4 ACK", me.id, client->id);
 
-		if (dynamic_transition)
+		if (dynamic_transition && !udb_is_authorized_sync_source(ctx, client))
 		{
 			udb_sync_to_server(client);
 		}
@@ -284,6 +284,24 @@ CMD_FUNC(cmd_db)
 			}
 			if (is_for_me)
 			{
+				if (block->session)
+				{
+					udb_send_db_to_one(client, ":%s DB %s ERR BEGIN %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE,
+									   parv[3] ? *parv[3] : '0');
+					return;
+				}
+				if (block->pending_from &&
+					(block->pending_from != direct_peer ||
+					 (block->pending_round_id && block->pending_round_id != udb_reconcile.round_id)))
+				{
+					udb_send_db_to_one(client, ":%s DB %s ERR BEGIN %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE,
+									   parv[3] ? *parv[3] : '0');
+					return;
+				}
+				block->pending_from = NULL;
+				block->pending_deadline = 0;
+				block->pending_round_id = 0;
+
 				int error = udb_sync_begin(block, direct_peer, parv[4]);
 				if (error)
 				{
@@ -365,6 +383,7 @@ CMD_FUNC(cmd_db)
 			}
 			if (is_for_me)
 			{
+				unsigned long session_round = block->session ? block->session->round_id : 0;
 				error = udb_sync_end(ctx, block, direct_peer, parv[4], parv[5], &digest);
 				if (error)
 				{
@@ -375,7 +394,7 @@ CMD_FUNC(cmd_db)
 				udb_send_db_to_one(client, ":%s DB %s ACK %c %s %08lX", me.id, client->id, *parv[3], parv[4], digest);
 				udb_sendto_confirmed_servers(client, ":%s DB * INF %c %08lX %lu", me.id, block->letter, block->checksum,
 											 (unsigned long)block->modified_at);
-				udb_reconcile_record_end(direct_peer, block->letter);
+				udb_reconcile_record_end(direct_peer, block->letter, session_round);
 				udb_reconcile_check(ctx);
 				if (!is_broadcast)
 					return;
@@ -394,6 +413,25 @@ CMD_FUNC(cmd_db)
 				udb_log(ULOG_INFO, "UDB_EVENT", client, "Error from $client: cmd=$cmd err=$errcode",
 						log_data_client("client", client), log_data_string("cmd", parv[3]),
 						log_data_integer("errcode", (int)errcode));
+
+				if (parc >= 6 && parv[5] && *parv[5])
+				{
+					char err_letter = *parv[5];
+					UdbBlock *eblock = udb_block_by_letter(ctx, err_letter);
+					if (eblock)
+					{
+						if (eblock->pending_from == direct_peer)
+						{
+							eblock->pending_from = NULL;
+							eblock->pending_deadline = 0;
+							eblock->pending_round_id = 0;
+						}
+						if (eblock->session && eblock->session->peer == direct_peer)
+						{
+							udb_sync_abort(eblock, "peer returned ERR");
+						}
+					}
+				}
 				if (!is_broadcast)
 					return;
 			}
@@ -457,17 +495,22 @@ CMD_FUNC(cmd_db)
 				udb_reconcile_record_inf(direct_peer, letter, crc32);
 				if (crc32 != block->checksum)
 				{
+					int should_request = 0;
 					if (remote_ts > block->modified_at)
+						should_request = 1;
+					else if (remote_ts == block->modified_at &&
+							 (!udb_peer_authorizes_us(client) || udb_remote_wins_equal_timestamp(client)))
+						should_request = 1;
+
+					if (should_request)
 					{
-						udb_send_db_to_one(client, ":%s DB %s RES %c", me.id, client->id, letter);
-						udb_reconcile_record_res(direct_peer, letter);
-						block->syncing_from = direct_peer;
-					}
-					else if (remote_ts == block->modified_at && udb_remote_wins_equal_timestamp(client))
-					{
-						udb_send_db_to_one(client, ":%s DB %s RES %c", me.id, client->id, letter);
-						udb_reconcile_record_res(direct_peer, letter);
-						block->syncing_from = direct_peer;
+						if (udb_send_db_to_one(client, ":%s DB %s RES %c", me.id, client->id, letter))
+						{
+							udb_reconcile_record_res(direct_peer, letter);
+							block->pending_from = direct_peer;
+							block->pending_deadline = time(NULL) + UDB_SYNC_TIMEOUT;
+							block->pending_round_id = udb_reconcile.round_id;
+						}
 					}
 				}
 				udb_reconcile_check(ctx);

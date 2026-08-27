@@ -123,6 +123,9 @@ struct UdbBlock
 	time_t modified_at;
 	Client *syncing_from;
 	UdbSyncSession *session;
+	Client *pending_from;
+	time_t pending_deadline;
+	unsigned long pending_round_id;
 	unsigned int record_count;
 	char letter;
 	unsigned int version;
@@ -133,6 +136,7 @@ struct UdbSyncSession
 {
 	Client *peer;
 	char txid[UDB_TXID_MAX + 1];
+	unsigned long round_id;
 	time_t started_at;
 	time_t last_activity;
 	time_t deadline;
@@ -231,6 +235,7 @@ typedef struct UdbReconcileState
 {
 	Client *authority_peer;
 	unsigned long round_id;
+	int active;
 	unsigned int compared_blocks;
 	unsigned int divergent_blocks;
 	unsigned int completed_blocks;
@@ -321,11 +326,18 @@ static unsigned int udb_block_letter_to_mask(char letter);
 static int udb_is_database_initialized(UdbContext *ctx);
 static void udb_persistence_mark_ready(void);
 static int udb_has_active_sessions(UdbContext *ctx);
+static int udb_transition_to_ready(UdbContext *ctx, time_t sync_time);
+static int udb_persistence_has_state_file(void);
+static int udb_persistence_migrate_legacy(UdbContext *ctx, time_t *last_sync_out);
+static void udb_block_clear_pending(UdbBlock *block);
+static int udb_has_pending_requests(UdbContext *ctx);
 static void udb_reconcile_reset(void);
+static void udb_reconcile_begin(Client *authority);
+static void udb_reconcile_abort(UdbContext *ctx, const char *reason);
 static void udb_reconcile_start(Client *authority);
 static void udb_reconcile_record_inf(Client *peer, char letter, unsigned long crc32);
 static void udb_reconcile_record_res(Client *peer, char letter);
-static void udb_reconcile_record_end(Client *peer, char letter);
+static void udb_reconcile_record_end(Client *peer, char letter, unsigned long round_id);
 static int udb_reconcile_check(UdbContext *ctx);
 static int udb_is_authorized_sync_source(UdbContext *ctx, Client *direct_peer);
 static int udb_sync_begin(UdbBlock *block, Client *peer, const char *txid);
@@ -343,7 +355,6 @@ static int udb_server_name_valid(const char *srv);
 static int udb_propagator_list_valid(const char *value);
 static const char *udb_propagator_policy(UdbContext *ctx);
 static int udb_select_propagator(UdbContext *ctx, int require_hello, UdbPropagatorSelection *selected);
-static int udb_propagator_in_policy(UdbContext *ctx, const char *server_name);
 static int udb_propagator_policy_present(UdbContext *ctx);
 static void udb_propagator_policy_changed(UdbContext *ctx);
 static void udb_sync_hello_refresh_all(void);

@@ -347,6 +347,8 @@ def run_tests(ircd_bin, keep=False):
             lines.append(line)
             expected_records[f"{chan}::topic"] = payload
 
+        for letter in ('N', 'I', 'S', 'L', 'K'):
+            (data_dir4 / f"udb_{letter}.db").write_text(f"; UDB Block {letter} - Version 1\n", encoding="ascii")
         large_records_db = data_dir4 / "udb_C.db"
         large_records_db.write_text("".join(lines), encoding="ascii")
         (data_dir4 / ".udb_state").write_text(f"STATE=READY\nLAST_SYNC={int(time.time())}\n", encoding="ascii")

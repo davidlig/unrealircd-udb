@@ -265,6 +265,9 @@ struct UdbBlock
 	time_t modified_at;
 	Client *syncing_from;
 	UdbSyncSession *session;
+	Client *pending_from;
+	time_t pending_deadline;
+	unsigned long pending_round_id;
 	unsigned int record_count;
 	char letter;
 	unsigned int version;
@@ -275,6 +278,7 @@ struct UdbSyncSession
 {
 	Client *peer;
 	char txid[UDB_TXID_MAX + 1];
+	unsigned long round_id;
 	time_t started_at;
 	time_t last_activity;
 	time_t deadline;
@@ -373,6 +377,7 @@ typedef struct UdbReconcileState
 {
 	Client *authority_peer;
 	unsigned long round_id;
+	int active;
 	unsigned int compared_blocks;
 	unsigned int divergent_blocks;
 	unsigned int completed_blocks;
@@ -463,11 +468,18 @@ static unsigned int udb_block_letter_to_mask(char letter);
 static int udb_is_database_initialized(UdbContext *ctx);
 static void udb_persistence_mark_ready(void);
 static int udb_has_active_sessions(UdbContext *ctx);
+static int udb_transition_to_ready(UdbContext *ctx, time_t sync_time);
+static int udb_persistence_has_state_file(void);
+static int udb_persistence_migrate_legacy(UdbContext *ctx, time_t *last_sync_out);
+static void udb_block_clear_pending(UdbBlock *block);
+static int udb_has_pending_requests(UdbContext *ctx);
 static void udb_reconcile_reset(void);
+static void udb_reconcile_begin(Client *authority);
+static void udb_reconcile_abort(UdbContext *ctx, const char *reason);
 static void udb_reconcile_start(Client *authority);
 static void udb_reconcile_record_inf(Client *peer, char letter, unsigned long crc32);
 static void udb_reconcile_record_res(Client *peer, char letter);
-static void udb_reconcile_record_end(Client *peer, char letter);
+static void udb_reconcile_record_end(Client *peer, char letter, unsigned long round_id);
 static int udb_reconcile_check(UdbContext *ctx);
 static int udb_is_authorized_sync_source(UdbContext *ctx, Client *direct_peer);
 static int udb_sync_begin(UdbBlock *block, Client *peer, const char *txid);
@@ -485,7 +497,6 @@ static int udb_server_name_valid(const char *srv);
 static int udb_propagator_list_valid(const char *value);
 static const char *udb_propagator_policy(UdbContext *ctx);
 static int udb_select_propagator(UdbContext *ctx, int require_hello, UdbPropagatorSelection *selected);
-static int udb_propagator_in_policy(UdbContext *ctx, const char *server_name);
 static int udb_propagator_policy_present(UdbContext *ctx);
 static void udb_propagator_policy_changed(UdbContext *ctx);
 static void udb_sync_hello_refresh_all(void);
@@ -3895,7 +3906,7 @@ static void udb_sync_hello_ack(Client *server)
 		peer->deadline = 0;
 		udb_log(ULOG_INFO, "UDB_HEL_CONFIRMED", server, "UDB HEL 4 capability confirmed for directly linked server");
 		udb_propagator_policy_changed(udb_ctx);
-		if (!peer->auth_received || peer->authorizes_us)
+		if (peer->authorizes_us && !udb_is_authorized_sync_source(udb_ctx, server))
 			udb_sync_to_server(server);
 	}
 }
@@ -3934,23 +3945,71 @@ static int udb_has_active_sessions(UdbContext *ctx)
 	return 0;
 }
 
+static int udb_has_pending_requests(UdbContext *ctx)
+{
+	UdbBlock *block;
+	if (!ctx)
+		return 0;
+	for (block = ctx->block_list; block; block = block->next)
+	{
+		if (block->pending_from)
+			return 1;
+	}
+	return 0;
+}
+
 static void udb_reconcile_reset(void)
 {
 	udb_reconcile.authority_peer = NULL;
+	udb_reconcile.active = 0;
 	udb_reconcile.compared_blocks = 0;
 	udb_reconcile.divergent_blocks = 0;
 	udb_reconcile.completed_blocks = 0;
 }
 
+static void udb_reconcile_abort(UdbContext *ctx, const char *reason)
+{
+	UdbBlock *block;
+	if (!udb_reconcile.active && !udb_reconcile.authority_peer)
+		return;
+
+	udb_log(ULOG_WARNING, "UDB_RECONCILE_ABORT", udb_reconcile.authority_peer,
+			"Reconciliation round $round aborted: $reason", log_data_integer("round", (int)udb_reconcile.round_id),
+			log_data_string("reason", reason ? reason : "unspecified"));
+
+	if (ctx)
+	{
+		for (block = ctx->block_list; block; block = block->next)
+		{
+			if (block->pending_from)
+			{
+				block->pending_from = NULL;
+				block->pending_deadline = 0;
+				block->pending_round_id = 0;
+			}
+		}
+	}
+	udb_reconcile_reset();
+}
+
+static void udb_reconcile_begin(Client *authority)
+{
+	udb_reconcile.authority_peer = authority;
+	udb_reconcile.round_id++;
+	udb_reconcile.active = 1;
+	udb_reconcile.compared_blocks = 0;
+	udb_reconcile.divergent_blocks = 0;
+	udb_reconcile.completed_blocks = 0;
+	udb_log(ULOG_INFO, "UDB_RECONCILE_ROUND_START", authority,
+			"Started reconciliation round $round with authority peer $peer",
+			log_data_integer("round", (int)udb_reconcile.round_id), log_data_client("peer", authority));
+}
+
 static void udb_reconcile_start(Client *authority)
 {
-	if (udb_reconcile.authority_peer != authority)
+	if (udb_reconcile.authority_peer != authority || !udb_reconcile.active)
 	{
-		udb_reconcile.authority_peer = authority;
-		udb_reconcile.round_id++;
-		udb_reconcile.compared_blocks = 0;
-		udb_reconcile.divergent_blocks = 0;
-		udb_reconcile.completed_blocks = 0;
+		udb_reconcile_begin(authority);
 	}
 }
 
@@ -3987,20 +4046,29 @@ static void udb_reconcile_record_res(Client *peer, char letter)
 	udb_reconcile.completed_blocks &= ~mask;
 }
 
-static void udb_reconcile_record_end(Client *peer, char letter)
+static void udb_reconcile_record_end(Client *peer, char letter, unsigned long round_id)
 {
 	unsigned int mask = udb_block_letter_to_mask(letter);
 	if (!mask)
 		return;
 
-	udb_reconcile_start(peer);
+	if (!udb_reconcile.active || udb_reconcile.authority_peer != peer || udb_reconcile.round_id != round_id)
+	{
+		udb_log(ULOG_WARNING, "UDB_RECONCILE_STALE_END", peer,
+				"Ignored staged END for block $block with round $session_round (current round is $current_round)",
+				log_data_string("block", (char[]){letter, '\0'}), log_data_integer("session_round", (int)round_id),
+				log_data_integer("current_round", (int)udb_reconcile.round_id));
+		return;
+	}
+
 	udb_reconcile.compared_blocks |= mask;
 	udb_reconcile.completed_blocks |= mask;
+	udb_reconcile.divergent_blocks &= ~mask;
 }
 
 static int udb_reconcile_check(UdbContext *ctx)
 {
-	if (!ctx)
+	if (!ctx || !udb_reconcile.active)
 		return 0;
 
 	if ((udb_reconcile.compared_blocks & UDB_ALL_BLOCKS_MASK) != UDB_ALL_BLOCKS_MASK)
@@ -4009,29 +4077,23 @@ static int udb_reconcile_check(UdbContext *ctx)
 	if ((udb_reconcile.divergent_blocks & udb_reconcile.completed_blocks) != udb_reconcile.divergent_blocks)
 		return 0;
 
-	if (udb_has_active_sessions(ctx))
+	if (udb_has_active_sessions(ctx) || udb_has_pending_requests(ctx))
 		return 0;
 
 	time_t now = time(NULL);
-	if (!udb_persistence_set_state(UDB_PERSIST_READY, now))
-	{
-		udb_log(ULOG_ERROR, "UDB_STATE_PERSIST_FAILED", NULL,
-				"Failed to persist READY state to disk; database remains NOT_READY");
-		udb_ready = 0;
-		return 0;
-	}
-
 	int was_stale_or_degraded = (udb_sync_status == UDB_SYNC_STALE || udb_sync_status == UDB_SYNC_DEGRADED);
 	int was_not_ready = !udb_ready;
 
-	udb_ready = 1;
+	if (!udb_transition_to_ready(ctx, now))
+		return 0;
+
 	udb_sync_status = UDB_SYNC_OK;
 	udb_degraded_since = 0;
-	udb_last_successful_sync = now;
 
 	udb_reconcile.compared_blocks = 0;
 	udb_reconcile.divergent_blocks = 0;
 	udb_reconcile.completed_blocks = 0;
+	udb_reconcile.active = 0;
 
 	if (was_stale_or_degraded || was_not_ready)
 	{
@@ -4192,11 +4254,20 @@ static void udb_sync_hello_refresh_all(void)
 
 static void udb_sync_abort(UdbBlock *block, const char *reason)
 {
-	if (!block || !block->session)
+	if (!block)
 		return;
-	udb_log(ULOG_WARNING, "UDB_SYNC_ABORT", block->session->peer, "Aborted staged sync of block $block: $reason",
-			log_data_string("block", (char[]){block->letter, '\0'}), log_data_string("reason", reason));
-	udb_sync_session_free(block);
+	if (block->session)
+	{
+		udb_log(ULOG_WARNING, "UDB_SYNC_ABORT", block->session->peer, "Aborted staged sync of block $block: $reason",
+				log_data_string("block", (char[]){block->letter, '\0'}), log_data_string("reason", reason));
+		udb_sync_session_free(block);
+	}
+	if (block->pending_from)
+	{
+		block->pending_from = NULL;
+		block->pending_deadline = 0;
+		block->pending_round_id = 0;
+	}
 }
 
 static void udb_propagator_policy_changed(UdbContext *ctx)
@@ -4219,7 +4290,7 @@ static void udb_propagator_policy_changed(UdbContext *ctx)
 	if (udb_bootstrap_peer && udb_bootstrap_peer != peer)
 		udb_bootstrap_peer = NULL;
 	if (udb_reconcile.authority_peer && udb_reconcile.authority_peer != peer)
-		udb_reconcile_reset();
+		udb_reconcile_abort(ctx, "propagator policy changed");
 
 	for (block = ctx->block_list; block; block = block->next)
 	{
@@ -4230,9 +4301,21 @@ static void udb_propagator_policy_changed(UdbContext *ctx)
 			udb_sync_abort(block, "propagator policy changed");
 		else if (!block->session && block->syncing_from && block->syncing_from != peer)
 			block->syncing_from = NULL;
+
+		if (block->pending_from && block->pending_from != peer)
+		{
+			block->pending_from = NULL;
+			block->pending_deadline = 0;
+			block->pending_round_id = 0;
+		}
 	}
 	udb_sync_hello_refresh_all();
 	udb_sync_status_refresh();
+
+	if (peer && udb_has_hello(peer) && (!udb_ready || udb_sync_status != UDB_SYNC_OK))
+	{
+		udb_sync_to_server(peer);
+	}
 }
 
 static int udb_sync_begin(UdbBlock *block, Client *peer, const char *txid)
@@ -4264,8 +4347,14 @@ static int udb_sync_begin(UdbBlock *block, Client *peer, const char *txid)
 	if (block->session)
 		return UDB_ERR_SYNC_ACTIVE;
 
+	if (!udb_reconcile.active || udb_reconcile.authority_peer != peer)
+	{
+		udb_reconcile_start(peer);
+	}
+
 	session = safe_alloc(sizeof(*session));
 	session->peer = peer;
+	session->round_id = udb_reconcile.round_id;
 	memcpy(session->txid, txid, txid_len + 1);
 	session->started_at = time(NULL);
 	session->last_activity = session->started_at;
@@ -4530,6 +4619,15 @@ EVENT(udb_sync_timeout_event)
 			else if (block->session->absolute_deadline <= now)
 				udb_sync_abort(block, "absolute timeout");
 		}
+		if (block->pending_from && block->pending_deadline <= now)
+		{
+			udb_log(ULOG_WARNING, "UDB_PENDING_RES_TIMEOUT", block->pending_from,
+					"Pending RES request for block $block timed out waiting for BEGIN",
+					log_data_string("block", (char[]){block->letter, '\0'}));
+			block->pending_from = NULL;
+			block->pending_deadline = 0;
+			block->pending_round_id = 0;
+		}
 	}
 	for (peer = udb_hello_peers; peer; peer = next)
 	{
@@ -4565,15 +4663,29 @@ static void udb_sync_server_quit(Client *client)
 			break;
 		}
 	for (block = udb_ctx->block_list; block; block = block->next)
+	{
 		if (block->session && block->session->peer == client)
 			udb_sync_abort(block, "peer quit");
 		else if (block->syncing_from == client)
 			block->syncing_from = NULL;
 
+		if (block->pending_from == client)
+		{
+			block->pending_from = NULL;
+			block->pending_deadline = 0;
+			block->pending_round_id = 0;
+		}
+	}
+
 	if (udb_bootstrap_peer == client)
 		udb_bootstrap_peer = NULL;
 	if (udb_reconcile.authority_peer == client)
+	{
+		udb_log(ULOG_INFO, "UDB_AUTHORITY_FAILOVER", client,
+				"Authority peer $client disconnected; resetting reconciliation round",
+				log_data_client("client", client));
 		udb_reconcile_reset();
+	}
 
 	udb_propagator_policy_changed(udb_ctx);
 }
@@ -4598,22 +4710,6 @@ static const char *udb_propagator_policy(UdbContext *ctx)
 	if (udb_cfg && udb_cfg->propagator && *udb_cfg->propagator)
 		return udb_cfg->propagator;
 	return ctx && ctx->propagator_setting && *ctx->propagator_setting ? ctx->propagator_setting : NULL;
-}
-
-static int udb_propagator_in_policy(UdbContext *ctx, const char *server_name)
-{
-	const char *cursor = udb_propagator_policy(ctx);
-	char name[HOSTLEN + 1];
-	int result;
-
-	if (!server_name || !*server_name)
-		return 0;
-	while (cursor && (result = udb_propagator_list_next(&cursor, name)) > 0)
-	{
-		if (!strcasecmp(name, server_name))
-			return 1;
-	}
-	return 0;
 }
 
 static int udb_propagator_policy_present(UdbContext *ctx)
@@ -5185,7 +5281,7 @@ CMD_FUNC(cmd_db)
 		}
 		else if (udb_server_name_valid(prop))
 		{
-			new_auth = !strcasecmp(prop, me.name) || udb_propagator_in_policy(ctx, prop);
+			new_auth = !strcasecmp(prop, me.name);
 		}
 		else
 		{
@@ -5208,7 +5304,7 @@ CMD_FUNC(cmd_db)
 			udb_sync_hello_start(client);
 		udb_send_db_to_one(client, ":%s DB %s HEL 4 ACK", me.id, client->id);
 
-		if (dynamic_transition)
+		if (dynamic_transition && !udb_is_authorized_sync_source(ctx, client))
 		{
 			udb_sync_to_server(client);
 		}
@@ -5257,6 +5353,24 @@ CMD_FUNC(cmd_db)
 			}
 			if (is_for_me)
 			{
+				if (block->session)
+				{
+					udb_send_db_to_one(client, ":%s DB %s ERR BEGIN %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE,
+									   parv[3] ? *parv[3] : '0');
+					return;
+				}
+				if (block->pending_from &&
+					(block->pending_from != direct_peer ||
+					 (block->pending_round_id && block->pending_round_id != udb_reconcile.round_id)))
+				{
+					udb_send_db_to_one(client, ":%s DB %s ERR BEGIN %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE,
+									   parv[3] ? *parv[3] : '0');
+					return;
+				}
+				block->pending_from = NULL;
+				block->pending_deadline = 0;
+				block->pending_round_id = 0;
+
 				int error = udb_sync_begin(block, direct_peer, parv[4]);
 				if (error)
 				{
@@ -5338,6 +5452,7 @@ CMD_FUNC(cmd_db)
 			}
 			if (is_for_me)
 			{
+				unsigned long session_round = block->session ? block->session->round_id : 0;
 				error = udb_sync_end(ctx, block, direct_peer, parv[4], parv[5], &digest);
 				if (error)
 				{
@@ -5348,7 +5463,7 @@ CMD_FUNC(cmd_db)
 				udb_send_db_to_one(client, ":%s DB %s ACK %c %s %08lX", me.id, client->id, *parv[3], parv[4], digest);
 				udb_sendto_confirmed_servers(client, ":%s DB * INF %c %08lX %lu", me.id, block->letter, block->checksum,
 											 (unsigned long)block->modified_at);
-				udb_reconcile_record_end(direct_peer, block->letter);
+				udb_reconcile_record_end(direct_peer, block->letter, session_round);
 				udb_reconcile_check(ctx);
 				if (!is_broadcast)
 					return;
@@ -5367,6 +5482,25 @@ CMD_FUNC(cmd_db)
 				udb_log(ULOG_INFO, "UDB_EVENT", client, "Error from $client: cmd=$cmd err=$errcode",
 						log_data_client("client", client), log_data_string("cmd", parv[3]),
 						log_data_integer("errcode", (int)errcode));
+
+				if (parc >= 6 && parv[5] && *parv[5])
+				{
+					char err_letter = *parv[5];
+					UdbBlock *eblock = udb_block_by_letter(ctx, err_letter);
+					if (eblock)
+					{
+						if (eblock->pending_from == direct_peer)
+						{
+							eblock->pending_from = NULL;
+							eblock->pending_deadline = 0;
+							eblock->pending_round_id = 0;
+						}
+						if (eblock->session && eblock->session->peer == direct_peer)
+						{
+							udb_sync_abort(eblock, "peer returned ERR");
+						}
+					}
+				}
 				if (!is_broadcast)
 					return;
 			}
@@ -5430,17 +5564,22 @@ CMD_FUNC(cmd_db)
 				udb_reconcile_record_inf(direct_peer, letter, crc32);
 				if (crc32 != block->checksum)
 				{
+					int should_request = 0;
 					if (remote_ts > block->modified_at)
+						should_request = 1;
+					else if (remote_ts == block->modified_at &&
+							 (!udb_peer_authorizes_us(client) || udb_remote_wins_equal_timestamp(client)))
+						should_request = 1;
+
+					if (should_request)
 					{
-						udb_send_db_to_one(client, ":%s DB %s RES %c", me.id, client->id, letter);
-						udb_reconcile_record_res(direct_peer, letter);
-						block->syncing_from = direct_peer;
-					}
-					else if (remote_ts == block->modified_at && udb_remote_wins_equal_timestamp(client))
-					{
-						udb_send_db_to_one(client, ":%s DB %s RES %c", me.id, client->id, letter);
-						udb_reconcile_record_res(direct_peer, letter);
-						block->syncing_from = direct_peer;
+						if (udb_send_db_to_one(client, ":%s DB %s RES %c", me.id, client->id, letter))
+						{
+							udb_reconcile_record_res(direct_peer, letter);
+							block->pending_from = direct_peer;
+							block->pending_deadline = time(NULL) + UDB_SYNC_TIMEOUT;
+							block->pending_round_id = udb_reconcile.round_id;
+						}
 					}
 				}
 				udb_reconcile_check(ctx);
@@ -8761,6 +8900,15 @@ static UdbBlock *udb_block_by_letter(UdbContext *ctx, char letter)
 	return ctx ? ctx->blocks[(unsigned char)letter] : NULL;
 }
 
+static void udb_block_clear_pending(UdbBlock *block)
+{
+	if (!block)
+		return;
+	block->pending_from = NULL;
+	block->pending_deadline = 0;
+	block->pending_round_id = 0;
+}
+
 static void udb_engine_cleanup(UdbContext *ctx)
 {
 	UdbBlock *b;
@@ -8771,6 +8919,7 @@ static void udb_engine_cleanup(UdbContext *ctx)
 	for (b = ctx->block_list; b;)
 	{
 		UdbBlock *next = b->next;
+		udb_block_clear_pending(b);
 		udb_sync_session_free(b);
 		udb_block_unload(ctx, b);
 		safe_free(b->filepath);
@@ -8789,7 +8938,14 @@ static int udb_persistence_set_state(UdbPersistentState state, time_t last_sync)
 	const char *directory = udb_cfg ? udb_cfg->db_directory : NULL;
 	char tmp_path[UDB_BLOCK_PATH_MAX];
 	char final_path[UDB_BLOCK_PATH_MAX];
-	FILE *fp;
+	char dir_path[UDB_BLOCK_PATH_MAX];
+	char *slash;
+	FILE *fp = NULL;
+	int fd = -1;
+	int dir_fd = -1;
+	int flags = O_WRONLY | O_CREAT | O_TRUNC;
+	int tmp_created = 0;
+	int saved_errno;
 
 	if (!directory || !*directory)
 		return 0;
@@ -8802,53 +8958,90 @@ static int udb_persistence_set_state(UdbPersistentState state, time_t last_sync)
 				 directory[strlen(directory) - 1] == '/' ? "" : "/") >= (int)sizeof(final_path))
 		return 0;
 
-	fp = fopen(tmp_path, "w");
-	if (!fp)
+	strlcpy(dir_path, final_path, sizeof(dir_path));
+	slash = strrchr(dir_path, '/');
+	if (!slash)
+		strlcpy(dir_path, ".", sizeof(dir_path));
+	else if (slash == dir_path)
+		slash[1] = '\0';
+	else
+		*slash = '\0';
+
+#ifdef O_NOFOLLOW
+	flags |= O_NOFOLLOW;
+#endif
+	fd = open(tmp_path, flags, 0600);
+	if (fd < 0)
 	{
+		saved_errno = errno;
 		udb_log(ULOG_ERROR, "UDB_STATE_PERSIST_FAILED", NULL, "Failed to open temporary state file $path: $error",
-				log_data_string("path", tmp_path), log_data_string("error", strerror(errno)));
+				log_data_string("path", tmp_path), log_data_string("error", strerror(saved_errno)));
 		return 0;
 	}
+	tmp_created = 1;
+
+	dir_fd = open(dir_path, O_RDONLY
+#ifdef O_DIRECTORY
+								| O_DIRECTORY
+#endif
+	);
+	if (dir_fd < 0)
+		goto cleanup;
+
+	if (fchmod(fd, 0600) != 0)
+		goto cleanup;
+
+	fp = fdopen(fd, "w");
+	if (!fp)
+		goto cleanup;
+	fd = -1;
 
 	const char *state_str = (state == UDB_PERSIST_READY) ? "READY" : "BOOTSTRAPPING";
 	if (fprintf(fp, "STATE=%s\nLAST_SYNC=%ld\n", state_str, (long)last_sync) < 0)
-	{
-		udb_log(ULOG_ERROR, "UDB_STATE_PERSIST_FAILED", NULL, "Failed to write state to $path: $error",
-				log_data_string("path", tmp_path), log_data_string("error", strerror(errno)));
-		fclose(fp);
-		unlink(tmp_path);
-		return 0;
-	}
+		goto cleanup;
 
 	if (fflush(fp) != 0 || fsync(fileno(fp)) != 0)
-	{
-		udb_log(ULOG_ERROR, "UDB_STATE_PERSIST_FAILED", NULL, "Failed to sync state file $path: $error",
-				log_data_string("path", tmp_path), log_data_string("error", strerror(errno)));
-		fclose(fp);
-		unlink(tmp_path);
-		return 0;
-	}
+		goto cleanup;
 
 	if (fclose(fp) != 0)
 	{
-		udb_log(ULOG_ERROR, "UDB_STATE_PERSIST_FAILED", NULL, "Failed to close state file $path: $error",
-				log_data_string("path", tmp_path), log_data_string("error", strerror(errno)));
-		unlink(tmp_path);
-		return 0;
+		fp = NULL;
+		goto cleanup;
 	}
+	fp = NULL;
 
 	if (rename(tmp_path, final_path) != 0)
+		goto cleanup;
+	tmp_created = 0;
+
+	if (fsync(dir_fd) != 0)
 	{
-		udb_log(ULOG_ERROR, "UDB_STATE_PERSIST_FAILED", NULL, "Failed to rename state file from $tmp to $final: $error",
-				log_data_string("tmp", tmp_path), log_data_string("final", final_path),
-				log_data_string("error", strerror(errno)));
-		unlink(tmp_path);
+		saved_errno = errno;
+		udb_log(ULOG_ERROR, "UDB_STATE_DIR_FSYNC_FAILED", NULL,
+				"Failed to fsync directory for state file $path after commit: $error",
+				log_data_string("path", final_path), log_data_string("error", strerror(saved_errno)));
+		close(dir_fd);
 		return 0;
 	}
+	close(dir_fd);
 
 	udb_log(ULOG_INFO, "UDB_STATE_PERSISTED", NULL, "Persistent UDB state updated to $state",
 			log_data_string("state", state_str));
 	return 1;
+
+cleanup:
+	saved_errno = errno;
+	udb_log(ULOG_ERROR, "UDB_STATE_PERSIST_FAILED", NULL, "Failed to persist state to $path: $error",
+			log_data_string("path", final_path), log_data_string("error", strerror(saved_errno)));
+	if (fp)
+		fclose(fp);
+	else if (fd >= 0)
+		close(fd);
+	if (dir_fd >= 0)
+		close(dir_fd);
+	if (tmp_created)
+		unlink(tmp_path);
+	return 0;
 }
 
 static UdbPersistentState udb_persistence_load_state(time_t *last_sync_out)
@@ -8858,6 +9051,7 @@ static UdbPersistentState udb_persistence_load_state(time_t *last_sync_out)
 	char line[256];
 	FILE *fp;
 	int state_parsed = 0;
+	int sync_parsed = 0;
 	UdbPersistentState state = UDB_PERSIST_BOOTSTRAPPING;
 	time_t parsed_sync = 0;
 
@@ -8874,7 +9068,7 @@ static UdbPersistentState udb_persistence_load_state(time_t *last_sync_out)
 	fp = fopen(state_path, "r");
 	if (!fp)
 	{
-		/* Missing .udb_state means clean/bootstrapping node */
+		/* Missing .udb_state */
 		return UDB_PERSIST_BOOTSTRAPPING;
 	}
 
@@ -8883,6 +9077,9 @@ static UdbPersistentState udb_persistence_load_state(time_t *last_sync_out)
 		char *nl = strpbrk(line, "\r\n");
 		if (nl)
 			*nl = '\0';
+
+		if (line[0] == '#' || line[0] == ';' || line[0] == '\0')
+			continue;
 
 		if (!strncmp(line, "STATE=", 6))
 		{
@@ -8906,7 +9103,19 @@ static UdbPersistentState udb_persistence_load_state(time_t *last_sync_out)
 		}
 		else if (!strncmp(line, "LAST_SYNC=", 10))
 		{
-			parsed_sync = (time_t)atol(line + 10);
+			if (udb_parse_time_t(line + 10, &parsed_sync))
+				sync_parsed = 1;
+			else
+			{
+				state_parsed = -1;
+				break;
+			}
+		}
+		else
+		{
+			/* Unrecognized line in .udb_state */
+			state_parsed = -1;
+			break;
 		}
 	}
 	fclose(fp);
@@ -8923,6 +9132,111 @@ static UdbPersistentState udb_persistence_load_state(time_t *last_sync_out)
 		*last_sync_out = parsed_sync;
 
 	return state;
+}
+
+static int udb_persistence_has_state_file(void)
+{
+	const char *directory = udb_cfg ? udb_cfg->db_directory : NULL;
+	char state_path[UDB_BLOCK_PATH_MAX];
+	struct stat st;
+
+	if (!directory || !*directory)
+		return 0;
+	if (snprintf(state_path, sizeof(state_path), "%s%s.udb_state", directory,
+				 directory[strlen(directory) - 1] == '/' ? "" : "/") >= (int)sizeof(state_path))
+		return 0;
+	return stat(state_path, &st) == 0;
+}
+
+static int udb_persistence_migrate_legacy(UdbContext *ctx, time_t *last_sync_out)
+{
+	const char *directory = udb_cfg ? udb_cfg->db_directory : NULL;
+	char legacy_path[UDB_BLOCK_PATH_MAX];
+	struct stat st;
+	UdbBlock *b;
+	time_t sync_time = 0;
+
+	if (!directory || !*directory || !ctx)
+		return 0;
+
+	if (snprintf(legacy_path, sizeof(legacy_path), "%s%s.udb_ready", directory,
+				 directory[strlen(directory) - 1] == '/' ? "" : "/") >= (int)sizeof(legacy_path))
+		return 0;
+
+	if (stat(legacy_path, &st) != 0)
+		return 0;
+
+	for (b = ctx->block_list; b; b = b->next)
+	{
+		if (b->load_state == UDB_LOAD_FAILED)
+		{
+			udb_log(ULOG_ERROR, "UDB_MIGRATION_FAILED", NULL,
+					"Cannot migrate legacy database: block $block failed to load",
+					log_data_string("block", (char[]){b->letter, '\0'}));
+			return 0;
+		}
+	}
+
+	sync_time = (st.st_mtime > 0) ? st.st_mtime : time(NULL);
+
+	if (!udb_blocks_save_all(ctx))
+	{
+		udb_log(ULOG_ERROR, "UDB_MIGRATION_FAILED", NULL,
+				"Cannot migrate legacy database: failed to materialize block snapshots");
+		return 0;
+	}
+
+	if (!udb_persistence_set_state(UDB_PERSIST_READY, sync_time))
+	{
+		udb_log(ULOG_ERROR, "UDB_MIGRATION_FAILED", NULL,
+				"Cannot migrate legacy database: failed to persist .udb_state");
+		return 0;
+	}
+
+	if (last_sync_out)
+		*last_sync_out = sync_time;
+
+	udb_log(ULOG_INFO, "UDB_LEGACY_MIGRATION", NULL,
+			"Migrated legacy database state (.udb_ready) to persistent READY (.udb_state)");
+	return 1;
+}
+
+static int udb_transition_to_ready(UdbContext *ctx, time_t sync_time)
+{
+	UdbBlock *b;
+
+	if (!ctx)
+		return 0;
+
+	for (b = ctx->block_list; b; b = b->next)
+	{
+		if (b->load_state != UDB_LOAD_SUCCESS && b->load_state != UDB_LOAD_EMPTY)
+		{
+			udb_log(ULOG_ERROR, "UDB_READY_SAVE_SKIPPED", NULL,
+					"Cannot enter READY: block $block is not in safe initialized state",
+					log_data_string("block", (char[]){b->letter, '\0'}));
+			return 0;
+		}
+	}
+
+	if (!udb_blocks_save_all(ctx))
+	{
+		udb_log(ULOG_ERROR, "UDB_READY_SAVE_FAILED", NULL,
+				"Cannot enter READY: failed to save block snapshots to disk");
+		return 0;
+	}
+
+	if (!udb_persistence_set_state(UDB_PERSIST_READY, sync_time))
+	{
+		udb_log(ULOG_ERROR, "UDB_STATE_PERSIST_FAILED", NULL,
+				"Failed to persist READY state to disk; database remains NOT_READY");
+		udb_ready = 0;
+		return 0;
+	}
+
+	udb_ready = 1;
+	udb_last_successful_sync = sync_time;
+	return 1;
 }
 
 static int udb_engine_init(void)
@@ -8979,26 +9293,58 @@ static int udb_engine_init(void)
 
 	int policy_present = udb_propagator_policy_present(udb_ctx);
 	time_t persisted_last_sync = 0;
-	UdbPersistentState persisted_state = udb_persistence_load_state(&persisted_last_sync);
-	const char *policy_cursor = udb_propagator_policy(udb_ctx);
-	char first_name[HOSTLEN + 1] = "";
-	int is_primary_local = 0;
-	if (policy_cursor && udb_propagator_list_next(&policy_cursor, first_name) > 0)
+	UdbPersistentState persisted_state = UDB_PERSIST_BOOTSTRAPPING;
+
+	if (udb_persistence_has_state_file())
 	{
-		if (me.name[0] && !strcasecmp(first_name, me.name))
-			is_primary_local = 1;
+		persisted_state = udb_persistence_load_state(&persisted_last_sync);
+		if (persisted_state == UDB_PERSIST_READY)
+		{
+			/* Invariant R2: Validate that all required block snapshots were materialized on disk */
+			int missing_block = 0;
+			UdbBlock *b;
+			for (b = udb_ctx->block_list; b; b = b->next)
+			{
+				if (b->load_state == UDB_LOAD_EMPTY)
+				{
+					udb_log(ULOG_ERROR, "UDB_READY_MISSING_BLOCK", NULL,
+							"Persisted READY state found, but snapshot for block $block is missing from disk; refusing "
+							"to start READY",
+							log_data_string("block", (char[]){b->letter, '\0'}));
+					missing_block = 1;
+				}
+			}
+			if (missing_block)
+			{
+				persisted_state = UDB_PERSIST_BOOTSTRAPPING;
+				persisted_last_sync = 0;
+			}
+		}
 	}
+	else
+	{
+		/* Attempt legacy migration if .udb_ready exists */
+		if (udb_persistence_migrate_legacy(udb_ctx, &persisted_last_sync))
+		{
+			persisted_state = UDB_PERSIST_READY;
+		}
+		else
+		{
+			persisted_state = UDB_PERSIST_BOOTSTRAPPING;
+		}
+	}
+
+	UdbPropagatorSelection selected;
+	int has_propagator = udb_select_propagator(udb_ctx, 0, &selected);
+	int is_primary_local = (has_propagator && selected.is_local);
 
 	if (is_primary_local)
 	{
 		if (persisted_state != UDB_PERSIST_READY)
 		{
-			/* Local primary authoritative propagator starting clean: ensure empty snapshots exist and persist READY */
-			udb_blocks_save_all(udb_ctx);
-			if (udb_persistence_set_state(UDB_PERSIST_READY, time(NULL)))
+			/* Local primary authoritative propagator starting clean: enter durable READY */
+			if (udb_transition_to_ready(udb_ctx, time(NULL)))
 			{
-				udb_ready = 1;
-				udb_last_successful_sync = time(NULL);
 				udb_sync_status = UDB_SYNC_OK;
 			}
 			else

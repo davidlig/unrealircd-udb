@@ -311,6 +311,9 @@ def main():
         a_db, b_db, c_db = (node / "data" / "udb_N.db" for node in (a, b, c))
         # Only A has a record. Empty, old placeholders make B and C request A's block.
         a_db.write_text(N_MARKER, encoding="ascii")
+        for n in (a, b, c):
+            for letter in ('C', 'I', 'S', 'L', 'K'):
+                (n / "data" / f"udb_{letter}.db").write_text(f"; UDB Block {letter} - Version 1\n", encoding="ascii")
         (a / "data" / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787720000\n", encoding="ascii")
         for db in (b_db, c_db):
             db.touch()

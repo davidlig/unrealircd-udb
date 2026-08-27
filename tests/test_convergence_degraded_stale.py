@@ -471,7 +471,9 @@ def test_suite():
         (nodeG / "modules" / "third").mkdir(parents=True, exist_ok=True)
         shutil.copy(module_src, nodeG / "modules" / "third" / "udb.so")
 
-        # Seed S.db with propagator = old-a.test,old-b.test
+        # Seed valid 6-block snapshots on disk with S.db propagator = old-a.test,old-b.test
+        for letter in ('N', 'C', 'I', 'S', 'L', 'K'):
+            (dbdirG / f"udb_{letter}.db").write_text(f"; UDB Block {letter} - Version 1\n", encoding="ascii")
         (dbdirG / "udb_S.db").write_text("; UDB Block S - Version 1\npropagator old-a.test,old-b.test\n", encoding="ascii")
         (dbdirG / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787800000\n", encoding="ascii")
 

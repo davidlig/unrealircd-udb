@@ -479,7 +479,8 @@ def test_suite():
             services5_new = MockPeer("services.test", "00S", "127.0.0.1", p5_ports[1], "005", propagator_advertised="services.test")
             new_rec = "carol::vhost carol.org"
             crc_new = zlib.crc32((new_rec + "\n").encode("utf-8")) & 0xFFFFFFFF
-            services5_new.send(f"DB 005 INF N {crc_new:08x} 1000")
+            now_ts = int(time.time()) + 1000
+            services5_new.send(f"DB 005 INF N {crc_new:08x} {now_ts}")
             for b in ('C', 'I', 'S', 'L', 'K'):
                 services5_new.send(f"DB 005 INF {b} 00000000 0")
             services5_new.wait_for(lambda l: " DB " in l and " RES N" in l, "RES N sent by Hub5")
@@ -514,7 +515,7 @@ def test_suite():
         )
         p6_leaf, n6_leaf, db6_leaf, cfg6_leaf = setup_node(
             tmpdir, "leaf6.test", "06L", p6_leaf_ports,
-            [("hub6.test", p6_hub_ports[1], True)], propagator="services.test"
+            [("hub6.test", p6_hub_ports[1], True)], propagator="hub6.test"
         )
         try:
             # Services links to Hub only
@@ -523,18 +524,41 @@ def test_suite():
                 services6.send(f"DB 006 INF {b} 00000000 0")
             time.sleep(0.5)
 
-            # Services broadcasts mutation INS
-            services6.send("DB * INS N dave::vhost dave.org")
+            # Check Hub reached READY
+            oper6_hub = MockClient("127.0.0.1", p6_hub_ports[0], "oper6_hub")
+            oper6_hub.send("OPER testoper operpass")
+            oper6_hub.wait_for(lambda l: " 381 " in l, timeout=3.0)
+            oper6_hub.send("UDB STATUS")
+            oper6_hub.wait_for(lambda l: "Database readiness: READY" in l, timeout=3.0)
+            oper6_hub.close()
+
+            # Leaf connects to Hub and reconciles from direct source hub6.test
             time.sleep(0.5)
 
-            # Oper on Leaf verifies the mutation arrived via Hub
+            # Oper on Leaf verifies Leaf reached READY through Hub and selected direct source hub6.test
             oper6 = MockClient("127.0.0.1", p6_leaf_ports[0], "oper6")
             oper6.send("OPER testoper operpass")
             oper6.wait_for(lambda l: " 381 " in l, timeout=3.0)
             oper6.send("UDB STATUS")
             oper6.wait_for(lambda l: "Database readiness: READY" in l, timeout=3.0)
+            oper6.wait_for(lambda l: "Selected direct source: hub6.test" in l, timeout=3.0)
+
+            # Services broadcasts mutation INS
+            services6.send("DB * INS N::dave::vhost dave.org")
+            time.sleep(0.5)
+
+            # Oper on Leaf queries the exact record value via DBQ
+            oper6.send("DBQ N::dave::vhost")
+            oper6.wait_for(lambda l: "dave.org" in l, timeout=3.0)
             oper6.close()
             services6.close()
+
+            # Stop Leaf and verify snapshot file persisted on disk
+            stop(p6_leaf)
+            leaf_n_db = db6_leaf / "udb_N.db"
+            assert leaf_n_db.exists(), "Leaf snapshot file udb_N.db must exist on disk"
+            assert "dave::vhost dave.org" in leaf_n_db.read_text(), "Leaf snapshot file must contain dave.org"
+
             print("PASS: Test HUB 6: Multi-hop mutation propagated across 3 nodes successfully")
         finally:
             stop(p6_leaf)
@@ -562,7 +586,7 @@ def test_suite():
             err_evil = evil.wait_for(lambda l: " DB " in l and " ERR BEGIN 6" in l, "ERR BEGIN 6 from evil peer")
             assert " ERR BEGIN 6" in err_evil, f"Expected ERR BEGIN 6, got: {err_evil}"
 
-            evil.send("DB * INS N evil::vhost evil.net")
+            evil.send("DB * INS N::evil::vhost evil.net")
             time.sleep(0.3)
 
             evil.close()

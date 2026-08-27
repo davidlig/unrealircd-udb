@@ -391,7 +391,22 @@ database directory.
 *   `5`: UDB_ERR_NO_SYNC (No synchronization was requested)
 *   `6`: UDB_ERR_FORBIDDEN (Action denied due to permissions / non-propagator)
 
-### 2.4 Operational Health & State Machine (OK / DEGRADED / STALE)
+### 2.4 Operational Readiness, Persistence & Health (Invariants R1 - R10)
+
+UDB enforces deterministic invariants for database readiness, durable persistence, round-isolated reconciliation, and hop-by-hop topology:
+
+1. **Durable Database Readiness (Invariant R1):** `udb_ready=1` is reachable only after all 6 blocks (`N, C, I, S, L, K`) are durably persisted to disk, `.udb_state` is atomically persisted to `STATE=READY` (with directory `fsync`), and then `udb_ready=1` is set.
+2. **Missing Snapshot Check on Restart (Invariant R2):** On restart with `.udb_state` indicating `READY`, if any required block snapshot `udb_X.db` is missing (`ENOENT` / `UDB_LOAD_EMPTY`), the node does NOT start `READY`; it logs `UDB_READY_MISSING_BLOCK` and fails closed to `BOOTSTRAPPING`.
+3. **Bootstrapping Integrity (Invariant R3):** Bootstrapping nodes cannot serve downstream staged snapshots (`RES` rejected with `ERR RES FORBIDDEN`) or accept normal local clients.
+4. **Orthogonality of Readiness and Health (Invariant R4):** `READY + OK`, `READY + DEGRADED`, and `READY + STALE` are valid independent states. Losing upstream does not erase durable `udb_ready=1`.
+5. **Direct Authority & Hop-by-Hop S2S (Invariant R5):** UDB staged synchronization is strictly hop-by-hop. In topology `Services A -> Hub B -> Leaf C`, B selects A as its direct authority, and C selects B as its direct authority. Staged `BEGIN`/`PUT`/`END`/`RES` synchronization is never a transparent multi-hop routed transaction. A direct peer authorizes exports only when `HEL 4 <prop>` specifies `<prop> == me.name` (or `?` during bootstrap).
+6. **Round Isolation & Lifecycle (Invariant R6):** Every reconciliation round has an explicit `round_id` and isolated bitmasks (`compared_blocks`, `divergent_blocks`, `completed_blocks`). Masks reset when starting a new round even with the same peer. Staged `END` commits verify `session->round_id == udb_reconcile.round_id`.
+7. **Reconciliation Convergence Check (Invariant R7):** Transition to `READY` requires all 6 blocks compared in the active round, all divergent blocks committed in that round, and no active or pending sync sessions.
+8. **Bounded Pending RES State (Invariant R8):** Requested sync state (`pending_from`, `pending_deadline`, `pending_round_id`) is bounded and tracked separately from active `session`. Pending requests are cleaned up on `BEGIN`, `ERR`, timeout, peer disconnect, policy changes, and shutdown.
+9. **Backward-Compatible Migration:** When `.udb_state` is absent, UDB inspects legacy `.udb_ready`, materializes all 6 snapshots, atomically writes `.udb_state` with `STATE=READY`, derives `LAST_SYNC`, and logs `UDB_LEGACY_MIGRATION`.
+10. **Crash Consistency:** Atomically renames `.udb_state.tmp` to `.udb_state` and invokes `fsync` on the containing directory descriptor before closing.
+
+### 2.5 Operational Health State Machine (OK / DEGRADED / STALE)
 UDB features a deterministic health state machine to manage node reliability:
 *   **`OK`**: An eligible upstream propagator candidate is directly connected and `HEL 4`-confirmed (or the local node itself is the designated authoritative propagator, or no policy is configured). Full database synchronization and client operations proceed normally.
 *   **`DEGRADED`**: A propagator policy is present (via local config or block `S`), but no eligible candidate is currently usable. The node operates within the configurable grace period (`stale-timeout`, default 300s). Live hop-by-hop mutations (`INS`/`DEL`/`DRP`/`OPT`) continue to propagate normally, existing clients remain connected, and new local clients are accepted.
@@ -402,7 +417,7 @@ UDB features a deterministic health state machine to manage node reliability:
 2.  **Automatic Recovery:** As soon as an eligible propagator links and confirms `HEL 4`, the node immediately transitions back to `OK`, emits log notice `UDB_SYNC_RECOVERED`, and permits new client connections without requiring an IRCd restart.
 3.  **Administrative Override:** Administrators can recover a stale node by updating `propagator "<new-server>";` in `unrealircd.conf` and issuing `/REHASH`. The local config override takes precedence over obsolete database policies.
 
-### 2.5 Diagnostic & Oper Status Commands
+### 2.6 Diagnostic & Oper Status Commands
 Operators can query live synchronization health in real time via `/UDB STATUS` or `/DBQ STATUS` (oper only):
 ```text
 /UDB STATUS
@@ -410,7 +425,10 @@ Operators can query live synchronization health in real time via `/UDB STATUS` o
 Output:
 ```text
 :server 339 oper :UDB synchronization: OK | DEGRADED | STALE
-:server 339 oper :Selected propagator: <server> | none
+:server 339 oper :Database readiness: READY | BOOTSTRAPPING
+:server 339 oper :Serving downstream: YES | NO
+:server 339 oper :Selected direct source: <server> | none
+:server 339 oper :Configured authority: <authority> | none
 :server 339 oper :Advertised state: HEL 4 <server|?|->
 :server 339 oper :Policy source: local | S | none
 :server 339 oper :Policy: <list>
@@ -419,7 +437,7 @@ Output:
 :server 339 oper :Last successful synchronization: <timestamp> | none
 ```
 
-### 2.6 DBQ Secret Redaction
+### 2.7 DBQ Secret Redaction
 
 `DBQ` requires oper privileges and never returns the value of `pass`,
 `challenge`, or `encryption_key`. Direct queries and child listings show
