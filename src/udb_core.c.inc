@@ -394,15 +394,56 @@ static int udb_ip_host_mask_valid(const char *mask)
 
 static int udb_server_name_valid(const char *srv)
 {
-	const char *c;
-	if (!srv || !*srv || strlen(srv) > HOSTLEN)
+	return srv && *srv && strlen(srv) <= HOSTLEN && !strpbrk(srv, " \t\r\n") && valid_server_name(srv);
+}
+
+/* Iterate a comma-separated propagator list without copying or truncating it.
+ * Spaces are accepted only around commas; tabs and line breaks are rejected. */
+static int udb_propagator_list_next(const char **cursor, char name[HOSTLEN + 1])
+{
+	const char *start, *end, *p;
+	size_t len;
+
+	if (!cursor || !(p = *cursor) || !*p)
 		return 0;
-	for (c = srv; *c; c++)
+	while (*p == ' ')
+		p++;
+	if (!*p || *p == ',')
+		return -1;
+	start = p;
+	while (*p && *p != ',')
+		p++;
+	end = p;
+	while (end > start && end[-1] == ' ')
+		end--;
+	len = (size_t)(end - start);
+	if (!len || len > HOSTLEN)
+		return -1;
+	memcpy(name, start, len);
+	name[len] = '\0';
+	if (!udb_server_name_valid(name))
+		return -1;
+	if (*p == ',')
 	{
-		if (*c <= ' ' || (unsigned char)*c > 126)
-			return 0;
+		p++;
+		if (!*p)
+			return -1;
 	}
+	*cursor = p;
 	return 1;
+}
+
+static int udb_propagator_list_valid(const char *value)
+{
+	const char *cursor = value;
+	char name[HOSTLEN + 1];
+	int result, count = 0;
+
+	if (!value || !*value || strlen(value) > UDB_RECORD_VALUE_MAX || strpbrk(value, "\r\n\t"))
+		return 0;
+	while ((result = udb_propagator_list_next(&cursor, name)) > 0)
+		count++;
+	return result == 0 && count > 0;
 }
 
 static int udb_flood_setting_valid(const char *value)
@@ -464,7 +505,7 @@ static const UdbKeyDescriptor udb_schema_s_subkeys[] = {
 	{SKEY_NICKSERV, UDB_VAL_STRING, udb_service_mask_valid, 0, NULL},
 	{SKEY_CHANSERV, UDB_VAL_STRING, udb_service_mask_valid, 0, NULL},
 	{SKEY_IPSERV, UDB_VAL_STRING, udb_service_mask_valid, 0, NULL},
-	{SKEY_PROPAGATOR, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL}};
+	{SKEY_PROPAGATOR, UDB_VAL_STRING, udb_propagator_list_valid, 0, NULL}};
 
 static const UdbKeyDescriptor udb_schema_l_subkeys[] = {
 	{LKEY_OPTIONS, UDB_VAL_NUMERIC, udb_options_record_valid, 0, NULL}};

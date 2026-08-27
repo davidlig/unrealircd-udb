@@ -132,6 +132,7 @@ static void udb_channel_ban_owners_free(ModData *m)
 static void udb_channel_do_mode(Channel *channel, MessageTag *mtags, const char *modes, const char *parameters)
 {
 	char buf[512];
+	char channel_name[CHANNELLEN + 1];
 	char *p, *param;
 	int myparc = 1;
 	int i;
@@ -140,6 +141,9 @@ static void udb_channel_do_mode(Channel *channel, MessageTag *mtags, const char 
 
 	if (!channel || !modes || !*modes || !do_mode)
 		return;
+	/* Removing +P may destroy an empty channel inside do_mode(). Keep only the
+	 * immutable name needed by the post-operation debug notice. */
+	strlcpy(channel_name, channel->name, sizeof(channel_name));
 	source = udb_service_source(SKEY_CHANSERV);
 	memset(myparv, 0, sizeof(myparv));
 	myparv[0] = raw_strdup(modes);
@@ -154,9 +158,9 @@ static void udb_channel_do_mode(Channel *channel, MessageTag *mtags, const char 
 		safe_free(myparv[i]);
 
 	if (parameters && *parameters)
-		udb_send_to_debugs(NULL, "Mode change on %s: %s %s", channel->name, modes, parameters);
+		udb_send_to_debugs(NULL, "Mode change on %s: %s %s", channel_name, modes, parameters);
 	else
-		udb_send_to_debugs(NULL, "Mode change on %s: %s", channel->name, modes);
+		udb_send_to_debugs(NULL, "Mode change on %s: %s", channel_name, modes);
 }
 
 static void udb_channel_set_modes(Channel *channel, const char *value)

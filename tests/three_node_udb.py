@@ -380,7 +380,7 @@ def main():
                               (("node B", b_db),))
             return 1
         print("PASS: HEL-confirmed non-propagator C could not import a staged block from or request an export from B")
-        arm_mutators((a, b))
+        arm_mutators((a,))
         if not wait_for_mutation(logs["B"], b_db, MUTATOR_RECORDS["A-B"], False, args.timeout):
             print_diagnostics("A-to-B authorized INS timeout", (("node A", logs["A"]), ("node B", logs["B"])),
                               (("node B", b_db),))
@@ -391,6 +391,7 @@ def main():
                               (("node B", b_db),))
             return skip("A-B-C staged-sync completed, but B did not durably apply the authorized A-to-B DEL")
         print("PASS: B durably applied the authorized A-to-B DEL")
+        arm_mutators((b,))
         if not wait_for_mutation(logs["C"], c_db, MUTATOR_RECORDS["B-C"], False, args.timeout):
             print_diagnostics("B-to-C authorized INS timeout", (("node B", logs["B"]), ("node C", logs["C"])),
                               (("node C", c_db),))

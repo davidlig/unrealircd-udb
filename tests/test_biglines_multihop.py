@@ -223,7 +223,7 @@ def run_tests(ircd_bin, keep=False):
                      module_path, b_dir / "data", SERVICES_NAME, link_password)
         write_config(c_conf, "udb-c.test", "0C1", c_ports,
                      (("udb-b.test", b_ports[1], False),),
-                     module_path, c_dir / "data", SERVICES_NAME, link_password)
+                     module_path, c_dir / "data", "udb-b.test", link_password)
 
         b_log, c_log = b_dir / "ircd.log", c_dir / "ircd.log"
 

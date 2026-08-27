@@ -67,12 +67,15 @@ jobs:
           python3 tests/test_staged_sync_ownership.py
           python3 tests/test_size_invariants.py
           python3 tests/test_spamfilter_limits.py
+          python3 tests/test_propagator_validation.py
 
       - name: Run Integration & Multi-Hop Test Suites
         run: |
           python3 tests/test_multihop_mutations.py
           python3 tests/test_biglines_multihop.py
           python3 tests/test_propagator_failover.py
+          python3 tests/test_propagator_non_adjacent.py
+          python3 tests/test_propagator_runtime_failover.py
           python3 tests/runtime_clone_limit.py
           python3 tests/runtime_channel_modes_ins.py
           python3 tests/runtime_debug_notices.py
@@ -134,8 +137,11 @@ jobs:
           python3 tests/test_staged_sync_ownership.py
           python3 tests/test_size_invariants.py
           python3 tests/test_spamfilter_limits.py
+          python3 tests/test_propagator_validation.py
           python3 tests/test_multihop_mutations.py
           python3 tests/test_propagator_failover.py
+          python3 tests/test_propagator_non_adjacent.py
+          python3 tests/test_propagator_runtime_failover.py
           python3 tests/runtime_clone_limit.py
           python3 tests/runtime_channel_modes_ins.py
           python3 tests/runtime_debug_notices.py

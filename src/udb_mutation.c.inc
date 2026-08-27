@@ -9,68 +9,60 @@
  * License: GNU General Public License v2+
  */
 
-static const char *udb_selected_propagator(UdbContext *ctx)
+static const char *udb_propagator_policy(UdbContext *ctx)
 {
-	static char selected_buf[HOSTLEN + 1];
-
-	/* 1. Priority 1: Explicit local override in unrealircd.conf */
 	if (udb_cfg && udb_cfg->propagator && *udb_cfg->propagator)
 		return udb_cfg->propagator;
-
-	/* 2. Priority 2: Priority list in S::propagator */
-	if (ctx && ctx->propagator_setting && *ctx->propagator_setting)
-	{
-		char *list_copy = NULL;
-		char *srv, *saveptr;
-		char *first_srv = NULL;
-
-		safe_strdup(list_copy, ctx->propagator_setting);
-		for (srv = strtok_r(list_copy, ",", &saveptr); srv; srv = strtok_r(NULL, ",", &saveptr))
-		{
-			while (*srv == ' ')
-				srv++;
-			char *end = srv + strlen(srv) - 1;
-			while (end > srv && *end == ' ')
-				*end-- = '\0';
-			if (!*srv)
-				continue;
-
-			if (!first_srv)
-				first_srv = srv;
-
-			/* Check if online in UnrealIRCd or if it is the local server */
-			if (find_server(srv, NULL) || (me.name[0] && !strcasecmp(srv, me.name)))
-			{
-				strlcpy(selected_buf, srv, sizeof(selected_buf));
-				safe_free(list_copy);
-				return selected_buf;
-			}
-		}
-		if (first_srv)
-		{
-			strlcpy(selected_buf, first_srv, sizeof(selected_buf));
-			safe_free(list_copy);
-			return selected_buf;
-		}
-		safe_free(list_copy);
-	}
-
-	return NULL;
+	return ctx && ctx->propagator_setting && *ctx->propagator_setting ? ctx->propagator_setting : NULL;
 }
 
-static int udb_is_propagator(UdbContext *ctx, Client *server)
+static int udb_propagator_policy_present(UdbContext *ctx)
 {
-	const char *selected;
+	return udb_propagator_policy(ctx) != NULL;
+}
 
-	if (!server || !IsServer(server))
+/* Resolve the first locally usable candidate. Network-wide visibility is never
+ * enough: a remote candidate must be a direct server peer and staged-sync use
+ * additionally requires a completed HEL 4 negotiation. */
+static int udb_select_propagator(UdbContext *ctx, int require_hello, UdbPropagatorSelection *selected)
+{
+	const char *cursor = udb_propagator_policy(ctx);
+	char name[HOSTLEN + 1];
+	int result;
+
+	if (!selected)
 		return 0;
-	selected = udb_selected_propagator(ctx);
-	if (selected && !strcasecmp(server->name, selected))
+	memset(selected, 0, sizeof(*selected));
+	while (cursor && (result = udb_propagator_list_next(&cursor, name)) > 0)
 	{
-		ctx->propagator = server;
+		Client *candidate;
+
+		if (me.name[0] && !strcasecmp(name, me.name))
+		{
+			memcpy(selected->name, name, strlen(name) + 1);
+			selected->is_local = 1;
+			return 1;
+		}
+		candidate = find_server(name, NULL);
+		if (!candidate || !IsServer(candidate) || !MyConnect(candidate))
+			continue;
+		if (require_hello && !udb_has_hello(candidate))
+			continue;
+		selected->peer = candidate;
+		memcpy(selected->name, name, strlen(name) + 1);
 		return 1;
 	}
 	return 0;
+}
+
+/* Checks if a directly connected client is our authorized upstream propagator */
+static int udb_is_propagator(UdbContext *ctx, Client *server)
+{
+	UdbPropagatorSelection selected;
+
+	if (!server || !IsServer(server) || !MyConnect(server))
+		return 0;
+	return udb_select_propagator(ctx, 1, &selected) && !selected.is_local && selected.peer == server;
 }
 
 static UdbBlock *udb_mutation_path_block(UdbContext *ctx, const char *path)
@@ -145,8 +137,8 @@ static int udb_mutation_persist_error(Client *client, const char *subcmd, char l
 	return udb_send_db_to_one(client, ":%s DB %s ERR %s %d %c", me.id, client->id, subcmd, UDB_ERR_FATAL, letter);
 }
 
-static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target, const char *path, const char *data,
-							 int is_for_me, int is_broadcast)
+static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, const char *path,
+							 const char *data, int is_for_me, int is_broadcast)
 {
 	UdbBlock *block = udb_mutation_path_block(ctx, path);
 	char letter = path && *path ? path[0] : '0';
@@ -158,12 +150,12 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 	}
 	if (is_for_me)
 	{
-		if (block->session || (block->syncing_from && block->syncing_from != client))
+		if (block->session || (block->syncing_from && block->syncing_from != direct_peer))
 		{
 			udb_send_db_to_one(client, ":%s DB %s ERR INS %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
 			return;
 		}
-		if (block->syncing_from != client && !udb_is_propagator(ctx, client))
+		if (block->syncing_from != direct_peer && !udb_is_propagator(ctx, direct_peer))
 		{
 			udb_send_db_to_one(client, ":%s DB %s ERR INS %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 			return;
@@ -184,14 +176,9 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 		unchanged = old_rec && udb_record_data_equals(old_rec, data);
 		if (unchanged)
 		{
-			if (ctx->propagator && block->syncing_from == client)
-			{
-				udb_mutation_forward_ins(ctx->propagator, client, target, path, data);
-				return;
-			}
 			if (!is_broadcast)
 				return;
-			udb_mutation_forward_ins(client, client, target, path, data);
+			udb_mutation_forward_ins(client, direct_peer, target, path, data);
 			return;
 		}
 		tree = udb_record_clone_tree(block->tree, old_rec, &rec);
@@ -228,19 +215,14 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 		char logbuf[512];
 		snprintf(logbuf, sizeof(logbuf), "Inserted record via S2S: %s -> %s", path, data);
 		udb_log(ULOG_INFO, "UDB_INS_RECEIVED", client, "$msg", log_data_string("msg", logbuf));
-		if (ctx->propagator && block->syncing_from == client)
-		{
-			udb_mutation_forward_ins(ctx->propagator, client, target, path, data);
-			return;
-		}
 		if (!is_broadcast)
 			return;
 	}
-	udb_mutation_forward_ins(client, client, target, path, data);
+	udb_mutation_forward_ins(client, direct_peer, target, path, data);
 }
 
-static void udb_mutation_del(UdbContext *ctx, Client *client, const char *target, const char *path, int is_for_me,
-							 int is_broadcast)
+static void udb_mutation_del(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, const char *path,
+							 int is_for_me, int is_broadcast)
 {
 	UdbBlock *block = udb_mutation_path_block(ctx, path);
 	char letter = path && *path ? path[0] : '0';
@@ -252,12 +234,12 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, const char *target
 	}
 	if (is_for_me)
 	{
-		if (block->session || (block->syncing_from && block->syncing_from != client))
+		if (block->session || (block->syncing_from && block->syncing_from != direct_peer))
 		{
 			udb_send_db_to_one(client, ":%s DB %s ERR DEL %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
 			return;
 		}
-		if (!block->syncing_from && !udb_is_propagator(ctx, client))
+		if (block->syncing_from != direct_peer && !udb_is_propagator(ctx, direct_peer))
 		{
 			udb_send_db_to_one(client, ":%s DB %s ERR DEL %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 			return;
@@ -265,14 +247,9 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, const char *target
 		UdbRecord *old_rec = udb_record_find_path(ctx, block, path + 3);
 		if (!old_rec)
 		{
-			if (ctx->propagator && block->syncing_from == client)
-			{
-				udb_mutation_forward_del(ctx->propagator, client, target, path);
-				return;
-			}
 			if (!is_broadcast)
 				return;
-			udb_mutation_forward_del(client, client, target, path);
+			udb_mutation_forward_del(client, direct_peer, target, path);
 			return;
 		}
 		UdbRecord *candidate_rec = NULL;
@@ -299,19 +276,17 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, const char *target
 			udb_lines_apply_effect(ctx, block, candidate_line, 0);
 		if (block->letter == 'L')
 			udb_sync_snomask_filter();
-		if (ctx->propagator && block->syncing_from == client)
-		{
-			udb_mutation_forward_del(ctx->propagator, client, target, path);
-			return;
-		}
+		char logbuf[512];
+		snprintf(logbuf, sizeof(logbuf), "Deleted record via S2S: %s", path);
+		udb_log(ULOG_INFO, "UDB_DEL_RECEIVED", client, "$msg", log_data_string("msg", logbuf));
 		if (!is_broadcast)
 			return;
 	}
-	udb_mutation_forward_del(client, client, target, path);
+	udb_mutation_forward_del(client, direct_peer, target, path);
 }
 
-static void udb_mutation_drp(UdbContext *ctx, Client *client, const char *target, char letter, int is_for_me,
-							 int is_broadcast)
+static void udb_mutation_drp(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, char letter,
+							 int is_for_me, int is_broadcast)
 {
 	if (is_for_me)
 	{
@@ -321,12 +296,12 @@ static void udb_mutation_drp(UdbContext *ctx, Client *client, const char *target
 			udb_send_db_to_one(client, ":%s DB %s ERR DRP %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
 			return;
 		}
-		if (block->session || (block->syncing_from && block->syncing_from != client))
+		if (block->session || (block->syncing_from && block->syncing_from != direct_peer))
 		{
 			udb_send_db_to_one(client, ":%s DB %s ERR DRP %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
 			return;
 		}
-		if (!udb_is_propagator(ctx, client))
+		if (!udb_is_propagator(ctx, direct_peer))
 		{
 			udb_send_db_to_one(client, ":%s DB %s ERR DRP %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 			return;
@@ -335,7 +310,7 @@ static void udb_mutation_drp(UdbContext *ctx, Client *client, const char *target
 		{
 			if (!is_broadcast)
 				return;
-			udb_sendto_confirmed_servers(client, ":%s DB %s DRP %c", client->id, target, letter);
+			udb_sendto_confirmed_servers(direct_peer, ":%s DB %s DRP %c", client->id, target, letter);
 			return;
 		}
 		UdbRecord *tree = udb_record_clone_tree(block->tree, NULL, NULL);
@@ -354,11 +329,11 @@ static void udb_mutation_drp(UdbContext *ctx, Client *client, const char *target
 		if (!is_broadcast)
 			return;
 	}
-	udb_sendto_confirmed_servers(client, ":%s DB %s DRP %c", client->id, target, letter);
+	udb_sendto_confirmed_servers(direct_peer, ":%s DB %s DRP %c", client->id, target, letter);
 }
 
-static void udb_mutation_opt(UdbContext *ctx, Client *client, const char *target, char letter, const char *modified_at,
-							 int is_for_me, int is_broadcast)
+static void udb_mutation_opt(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, char letter,
+							 const char *modified_at, int is_for_me, int is_broadcast)
 {
 	if (is_for_me)
 	{
@@ -373,7 +348,7 @@ static void udb_mutation_opt(UdbContext *ctx, Client *client, const char *target
 			udb_send_db_to_one(client, ":%s DB %s ERR OPT %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
 			return;
 		}
-		if (!udb_is_propagator(ctx, client))
+		if (!udb_is_propagator(ctx, direct_peer))
 		{
 			udb_send_db_to_one(client, ":%s DB %s ERR OPT %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 			return;
@@ -387,7 +362,7 @@ static void udb_mutation_opt(UdbContext *ctx, Client *client, const char *target
 			return;
 	}
 	if (modified_at)
-		udb_sendto_confirmed_servers(client, ":%s DB %s OPT %c %s", client->id, target, letter, modified_at);
+		udb_sendto_confirmed_servers(direct_peer, ":%s DB %s OPT %c %s", client->id, target, letter, modified_at);
 	else
-		udb_sendto_confirmed_servers(client, ":%s DB %s OPT %c", client->id, target, letter);
+		udb_sendto_confirmed_servers(direct_peer, ":%s DB %s OPT %c", client->id, target, letter);
 }

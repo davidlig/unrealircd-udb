@@ -30,7 +30,11 @@ davidlig::oper netadmin
     archivos de bloque (`udb_N.db`, `udb_C.db`, `udb_I.db`, `udb_S.db`, `udb_L.db`, `udb_K.db`).
     Las rutas locales absolutas se usan tal cual. Las relativas se resuelven bajo `PERMDATADIR`.
     UDB crea el directorio con permisos `0700` de forma segura. Si se omite, se usa `PERMDATADIR`.
-*   `propagator "<servidor>";`: Servidor autorizado para propagar sincronizaciones y mutaciones.
+*   `propagator "<servidor>";`: Override local estricto del propagador. El valor
+    es un único nombre de servidor UnrealIRCd, debe caber en `HOSTLEN` y se
+    rechaza durante `CONFIGTEST` si contiene whitespace o CR/LF, o si no supera
+    la validación nativa de nombres de servidor. Un valor remoto solo autoriza
+    staged sync cuando es un peer directo con `HEL 4` confirmado.
 *   `max-staged-records <número>;`: Límite máximo de registros permitidos por bloque en una sesión
     de sincronización transaccional (*staged sync*). Protege contra ataques DoS y agotamiento de
     memoria (OOM). Rango permitido: `1` a `10000000` (por defecto `500000`).
@@ -159,13 +163,32 @@ Solo se admiten `clones`, `quit_ips`, `quit_clones`, `flood`, `encryption_key`,
     incluidos password incorrecto y bloqueo por flood. IpServ es el origen
     visible de los avisos de vhost explícito de nick, vhost derivado por IP y
     cambios o restauraciones de `I::<ip>::host`.
-*   **propagator**: Autoridad o lista ordenada de servidores autorizados para emitir mutaciones y snapshots en el clúster (ej: `S::propagator "servicios.red.net,hub1.red.net"`).
+*   **propagator**: Lista ordenada de prioridad del clúster (por ejemplo,
+    `S::propagator "servicios.red.net, hub1.red.net"`). Solo se admiten espacios
+    alrededor de las comas y se recortan por token. Se rechazan tokens vacíos,
+    tabs, CR/LF, nombres mayores que `HOSTLEN`, nombres inválidos para
+    UnrealIRCd y valores totales mayores que `UDB_RECORD_VALUE_MAX`. Una lista
+    válida puede superar 512 bytes; ningún token se trunca.
 
 ##### Jerarquía de Resolución del Propagador
-UDB evalúa la autoridad activa mediante un modelo jerárquico determinista y tolerante a fallos:
-1. **Prioridad 1 (Override Local):** Si `udb { propagator "servidor"; }` está definido en `unrealircd.conf`, tiene precedencia absoluta sobre la red.
-2. **Prioridad 2 (Lista de Prioridad en BD):** Si existe `S::propagator "pri,sec"`, se selecciona el primer servidor de la lista que se encuentre actualmente online (`FindServer`), permitiendo Failover y Failback automático sin intervención manual.
-3. **Modo Bootstrap / Clean Node:** Si no hay propagador configurado localmente, el nodo acepta la sincronización inicial del peer directo enlazado vía `HEL 4 ?` y aprende la autoridad dinámicamente desde el bloque `S`.
+UDB resuelve la autoridad de forma independiente en cada nodo; una transacción
+staged nunca se enruta como protocolo multi-hop:
+1. **Override local:** `udb { propagator "<servidor>"; }` tiene precedencia
+   estricta. Puede nombrar al servidor local. Un nombre remoto solo es elegible
+   si corresponde a un peer de servidor directamente conectado.
+2. **Lista persistida:** `S::propagator "pri,sec"` selecciona la primera entrada
+   que nombra al servidor local o a un peer de servidor directo. Se omite un
+   servidor visible globalmente a través de otro hub.
+3. **Autorización HEL:** El peer remoto seleccionado solo puede participar en
+   `BEGIN / PUT / END / RES` después de confirmar `HEL 4` en el enlace directo y
+   de que la selección anunciada por el peer autorice la transferencia.
+4. **Auto-bootstrap:** Un nodo sin override local ni lista persistida válida
+   anuncia `HEL 4 ?`, acepta el snapshot inicial de ese peer directo y aprende
+   `S::propagator` desde el bloque `S`.
+
+La selección se recalcula cuando cambian los enlaces o los ajustes de
+propagator. La disponibilidad ordenada produce failover y failback deterministas
+sin conservar punteros `Client *` muertos.
 
 #### Bloque L (Enlaces S2S)
 Solo se admite `L::<servidor>::options`. Su máscara numérica usa `*1` para
@@ -208,8 +231,11 @@ aceptado antes de confirmar y nunca se reenvía fuera del enlace directo.
 **HEL (Negociación de capacidad y Auto-Bootstrap):**
 `:<sid> DB <sid-peer-directo> HEL 4 <propagador-seleccionado>`
 
-El campo de propagador seleccionado es `?` cuando no existe una fuente local
-configurada. Permite al nodo nuevo auto-descubrir la autoridad y autoriza al peer directo a proveer el snapshot inicial staged.
+El campo de propagador seleccionado es `?` solo cuando no existe ninguna fuente
+de propagator configurada. Permite al nodo limpio descubrir la autoridad y
+autoriza al peer directo a entregar el snapshot inicial. Un servidor configurado
+pero no disponible se anuncia como `HEL 4 -`, no como `?`; `-` no concede
+autorización staged y evita ampliar el acceso de forma silenciosa.
 
 **Acuse HEL:**
 `:<sid> DB <sid-peer-directo> HEL 4 ACK`

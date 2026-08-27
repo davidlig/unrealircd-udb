@@ -66,7 +66,9 @@ static int udb_peer_authorizes_us(Client *server)
 static int udb_sync_hello_start(Client *server)
 {
 	UdbHelloPeer *peer;
+	UdbPropagatorSelection selected;
 	const char *propagator;
+	int ok;
 
 	if (!server || !IsServer(server) || !MyConnect(server))
 		return 0;
@@ -75,8 +77,18 @@ static int udb_sync_hello_start(Client *server)
 		return 0;
 	peer->state = UDB_HEL_WAITING;
 	peer->deadline = time(NULL) + UDB_SYNC_TIMEOUT;
-	propagator = udb_selected_propagator(udb_ctx);
-	return udb_send_db_to_one(server, ":%s DB %s HEL 4 %s", me.id, server->id, propagator ? propagator : "?");
+	if (udb_select_propagator(udb_ctx, 1, &selected))
+		propagator = selected.name;
+	else
+		propagator = udb_propagator_policy_present(udb_ctx) ? "-" : "?";
+	ok = udb_send_db_to_one(server, ":%s DB %s HEL 4 %s", me.id, server->id, propagator);
+	if (!ok)
+	{
+		peer->state = 0;
+		peer->deadline = 0;
+		return 0;
+	}
+	return 1;
 }
 
 static int udb_sync_hello_ack(Client *server)
@@ -87,8 +99,29 @@ static int udb_sync_hello_ack(Client *server)
 		return 0;
 	peer->state = UDB_HEL_CONFIRMED;
 	udb_log(ULOG_INFO, "UDB_HEL_CONFIRMED", server, "UDB HEL 4 capability confirmed for directly linked server");
+	/* HEL confirmation can make this peer the first usable policy candidate.
+	 * Refresh every direct peer so old authorizes_us decisions cannot survive a
+	 * deterministic failover or recovery. */
+	udb_sync_hello_refresh_all();
 	udb_sync_to_server(server);
 	return 1;
+}
+
+static void udb_sync_hello_refresh_all(void)
+{
+	Client *server;
+	UdbPropagatorSelection selected;
+	const char *propagator;
+
+	if (udb_select_propagator(udb_ctx, 1, &selected))
+		propagator = selected.name;
+	else
+		propagator = udb_propagator_policy_present(udb_ctx) ? "-" : "?";
+	list_for_each_entry(server, &server_list, special_node)
+	{
+		if (IsServer(server) && MyConnect(server) && udb_has_hello(server))
+			udb_send_db_to_one(server, ":%s DB %s HEL 4 %s", me.id, server->id, propagator);
+	}
 }
 
 static void udb_sync_abort(UdbBlock *block, const char *reason)
@@ -98,6 +131,29 @@ static void udb_sync_abort(UdbBlock *block, const char *reason)
 	udb_log(ULOG_WARNING, "UDB_SYNC_ABORT", block->session->peer, "Aborted staged sync of block $block: $reason",
 			log_data_string("block", (char[]){block->letter, '\0'}), log_data_string("reason", reason));
 	udb_sync_session_free(block);
+}
+
+static void udb_propagator_policy_changed(UdbContext *ctx)
+{
+	UdbBlock *block;
+	UdbPropagatorSelection selected;
+	Client *peer = NULL;
+
+	if (!ctx)
+		return;
+	if (udb_select_propagator(ctx, 1, &selected) && !selected.is_local)
+		peer = selected.peer;
+	for (block = ctx->block_list; block; block = block->next)
+	{
+		/* Replacing block S removes the old tree's effects while the S session
+		 * still owns its replacement tree. Do not abort that session from its
+		 * own policy callback; the new policy is applied after commit. */
+		if (block->session && block->letter != 'S' && block->session->peer != peer)
+			udb_sync_abort(block, "propagator policy changed");
+		else if (!block->session && block->syncing_from && block->syncing_from != peer)
+			block->syncing_from = NULL;
+	}
+	udb_sync_hello_refresh_all();
 }
 
 static int udb_sync_begin(UdbBlock *block, Client *peer, const char *txid)
@@ -433,4 +489,5 @@ static void udb_sync_server_quit(Client *client)
 			udb_sync_abort(block, "peer quit");
 		else if (block->syncing_from == client)
 			block->syncing_from = NULL;
+	udb_propagator_policy_changed(udb_ctx);
 }

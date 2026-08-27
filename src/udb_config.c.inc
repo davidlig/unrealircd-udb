@@ -10,6 +10,7 @@
  */
 
 static UdbConfig *udb_cfg = NULL;
+static int udb_config_seen_propagator = 0;
 
 static int udb_flood_valid(const char *value, int *attempts, int *period);
 
@@ -51,9 +52,10 @@ static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
 		}
 		else if (!strcmp(cep->name, "propagator"))
 		{
-			if (!cep->value || !*cep->value)
+			if (!cep->value || !udb_server_name_valid(cep->value))
 			{
-				config_error("%s:%i: udb::propagator requires a server name", cep->file->filename, cep->line_number);
+				config_error("%s:%i: udb::propagator requires a valid server name", cep->file->filename,
+							 cep->line_number);
 				errors++;
 			}
 		}
@@ -139,6 +141,24 @@ static int udb_config_posttest(int *errs)
 	return 0;
 }
 
+/* CONFIGRUN only visits directives that still exist. Track the new generation
+ * without mutating the active value until a successful postconf, so a failed
+ * rehash cannot erase the last known-good propagator override. */
+static int udb_config_rehash(void)
+{
+	udb_config_seen_propagator = 0;
+	return 0;
+}
+
+static int udb_config_postconf(void)
+{
+	if (udb_cfg && !udb_config_seen_propagator)
+		safe_free(udb_cfg->propagator);
+	if (udb_ctx)
+		udb_propagator_policy_changed(udb_ctx);
+	return 0;
+}
+
 static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
 {
 	ConfigEntry *cep;
@@ -160,6 +180,7 @@ static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
 		}
 		else if (!strcmp(cep->name, "propagator"))
 		{
+			udb_config_seen_propagator = 1;
 			safe_strdup(udb_cfg->propagator, cep->value);
 		}
 		else if (!strcmp(cep->name, "max-global-clones"))
@@ -249,13 +270,14 @@ static int udb_setting_string_valid(const char *value)
 
 static int udb_suffix_valid(const char *value)
 {
-	const unsigned char *p = (const unsigned char *)value;
+	const unsigned char *p;
 	const char *label;
 
 	/* The derived label is 32 hexadecimal characters. */
 	if (!value || !*value || strlen(value) > HOSTLEN - 32 || value[0] != '.')
 		return 0;
 	label = value + 1;
+	p = (const unsigned char *)label;
 	for (; *p; p++)
 	{
 		if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') || *p == '.' ||
@@ -409,10 +431,10 @@ static int udb_settings_apply_record(UdbContext *ctx, UdbRecord *rec)
 	}
 	else if (!strcmp(rec->key, SKEY_PROPAGATOR))
 	{
-		if (!udb_setting_string_valid(rec->data_str))
+		if (!udb_propagator_list_valid(rec->data_str))
 			return 0;
 		udb_settings_replace(&ctx->propagator_setting, rec->data_str);
-		ctx->propagator = NULL;
+		udb_propagator_policy_changed(ctx);
 	}
 	else
 	{
@@ -450,7 +472,7 @@ static void udb_settings_remove_record(UdbContext *ctx, UdbRecord *rec)
 	else if (!strcmp(rec->key, SKEY_PROPAGATOR))
 	{
 		udb_settings_replace(&ctx->propagator_setting, NULL);
-		ctx->propagator = NULL;
+		udb_propagator_policy_changed(ctx);
 	}
 }
 

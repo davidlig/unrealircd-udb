@@ -30,7 +30,11 @@ davidlig::oper netadmin
     (`udb_N.db`, `udb_C.db`, `udb_I.db`, `udb_S.db`, `udb_L.db`, `udb_K.db`).
     Absolute local paths are used as written. Relative paths resolve beneath `PERMDATADIR`.
     UDB creates the directory with `0700` permissions. Defaults to `PERMDATADIR`.
-*   `propagator "<server>";`: Server authorized to propagate database syncs and live mutations.
+*   `propagator "<server>";`: Strict local propagator override. The value is one
+    UnrealIRCd server name, must fit `HOSTLEN`, and is rejected during
+    `CONFIGTEST` if it contains whitespace or CR/LF or fails UnrealIRCd's native
+    server-name validation. A remote value authorizes staged sync only when it
+    is a directly connected, `HEL 4`-confirmed peer.
 *   `max-staged-records <number>;`: Maximum number of records allowed per block during a single
     staged sync transaction. Protects against DoS attacks and memory exhaustion (OOM).
     Allowed range: `1` to `10000000` (default `500000`).
@@ -171,13 +175,32 @@ Only these values are supported: `clones`, `quit_ips`, `quit_clones`, `flood`,
     password and password-flood notifications. IpServ is the visible source
     of explicit nick vhost, derived IP vhost, and `I::<ip>::host` change or
     restoration notices.
-*   **propagator**: Cluster authoritative propagator or priority list of authorized servers (e.g. `S::propagator "services.yourdomain.net,hub1.yourdomain.net"`).
+*   **propagator**: Ordered cluster priority list (for example,
+    `S::propagator "services.example.net, hub1.example.net"`). Spaces are
+    accepted only around commas and are trimmed per token. Empty tokens, tabs,
+    CR/LF, names longer than `HOSTLEN`, names rejected by UnrealIRCd, and total
+    values longer than `UDB_RECORD_VALUE_MAX` are rejected. Lists longer than
+    512 bytes remain valid when they fit the record limit; no token is truncated.
 
 ##### Propagator Resolution Hierarchy
-UDB resolves the active cluster propagator using a deterministic, fault-tolerant priority model:
-1. **Priority 1 (Local Override):** Explicit `udb { propagator "<server>"; }` in `unrealircd.conf` takes strict precedence.
-2. **Priority 2 (Dynamic Priority List in DB):** If `S::propagator "pri,sec"` is defined, the first server currently connected and online (`FindServer`) is elected, enabling automated, zero-latency Failover and Failback.
-3. **Auto-Bootstrap (Clean Node Mode):** Nodes without local configuration accept initial staged syncs from their direct HEL 4 link partner via `HEL 4 ?` and learn the cluster authority dynamically from block `S`.
+UDB resolves authority independently on every node; staged sync is never routed
+as a multi-hop transaction:
+1. **Local override:** `udb { propagator "<server>"; }` takes strict precedence.
+   The local server may name itself. A remote name is eligible only if it is a
+   directly connected server peer.
+2. **Persisted priority list:** `S::propagator "pri,sec"` selects the first
+   entry that names the local server or a directly connected server peer. A
+   globally visible server reached through another hub is skipped.
+3. **HEL authorization:** A selected remote peer becomes usable for staged
+   `BEGIN / PUT / END / RES` only after the direct link confirms `HEL 4` and the
+   peer's advertised selection authorizes the transfer.
+4. **Auto-bootstrap:** A node with neither a local override nor a valid persisted
+   list advertises `HEL 4 ?`, accepts its initial staged snapshot from that
+   direct peer, and learns `S::propagator` from block `S`.
+
+Selection is recomputed when links or propagator settings change. Ordered
+availability therefore produces deterministic failover and failback without
+retaining dead `Client *` state.
 
 #### Block L (S2S Links)
 Only `L::<server>::options` is supported. Its numeric bitmask is `*1` for UDB
@@ -218,8 +241,11 @@ never routed beyond the direct link.
 **HEL (Capability Negotiation and Auto-Bootstrap):**
 `:<sid> DB <direct-peer-sid> HEL 4 <selected-propagator>`
 
-The selected propagator field is `?` when no local source is configured. It
-allows a clean node to discover cluster authority and authorizes the direct peer to supply the initial staged snapshot.
+The selected propagator field is `?` only when neither propagator source is
+configured. It allows a clean node to discover cluster authority and authorizes
+the direct peer to supply the initial staged snapshot. A configured but
+unavailable policy is advertised as `HEL 4 -`, not converted to `?`; `-` grants
+no staged-sync authorization and therefore cannot silently broaden access.
 
 **HEL acknowledgement:**
 `:<sid> DB <direct-peer-sid> HEL 4 ACK`

@@ -116,6 +116,12 @@ a staged sync transaction (range `1` to `10000000`, default `500000`). Staged sy
 also enforce `max-staged-bytes` (default 64 MB), `sync-inactivity-timeout` (default 60s),
 and `sync-absolute-timeout` (default 300s).
 
+`udb::propagator` is a strict local override containing one UnrealIRCd server
+name. The name must fit `HOSTLEN` and pass UnrealIRCd's server-name validation;
+whitespace, CR/LF, and silent truncation are rejected during `CONFIGTEST`. A
+remote override is usable for staged sync only while that server is a directly
+connected peer with a confirmed `HEL 4` exchange.
+
 ---
 
 ### Step 4: Test & Start Server
@@ -209,10 +215,17 @@ Detailed technical documentation is available in the `doc/` directory:
   `encryption_key`, `suffix`, `nickserv`, `chanserv`, `ipserv`, and `propagator`.
 - The only supported `L` child is `L::<server>::options`: `*1` enables UDB
   debug notices.
-- Propagator authority is resolved via a fault-tolerant priority model: local
-  `udb::propagator` takes precedence, followed by the dynamic priority list in
-  `S::propagator` (e.g. `services.net,hub1.net` with automatic failover via `FindServer`),
-  and auto-bootstrap for unconfigured clean nodes. Debug notices redact diagnostic detail.
+- Propagator authority is hop-by-hop. Local `udb::propagator` takes precedence;
+  otherwise `S::propagator` is an ordered list such as
+  `services.example.net, hub1.example.net`. Each node selects the first entry
+  that is itself or a directly connected server peer. Merely finding a server
+  elsewhere in the IRC network does not make it eligible. Link availability
+  drives deterministic failover and failback; a node with neither setting uses
+  `HEL 4 ?` to bootstrap from its direct peer.
+- Every `S::propagator` token is trimmed only around commas, must fit `HOSTLEN`,
+  and must pass UnrealIRCd's server-name validation. Empty tokens, tabs, CR/LF,
+  invalid names, and values above `UDB_RECORD_VALUE_MAX` fail closed. Valid
+  lists may exceed 512 bytes and are never truncated.
 - UDB snapshots are created exclusively with mode `0600`, regardless of umask.
   Platforms that provide `O_NOFOLLOW` also reject a symlink temporary snapshot.
   UDB flushes and `fsync`s the temporary file before rename, then `fsync`s its

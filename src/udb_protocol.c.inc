@@ -156,8 +156,6 @@ static int udb_hook_server_sync(Client *client)
 
 int udb_hook_server_quit(Client *client, MessageTag *mtags)
 {
-	if (udb_ctx->propagator == client)
-		udb_ctx->propagator = NULL;
 	udb_sync_server_quit(client);
 	return 0;
 }
@@ -198,7 +196,9 @@ CMD_FUNC(cmd_db)
 			return;
 		}
 		const char *prop = (parc >= 5 && parv[4]) ? parv[4] : "?";
-		udb_hello_peer(client, 1)->authorizes_us = !strcasecmp(prop, me.name) || !strcmp(prop, "?");
+		UdbHelloPeer *hello_peer = udb_hello_peer(client, 1);
+		hello_peer->authorizes_us =
+			(!strcmp(prop, "?") || udb_server_name_valid(prop)) && (!strcasecmp(prop, me.name) || !strcmp(prop, "?"));
 		udb_log(ULOG_INFO, "UDB_HEL_AUTHORIZATION", client,
 				"Direct peer selected $propagator as its staged-sync source", log_data_string("propagator", prop));
 		/* Each side sends its own request, so only an ACK confirms outbound data. */
@@ -229,12 +229,12 @@ CMD_FUNC(cmd_db)
 		if (!strcasecmp(subcmd, "BEGIN"))
 		{
 			UdbBlock *block;
-			if (parc < 6 || !udb_has_staged_sync(client))
+			if (parc < 6 || client != direct_peer || is_broadcast || !is_for_me || !udb_has_staged_sync(direct_peer))
 			{
 				udb_protocol_params_error(client, subcmd);
 				return;
 			}
-			if (udb_selected_propagator(ctx) && !udb_is_propagator(ctx, client))
+			if (udb_propagator_policy_present(ctx) && !udb_is_propagator(ctx, direct_peer))
 			{
 				udb_send_db_to_one(client, ":%s DB %s ERR BEGIN %d %c", me.id, client->id, UDB_ERR_FORBIDDEN,
 								   parv[3] ? *parv[3] : '0');
@@ -250,7 +250,7 @@ CMD_FUNC(cmd_db)
 			}
 			if (is_for_me)
 			{
-				int error = udb_sync_begin(block, client, parv[4]);
+				int error = udb_sync_begin(block, direct_peer, parv[4]);
 				if (error)
 				{
 					udb_send_db_to_one(client, ":%s DB %s ERR BEGIN %d %c", me.id, client->id, error,
@@ -260,8 +260,7 @@ CMD_FUNC(cmd_db)
 				if (!is_broadcast)
 					return;
 			}
-			udb_sendto_confirmed_servers(client, ":%s DB %s BEGIN %s %s %s", client->id, target, parv[3], parv[4],
-										 parv[5]);
+			return;
 		}
 		break;
 
@@ -270,12 +269,12 @@ CMD_FUNC(cmd_db)
 		{
 			UdbBlock *block;
 			int error;
-			if (parc < 7 || !udb_has_staged_sync(client))
+			if (parc < 7 || client != direct_peer || is_broadcast || !is_for_me || !udb_has_staged_sync(direct_peer))
 			{
 				udb_protocol_params_error(client, subcmd);
 				return;
 			}
-			if (udb_selected_propagator(ctx) && !udb_is_propagator(ctx, client))
+			if (udb_propagator_policy_present(ctx) && !udb_is_propagator(ctx, direct_peer))
 			{
 				udb_send_db_to_one(client, ":%s DB %s ERR PUT %d %c", me.id, client->id, UDB_ERR_FORBIDDEN,
 								   parv[3] ? *parv[3] : '0');
@@ -291,7 +290,7 @@ CMD_FUNC(cmd_db)
 			}
 			if (is_for_me)
 			{
-				error = udb_sync_put(block, client, parv[4], parv[5], parv[6]);
+				error = udb_sync_put(block, direct_peer, parv[4], parv[5], parv[6]);
 				if (error)
 				{
 					udb_send_db_to_one(client, ":%s DB %s ERR PUT %d %c", me.id, client->id, error,
@@ -301,8 +300,7 @@ CMD_FUNC(cmd_db)
 				if (!is_broadcast)
 					return;
 			}
-			udb_sendto_confirmed_servers(client, ":%s DB %s PUT %s %s %s :%s", client->id, target, parv[3], parv[4],
-										 parv[5], parv[6]);
+			return;
 		}
 		break;
 
@@ -312,12 +310,12 @@ CMD_FUNC(cmd_db)
 			UdbBlock *block;
 			unsigned long digest;
 			int error;
-			if (parc < 6 || !udb_has_staged_sync(client))
+			if (parc < 6 || client != direct_peer || is_broadcast || !is_for_me || !udb_has_staged_sync(direct_peer))
 			{
 				udb_protocol_params_error(client, subcmd);
 				return;
 			}
-			if (udb_selected_propagator(ctx) && !udb_is_propagator(ctx, client))
+			if (udb_propagator_policy_present(ctx) && !udb_is_propagator(ctx, direct_peer))
 			{
 				udb_send_db_to_one(client, ":%s DB %s ERR END %d %c", me.id, client->id, UDB_ERR_FORBIDDEN,
 								   parv[3] ? *parv[3] : '0');
@@ -333,7 +331,7 @@ CMD_FUNC(cmd_db)
 			}
 			if (is_for_me)
 			{
-				error = udb_sync_end(ctx, block, client, parv[4], parv[5], &digest);
+				error = udb_sync_end(ctx, block, direct_peer, parv[4], parv[5], &digest);
 				if (error)
 				{
 					udb_send_db_to_one(client, ":%s DB %s ERR END %d %c", me.id, client->id, error,
@@ -341,11 +339,12 @@ CMD_FUNC(cmd_db)
 					return;
 				}
 				udb_send_db_to_one(client, ":%s DB %s ACK %c %s %08lX", me.id, client->id, *parv[3], parv[4], digest);
+				udb_sendto_confirmed_servers(client, ":%s DB * INF %c %08lX %lu", me.id, block->letter, block->checksum,
+											 (unsigned long)block->modified_at);
 				if (!is_broadcast)
 					return;
 			}
-			udb_sendto_confirmed_servers(client, ":%s DB %s END %s %s %s", client->id, target, parv[3], parv[4],
-										 parv[5]);
+			return;
 		}
 		else if (!strcasecmp(subcmd, "ERR"))
 		{
@@ -377,19 +376,18 @@ CMD_FUNC(cmd_db)
 	case 'A':
 		if (!strcasecmp(subcmd, "ACK"))
 		{
-			if (parc < 6 || !udb_has_staged_sync(client))
+			if (parc < 6 || client != direct_peer || is_broadcast || !is_for_me || !udb_has_staged_sync(direct_peer))
 			{
 				udb_protocol_params_error(client, subcmd);
 				return;
 			}
 			if (is_for_me)
 			{
-				udb_sync_ack(client, parv[3]);
+				udb_sync_ack(direct_peer, parv[3]);
 				if (!is_broadcast)
 					return;
 			}
-			udb_sendto_confirmed_servers(client, ":%s DB %s ACK %s %s %s", client->id, target, parv[3], parv[4],
-										 parv[5]);
+			return;
 		}
 		break;
 
@@ -418,7 +416,8 @@ CMD_FUNC(cmd_db)
 				return;
 			}
 
-			if (is_for_me)
+			if (client == direct_peer && is_for_me &&
+				(!udb_propagator_policy_present(ctx) || udb_is_propagator(ctx, direct_peer)))
 			{
 				if (crc32 != block->checksum)
 				{
@@ -444,7 +443,7 @@ CMD_FUNC(cmd_db)
 				udb_protocol_params_error(client, subcmd);
 				return;
 			}
-			udb_mutation_ins(ctx, client, target, parv[3], parv[4], is_for_me, is_broadcast);
+			udb_mutation_ins(ctx, client, direct_peer, target, parv[3], parv[4], is_for_me, is_broadcast);
 		}
 		break;
 
@@ -455,7 +454,12 @@ CMD_FUNC(cmd_db)
 				return;
 			char letter = *parv[3];
 			UdbBlock *block = udb_block_by_letter(ctx, letter);
-			if (!udb_peer_authorizes_us(client))
+			if (client != direct_peer || is_broadcast || !is_for_me)
+			{
+				udb_send_db_to_one(client, ":%s DB %s ERR RES %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
+				return;
+			}
+			if (!udb_peer_authorizes_us(direct_peer))
 			{
 				udb_send_db_to_one(client, ":%s DB %s ERR RES %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 				return;
@@ -468,20 +472,20 @@ CMD_FUNC(cmd_db)
 					udb_send_db_to_one(client, ":%s DB %s ERR RES %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
 					return;
 				}
-				if (block->syncing_from && block->syncing_from != client)
+				if (block->syncing_from && block->syncing_from != direct_peer)
 				{
 					udb_send_db_to_one(client, ":%s DB %s ERR RES %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE,
 									   letter);
 					return;
 				}
 
-				udb_sync_send_stage(client, block);
+				udb_sync_send_stage(direct_peer, block);
 				block->syncing_from = NULL;
 
 				if (!is_broadcast)
 					return;
 			}
-			udb_sendto_confirmed_servers(client, ":%s DB %s RES %c", client->id, target, letter);
+			return;
 		}
 		break;
 
@@ -493,13 +497,13 @@ CMD_FUNC(cmd_db)
 				udb_protocol_params_error(client, subcmd);
 				return;
 			}
-			udb_mutation_del(ctx, client, target, parv[3], is_for_me, is_broadcast);
+			udb_mutation_del(ctx, client, direct_peer, target, parv[3], is_for_me, is_broadcast);
 		}
 		else if (!strcasecmp(subcmd, "DRP"))
 		{
 			if (parc < 4)
 				return;
-			udb_mutation_drp(ctx, client, target, *parv[3], is_for_me, is_broadcast);
+			udb_mutation_drp(ctx, client, direct_peer, target, *parv[3], is_for_me, is_broadcast);
 		}
 		break;
 
@@ -508,7 +512,8 @@ CMD_FUNC(cmd_db)
 		{
 			if (parc < 4)
 				return;
-			udb_mutation_opt(ctx, client, target, *parv[3], parc >= 5 ? parv[4] : NULL, is_for_me, is_broadcast);
+			udb_mutation_opt(ctx, client, direct_peer, target, *parv[3], parc >= 5 ? parv[4] : NULL, is_for_me,
+							 is_broadcast);
 		}
 		break;
 	}
@@ -518,6 +523,8 @@ static int udb_protocol_init(ModuleInfo *modinfo)
 {
 	CommandAdd(modinfo->handle, "DB", cmd_db, MAXPARA, CMD_SERVER | CMD_BIGLINES);
 	HookAdd(modinfo->handle, HOOKTYPE_SERVER_SYNC, 0, udb_hook_server_sync);
+	HookAdd(modinfo->handle, HOOKTYPE_REHASH, 0, udb_config_rehash);
+	HookAdd(modinfo->handle, HOOKTYPE_POSTCONF, 0, udb_config_postconf);
 	HookAdd(modinfo->handle, HOOKTYPE_SERVER_QUIT, 0, udb_hook_server_quit);
 	EventAdd(modinfo->handle, "udb_sync_timeout", udb_sync_timeout_event, NULL, 1000, 0);
 

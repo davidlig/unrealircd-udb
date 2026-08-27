@@ -188,6 +188,13 @@ typedef struct UdbRecord UdbRecord;
 typedef struct UdbBlock UdbBlock;
 typedef struct UdbSyncSession UdbSyncSession;
 
+typedef struct UdbPropagatorSelection
+{
+	Client *peer;
+	char name[HOSTLEN + 1];
+	int is_local;
+} UdbPropagatorSelection;
+
 typedef enum UdbValueType
 {
 	UDB_VAL_NONE = 0, /* No value allowed (container node) */
@@ -313,7 +320,6 @@ typedef struct UdbContext
 	UdbRecord *links;
 	UdbRecord *lines;
 	UdbRecord **hash_table[UDB_NUM_BLOCKS];
-	Client *propagator;
 	char *propagator_setting;
 	char *quit_ips;
 	char *quit_clones;
@@ -332,6 +338,8 @@ static UdbPasswordFailure udb_password_failures[UDB_PASSWORD_FAILURE_SLOTS];
 static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs);
 static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type);
 static int udb_config_posttest(int *errs);
+static int udb_config_rehash(void);
+static int udb_config_postconf(void);
 static void udb_config_free(UdbContext *ctx);
 static int udb_database_directory_valid(const char *value);
 static char *udb_block_filepath(char letter);
@@ -412,20 +420,25 @@ static int udb_sync_send_tree(Client *server, UdbRecord *rec, int depth, char *p
 							  const char *txid);
 static int udb_sync_send_stage(Client *server, UdbBlock *block);
 static void udb_sync_server_quit(Client *client);
-static int udb_is_propagator(UdbContext *ctx, Client *server);
-static const char *udb_selected_propagator(UdbContext *ctx);
 static int udb_send_db_to_one(Client *to, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+static int udb_is_propagator(UdbContext *ctx, Client *server);
+static int udb_server_name_valid(const char *srv);
+static int udb_propagator_list_valid(const char *value);
+static int udb_select_propagator(UdbContext *ctx, int require_hello, UdbPropagatorSelection *selected);
+static int udb_propagator_policy_present(UdbContext *ctx);
+static void udb_propagator_policy_changed(UdbContext *ctx);
+static void udb_sync_hello_refresh_all(void);
 static int udb_send_db_to_confirmed_servers(Client *except, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static int udb_sendto_confirmed_servers(Client *except, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void udb_protocol_params_error(Client *client, const char *subcmd);
-static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target, const char *path, const char *data,
+static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, const char *path,
+							 const char *data, int is_for_me, int is_broadcast);
+static void udb_mutation_del(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, const char *path,
 							 int is_for_me, int is_broadcast);
-static void udb_mutation_del(UdbContext *ctx, Client *client, const char *target, const char *path, int is_for_me,
-							 int is_broadcast);
-static void udb_mutation_drp(UdbContext *ctx, Client *client, const char *target, char letter, int is_for_me,
-							 int is_broadcast);
-static void udb_mutation_opt(UdbContext *ctx, Client *client, const char *target, char letter, const char *modified_at,
+static void udb_mutation_drp(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, char letter,
 							 int is_for_me, int is_broadcast);
+static void udb_mutation_opt(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, char letter,
+							 const char *modified_at, int is_for_me, int is_broadcast);
 static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync);
 static void udb_nick_strip(Client *client, UdbRecord *nick_rec);
 static void udb_nick_remove_record(UdbBlock *block, UdbRecord *rec);
@@ -1302,6 +1315,7 @@ static int udb_file_save_block(UdbContext *ctx, UdbBlock *block)
  */
 
 static UdbConfig *udb_cfg = NULL;
+static int udb_config_seen_propagator = 0;
 
 static int udb_flood_valid(const char *value, int *attempts, int *period);
 
@@ -1343,9 +1357,10 @@ static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
 		}
 		else if (!strcmp(cep->name, "propagator"))
 		{
-			if (!cep->value || !*cep->value)
+			if (!cep->value || !udb_server_name_valid(cep->value))
 			{
-				config_error("%s:%i: udb::propagator requires a server name", cep->file->filename, cep->line_number);
+				config_error("%s:%i: udb::propagator requires a valid server name", cep->file->filename,
+							 cep->line_number);
 				errors++;
 			}
 		}
@@ -1431,6 +1446,24 @@ static int udb_config_posttest(int *errs)
 	return 0;
 }
 
+/* CONFIGRUN only visits directives that still exist. Track the new generation
+ * without mutating the active value until a successful postconf, so a failed
+ * rehash cannot erase the last known-good propagator override. */
+static int udb_config_rehash(void)
+{
+	udb_config_seen_propagator = 0;
+	return 0;
+}
+
+static int udb_config_postconf(void)
+{
+	if (udb_cfg && !udb_config_seen_propagator)
+		safe_free(udb_cfg->propagator);
+	if (udb_ctx)
+		udb_propagator_policy_changed(udb_ctx);
+	return 0;
+}
+
 static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
 {
 	ConfigEntry *cep;
@@ -1452,6 +1485,7 @@ static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
 		}
 		else if (!strcmp(cep->name, "propagator"))
 		{
+			udb_config_seen_propagator = 1;
 			safe_strdup(udb_cfg->propagator, cep->value);
 		}
 		else if (!strcmp(cep->name, "max-global-clones"))
@@ -1541,13 +1575,14 @@ static int udb_setting_string_valid(const char *value)
 
 static int udb_suffix_valid(const char *value)
 {
-	const unsigned char *p = (const unsigned char *)value;
+	const unsigned char *p;
 	const char *label;
 
 	/* The derived label is 32 hexadecimal characters. */
 	if (!value || !*value || strlen(value) > HOSTLEN - 32 || value[0] != '.')
 		return 0;
 	label = value + 1;
+	p = (const unsigned char *)label;
 	for (; *p; p++)
 	{
 		if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') || *p == '.' ||
@@ -1701,10 +1736,10 @@ static int udb_settings_apply_record(UdbContext *ctx, UdbRecord *rec)
 	}
 	else if (!strcmp(rec->key, SKEY_PROPAGATOR))
 	{
-		if (!udb_setting_string_valid(rec->data_str))
+		if (!udb_propagator_list_valid(rec->data_str))
 			return 0;
 		udb_settings_replace(&ctx->propagator_setting, rec->data_str);
-		ctx->propagator = NULL;
+		udb_propagator_policy_changed(ctx);
 	}
 	else
 	{
@@ -1742,7 +1777,7 @@ static void udb_settings_remove_record(UdbContext *ctx, UdbRecord *rec)
 	else if (!strcmp(rec->key, SKEY_PROPAGATOR))
 	{
 		udb_settings_replace(&ctx->propagator_setting, NULL);
-		ctx->propagator = NULL;
+		udb_propagator_policy_changed(ctx);
 	}
 }
 
@@ -2183,15 +2218,56 @@ static int udb_ip_host_mask_valid(const char *mask)
 
 static int udb_server_name_valid(const char *srv)
 {
-	const char *c;
-	if (!srv || !*srv || strlen(srv) > HOSTLEN)
+	return srv && *srv && strlen(srv) <= HOSTLEN && !strpbrk(srv, " \t\r\n") && valid_server_name(srv);
+}
+
+/* Iterate a comma-separated propagator list without copying or truncating it.
+ * Spaces are accepted only around commas; tabs and line breaks are rejected. */
+static int udb_propagator_list_next(const char **cursor, char name[HOSTLEN + 1])
+{
+	const char *start, *end, *p;
+	size_t len;
+
+	if (!cursor || !(p = *cursor) || !*p)
 		return 0;
-	for (c = srv; *c; c++)
+	while (*p == ' ')
+		p++;
+	if (!*p || *p == ',')
+		return -1;
+	start = p;
+	while (*p && *p != ',')
+		p++;
+	end = p;
+	while (end > start && end[-1] == ' ')
+		end--;
+	len = (size_t)(end - start);
+	if (!len || len > HOSTLEN)
+		return -1;
+	memcpy(name, start, len);
+	name[len] = '\0';
+	if (!udb_server_name_valid(name))
+		return -1;
+	if (*p == ',')
 	{
-		if (*c <= ' ' || (unsigned char)*c > 126)
-			return 0;
+		p++;
+		if (!*p)
+			return -1;
 	}
+	*cursor = p;
 	return 1;
+}
+
+static int udb_propagator_list_valid(const char *value)
+{
+	const char *cursor = value;
+	char name[HOSTLEN + 1];
+	int result, count = 0;
+
+	if (!value || !*value || strlen(value) > UDB_RECORD_VALUE_MAX || strpbrk(value, "\r\n\t"))
+		return 0;
+	while ((result = udb_propagator_list_next(&cursor, name)) > 0)
+		count++;
+	return result == 0 && count > 0;
 }
 
 static int udb_flood_setting_valid(const char *value)
@@ -2253,7 +2329,7 @@ static const UdbKeyDescriptor udb_schema_s_subkeys[] = {
 	{SKEY_NICKSERV, UDB_VAL_STRING, udb_service_mask_valid, 0, NULL},
 	{SKEY_CHANSERV, UDB_VAL_STRING, udb_service_mask_valid, 0, NULL},
 	{SKEY_IPSERV, UDB_VAL_STRING, udb_service_mask_valid, 0, NULL},
-	{SKEY_PROPAGATOR, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL}};
+	{SKEY_PROPAGATOR, UDB_VAL_STRING, udb_propagator_list_valid, 0, NULL}};
 
 static const UdbKeyDescriptor udb_schema_l_subkeys[] = {
 	{LKEY_OPTIONS, UDB_VAL_NUMERIC, udb_options_record_valid, 0, NULL}};
@@ -3674,7 +3750,9 @@ static int udb_peer_authorizes_us(Client *server)
 static int udb_sync_hello_start(Client *server)
 {
 	UdbHelloPeer *peer;
+	UdbPropagatorSelection selected;
 	const char *propagator;
+	int ok;
 
 	if (!server || !IsServer(server) || !MyConnect(server))
 		return 0;
@@ -3683,8 +3761,18 @@ static int udb_sync_hello_start(Client *server)
 		return 0;
 	peer->state = UDB_HEL_WAITING;
 	peer->deadline = time(NULL) + UDB_SYNC_TIMEOUT;
-	propagator = udb_selected_propagator(udb_ctx);
-	return udb_send_db_to_one(server, ":%s DB %s HEL 4 %s", me.id, server->id, propagator ? propagator : "?");
+	if (udb_select_propagator(udb_ctx, 1, &selected))
+		propagator = selected.name;
+	else
+		propagator = udb_propagator_policy_present(udb_ctx) ? "-" : "?";
+	ok = udb_send_db_to_one(server, ":%s DB %s HEL 4 %s", me.id, server->id, propagator);
+	if (!ok)
+	{
+		peer->state = 0;
+		peer->deadline = 0;
+		return 0;
+	}
+	return 1;
 }
 
 static int udb_sync_hello_ack(Client *server)
@@ -3695,8 +3783,29 @@ static int udb_sync_hello_ack(Client *server)
 		return 0;
 	peer->state = UDB_HEL_CONFIRMED;
 	udb_log(ULOG_INFO, "UDB_HEL_CONFIRMED", server, "UDB HEL 4 capability confirmed for directly linked server");
+	/* HEL confirmation can make this peer the first usable policy candidate.
+	 * Refresh every direct peer so old authorizes_us decisions cannot survive a
+	 * deterministic failover or recovery. */
+	udb_sync_hello_refresh_all();
 	udb_sync_to_server(server);
 	return 1;
+}
+
+static void udb_sync_hello_refresh_all(void)
+{
+	Client *server;
+	UdbPropagatorSelection selected;
+	const char *propagator;
+
+	if (udb_select_propagator(udb_ctx, 1, &selected))
+		propagator = selected.name;
+	else
+		propagator = udb_propagator_policy_present(udb_ctx) ? "-" : "?";
+	list_for_each_entry(server, &server_list, special_node)
+	{
+		if (IsServer(server) && MyConnect(server) && udb_has_hello(server))
+			udb_send_db_to_one(server, ":%s DB %s HEL 4 %s", me.id, server->id, propagator);
+	}
 }
 
 static void udb_sync_abort(UdbBlock *block, const char *reason)
@@ -3706,6 +3815,29 @@ static void udb_sync_abort(UdbBlock *block, const char *reason)
 	udb_log(ULOG_WARNING, "UDB_SYNC_ABORT", block->session->peer, "Aborted staged sync of block $block: $reason",
 			log_data_string("block", (char[]){block->letter, '\0'}), log_data_string("reason", reason));
 	udb_sync_session_free(block);
+}
+
+static void udb_propagator_policy_changed(UdbContext *ctx)
+{
+	UdbBlock *block;
+	UdbPropagatorSelection selected;
+	Client *peer = NULL;
+
+	if (!ctx)
+		return;
+	if (udb_select_propagator(ctx, 1, &selected) && !selected.is_local)
+		peer = selected.peer;
+	for (block = ctx->block_list; block; block = block->next)
+	{
+		/* Replacing block S removes the old tree's effects while the S session
+		 * still owns its replacement tree. Do not abort that session from its
+		 * own policy callback; the new policy is applied after commit. */
+		if (block->session && block->letter != 'S' && block->session->peer != peer)
+			udb_sync_abort(block, "propagator policy changed");
+		else if (!block->session && block->syncing_from && block->syncing_from != peer)
+			block->syncing_from = NULL;
+	}
+	udb_sync_hello_refresh_all();
 }
 
 static int udb_sync_begin(UdbBlock *block, Client *peer, const char *txid)
@@ -4041,6 +4173,7 @@ static void udb_sync_server_quit(Client *client)
 			udb_sync_abort(block, "peer quit");
 		else if (block->syncing_from == client)
 			block->syncing_from = NULL;
+	udb_propagator_policy_changed(udb_ctx);
 }
 
 /* End of udb_sync.c.inc */
@@ -4058,68 +4191,60 @@ static void udb_sync_server_quit(Client *client)
  * License: GNU General Public License v2+
  */
 
-static const char *udb_selected_propagator(UdbContext *ctx)
+static const char *udb_propagator_policy(UdbContext *ctx)
 {
-	static char selected_buf[HOSTLEN + 1];
-
-	/* 1. Priority 1: Explicit local override in unrealircd.conf */
 	if (udb_cfg && udb_cfg->propagator && *udb_cfg->propagator)
 		return udb_cfg->propagator;
-
-	/* 2. Priority 2: Priority list in S::propagator */
-	if (ctx && ctx->propagator_setting && *ctx->propagator_setting)
-	{
-		char *list_copy = NULL;
-		char *srv, *saveptr;
-		char *first_srv = NULL;
-
-		safe_strdup(list_copy, ctx->propagator_setting);
-		for (srv = strtok_r(list_copy, ",", &saveptr); srv; srv = strtok_r(NULL, ",", &saveptr))
-		{
-			while (*srv == ' ')
-				srv++;
-			char *end = srv + strlen(srv) - 1;
-			while (end > srv && *end == ' ')
-				*end-- = '\0';
-			if (!*srv)
-				continue;
-
-			if (!first_srv)
-				first_srv = srv;
-
-			/* Check if online in UnrealIRCd or if it is the local server */
-			if (find_server(srv, NULL) || (me.name[0] && !strcasecmp(srv, me.name)))
-			{
-				strlcpy(selected_buf, srv, sizeof(selected_buf));
-				safe_free(list_copy);
-				return selected_buf;
-			}
-		}
-		if (first_srv)
-		{
-			strlcpy(selected_buf, first_srv, sizeof(selected_buf));
-			safe_free(list_copy);
-			return selected_buf;
-		}
-		safe_free(list_copy);
-	}
-
-	return NULL;
+	return ctx && ctx->propagator_setting && *ctx->propagator_setting ? ctx->propagator_setting : NULL;
 }
 
-static int udb_is_propagator(UdbContext *ctx, Client *server)
+static int udb_propagator_policy_present(UdbContext *ctx)
 {
-	const char *selected;
+	return udb_propagator_policy(ctx) != NULL;
+}
 
-	if (!server || !IsServer(server))
+/* Resolve the first locally usable candidate. Network-wide visibility is never
+ * enough: a remote candidate must be a direct server peer and staged-sync use
+ * additionally requires a completed HEL 4 negotiation. */
+static int udb_select_propagator(UdbContext *ctx, int require_hello, UdbPropagatorSelection *selected)
+{
+	const char *cursor = udb_propagator_policy(ctx);
+	char name[HOSTLEN + 1];
+	int result;
+
+	if (!selected)
 		return 0;
-	selected = udb_selected_propagator(ctx);
-	if (selected && !strcasecmp(server->name, selected))
+	memset(selected, 0, sizeof(*selected));
+	while (cursor && (result = udb_propagator_list_next(&cursor, name)) > 0)
 	{
-		ctx->propagator = server;
+		Client *candidate;
+
+		if (me.name[0] && !strcasecmp(name, me.name))
+		{
+			memcpy(selected->name, name, strlen(name) + 1);
+			selected->is_local = 1;
+			return 1;
+		}
+		candidate = find_server(name, NULL);
+		if (!candidate || !IsServer(candidate) || !MyConnect(candidate))
+			continue;
+		if (require_hello && !udb_has_hello(candidate))
+			continue;
+		selected->peer = candidate;
+		memcpy(selected->name, name, strlen(name) + 1);
 		return 1;
 	}
 	return 0;
+}
+
+/* Checks if a directly connected client is our authorized upstream propagator */
+static int udb_is_propagator(UdbContext *ctx, Client *server)
+{
+	UdbPropagatorSelection selected;
+
+	if (!server || !IsServer(server) || !MyConnect(server))
+		return 0;
+	return udb_select_propagator(ctx, 1, &selected) && !selected.is_local && selected.peer == server;
 }
 
 static UdbBlock *udb_mutation_path_block(UdbContext *ctx, const char *path)
@@ -4194,8 +4319,8 @@ static int udb_mutation_persist_error(Client *client, const char *subcmd, char l
 	return udb_send_db_to_one(client, ":%s DB %s ERR %s %d %c", me.id, client->id, subcmd, UDB_ERR_FATAL, letter);
 }
 
-static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target, const char *path, const char *data,
-							 int is_for_me, int is_broadcast)
+static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, const char *path,
+							 const char *data, int is_for_me, int is_broadcast)
 {
 	UdbBlock *block = udb_mutation_path_block(ctx, path);
 	char letter = path && *path ? path[0] : '0';
@@ -4207,12 +4332,12 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 	}
 	if (is_for_me)
 	{
-		if (block->session || (block->syncing_from && block->syncing_from != client))
+		if (block->session || (block->syncing_from && block->syncing_from != direct_peer))
 		{
 			udb_send_db_to_one(client, ":%s DB %s ERR INS %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
 			return;
 		}
-		if (block->syncing_from != client && !udb_is_propagator(ctx, client))
+		if (block->syncing_from != direct_peer && !udb_is_propagator(ctx, direct_peer))
 		{
 			udb_send_db_to_one(client, ":%s DB %s ERR INS %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 			return;
@@ -4233,14 +4358,9 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 		unchanged = old_rec && udb_record_data_equals(old_rec, data);
 		if (unchanged)
 		{
-			if (ctx->propagator && block->syncing_from == client)
-			{
-				udb_mutation_forward_ins(ctx->propagator, client, target, path, data);
-				return;
-			}
 			if (!is_broadcast)
 				return;
-			udb_mutation_forward_ins(client, client, target, path, data);
+			udb_mutation_forward_ins(client, direct_peer, target, path, data);
 			return;
 		}
 		tree = udb_record_clone_tree(block->tree, old_rec, &rec);
@@ -4277,19 +4397,14 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 		char logbuf[512];
 		snprintf(logbuf, sizeof(logbuf), "Inserted record via S2S: %s -> %s", path, data);
 		udb_log(ULOG_INFO, "UDB_INS_RECEIVED", client, "$msg", log_data_string("msg", logbuf));
-		if (ctx->propagator && block->syncing_from == client)
-		{
-			udb_mutation_forward_ins(ctx->propagator, client, target, path, data);
-			return;
-		}
 		if (!is_broadcast)
 			return;
 	}
-	udb_mutation_forward_ins(client, client, target, path, data);
+	udb_mutation_forward_ins(client, direct_peer, target, path, data);
 }
 
-static void udb_mutation_del(UdbContext *ctx, Client *client, const char *target, const char *path, int is_for_me,
-							 int is_broadcast)
+static void udb_mutation_del(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, const char *path,
+							 int is_for_me, int is_broadcast)
 {
 	UdbBlock *block = udb_mutation_path_block(ctx, path);
 	char letter = path && *path ? path[0] : '0';
@@ -4301,12 +4416,12 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, const char *target
 	}
 	if (is_for_me)
 	{
-		if (block->session || (block->syncing_from && block->syncing_from != client))
+		if (block->session || (block->syncing_from && block->syncing_from != direct_peer))
 		{
 			udb_send_db_to_one(client, ":%s DB %s ERR DEL %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
 			return;
 		}
-		if (!block->syncing_from && !udb_is_propagator(ctx, client))
+		if (block->syncing_from != direct_peer && !udb_is_propagator(ctx, direct_peer))
 		{
 			udb_send_db_to_one(client, ":%s DB %s ERR DEL %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 			return;
@@ -4314,14 +4429,9 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, const char *target
 		UdbRecord *old_rec = udb_record_find_path(ctx, block, path + 3);
 		if (!old_rec)
 		{
-			if (ctx->propagator && block->syncing_from == client)
-			{
-				udb_mutation_forward_del(ctx->propagator, client, target, path);
-				return;
-			}
 			if (!is_broadcast)
 				return;
-			udb_mutation_forward_del(client, client, target, path);
+			udb_mutation_forward_del(client, direct_peer, target, path);
 			return;
 		}
 		UdbRecord *candidate_rec = NULL;
@@ -4348,19 +4458,17 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, const char *target
 			udb_lines_apply_effect(ctx, block, candidate_line, 0);
 		if (block->letter == 'L')
 			udb_sync_snomask_filter();
-		if (ctx->propagator && block->syncing_from == client)
-		{
-			udb_mutation_forward_del(ctx->propagator, client, target, path);
-			return;
-		}
+		char logbuf[512];
+		snprintf(logbuf, sizeof(logbuf), "Deleted record via S2S: %s", path);
+		udb_log(ULOG_INFO, "UDB_DEL_RECEIVED", client, "$msg", log_data_string("msg", logbuf));
 		if (!is_broadcast)
 			return;
 	}
-	udb_mutation_forward_del(client, client, target, path);
+	udb_mutation_forward_del(client, direct_peer, target, path);
 }
 
-static void udb_mutation_drp(UdbContext *ctx, Client *client, const char *target, char letter, int is_for_me,
-							 int is_broadcast)
+static void udb_mutation_drp(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, char letter,
+							 int is_for_me, int is_broadcast)
 {
 	if (is_for_me)
 	{
@@ -4370,12 +4478,12 @@ static void udb_mutation_drp(UdbContext *ctx, Client *client, const char *target
 			udb_send_db_to_one(client, ":%s DB %s ERR DRP %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
 			return;
 		}
-		if (block->session || (block->syncing_from && block->syncing_from != client))
+		if (block->session || (block->syncing_from && block->syncing_from != direct_peer))
 		{
 			udb_send_db_to_one(client, ":%s DB %s ERR DRP %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
 			return;
 		}
-		if (!udb_is_propagator(ctx, client))
+		if (!udb_is_propagator(ctx, direct_peer))
 		{
 			udb_send_db_to_one(client, ":%s DB %s ERR DRP %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 			return;
@@ -4384,7 +4492,7 @@ static void udb_mutation_drp(UdbContext *ctx, Client *client, const char *target
 		{
 			if (!is_broadcast)
 				return;
-			udb_sendto_confirmed_servers(client, ":%s DB %s DRP %c", client->id, target, letter);
+			udb_sendto_confirmed_servers(direct_peer, ":%s DB %s DRP %c", client->id, target, letter);
 			return;
 		}
 		UdbRecord *tree = udb_record_clone_tree(block->tree, NULL, NULL);
@@ -4403,11 +4511,11 @@ static void udb_mutation_drp(UdbContext *ctx, Client *client, const char *target
 		if (!is_broadcast)
 			return;
 	}
-	udb_sendto_confirmed_servers(client, ":%s DB %s DRP %c", client->id, target, letter);
+	udb_sendto_confirmed_servers(direct_peer, ":%s DB %s DRP %c", client->id, target, letter);
 }
 
-static void udb_mutation_opt(UdbContext *ctx, Client *client, const char *target, char letter, const char *modified_at,
-							 int is_for_me, int is_broadcast)
+static void udb_mutation_opt(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, char letter,
+							 const char *modified_at, int is_for_me, int is_broadcast)
 {
 	if (is_for_me)
 	{
@@ -4422,7 +4530,7 @@ static void udb_mutation_opt(UdbContext *ctx, Client *client, const char *target
 			udb_send_db_to_one(client, ":%s DB %s ERR OPT %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
 			return;
 		}
-		if (!udb_is_propagator(ctx, client))
+		if (!udb_is_propagator(ctx, direct_peer))
 		{
 			udb_send_db_to_one(client, ":%s DB %s ERR OPT %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 			return;
@@ -4436,9 +4544,9 @@ static void udb_mutation_opt(UdbContext *ctx, Client *client, const char *target
 			return;
 	}
 	if (modified_at)
-		udb_sendto_confirmed_servers(client, ":%s DB %s OPT %c %s", client->id, target, letter, modified_at);
+		udb_sendto_confirmed_servers(direct_peer, ":%s DB %s OPT %c %s", client->id, target, letter, modified_at);
 	else
-		udb_sendto_confirmed_servers(client, ":%s DB %s OPT %c", client->id, target, letter);
+		udb_sendto_confirmed_servers(direct_peer, ":%s DB %s OPT %c", client->id, target, letter);
 }
 
 /* End of udb_mutation.c.inc */
@@ -4603,8 +4711,6 @@ static int udb_hook_server_sync(Client *client)
 
 int udb_hook_server_quit(Client *client, MessageTag *mtags)
 {
-	if (udb_ctx->propagator == client)
-		udb_ctx->propagator = NULL;
 	udb_sync_server_quit(client);
 	return 0;
 }
@@ -4645,7 +4751,9 @@ CMD_FUNC(cmd_db)
 			return;
 		}
 		const char *prop = (parc >= 5 && parv[4]) ? parv[4] : "?";
-		udb_hello_peer(client, 1)->authorizes_us = !strcasecmp(prop, me.name) || !strcmp(prop, "?");
+		UdbHelloPeer *hello_peer = udb_hello_peer(client, 1);
+		hello_peer->authorizes_us =
+			(!strcmp(prop, "?") || udb_server_name_valid(prop)) && (!strcasecmp(prop, me.name) || !strcmp(prop, "?"));
 		udb_log(ULOG_INFO, "UDB_HEL_AUTHORIZATION", client,
 				"Direct peer selected $propagator as its staged-sync source", log_data_string("propagator", prop));
 		/* Each side sends its own request, so only an ACK confirms outbound data. */
@@ -4676,12 +4784,12 @@ CMD_FUNC(cmd_db)
 		if (!strcasecmp(subcmd, "BEGIN"))
 		{
 			UdbBlock *block;
-			if (parc < 6 || !udb_has_staged_sync(client))
+			if (parc < 6 || client != direct_peer || is_broadcast || !is_for_me || !udb_has_staged_sync(direct_peer))
 			{
 				udb_protocol_params_error(client, subcmd);
 				return;
 			}
-			if (udb_selected_propagator(ctx) && !udb_is_propagator(ctx, client))
+			if (udb_propagator_policy_present(ctx) && !udb_is_propagator(ctx, direct_peer))
 			{
 				udb_send_db_to_one(client, ":%s DB %s ERR BEGIN %d %c", me.id, client->id, UDB_ERR_FORBIDDEN,
 								   parv[3] ? *parv[3] : '0');
@@ -4697,7 +4805,7 @@ CMD_FUNC(cmd_db)
 			}
 			if (is_for_me)
 			{
-				int error = udb_sync_begin(block, client, parv[4]);
+				int error = udb_sync_begin(block, direct_peer, parv[4]);
 				if (error)
 				{
 					udb_send_db_to_one(client, ":%s DB %s ERR BEGIN %d %c", me.id, client->id, error,
@@ -4707,8 +4815,7 @@ CMD_FUNC(cmd_db)
 				if (!is_broadcast)
 					return;
 			}
-			udb_sendto_confirmed_servers(client, ":%s DB %s BEGIN %s %s %s", client->id, target, parv[3], parv[4],
-										 parv[5]);
+			return;
 		}
 		break;
 
@@ -4717,12 +4824,12 @@ CMD_FUNC(cmd_db)
 		{
 			UdbBlock *block;
 			int error;
-			if (parc < 7 || !udb_has_staged_sync(client))
+			if (parc < 7 || client != direct_peer || is_broadcast || !is_for_me || !udb_has_staged_sync(direct_peer))
 			{
 				udb_protocol_params_error(client, subcmd);
 				return;
 			}
-			if (udb_selected_propagator(ctx) && !udb_is_propagator(ctx, client))
+			if (udb_propagator_policy_present(ctx) && !udb_is_propagator(ctx, direct_peer))
 			{
 				udb_send_db_to_one(client, ":%s DB %s ERR PUT %d %c", me.id, client->id, UDB_ERR_FORBIDDEN,
 								   parv[3] ? *parv[3] : '0');
@@ -4738,7 +4845,7 @@ CMD_FUNC(cmd_db)
 			}
 			if (is_for_me)
 			{
-				error = udb_sync_put(block, client, parv[4], parv[5], parv[6]);
+				error = udb_sync_put(block, direct_peer, parv[4], parv[5], parv[6]);
 				if (error)
 				{
 					udb_send_db_to_one(client, ":%s DB %s ERR PUT %d %c", me.id, client->id, error,
@@ -4748,8 +4855,7 @@ CMD_FUNC(cmd_db)
 				if (!is_broadcast)
 					return;
 			}
-			udb_sendto_confirmed_servers(client, ":%s DB %s PUT %s %s %s :%s", client->id, target, parv[3], parv[4],
-										 parv[5], parv[6]);
+			return;
 		}
 		break;
 
@@ -4759,12 +4865,12 @@ CMD_FUNC(cmd_db)
 			UdbBlock *block;
 			unsigned long digest;
 			int error;
-			if (parc < 6 || !udb_has_staged_sync(client))
+			if (parc < 6 || client != direct_peer || is_broadcast || !is_for_me || !udb_has_staged_sync(direct_peer))
 			{
 				udb_protocol_params_error(client, subcmd);
 				return;
 			}
-			if (udb_selected_propagator(ctx) && !udb_is_propagator(ctx, client))
+			if (udb_propagator_policy_present(ctx) && !udb_is_propagator(ctx, direct_peer))
 			{
 				udb_send_db_to_one(client, ":%s DB %s ERR END %d %c", me.id, client->id, UDB_ERR_FORBIDDEN,
 								   parv[3] ? *parv[3] : '0');
@@ -4780,7 +4886,7 @@ CMD_FUNC(cmd_db)
 			}
 			if (is_for_me)
 			{
-				error = udb_sync_end(ctx, block, client, parv[4], parv[5], &digest);
+				error = udb_sync_end(ctx, block, direct_peer, parv[4], parv[5], &digest);
 				if (error)
 				{
 					udb_send_db_to_one(client, ":%s DB %s ERR END %d %c", me.id, client->id, error,
@@ -4788,11 +4894,12 @@ CMD_FUNC(cmd_db)
 					return;
 				}
 				udb_send_db_to_one(client, ":%s DB %s ACK %c %s %08lX", me.id, client->id, *parv[3], parv[4], digest);
+				udb_sendto_confirmed_servers(client, ":%s DB * INF %c %08lX %lu", me.id, block->letter, block->checksum,
+											 (unsigned long)block->modified_at);
 				if (!is_broadcast)
 					return;
 			}
-			udb_sendto_confirmed_servers(client, ":%s DB %s END %s %s %s", client->id, target, parv[3], parv[4],
-										 parv[5]);
+			return;
 		}
 		else if (!strcasecmp(subcmd, "ERR"))
 		{
@@ -4824,19 +4931,18 @@ CMD_FUNC(cmd_db)
 	case 'A':
 		if (!strcasecmp(subcmd, "ACK"))
 		{
-			if (parc < 6 || !udb_has_staged_sync(client))
+			if (parc < 6 || client != direct_peer || is_broadcast || !is_for_me || !udb_has_staged_sync(direct_peer))
 			{
 				udb_protocol_params_error(client, subcmd);
 				return;
 			}
 			if (is_for_me)
 			{
-				udb_sync_ack(client, parv[3]);
+				udb_sync_ack(direct_peer, parv[3]);
 				if (!is_broadcast)
 					return;
 			}
-			udb_sendto_confirmed_servers(client, ":%s DB %s ACK %s %s %s", client->id, target, parv[3], parv[4],
-										 parv[5]);
+			return;
 		}
 		break;
 
@@ -4865,7 +4971,8 @@ CMD_FUNC(cmd_db)
 				return;
 			}
 
-			if (is_for_me)
+			if (client == direct_peer && is_for_me &&
+				(!udb_propagator_policy_present(ctx) || udb_is_propagator(ctx, direct_peer)))
 			{
 				if (crc32 != block->checksum)
 				{
@@ -4891,7 +4998,7 @@ CMD_FUNC(cmd_db)
 				udb_protocol_params_error(client, subcmd);
 				return;
 			}
-			udb_mutation_ins(ctx, client, target, parv[3], parv[4], is_for_me, is_broadcast);
+			udb_mutation_ins(ctx, client, direct_peer, target, parv[3], parv[4], is_for_me, is_broadcast);
 		}
 		break;
 
@@ -4902,7 +5009,12 @@ CMD_FUNC(cmd_db)
 				return;
 			char letter = *parv[3];
 			UdbBlock *block = udb_block_by_letter(ctx, letter);
-			if (!udb_peer_authorizes_us(client))
+			if (client != direct_peer || is_broadcast || !is_for_me)
+			{
+				udb_send_db_to_one(client, ":%s DB %s ERR RES %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
+				return;
+			}
+			if (!udb_peer_authorizes_us(direct_peer))
 			{
 				udb_send_db_to_one(client, ":%s DB %s ERR RES %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 				return;
@@ -4915,20 +5027,20 @@ CMD_FUNC(cmd_db)
 					udb_send_db_to_one(client, ":%s DB %s ERR RES %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
 					return;
 				}
-				if (block->syncing_from && block->syncing_from != client)
+				if (block->syncing_from && block->syncing_from != direct_peer)
 				{
 					udb_send_db_to_one(client, ":%s DB %s ERR RES %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE,
 									   letter);
 					return;
 				}
 
-				udb_sync_send_stage(client, block);
+				udb_sync_send_stage(direct_peer, block);
 				block->syncing_from = NULL;
 
 				if (!is_broadcast)
 					return;
 			}
-			udb_sendto_confirmed_servers(client, ":%s DB %s RES %c", client->id, target, letter);
+			return;
 		}
 		break;
 
@@ -4940,13 +5052,13 @@ CMD_FUNC(cmd_db)
 				udb_protocol_params_error(client, subcmd);
 				return;
 			}
-			udb_mutation_del(ctx, client, target, parv[3], is_for_me, is_broadcast);
+			udb_mutation_del(ctx, client, direct_peer, target, parv[3], is_for_me, is_broadcast);
 		}
 		else if (!strcasecmp(subcmd, "DRP"))
 		{
 			if (parc < 4)
 				return;
-			udb_mutation_drp(ctx, client, target, *parv[3], is_for_me, is_broadcast);
+			udb_mutation_drp(ctx, client, direct_peer, target, *parv[3], is_for_me, is_broadcast);
 		}
 		break;
 
@@ -4955,7 +5067,8 @@ CMD_FUNC(cmd_db)
 		{
 			if (parc < 4)
 				return;
-			udb_mutation_opt(ctx, client, target, *parv[3], parc >= 5 ? parv[4] : NULL, is_for_me, is_broadcast);
+			udb_mutation_opt(ctx, client, direct_peer, target, *parv[3], parc >= 5 ? parv[4] : NULL, is_for_me,
+							 is_broadcast);
 		}
 		break;
 	}
@@ -4965,6 +5078,8 @@ static int udb_protocol_init(ModuleInfo *modinfo)
 {
 	CommandAdd(modinfo->handle, "DB", cmd_db, MAXPARA, CMD_SERVER | CMD_BIGLINES);
 	HookAdd(modinfo->handle, HOOKTYPE_SERVER_SYNC, 0, udb_hook_server_sync);
+	HookAdd(modinfo->handle, HOOKTYPE_REHASH, 0, udb_config_rehash);
+	HookAdd(modinfo->handle, HOOKTYPE_POSTCONF, 0, udb_config_postconf);
 	HookAdd(modinfo->handle, HOOKTYPE_SERVER_QUIT, 0, udb_hook_server_quit);
 	EventAdd(modinfo->handle, "udb_sync_timeout", udb_sync_timeout_event, NULL, 1000, 0);
 
@@ -6021,6 +6136,7 @@ static void udb_channel_ban_owners_free(ModData *m)
 static void udb_channel_do_mode(Channel *channel, MessageTag *mtags, const char *modes, const char *parameters)
 {
 	char buf[512];
+	char channel_name[CHANNELLEN + 1];
 	char *p, *param;
 	int myparc = 1;
 	int i;
@@ -6029,6 +6145,9 @@ static void udb_channel_do_mode(Channel *channel, MessageTag *mtags, const char 
 
 	if (!channel || !modes || !*modes || !do_mode)
 		return;
+	/* Removing +P may destroy an empty channel inside do_mode(). Keep only the
+	 * immutable name needed by the post-operation debug notice. */
+	strlcpy(channel_name, channel->name, sizeof(channel_name));
 	source = udb_service_source(SKEY_CHANSERV);
 	memset(myparv, 0, sizeof(myparv));
 	myparv[0] = raw_strdup(modes);
@@ -6043,9 +6162,9 @@ static void udb_channel_do_mode(Channel *channel, MessageTag *mtags, const char 
 		safe_free(myparv[i]);
 
 	if (parameters && *parameters)
-		udb_send_to_debugs(NULL, "Mode change on %s: %s %s", channel->name, modes, parameters);
+		udb_send_to_debugs(NULL, "Mode change on %s: %s %s", channel_name, modes, parameters);
 	else
-		udb_send_to_debugs(NULL, "Mode change on %s: %s", channel->name, modes);
+		udb_send_to_debugs(NULL, "Mode change on %s: %s", channel_name, modes);
 }
 
 static void udb_channel_set_modes(Channel *channel, const char *value)

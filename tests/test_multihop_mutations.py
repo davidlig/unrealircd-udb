@@ -184,7 +184,7 @@ def run_tests(ircd_bin, keep=False):
                      module_path, b / "data", "udb-a.test", link_password, load_mutator=False)
         write_config(c_conf, "udb-c.test", "0C1", ports[2],
                      (("udb-b.test", ports[1][1], False),),
-                     module_path, c / "data", "udb-a.test", link_password, load_mutator=False)
+                     module_path, c / "data", "udb-b.test", link_password, load_mutator=False)
 
         logs = {"A": a / "ircd.log", "B": b / "ircd.log", "C": c / "ircd.log"}
 

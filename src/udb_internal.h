@@ -46,6 +46,13 @@ typedef struct UdbRecord UdbRecord;
 typedef struct UdbBlock UdbBlock;
 typedef struct UdbSyncSession UdbSyncSession;
 
+typedef struct UdbPropagatorSelection
+{
+	Client *peer;
+	char name[HOSTLEN + 1];
+	int is_local;
+} UdbPropagatorSelection;
+
 typedef enum UdbValueType
 {
 	UDB_VAL_NONE = 0, /* No value allowed (container node) */
@@ -171,7 +178,6 @@ typedef struct UdbContext
 	UdbRecord *links;
 	UdbRecord *lines;
 	UdbRecord **hash_table[UDB_NUM_BLOCKS];
-	Client *propagator;
 	char *propagator_setting;
 	char *quit_ips;
 	char *quit_clones;
@@ -190,6 +196,8 @@ static UdbPasswordFailure udb_password_failures[UDB_PASSWORD_FAILURE_SLOTS];
 static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs);
 static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type);
 static int udb_config_posttest(int *errs);
+static int udb_config_rehash(void);
+static int udb_config_postconf(void);
 static void udb_config_free(UdbContext *ctx);
 static int udb_database_directory_valid(const char *value);
 static char *udb_block_filepath(char letter);
@@ -270,20 +278,25 @@ static int udb_sync_send_tree(Client *server, UdbRecord *rec, int depth, char *p
 							  const char *txid);
 static int udb_sync_send_stage(Client *server, UdbBlock *block);
 static void udb_sync_server_quit(Client *client);
-static int udb_is_propagator(UdbContext *ctx, Client *server);
-static const char *udb_selected_propagator(UdbContext *ctx);
 static int udb_send_db_to_one(Client *to, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+static int udb_is_propagator(UdbContext *ctx, Client *server);
+static int udb_server_name_valid(const char *srv);
+static int udb_propagator_list_valid(const char *value);
+static int udb_select_propagator(UdbContext *ctx, int require_hello, UdbPropagatorSelection *selected);
+static int udb_propagator_policy_present(UdbContext *ctx);
+static void udb_propagator_policy_changed(UdbContext *ctx);
+static void udb_sync_hello_refresh_all(void);
 static int udb_send_db_to_confirmed_servers(Client *except, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static int udb_sendto_confirmed_servers(Client *except, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void udb_protocol_params_error(Client *client, const char *subcmd);
-static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target, const char *path, const char *data,
+static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, const char *path,
+							 const char *data, int is_for_me, int is_broadcast);
+static void udb_mutation_del(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, const char *path,
 							 int is_for_me, int is_broadcast);
-static void udb_mutation_del(UdbContext *ctx, Client *client, const char *target, const char *path, int is_for_me,
-							 int is_broadcast);
-static void udb_mutation_drp(UdbContext *ctx, Client *client, const char *target, char letter, int is_for_me,
-							 int is_broadcast);
-static void udb_mutation_opt(UdbContext *ctx, Client *client, const char *target, char letter, const char *modified_at,
+static void udb_mutation_drp(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, char letter,
 							 int is_for_me, int is_broadcast);
+static void udb_mutation_opt(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, char letter,
+							 const char *modified_at, int is_for_me, int is_broadcast);
 static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync);
 static void udb_nick_strip(Client *client, UdbRecord *nick_rec);
 static void udb_nick_remove_record(UdbBlock *block, UdbRecord *rec);
