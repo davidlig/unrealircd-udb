@@ -116,7 +116,7 @@ class MockServices:
         self.buffer = ""
         self.send(f"PASS :{LINK_PASSWORD}")
         self.send(f"PROTOCTL EAUTH={SERVICES_NAME}")
-        self.send("PROTOCTL NOQUIT NICKv2 SJOIN SJOIN2 UMODE2 SJ3 SID=" + self.sid)
+        self.send("PROTOCTL NOQUIT NICKv2 SJOIN SJOIN2 UMODE2 SJ3 BIGLINES SID=" + self.sid)
         self.send(f"SERVER {SERVICES_NAME} 1 :UDB test services")
         self.wait_for(lambda line: " 001 " in line or " EOS" in line or "NETINFO" in line, "link handshake")
         self.send("EOS")
@@ -226,7 +226,25 @@ def run_tests(ircd_bin, keep=False):
                           "rejection of INF with negative timestamp")
         print("PASS: INF with negative timestamp was rejected with ERR INF")
 
-        # Overflowing timestamp
+        # Leading plus in timestamp
+        services.send_inf("N", "A1B2C3D4", "+1787720000")
+        services.wait_for(lambda l: " DB " in l and " ERR " in l and " INF " in l,
+                          "rejection of INF with leading plus sign")
+        print("PASS: INF with leading plus sign in timestamp was rejected with ERR INF")
+
+        # Overflowing timestamp (exceeding signed 64-bit max: 9223372036854775807)
+        services.send_inf("N", "A1B2C3D4", "9223372036854775808")
+        services.wait_for(lambda l: " DB " in l and " ERR " in l and " INF " in l,
+                          "rejection of INF with INT64_MAX+1 timestamp")
+        print("PASS: INF with INT64_MAX+1 timestamp was rejected with ERR INF")
+
+        # ULLONG_MAX timestamp
+        services.send_inf("N", "A1B2C3D4", "18446744073709551615")
+        services.wait_for(lambda l: " DB " in l and " ERR " in l and " INF " in l,
+                          "rejection of INF with ULLONG_MAX timestamp")
+        print("PASS: INF with ULLONG_MAX timestamp was rejected with ERR INF")
+
+        # Huge overflowing timestamp
         services.send_inf("N", "A1B2C3D4", "999999999999999999999999999999999999")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INF " in l,
                           "rejection of INF with overflowing timestamp")

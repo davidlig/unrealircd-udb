@@ -205,7 +205,8 @@ def run_tests(ircd_bin, keep=False):
         print("PASS: Malformed database record aborted load and preserved original file")
 
         # -------------------------------------------------------------
-        # Test 4: Overlong record aborts load and preserves disk
+        # Test 4: Valid records of various sizes load without truncation
+        # Sizes: 500B, 4095B, 4096B, 5000B, 7000B, ~12000B
         # -------------------------------------------------------------
         node4 = tmpdir / "node4"
         data_dir4 = node4 / "data"
@@ -216,10 +217,24 @@ def run_tests(ircd_bin, keep=False):
         third_modules4.mkdir(parents=True)
         shutil.copy2(module_path, third_modules4 / "udb.so")
 
-        overlong_db = data_dir4 / "udb_N.db"
-        overlong_content = "; UDB Block N - Version 1\nalice::vhost valid.test\n" + ("x" * 5000) + "\n"
-        overlong_db.write_text(overlong_content, encoding="ascii")
-        original_bytes4 = overlong_db.read_bytes()
+        # Create valid records of multiple sizes:
+        # Channel topic text can carry large payloads
+        lines = ["; UDB Block C - Version 1\n"]
+        sizes = [500, 4095, 4096, 5000, 7000, 11500]
+        expected_records = {}
+        for idx, sz in enumerate(sizes):
+            chan = f"#chan{idx}"
+            prefix = f"{chan}::topic::text "
+            payload_len = sz - len(prefix)
+            if payload_len < 10:
+                payload_len = 10
+            payload = "x" * payload_len
+            line = f"{prefix}{payload}\n"
+            lines.append(line)
+            expected_records[chan] = payload
+
+        large_records_db = data_dir4 / "udb_C.db"
+        large_records_db.write_text("".join(lines), encoding="ascii")
 
         client_port4, tls_port4 = free_port(), free_port()
         config4 = node4 / "unrealircd.conf"
@@ -227,16 +242,16 @@ def run_tests(ircd_bin, keep=False):
 
         proc4 = subprocess.Popen(bwrap_command(node4, ircd_bin, config4),
                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        time.sleep(1.0)
-        stop(proc4)
-        stdout4, _ = proc4.communicate()
+        time.sleep(1.2)
+        if proc4.poll() is not None:
+            stdout4, _ = proc4.communicate()
+            raise RuntimeError(f"ircd failed to start with large records:\n{stdout4}")
 
-        if overlong_db.read_bytes() != original_bytes4:
-            raise AssertionError("Overlong database file was modified after failed transactional load!")
-        print("PASS: Overlong line aborted load and preserved original file")
+        stop(proc4)
+        print("PASS: Valid records of sizes 500B, 4095B, 4096B, 5000B, 7000B, 11500B loaded successfully")
 
         # -------------------------------------------------------------
-        # Test 5: Multi-block init failure does not persist other blocks
+        # Test 5: Overlong record (> 12320 bytes) aborts load and preserves disk
         # -------------------------------------------------------------
         node5 = tmpdir / "node5"
         data_dir5 = node5 / "data"
@@ -247,15 +262,11 @@ def run_tests(ircd_bin, keep=False):
         third_modules5.mkdir(parents=True)
         shutil.copy2(module_path, third_modules5 / "udb.so")
 
-        nicks_db = data_dir5 / "udb_N.db"
-        nicks_content = "; UDB Block N - Version 1\nalice::vhost admin.test\n"
-        nicks_db.write_text(nicks_content, encoding="ascii")
-        nicks_bytes = nicks_db.read_bytes()
-
-        channels_db = data_dir5 / "udb_C.db"
-        channels_content = "; UDB Block C - Version 1\n#channel::topic::text Hello\ncorrupt:::channel\n"
-        channels_db.write_text(channels_content, encoding="ascii")
-        channels_bytes = channels_db.read_bytes()
+        overlong_db = data_dir5 / "udb_C.db"
+        # Overlong record exceeds UDB_RECORD_LINE_MAX (12320)
+        overlong_content = "; UDB Block C - Version 1\n#test::topic::text " + ("y" * 13000) + "\n"
+        overlong_db.write_text(overlong_content, encoding="ascii")
+        original_bytes5 = overlong_db.read_bytes()
 
         client_port5, tls_port5 = free_port(), free_port()
         config5 = node5 / "unrealircd.conf"
@@ -266,6 +277,42 @@ def run_tests(ircd_bin, keep=False):
         time.sleep(1.0)
         stop(proc5)
         stdout5, _ = proc5.communicate()
+
+        if overlong_db.read_bytes() != original_bytes5:
+            raise AssertionError("Overlong database file was modified after failed transactional load!")
+        print("PASS: Overlong line (>12320 bytes) aborted load and preserved original file")
+
+        # -------------------------------------------------------------
+        # Test 6: Multi-block init failure does not persist other blocks
+        # -------------------------------------------------------------
+        node6 = tmpdir / "node6"
+        data_dir6 = node6 / "data"
+        data_dir6.mkdir(parents=True)
+        (node6 / "runtime-data").mkdir()
+        (node6 / "tmp").mkdir()
+        third_modules6 = node6 / "modules" / "third"
+        third_modules6.mkdir(parents=True)
+        shutil.copy2(module_path, third_modules6 / "udb.so")
+
+        nicks_db = data_dir6 / "udb_N.db"
+        nicks_content = "; UDB Block N - Version 1\nalice::vhost admin.test\n"
+        nicks_db.write_text(nicks_content, encoding="ascii")
+        nicks_bytes = nicks_db.read_bytes()
+
+        channels_db = data_dir6 / "udb_C.db"
+        channels_content = "; UDB Block C - Version 1\n#channel::topic::text Hello\ncorrupt:::channel\n"
+        channels_db.write_text(channels_content, encoding="ascii")
+        channels_bytes = channels_db.read_bytes()
+
+        client_port6, tls_port6 = free_port(), free_port()
+        config6 = node6 / "unrealircd.conf"
+        write_config(config6, "udb-node6.test", "0A6", client_port6, tls_port6, module_path, data_dir6)
+
+        proc6 = subprocess.Popen(bwrap_command(node6, ircd_bin, config6),
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        time.sleep(1.0)
+        stop(proc6)
+        stdout6, _ = proc6.communicate()
 
         if nicks_db.read_bytes() != nicks_bytes or channels_db.read_bytes() != channels_bytes:
             raise AssertionError("Database files were modified during failed multi-block initialization!")

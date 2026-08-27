@@ -668,7 +668,7 @@ static int udb_file_save_block(UdbContext *ctx, UdbBlock *block)
 	if (res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
 		return 0;
 	(void)ctx;
-	block->checksum = udb_compute_block_checksum(block);
+	udb_compute_block_checksum(block, &block->checksum);
 	block->modified_at = time(NULL);
 	if (stat(block->filepath, &st) == 0)
 		block->filesize = st.st_size;

@@ -203,7 +203,7 @@ class FakeServicesServer:
         self.buffer = ""
         self.send(f"PASS :{LINK_PASSWORD}")
         self.send(f"PROTOCTL EAUTH={SERVICES_NAME}")
-        self.send("PROTOCTL NOQUIT NICKv2 SJOIN SJOIN2 UMODE2 SJ3 SID=" + self.sid)
+        self.send("PROTOCTL NOQUIT NICKv2 SJOIN SJOIN2 UMODE2 SJ3 BIGLINES SID=" + self.sid)
         self.send(f"SERVER {SERVICES_NAME} 1 :UDB test services")
         self.wait_for(lambda line: " 001 " in line or " EOS" in line or "NETINFO" in line, "link handshake")
         self.send("EOS")
@@ -391,6 +391,26 @@ def run_tests(ircd_bin, keep=False):
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " K" in l,
                           "rejection of unknown subkey in Block K")
         print("PASS: INS of unknown subkey in Block K was rejected with ERR INS 2 K")
+
+        # -------------------------------------------------------------
+        # Test 6b: Spamfilter regex pattern length limits (3071, 3072, 3073 bytes)
+        # -------------------------------------------------------------
+        # Pattern of 3071 bytes -> Valid
+        pat3071 = "a" * 3071
+        services.send_ins(f"K::F::{pat3071}::type", "c")
+        time.sleep(0.1)
+
+        # Pattern of 3072 bytes (exact max) -> Valid
+        pat3072 = "b" * 3072
+        services.send_ins(f"K::F::{pat3072}::type", "c")
+        time.sleep(0.1)
+
+        # Pattern of 3073 bytes (over max) -> Rejected with ERR INS 2 K
+        pat3073 = "c" * 3073
+        services.send_ins(f"K::F::{pat3073}::type", "c")
+        services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " K" in l,
+                          "rejection of spamfilter pattern exceeding 3072 bytes")
+        print("PASS: Spamfilter pattern lengths: 3071 (accepted), 3072 (accepted), 3073 (rejected)")
 
         services.close()
         stop(proc)

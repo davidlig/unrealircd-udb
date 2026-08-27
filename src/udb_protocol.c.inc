@@ -9,27 +9,103 @@
  * License: GNU General Public License v2+
  */
 
-static void udb_sendto_confirmed_servers(Client *except, const char *fmt, ...)
+static int udb_send_db_to_one(Client *to, const char *fmt, ...)
+{
+	char *line;
+	va_list args;
+	int n;
+
+	if (!to)
+		return 0;
+
+	line = safe_alloc(UDB_S2S_LINE_MAX);
+	va_start(args, fmt);
+	n = vsnprintf(line, UDB_S2S_LINE_MAX, fmt, args);
+	va_end(args);
+
+	if (n < 0 || (size_t)n >= UDB_S2S_LINE_MAX)
+	{
+		udb_log(ULOG_ERROR, "UDB_S2S_OVERSIZE_FRAME", to,
+				"Oversized S2S frame ($length bytes) discarded to prevent truncation", log_data_integer("length", n));
+		safe_free(line);
+		return 0;
+	}
+
+	sendto_one(to, NULL, "%s", line);
+	safe_free(line);
+	return 1;
+}
+
+static int udb_send_db_to_confirmed_servers(Client *except, const char *fmt, ...)
 {
 	Client *server;
-	char line[4096];
+	char *line;
 	va_list args;
+	int n;
+	int sent = 0;
 
+	line = safe_alloc(UDB_S2S_LINE_MAX);
 	va_start(args, fmt);
-	vsnprintf(line, sizeof(line), fmt, args);
+	n = vsnprintf(line, UDB_S2S_LINE_MAX, fmt, args);
 	va_end(args);
+
+	if (n < 0 || (size_t)n >= UDB_S2S_LINE_MAX)
+	{
+		udb_log(ULOG_ERROR, "UDB_S2S_OVERSIZE_BROADCAST", except,
+				"Oversized broadcast S2S frame ($length bytes) discarded to prevent truncation",
+				log_data_integer("length", n));
+		safe_free(line);
+		return 0;
+	}
+
 	list_for_each_entry(server, &server_list, special_node)
 	{
 		if (server == except || (except && server == except->direction))
 			continue;
 		if (IsServer(server) && MyConnect(server) && udb_has_hello(server))
+		{
 			sendto_one(server, NULL, "%s", line);
+			sent++;
+		}
 	}
+	safe_free(line);
+	return 1;
+}
+
+static void udb_sendto_confirmed_servers(Client *except, const char *fmt, ...)
+{
+	char *line;
+	va_list args;
+	int n;
+
+	line = safe_alloc(UDB_S2S_LINE_MAX);
+	va_start(args, fmt);
+	n = vsnprintf(line, UDB_S2S_LINE_MAX, fmt, args);
+	va_end(args);
+
+	if (n >= 0 && (size_t)n < UDB_S2S_LINE_MAX)
+	{
+		Client *server;
+		list_for_each_entry(server, &server_list, special_node)
+		{
+			if (server == except || (except && server == except->direction))
+				continue;
+			if (IsServer(server) && MyConnect(server) && udb_has_hello(server))
+				sendto_one(server, NULL, "%s", line);
+		}
+	}
+	else
+	{
+		udb_log(ULOG_ERROR, "UDB_S2S_OVERSIZE_BROADCAST", except,
+				"Oversized broadcast S2S frame ($length bytes) discarded to prevent truncation",
+				log_data_integer("length", n));
+	}
+	safe_free(line);
 }
 
 static void udb_protocol_params_error(Client *client, const char *subcmd)
 {
-	sendto_one(client, NULL, ":%s DB %s ERR %s %d 0", me.id, client->id, subcmd ? subcmd : "0", UDB_ERR_PARAMS);
+	udb_send_db_to_one(client, ":%s DB %s ERR %s %d 0", me.id, client->id, subcmd ? subcmd : "0", UDB_ERR_PARAMS);
 }
 
 static void udb_sync_to_server(Client *server)
@@ -39,8 +115,8 @@ static void udb_sync_to_server(Client *server)
 		return;
 	while (block)
 	{
-		sendto_one(server, NULL, ":%s DB %s INF %c %lX %lu", me.id, server->id, block->letter, block->checksum,
-				   (unsigned long)block->modified_at);
+		udb_send_db_to_one(server, ":%s DB %s INF %c %lX %lu", me.id, server->id, block->letter, block->checksum,
+						   (unsigned long)block->modified_at);
 		block = block->next;
 	}
 }
@@ -408,7 +484,7 @@ CMD_FUNC(cmd_db)
 
 static int udb_protocol_init(ModuleInfo *modinfo)
 {
-	CommandAdd(modinfo->handle, "DB", cmd_db, MAXPARA, CMD_SERVER);
+	CommandAdd(modinfo->handle, "DB", cmd_db, MAXPARA, CMD_SERVER | CMD_BIGLINES);
 	HookAdd(modinfo->handle, HOOKTYPE_SERVER_SYNC, 0, udb_hook_server_sync);
 	HookAdd(modinfo->handle, HOOKTYPE_SERVER_QUIT, 0, udb_hook_server_quit);
 	EventAdd(modinfo->handle, "udb_sync_timeout", udb_sync_timeout_event, NULL, 1000, 0);

@@ -253,18 +253,21 @@ continue a staged session, trigger a block export, or cause those frames to be
 forwarded.
 
 `PUT` paths omit the block prefix because the block is an explicit parameter.
-Persisted records must have non-empty `::` path components and fit the record
-path limit. UDB logs and skips malformed or overlong persisted lines while
-continuing to load the remaining records in that block.
+Persisted records must have non-empty `::` path components and fit within
+`UDB_RECORD_LINE_MAX` (12320 bytes) and `UDB_RECORD_PATH_MAX` (8192 bytes). If any
+malformed, overlong, or schema-invalid line is encountered during local `.db` file
+loading, UDB aborts loading fail-closed with `UDB_LOAD_FAILED`, discards the candidate
+tree, and logs a fatal error, preventing corruption or partial startup.
 The receiver builds an isolated tree per block and never applies its runtime
 effects during transfer. On `END`, it verifies the canonical digest, writes the
 staged tree atomically via the block temporary file, removes every runtime
 effect represented by the outgoing tree, then replaces the active tree and
 recursively applies each incoming effect owner once. This includes live N, C,
 I, S/L, and K state, so nested K patterns are installed after commit without
-duplicate application. A peer quit, 60-second inactivity
-timeout, malformed `PUT`, unexpected transaction ID, or bad digest discards the
-staged tree only. The prior active and durable tree remain in use.
+duplicate application. A peer quit, configured inactivity timeout (default 60s),
+configured absolute timeout (default 300s), malformed `PUT`, staged record/byte
+limit exhaustion, unexpected transaction ID, or bad digest discards the staged
+tree only. The prior active and durable tree remain in use.
 An `END` digest is valid only when its entire non-empty field is hexadecimal and
 fits in `unsigned long`; partial input and overflow are rejected even when an
 empty staged tree has digest zero.
@@ -294,7 +297,7 @@ UDB strictly validates all records received via `INS`, `PUT`, or loaded from dis
 against a declarative per-block schema catalogue. Unknown keys, invalid hierarchy
 nesting (such as composite paths in Block S), or incompatible data types are
 immediately rejected with `ERR INS 2 <block>` or `ERR PUT 2 <block>` (`UDB_ERR_PARAMS`),
-and skipped with a `ULOG_WARNING` notice during local `.db` file parsing.
+and cause local `.db` file parsing to abort fail-closed.
 
 For `INS`, `DEL`, and `DRP`, UDB first clones the active block and applies the
 change to that private candidate. It atomically writes and renames the candidate

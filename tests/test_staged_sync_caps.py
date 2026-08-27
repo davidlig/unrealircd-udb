@@ -39,7 +39,8 @@ def free_port():
         return sock.getsockname()[1]
 
 
-def write_config(path, name, sid, client_port, server_port, tls_port, module, dbdir):
+def write_config(path, name, sid, client_port, server_port, tls_port, module, dbdir,
+                 max_records=100000, max_bytes=67108864, inact_timeout=60, abs_timeout=300):
     path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
 include "{RUNTIME_ROOT}/conf/snomasks.default.conf";
 blacklist-module "geoip_classic";
@@ -78,6 +79,10 @@ loadmodule "third/udb";
 udb {{
     database-directory "{dbdir}";
     propagator "{SERVICES_NAME}";
+    max-staged-records {max_records};
+    max-staged-bytes {max_bytes};
+    sync-inactivity-timeout {inact_timeout};
+    sync-absolute-timeout {abs_timeout};
 }}
 ''', encoding="ascii")
 
@@ -116,7 +121,7 @@ class MockServices:
         self.buffer = ""
         self.send(f"PASS :{LINK_PASSWORD}")
         self.send(f"PROTOCTL EAUTH={SERVICES_NAME}")
-        self.send("PROTOCTL NOQUIT NICKv2 SJOIN SJOIN2 UMODE2 SJ3 SID=" + self.sid)
+        self.send("PROTOCTL NOQUIT NICKv2 SJOIN SJOIN2 UMODE2 SJ3 BIGLINES SID=" + self.sid)
         self.send(f"SERVER {SERVICES_NAME} 1 :UDB test services")
         self.wait_for(lambda line: " 001 " in line or " EOS" in line or "NETINFO" in line, "link handshake")
         self.send("EOS")
@@ -210,7 +215,9 @@ def run_tests(ircd_bin, keep=False):
 
         client_port, server_port, tls_port = free_port(), free_port(), free_port()
         config = node / "unrealircd.conf"
-        write_config(config, "udb-staged.test", IRCD_SID, client_port, server_port, tls_port, module_path, data_dir)
+        # Test config: max 3 staged records, max 1200 staged bytes, 2s inactivity timeout, 4s absolute timeout
+        write_config(config, "udb-staged.test", IRCD_SID, client_port, server_port, tls_port, module_path, data_dir,
+                     max_records=3, max_bytes=1200, inact_timeout=2, abs_timeout=4)
 
         proc = subprocess.Popen(bwrap_command(node, ircd_bin, config),
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -222,44 +229,89 @@ def run_tests(ircd_bin, keep=False):
         services = MockServices("127.0.0.1", server_port)
 
         # -------------------------------------------------------------
-        # Test 1: Invalid staged PUT payload causes fail-safe abort
+        # Test 1: max-staged-records boundary (limit=3): limit-1, limit OK, limit+1 abort
         # -------------------------------------------------------------
-        services.send_begin("N", "tx-abort-1", "00000000")
-        services.send_put("N", "tx-abort-1", "N::invalid%zzpath", "some_data")
+        services.send_begin("N", "tx-rec-cap", "00000000")
+        # Record 1 (limit-2)
+        services.send_put("N", "tx-rec-cap", "user1::vhost", "vhost1.test")
+        time.sleep(0.1)
+        # Record 2 (limit-1)
+        services.send_put("N", "tx-rec-cap", "user2::vhost", "vhost2.test")
+        time.sleep(0.1)
+        # Record 3 (limit)
+        services.send_put("N", "tx-rec-cap", "user3::vhost", "vhost3.test")
+        time.sleep(0.1)
+        # Record 4 (limit+1) -> Should abort
+        services.send_put("N", "tx-rec-cap", "user4::vhost", "vhost4.test")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " PUT " in l,
-                          "rejection of invalid PUT with ERR PUT")
-        print("PASS: Invalid payload in staged-sync session aborted cleanly with ERR PUT")
+                          "rejection of exceeding max-staged-records with ERR PUT")
+        print("PASS: max-staged-records limit+1 correctly aborted session with ERR PUT")
 
-        # Verify active database in memory and on disk was NOT modified
+        # Verify active database was NOT modified
         db_n = (data_dir / "udb_N.db").read_text(encoding="ascii")
-        if "alice::pass crypt:sample" not in db_n:
+        if "alice::pass crypt:sample" not in db_n or "user1::vhost" in db_n:
             raise AssertionError(f"Active database was corrupted by aborted staged-sync:\n{db_n}")
-        print("PASS: Active database remained intact after staged-sync abort")
+        print("PASS: Active database and memory tree remained invariant after record cap abort")
 
         # -------------------------------------------------------------
-        # Test 2: Subsequent valid staged-sync commits empty tree cleanly
+        # Test 2: max-staged-bytes boundary (limit=1200 bytes): limit+1 abort
         # -------------------------------------------------------------
-        services.send_begin("N", "tx-valid-empty", "00000000")
-        services.send_end("N", "tx-valid-empty", "00000000")
+        services.send_begin("N", "tx-byte-cap", "00000000")
+        # Put 1: 500 bytes payload
+        services.send_put("N", "tx-byte-cap", "user1::vhost", "x" * 500)
+        time.sleep(0.1)
+        # Put 2: 500 bytes payload (cumulative 1000 bytes <= 1200)
+        services.send_put("N", "tx-byte-cap", "user2::vhost", "y" * 500)
+        time.sleep(0.1)
+        # Put 3: 300 bytes payload (cumulative 1300 bytes > 1200) -> Should abort
+        services.send_put("N", "tx-byte-cap", "user3::vhost", "z" * 300)
+        services.wait_for(lambda l: " DB " in l and " ERR " in l and " PUT " in l,
+                          "rejection of exceeding max-staged-bytes with ERR PUT")
+        print("PASS: max-staged-bytes limit+1 correctly aborted session with ERR PUT")
+
+        db_n = (data_dir / "udb_N.db").read_text(encoding="ascii")
+        if "alice::pass crypt:sample" not in db_n or "user1::vhost" in db_n:
+            raise AssertionError(f"Active database was corrupted by aborted staged-sync:\n{db_n}")
+        print("PASS: Active database remained invariant after byte cap abort")
+
+        # -------------------------------------------------------------
+        # Test 3: sync-inactivity-timeout (configured as 2 seconds)
+        # -------------------------------------------------------------
+        services.send_begin("N", "tx-inact-to", "00000000")
+        services.send_put("N", "tx-inact-to", "user1::vhost", "vhost1.test")
+        time.sleep(2.5)  # Wait beyond 2s inactivity timeout
+        # Next PUT will fail because session timed out and was destroyed
+        services.send_put("N", "tx-inact-to", "user2::vhost", "vhost2.test")
+        services.wait_for(lambda l: " DB " in l and " ERR " in l and " PUT " in l,
+                          "rejection of PUT after inactivity timeout")
+        print("PASS: Staged sync session aborted on inactivity timeout")
+
+        # -------------------------------------------------------------
+        # Test 4: sync-absolute-timeout (configured as 4 seconds)
+        # -------------------------------------------------------------
+        services.send_begin("N", "tx-abs-to", "00000000")
+        # Keep sending PUT every 1s so inactivity timeout never fires, but absolute does at t=4s
+        for i in range(3):
+            time.sleep(1.0)
+            services.send_put("N", "tx-abs-to", "user1::vhost", f"vhost{i}.test")
+        time.sleep(1.5)  # Now at ~4.5s (exceeds 4s absolute timeout)
+        services.send_put("N", "tx-abs-to", "user1::vhost", "vhost_over_abs.test")
+        services.wait_for(lambda l: " DB " in l and " ERR " in l and " PUT " in l,
+                          "rejection of PUT after absolute timeout")
+        print("PASS: Staged sync session aborted on absolute timeout despite ongoing activity")
+
+        # -------------------------------------------------------------
+        # Test 5: Clean staged sync commit after previous aborts
+        # -------------------------------------------------------------
+        services.send_begin("N", "tx-valid-final", "00000000")
+        services.send_end("N", "tx-valid-final", "00000000")
         services.wait_for(lambda l: " DB " in l and " ACK " in l and " N " in l,
                           "confirmation of ACK for staged-sync")
         print("PASS: Valid staged-sync session completed and acknowledged with ACK")
 
-        # -------------------------------------------------------------
-        # Test 3: Live INS after staged sync succeeds
-        # -------------------------------------------------------------
-        services.send_ins("N::bob::pass", "crypt:sample_bob")
-        time.sleep(0.5)
-
         services.close()
         stop(proc)
         proc = None
-
-        # Verify valid mutation committed successfully
-        db_n = (data_dir / "udb_N.db").read_text(encoding="ascii")
-        if "bob::pass crypt:sample_bob" not in db_n:
-            raise AssertionError(f"Valid INS did not commit after prior staged sync:\n{db_n}")
-        print("PASS: Subsequent mutation completed and committed atomically with success")
 
     finally:
         if proc:

@@ -140,7 +140,7 @@ static void udb_mutation_forward_del(Client *source, Client *except, const char 
 
 static void udb_mutation_persist_error(Client *client, const char *subcmd, char letter)
 {
-	sendto_one(client, NULL, ":%s DB %s ERR %s %d %c", me.id, client->id, subcmd, UDB_ERR_FATAL, letter);
+	udb_send_db_to_one(client, ":%s DB %s ERR %s %d %c", me.id, client->id, subcmd, UDB_ERR_FATAL, letter);
 }
 
 static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target, const char *path, const char *data,
@@ -158,12 +158,12 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 	{
 		if (block->session || (block->syncing_from && block->syncing_from != client))
 		{
-			sendto_one(client, NULL, ":%s DB %s ERR INS %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
+			udb_send_db_to_one(client, ":%s DB %s ERR INS %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
 			return;
 		}
 		if (block->syncing_from != client && !udb_is_propagator(ctx, client))
 		{
-			sendto_one(client, NULL, ":%s DB %s ERR INS %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
+			udb_send_db_to_one(client, ":%s DB %s ERR INS %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 			return;
 		}
 		UdbRecord *old_rec;
@@ -175,7 +175,7 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 		{
 			udb_log(ULOG_WARNING, "UDB_INS_SCHEMA_REJECT", client,
 					"Rejected S2S INS for invalid or unknown record: $path", log_data_string("path", path));
-			sendto_one(client, NULL, ":%s DB %s ERR INS %d %c", me.id, client->id, UDB_ERR_PARAMS, letter);
+			udb_send_db_to_one(client, ":%s DB %s ERR INS %d %c", me.id, client->id, UDB_ERR_PARAMS, letter);
 			return;
 		}
 		old_rec = udb_record_find_path(ctx, block, path + 3);
@@ -252,12 +252,12 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, const char *target
 	{
 		if (block->session || (block->syncing_from && block->syncing_from != client))
 		{
-			sendto_one(client, NULL, ":%s DB %s ERR DEL %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
+			udb_send_db_to_one(client, ":%s DB %s ERR DEL %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
 			return;
 		}
 		if (!block->syncing_from && !udb_is_propagator(ctx, client))
 		{
-			sendto_one(client, NULL, ":%s DB %s ERR DEL %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
+			udb_send_db_to_one(client, ":%s DB %s ERR DEL %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 			return;
 		}
 		UdbRecord *old_rec = udb_record_find_path(ctx, block, path + 3);
@@ -316,17 +316,17 @@ static void udb_mutation_drp(UdbContext *ctx, Client *client, const char *target
 		UdbBlock *block = udb_block_by_letter(ctx, letter);
 		if (!block)
 		{
-			sendto_one(client, NULL, ":%s DB %s ERR DRP %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
+			udb_send_db_to_one(client, ":%s DB %s ERR DRP %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
 			return;
 		}
 		if (block->session || (block->syncing_from && block->syncing_from != client))
 		{
-			sendto_one(client, NULL, ":%s DB %s ERR DRP %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
+			udb_send_db_to_one(client, ":%s DB %s ERR DRP %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
 			return;
 		}
 		if (!udb_is_propagator(ctx, client))
 		{
-			sendto_one(client, NULL, ":%s DB %s ERR DRP %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
+			udb_send_db_to_one(client, ":%s DB %s ERR DRP %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 			return;
 		}
 		if (!block->tree->child)
@@ -363,17 +363,17 @@ static void udb_mutation_opt(UdbContext *ctx, Client *client, const char *target
 		UdbBlock *block = udb_block_by_letter(ctx, letter);
 		if (!block)
 		{
-			sendto_one(client, NULL, ":%s DB %s ERR OPT %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
+			udb_send_db_to_one(client, ":%s DB %s ERR OPT %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
 			return;
 		}
 		if (block->session)
 		{
-			sendto_one(client, NULL, ":%s DB %s ERR OPT %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
+			udb_send_db_to_one(client, ":%s DB %s ERR OPT %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
 			return;
 		}
 		if (!udb_is_propagator(ctx, client))
 		{
-			sendto_one(client, NULL, ":%s DB %s ERR OPT %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
+			udb_send_db_to_one(client, ":%s DB %s ERR OPT %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 			return;
 		}
 		if (!udb_file_save_block(ctx, block))

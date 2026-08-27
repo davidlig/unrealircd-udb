@@ -245,14 +245,19 @@ esos frames se reenvíen.
 
 Las rutas de `PUT` omiten el prefijo del bloque porque el bloque es un parámetro
 explícito. Los registros persistidos deben tener componentes de ruta `::` no
-vacíos y caber en el límite de ruta. UDB registra y omite líneas persistidas
-malformadas o demasiado largas y continúa cargando el resto del bloque. El
-receptor construye un árbol aislado por bloque y no aplica efectos
-en tiempo real durante la transferencia. En `END` valida el digest canónico,
-persiste el árbol staged atómicamente en el archivo temporal y solo entonces
-reemplaza el árbol activo. Una desconexión del peer, 60 segundos sin actividad,
-un `PUT` inválido, un txid inesperado o un digest incorrecto descarta solo el
-árbol staged; el árbol activo y durable anterior no cambian.
+vacíos y caber dentro de los límites `UDB_RECORD_LINE_MAX` (12320 bytes) y
+`UDB_RECORD_PATH_MAX` (8192 bytes). Si se encuentra cualquier línea malformada,
+demasiado larga o que no cumpla con el esquema durante la carga del archivo `.db`,
+UDB aborta la carga de forma transaccional fail-closed con `UDB_LOAD_FAILED`,
+descarta el candidato y registra un error fatal, evitando corrupciones o
+arranques en estado parcial. El receptor construye un árbol aislado por bloque y
+no aplica efectos en tiempo real durante la transferencia. En `END` valida el digest
+canónico, persiste el árbol staged atómicamente en el archivo temporal y solo entonces
+reemplaza el árbol activo. Una desconexión del peer, el vencimiento del timeout de
+inactividad configurable (por defecto 60s), el timeout absoluto configurable
+(por defecto 300s), superar los límites de registros/bytes staged, un `PUT` inválido,
+un txid inesperado o un digest incorrecto descarta solo el árbol staged; el árbol
+activo y durable anterior no cambian.
 Un digest de `END` solo es válido si todo su campo no vacío es hexadecimal y
 cabe en `unsigned long`; se rechazan entradas parciales y desbordamientos,
 incluso cuando un árbol staged vacío tiene digest cero.
@@ -284,8 +289,8 @@ cualquier registro recibido vía `INS`, `PUT` o cargado desde disco pertenezca a
 catálogo de opciones válidas del bloque correspondiente y cumpla con su tipo de
 dato y formato. Claves desconocidas, anidamientos no permitidos (como rutas
 compuestas en Bloque S) o tipos incompatibles son rechazados inmediatamente con
-`ERR INS 2 <bloque>` o `ERR PUT 2 <bloque>` (`UDB_ERR_PARAMS`), y descartados
-con un aviso (`ULOG_WARNING`) durante la carga de archivos locales.
+`ERR INS 2 <bloque>` o `ERR PUT 2 <bloque>` (`UDB_ERR_PARAMS`), y provocan que la
+carga de archivos `.db` aborte fail-closed.
 
 Para `INS`, `DEL` y `DRP`, UDB primero clona el bloque activo y aplica el
 cambio al candidato privado. Solo después de escribir y renombrar atómicamente

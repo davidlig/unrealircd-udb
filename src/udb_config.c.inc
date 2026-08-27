@@ -90,6 +90,38 @@ static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
 				errors++;
 			}
 		}
+		else if (!strcmp(cep->name, "max-staged-bytes"))
+		{
+			size_t val;
+			if (!cep->value ||
+				!udb_parse_size_strict(cep->value, &val, UDB_MIN_MAX_STAGED_BYTES, (size_t)UDB_MAX_MAX_STAGED_BYTES))
+			{
+				config_error("%s:%i: udb::max-staged-bytes must be between %llu and %llu bytes", cep->file->filename,
+							 cep->line_number, (unsigned long long)UDB_MIN_MAX_STAGED_BYTES,
+							 (unsigned long long)UDB_MAX_MAX_STAGED_BYTES);
+				errors++;
+			}
+		}
+		else if (!strcmp(cep->name, "sync-inactivity-timeout"))
+		{
+			unsigned int val;
+			if (!cep->value || !udb_parse_uint_strict(cep->value, &val, 1, 86400))
+			{
+				config_error("%s:%i: udb::sync-inactivity-timeout must be between 1 and 86400 seconds",
+							 cep->file->filename, cep->line_number);
+				errors++;
+			}
+		}
+		else if (!strcmp(cep->name, "sync-absolute-timeout"))
+		{
+			unsigned int val;
+			if (!cep->value || !udb_parse_uint_strict(cep->value, &val, 1, 86400))
+			{
+				config_error("%s:%i: udb::sync-absolute-timeout must be between 1 and 86400 seconds",
+							 cep->file->filename, cep->line_number);
+				errors++;
+			}
+		}
 		else
 		{
 			config_error("%s:%i: unknown directive udb::%s", cep->file->filename, cep->line_number, cep->name);
@@ -142,6 +174,24 @@ static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
 			if (udb_parse_uint_strict(cep->value, &val, UDB_MIN_MAX_STAGED_RECORDS, UDB_MAX_MAX_STAGED_RECORDS))
 				udb_cfg->max_staged_records = val;
 		}
+		else if (!strcmp(cep->name, "max-staged-bytes"))
+		{
+			size_t val = 0;
+			if (udb_parse_size_strict(cep->value, &val, UDB_MIN_MAX_STAGED_BYTES, (size_t)UDB_MAX_MAX_STAGED_BYTES))
+				udb_cfg->max_staged_bytes = val;
+		}
+		else if (!strcmp(cep->name, "sync-inactivity-timeout"))
+		{
+			unsigned int val = 0;
+			if (udb_parse_uint_strict(cep->value, &val, 1, 86400))
+				udb_cfg->sync_inactivity_timeout = (int)val;
+		}
+		else if (!strcmp(cep->name, "sync-absolute-timeout"))
+		{
+			unsigned int val = 0;
+			if (udb_parse_uint_strict(cep->value, &val, 1, 86400))
+				udb_cfg->sync_absolute_timeout = (int)val;
+		}
 		else if (!strcmp(cep->name, "password-flood"))
 		{
 			udb_flood_valid(cep->value, &udb_cfg->flood_attempts, &udb_cfg->flood_period);
@@ -154,6 +204,12 @@ static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
 	convert_to_absolute_path(&udb_cfg->db_directory, PERMDATADIR);
 	if (udb_cfg->max_staged_records == 0)
 		udb_cfg->max_staged_records = UDB_DEFAULT_MAX_STAGED_RECORDS;
+	if (udb_cfg->max_staged_bytes == 0)
+		udb_cfg->max_staged_bytes = UDB_DEFAULT_MAX_STAGED_BYTES;
+	if (udb_cfg->sync_inactivity_timeout == 0)
+		udb_cfg->sync_inactivity_timeout = UDB_SYNC_INACTIVITY_TIMEOUT;
+	if (udb_cfg->sync_absolute_timeout == 0)
+		udb_cfg->sync_absolute_timeout = UDB_SYNC_ABSOLUTE_TIMEOUT;
 	if (udb_cfg->flood_attempts == 0)
 		udb_cfg->flood_attempts = 5;
 	if (udb_cfg->flood_period == 0)

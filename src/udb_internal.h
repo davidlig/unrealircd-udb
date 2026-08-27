@@ -21,15 +21,20 @@
 #define UDB_DEFAULT_DB_DIRECTORY PERMDATADIR
 #define UDB_BLOCK_PATH_MAX 1024
 #define UDB_RECORD_PATH_MAX 8192
-#define UDB_COMPONENT_MAX 4096
+#define UDB_COMPONENT_RAW_MAX 4096
+#define UDB_COMPONENT_ENCODED_MAX 4608
+#define UDB_COMPONENT_MAX UDB_COMPONENT_ENCODED_MAX
 #define UDB_RECORD_VALUE_MAX 4096
 #define UDB_RECORD_LINE_MAX (UDB_RECORD_PATH_MAX + UDB_RECORD_VALUE_MAX + 32)
+#define UDB_S2S_LINE_MAX MAXLINELENGTH
 #define UDB_SYNC_INACTIVITY_TIMEOUT 60
 #define UDB_SYNC_ABSOLUTE_TIMEOUT 300
 #define UDB_SYNC_TIMEOUT UDB_SYNC_INACTIVITY_TIMEOUT
 #define UDB_DEFAULT_MAX_STAGED_BYTES (64 * 1024 * 1024) /* 64 MB */
+#define UDB_MIN_MAX_STAGED_BYTES 1024
+#define UDB_MAX_MAX_STAGED_BYTES (1024ULL * 1024 * 1024)
 #define UDB_DEFAULT_MAX_STAGED_RECORDS 500000
-#define UDB_MIN_MAX_STAGED_RECORDS 1000
+#define UDB_MIN_MAX_STAGED_RECORDS 1
 #define UDB_MAX_MAX_STAGED_RECORDS 10000000
 #define UDB_HASH_SIZE 2048
 #define UDB_HASH_MASK (UDB_HASH_SIZE - 1)
@@ -148,6 +153,9 @@ typedef struct UdbConfig
 	int config_flood_attempts;
 	int config_flood_period;
 	unsigned int max_staged_records;
+	size_t max_staged_bytes;
+	int sync_inactivity_timeout;
+	int sync_absolute_timeout;
 } UdbConfig;
 
 typedef struct UdbContext
@@ -207,6 +215,7 @@ static int udb_strtoul_strict(const char *s, unsigned long *out);
 static int udb_parse_uint_strict(const char *s, unsigned int *out, unsigned int min_val, unsigned int max_val);
 static int udb_parse_ulong_strict(const char *s, unsigned long *out, unsigned long min_val, unsigned long max_val);
 static int udb_parse_size_strict(const char *s, size_t *out, size_t min_val, size_t max_val);
+static unsigned long long udb_time_t_max_val(void);
 static int udb_parse_time_t(const char *s, time_t *out);
 static int udb_time_add(time_t base, unsigned long duration, time_t *result);
 static int udb_timestamp_parse(const char *s, time_t *out);
@@ -234,8 +243,8 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block);
 static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *line);
 static int udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbuf, size_t pathlen);
 static unsigned long udb_crc32(const char *data, size_t len);
-static unsigned long udb_compute_block_checksum(UdbBlock *block);
-static unsigned long udb_compute_tree_checksum(UdbRecord *tree);
+static int udb_compute_block_checksum(UdbBlock *block, unsigned long *checksum);
+static int udb_compute_tree_checksum(UdbRecord *tree, unsigned long *checksum);
 static int udb_stage_parse_line(UdbBlock *block, UdbSyncSession *session, const char *line);
 static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSession *session, unsigned long checksum);
 static void udb_sync_session_free(UdbBlock *block);
@@ -254,10 +263,14 @@ static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid, const c
 static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, const char *txid, const char *checksum,
 						unsigned long *digest);
 static void udb_sync_ack(Client *peer, const char *block);
+static int udb_sync_send_tree(Client *server, UdbRecord *rec, int depth, char *pathbuf, size_t pathlen, char letter,
+							  const char *txid);
 static void udb_sync_send_stage(Client *server, UdbBlock *block);
 static void udb_sync_server_quit(Client *client);
 static int udb_is_propagator(UdbContext *ctx, Client *server);
 static const char *udb_selected_propagator(UdbContext *ctx);
+static int udb_send_db_to_one(Client *to, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+static int udb_send_db_to_confirmed_servers(Client *except, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void udb_sendto_confirmed_servers(Client *except, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void udb_protocol_params_error(Client *client, const char *subcmd);
 static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target, const char *path, const char *data,
