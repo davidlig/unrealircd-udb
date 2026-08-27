@@ -732,7 +732,8 @@ static void udb_block_replace_tree(UdbContext *ctx, UdbBlock *block, UdbRecord *
 	if (!udb_compute_block_checksum(block, &block->checksum))
 	{
 		block->checksum = 0;
-		udb_log(ULOG_ERROR, "UDB_CHECKSUM_CALC_FAILED", NULL, "Failed to compute checksum for block $block after commit",
+		udb_log(ULOG_ERROR, "UDB_CHECKSUM_CALC_FAILED", NULL,
+				"Failed to compute checksum for block $block after commit",
 				log_data_string("block", (char[]){block->letter, '\0'}));
 	}
 	block->modified_at = time(NULL);

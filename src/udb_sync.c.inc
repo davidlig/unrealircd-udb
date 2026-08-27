@@ -169,7 +169,8 @@ static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid, const c
 		return UDB_ERR_PARAMS;
 	}
 	line = safe_alloc(UDB_RECORD_LINE_MAX + 2);
-	if (snprintf(line, UDB_RECORD_LINE_MAX + 2, "%s %s", path ? path : "", data ? data : "") >= (int)UDB_RECORD_LINE_MAX)
+	if (snprintf(line, UDB_RECORD_LINE_MAX + 2, "%s %s", path ? path : "", data ? data : "") >=
+		(int)UDB_RECORD_LINE_MAX)
 	{
 		safe_free(line);
 		udb_sync_abort(block, "invalid PUT payload");

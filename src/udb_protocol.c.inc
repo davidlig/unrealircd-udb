@@ -448,7 +448,8 @@ CMD_FUNC(cmd_db)
 				}
 				if (block->syncing_from && block->syncing_from != client)
 				{
-					udb_send_db_to_one(client, ":%s DB %s ERR RES %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
+					udb_send_db_to_one(client, ":%s DB %s ERR RES %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE,
+									   letter);
 					return;
 				}
 

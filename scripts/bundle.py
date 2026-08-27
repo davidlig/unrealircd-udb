@@ -34,7 +34,7 @@ module
 {
 	documentation "https://github.com/davidlig/unrealircd-udb";
 	troubleshooting "In case of problems, report issues at https://github.com/davidlig/unrealircd-udb/issues";
-	min-unrealircd-version "6.*";
+	min-unrealircd-version "6.2.*";
 	post-install-text {
 		"The UDB module is now installed. Next steps:";
 		"1. Add the following to your unrealircd.conf:";
@@ -131,7 +131,7 @@ module "third/udb"
 	troubleshooting "In case of problems, report issues at https://github.com/davidlig/unrealircd-udb/issues";
 	source "https://raw.githubusercontent.com/davidlig/unrealircd-udb/main/dist/udb.c";
 	sha256sum "{sha256}";
-	min-unrealircd-version "6.*";
+	min-unrealircd-version "6.2.*";
 	post-install-text
 	{{
 		"The UDB module is now installed. Next steps:";

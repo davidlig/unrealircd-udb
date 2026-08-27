@@ -14,7 +14,7 @@ module
 {
 	documentation "https://github.com/davidlig/unrealircd-udb";
 	troubleshooting "In case of problems, report issues at https://github.com/davidlig/unrealircd-udb/issues";
-	min-unrealircd-version "6.*";
+	min-unrealircd-version "6.2.*";
 	post-install-text {
 		"The UDB module is now installed. Next steps:";
 		"1. Add the following to your unrealircd.conf:";
@@ -163,12 +163,13 @@ module
 #define UDB_DEFAULT_DB_DIRECTORY PERMDATADIR
 #define UDB_BLOCK_PATH_MAX 1024
 #define UDB_RECORD_PATH_MAX 8192
-#define UDB_COMPONENT_RAW_MAX 4096
+#define UDB_COMPONENT_RAW_MAX 4608
 #define UDB_COMPONENT_ENCODED_MAX 4608
 #define UDB_COMPONENT_MAX UDB_COMPONENT_ENCODED_MAX
 #define UDB_RECORD_VALUE_MAX 4096
 #define UDB_RECORD_LINE_MAX (UDB_RECORD_PATH_MAX + UDB_RECORD_VALUE_MAX + 32)
 #define UDB_S2S_LINE_MAX MAXLINELENGTH
+#define UDB_S2S_OVERHEAD_MAX 256
 #define UDB_SYNC_INACTIVITY_TIMEOUT 60
 #define UDB_SYNC_ABSOLUTE_TIMEOUT 300
 #define UDB_SYNC_TIMEOUT UDB_SYNC_INACTIVITY_TIMEOUT
@@ -348,6 +349,7 @@ static void udb_block_reset(UdbContext *ctx, UdbBlock *block);
 static int udb_blocks_load_all(UdbContext *ctx);
 static int udb_blocks_save_all(UdbContext *ctx);
 static UdbBlock *udb_block_by_letter(UdbContext *ctx, char letter);
+static int udb_record_fits_limits(const char *path, const char *value);
 static int udb_path_encode_component(const char *raw, char *buf, size_t bufsz);
 static int udb_path_decode_component(const char *encoded, char *buf, size_t bufsz);
 static int udb_path_append(char *dst, size_t dst_size, size_t *used, const char *component);
@@ -392,12 +394,12 @@ static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSessi
 static void udb_sync_session_free(UdbBlock *block);
 static int udb_block_letter_to_index(char letter);
 
-static void udb_sync_to_server(Client *server);
+static int udb_sync_to_server(Client *server);
 static int udb_remote_wins_equal_timestamp(Client *server);
 static int udb_has_hello(Client *server);
 static int udb_has_staged_sync(Client *server);
 static int udb_peer_authorizes_us(Client *server);
-static void udb_sync_hello_start(Client *server);
+static int udb_sync_hello_start(Client *server);
 static int udb_sync_hello_ack(Client *server);
 static void udb_sync_abort(UdbBlock *block, const char *reason);
 static int udb_sync_begin(UdbBlock *block, Client *peer, const char *txid);
@@ -407,13 +409,13 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, const ch
 static void udb_sync_ack(Client *peer, const char *block);
 static int udb_sync_send_tree(Client *server, UdbRecord *rec, int depth, char *pathbuf, size_t pathlen, char letter,
 							  const char *txid);
-static void udb_sync_send_stage(Client *server, UdbBlock *block);
+static int udb_sync_send_stage(Client *server, UdbBlock *block);
 static void udb_sync_server_quit(Client *client);
 static int udb_is_propagator(UdbContext *ctx, Client *server);
 static const char *udb_selected_propagator(UdbContext *ctx);
 static int udb_send_db_to_one(Client *to, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static int udb_send_db_to_confirmed_servers(Client *except, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
-static void udb_sendto_confirmed_servers(Client *except, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+static int udb_sendto_confirmed_servers(Client *except, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void udb_protocol_params_error(Client *client, const char *subcmd);
 static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target, const char *path, const char *data,
 							 int is_for_me, int is_broadcast);
@@ -446,6 +448,7 @@ static void udb_config_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord 
 static void udb_config_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
 static void udb_lines_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new);
 static void udb_lines_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
+static int udb_spamfilter_pattern(const char *stored, char *pattern, size_t patternsz);
 static const char *udb_get_bot_nick(const char *service_key, int force_default);
 static const char *udb_get_bot_mask(const char *service_key, int force_default);
 static Client *udb_service_source(const char *service_key);
@@ -674,6 +677,75 @@ static UdbRecord *udb_record_find(UdbContext *ctx, const char *key, UdbRecord *p
 }
 
 /* ========================================================================
+ * Record Limits and Feasibility Validation
+ * ======================================================================== */
+static int udb_record_fits_limits(const char *path, const char *value)
+{
+	size_t path_len;
+	size_t val_len = 0;
+	size_t serialized_line_len;
+	const char *comp;
+	const char *sep;
+
+	if (!path || !*path)
+		return 0;
+
+	path_len = strlen(path);
+	if (path_len > UDB_RECORD_PATH_MAX)
+		return 0;
+
+	/* Validate each encoded component in path */
+	comp = path;
+	while ((sep = strstr(comp, "::")))
+	{
+		if (sep == comp || !sep[2])
+			return 0;
+		size_t clen = sep - comp;
+		if (clen > UDB_COMPONENT_ENCODED_MAX)
+			return 0;
+		char enc_buf[UDB_COMPONENT_ENCODED_MAX + 1];
+		char dec_buf[UDB_COMPONENT_RAW_MAX + 1];
+		memcpy(enc_buf, comp, clen);
+		enc_buf[clen] = '\0';
+		if (!udb_path_decode_component(enc_buf, dec_buf, sizeof(dec_buf)))
+			return 0;
+		if (strlen(dec_buf) > UDB_COMPONENT_RAW_MAX)
+			return 0;
+		comp = sep + 2;
+	}
+	if (!*comp)
+		return 0;
+	size_t last_clen = strlen(comp);
+	if (last_clen > UDB_COMPONENT_ENCODED_MAX)
+		return 0;
+	char dec_buf[UDB_COMPONENT_RAW_MAX + 1];
+	if (!udb_path_decode_component(comp, dec_buf, sizeof(dec_buf)))
+		return 0;
+	if (strlen(dec_buf) > UDB_COMPONENT_RAW_MAX)
+		return 0;
+
+	if (value)
+	{
+		val_len = strlen(value);
+		if (val_len > UDB_RECORD_VALUE_MAX)
+			return 0;
+		if (strpbrk(value, "\r\n"))
+			return 0;
+	}
+
+	/* Serialized line check: path + ' ' + value + '\n' */
+	serialized_line_len = path_len + (value && *value ? 1 + val_len : 0) + 1;
+	if (serialized_line_len > UDB_RECORD_LINE_MAX)
+		return 0;
+
+	/* S2S feasibility check */
+	if (path_len + (value ? val_len : 0) + UDB_S2S_OVERHEAD_MAX > UDB_S2S_LINE_MAX)
+		return 0;
+
+	return 1;
+}
+
+/* ========================================================================
  * Path Component Encoding & Decoding
  * ======================================================================== */
 static int udb_path_encode_component(const char *raw, char *buf, size_t bufsz)
@@ -760,7 +832,7 @@ static int udb_path_decode_component(const char *encoded, char *buf, size_t bufs
 
 static int udb_path_append(char *dst, size_t dst_size, size_t *used, const char *component)
 {
-	char encoded[UDB_COMPONENT_MAX];
+	char encoded[UDB_COMPONENT_ENCODED_MAX + 1];
 	size_t cur_len;
 	size_t enc_len;
 
@@ -794,13 +866,13 @@ static int udb_path_append_component(char *pathbuf, size_t bufsz, const char *ra
 
 static UdbRecord *udb_record_find_path(UdbContext *ctx, UdbBlock *block, const char *path)
 {
-	char decoded_part[UDB_COMPONENT_MAX];
-	char pathbuf[UDB_RECORD_PATH_MAX];
+	char decoded_part[UDB_COMPONENT_RAW_MAX + 1];
+	char pathbuf[UDB_RECORD_PATH_MAX + 1];
 	char *cur;
 	char *ds;
 	UdbRecord *rec;
 
-	if (!block || !block->tree || !path || strlen(path) >= sizeof(pathbuf))
+	if (!block || !block->tree || !path || strlen(path) > UDB_RECORD_PATH_MAX || !udb_record_fits_limits(path, NULL))
 		return NULL;
 	strlcpy(pathbuf, path, sizeof(pathbuf));
 	cur = pathbuf;
@@ -888,13 +960,13 @@ static unsigned int udb_record_count_tree(UdbRecord *rec)
 
 static UdbRecord *udb_record_insert_path(UdbRecord *tree, const char *path, const char *data)
 {
-	char pathbuf[UDB_RECORD_PATH_MAX];
-	char decoded_part[UDB_COMPONENT_MAX];
+	char pathbuf[UDB_RECORD_PATH_MAX + 1];
+	char decoded_part[UDB_COMPONENT_RAW_MAX + 1];
 	char *part;
 	char *next;
 	UdbRecord *parent = tree;
 
-	if (!tree || !path || !*path || strlen(path) >= sizeof(pathbuf))
+	if (!tree || !path || !*path || strlen(path) > UDB_RECORD_PATH_MAX || !udb_record_fits_limits(path, data))
 		return NULL;
 	strlcpy(pathbuf, path, sizeof(pathbuf));
 	for (part = pathbuf; part; part = next)
@@ -924,7 +996,8 @@ static UdbRecord *udb_record_insert_path(UdbRecord *tree, const char *path, cons
 		safe_free(parent->data_str);
 	if (data && *data == '*')
 	{
-		udb_strtoul_strict(data + 1, &parent->data_num);
+		if (!udb_strtoul_strict(data + 1, &parent->data_num))
+			return NULL;
 		parent->data_str = NULL;
 	}
 	else if (data)
@@ -961,7 +1034,7 @@ static int udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbuf
 {
 	UdbRecord *child;
 	size_t old_len;
-	char encoded_key[UDB_COMPONENT_MAX];
+	char encoded_key[UDB_COMPONENT_ENCODED_MAX + 1];
 
 	if (!rec || !rec->key)
 		return 1;
@@ -984,11 +1057,36 @@ static int udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbuf
 	if (rec->data_str || rec->data_num > 0 || !rec->child)
 	{
 		int ret;
+		size_t line_len;
+		char numbuf[32];
+		const char *val_str;
+
 		if (rec->data_str)
-			ret = fprintf(fp, "%s %s\n", pathbuf, rec->data_str);
+		{
+			val_str = rec->data_str;
+		}
 		else
-			ret = fprintf(fp, "%s *%lu\n", pathbuf, rec->data_num);
-		if (ret < 0 || ferror(fp))
+		{
+			snprintf(numbuf, sizeof(numbuf), "*%lu", rec->data_num);
+			val_str = numbuf;
+		}
+
+		if (!udb_record_fits_limits(pathbuf, val_str))
+		{
+			pathbuf[old_len] = '\0';
+			return 0;
+		}
+
+		/* path + space + value + newline */
+		line_len = strlen(pathbuf) + 1 + strlen(val_str) + 1;
+		if (line_len > UDB_RECORD_LINE_MAX)
+		{
+			pathbuf[old_len] = '\0';
+			return 0;
+		}
+
+		ret = fprintf(fp, "%s %s\n", pathbuf, val_str);
+		if (ret < 0 || (size_t)ret != line_len || ferror(fp))
 		{
 			pathbuf[old_len] = '\0';
 			return 0;
@@ -1060,7 +1158,7 @@ static UdbSnapshotResult udb_file_write_snapshot(UdbBlock *block, UdbRecord *tre
 {
 	char dir_path[UDB_BLOCK_PATH_MAX];
 	char tmp_path[UDB_BLOCK_PATH_MAX];
-	char pathbuf[UDB_RECORD_PATH_MAX] = "";
+	char pathbuf[UDB_RECORD_PATH_MAX + 1] = "";
 	char *slash;
 	FILE *fp = NULL;
 	UdbRecord *rec;
@@ -1175,7 +1273,12 @@ static int udb_file_save_block(UdbContext *ctx, UdbBlock *block)
 	if (res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
 		return 0;
 	(void)ctx;
-	udb_compute_block_checksum(block, &block->checksum);
+	if (!udb_compute_block_checksum(block, &block->checksum))
+	{
+		block->checksum = 0;
+		udb_log(ULOG_ERROR, "UDB_CHECKSUM_CALC_FAILED", NULL, "Failed to compute checksum for block $block after save",
+				log_data_string("block", (char[]){block->letter, '\0'}));
+	}
 	block->modified_at = time(NULL);
 	if (stat(block->filepath, &st) == 0)
 		block->filesize = st.st_size;
@@ -1432,7 +1535,7 @@ static void udb_config_free(UdbContext *ctx)
 
 static int udb_setting_string_valid(const char *value)
 {
-	return value && *value && !strpbrk(value, "\r\n");
+	return value && *value && strlen(value) <= UDB_RECORD_VALUE_MAX && !strpbrk(value, "\r\n");
 }
 
 static int udb_suffix_valid(const char *value)
@@ -2031,7 +2134,7 @@ static int udb_nolines_record_valid(const char *value)
 
 static int udb_non_empty_string_valid(const char *value)
 {
-	return value && *value && !strpbrk(value, "\r\n");
+	return value && *value && strlen(value) <= UDB_RECORD_VALUE_MAX && !strpbrk(value, "\r\n");
 }
 
 static int udb_nick_name_valid(const char *name)
@@ -2179,7 +2282,7 @@ static const UdbBlockSchema *udb_get_block_schema(char letter)
 
 static int udb_record_validate(UdbBlock *block, const char *path, const char *value)
 {
-	char pathbuf[UDB_RECORD_PATH_MAX];
+	char pathbuf[UDB_RECORD_PATH_MAX + 1];
 	char *decoded_parts = NULL;
 	char *parts[8];
 	int depth = 0;
@@ -2188,16 +2291,19 @@ static int udb_record_validate(UdbBlock *block, const char *path, const char *va
 	const UdbKeyDescriptor *desc = NULL;
 	int result = 0;
 
-	if (!block || !path || !*path || strlen(path) >= sizeof(pathbuf))
+	if (!block || !path || !*path || strlen(path) > UDB_RECORD_PATH_MAX)
+		return 0;
+
+	if (!udb_record_fits_limits(path, value))
 		return 0;
 
 	schema = udb_get_block_schema(block->letter);
 	if (!schema)
 		return 0;
 
-	decoded_parts = safe_alloc(8 * UDB_COMPONENT_MAX);
+	decoded_parts = safe_alloc(8 * (UDB_COMPONENT_RAW_MAX + 1));
 	for (int i = 0; i < 8; i++)
-		parts[i] = decoded_parts + (i * UDB_COMPONENT_MAX);
+		parts[i] = decoded_parts + (i * (UDB_COMPONENT_RAW_MAX + 1));
 
 	strlcpy(pathbuf, path, sizeof(pathbuf));
 	p = pathbuf;
@@ -2213,7 +2319,7 @@ static int udb_record_validate(UdbBlock *block, const char *path, const char *va
 		}
 		if (depth >= 8)
 			goto done;
-		if (!udb_path_decode_component(p, parts[depth], UDB_COMPONENT_MAX))
+		if (!udb_path_decode_component(p, parts[depth], UDB_COMPONENT_RAW_MAX + 1))
 			goto done;
 		depth++;
 		p = next;
@@ -2266,7 +2372,8 @@ static int udb_record_validate(UdbBlock *block, const char *path, const char *va
 				goto done;
 			const char *pattern = parts[1];
 			const char *subkey = parts[2];
-			if (!pattern || !*pattern)
+			char pat_buf[UDB_SPAMFILTER_PATTERN_MAX + 1];
+			if (!pattern || !*pattern || !udb_spamfilter_pattern(pattern, pat_buf, sizeof(pat_buf)))
 				goto done;
 			if (!strcasecmp(subkey, KKEY_TYPE))
 			{
@@ -2410,7 +2517,13 @@ static void udb_block_replace_tree(UdbContext *ctx, UdbBlock *block, UdbRecord *
 	for (rec = tree->child; rec; rec = rec->sibling)
 		udb_hash_insert_record(ctx, rec, udb_block_letter_to_index(block->letter), rec->key);
 	udb_block_set_context_root(ctx, block);
-	udb_compute_block_checksum(block, &block->checksum);
+	if (!udb_compute_block_checksum(block, &block->checksum))
+	{
+		block->checksum = 0;
+		udb_log(ULOG_ERROR, "UDB_CHECKSUM_CALC_FAILED", NULL,
+				"Failed to compute checksum for block $block after commit",
+				log_data_string("block", (char[]){block->letter, '\0'}));
+	}
 	block->modified_at = time(NULL);
 	if (stat(block->filepath, &st) == 0)
 		block->filesize = st.st_size;
@@ -2427,12 +2540,14 @@ static UdbRecord *udb_record_insert(UdbContext *ctx, UdbBlock *block, UdbRecord 
 
 		if (!parent)
 			parent = block->tree;
-		candidate = udb_record_clone_tree(block->tree, parent, &candidate_parent);
 		if (!data_str)
 		{
 			snprintf(value, sizeof(value), "*%lu", data_num);
 			data_str = value;
 		}
+		if (!udb_record_fits_limits(key, data_str))
+			return NULL;
+		candidate = udb_record_clone_tree(block->tree, parent, &candidate_parent);
 		if (!candidate_parent)
 			candidate_parent = candidate;
 		UdbRecord *rec = udb_record_find(NULL, key, candidate_parent);
@@ -2651,45 +2766,59 @@ static void udb_digest_lines_free(UdbDigestLine *lines)
 
 static int udb_digest_collect(UdbRecord *rec, int depth, char *pathbuf, size_t pathlen, UdbDigestLine **lines)
 {
-	size_t old_len;
+	size_t orig_len;
 	UdbRecord *child;
-	char encoded_key[UDB_COMPONENT_MAX];
+	char encoded_key[UDB_COMPONENT_ENCODED_MAX + 1];
 
 	if (!rec || !rec->key)
 		return 1;
-	old_len = strlen(pathbuf);
+	orig_len = strlen(pathbuf);
 	if (!udb_path_encode_component(rec->key, encoded_key, sizeof(encoded_key)))
 		return 0;
 	size_t enc_len = strlen(encoded_key);
 	if (depth > 0)
 	{
-		if (old_len + 2 + enc_len >= pathlen)
+		if (orig_len + 2 + enc_len >= pathlen)
 			return 0;
-		memcpy(pathbuf + old_len, "::", 2);
-		old_len += 2;
+		strlcat(pathbuf, "::", pathlen);
 	}
 	else
 	{
 		if (enc_len >= pathlen)
 			return 0;
 	}
-	memcpy(pathbuf + old_len, encoded_key, enc_len + 1);
+	strlcat(pathbuf, encoded_key, pathlen);
 
 	if (rec->data_str || rec->data_num > 0 || !rec->child)
 	{
-		UdbDigestLine *line = safe_alloc(sizeof(*line));
-		size_t len = strlen(pathbuf) + 2 + (rec->data_str ? strlen(rec->data_str) : 32);
-		line->line = safe_alloc(len);
-		int n;
+		char numbuf[32];
+		const char *val_str;
+
 		if (rec->data_str)
-			n = snprintf(line->line, len, "%s %s", pathbuf, rec->data_str);
+		{
+			val_str = rec->data_str;
+		}
 		else
-			n = snprintf(line->line, len, "%s *%lu", pathbuf, rec->data_num);
+		{
+			snprintf(numbuf, sizeof(numbuf), "*%lu", rec->data_num);
+			val_str = numbuf;
+		}
+
+		if (!udb_record_fits_limits(pathbuf, val_str))
+		{
+			pathbuf[orig_len] = '\0';
+			return 0;
+		}
+
+		UdbDigestLine *line = safe_alloc(sizeof(*line));
+		size_t len = strlen(pathbuf) + 1 + strlen(val_str) + 1;
+		line->line = safe_alloc(len);
+		int n = snprintf(line->line, len, "%s %s", pathbuf, val_str);
 		if (n < 0 || (size_t)n >= len)
 		{
 			safe_free(line->line);
 			safe_free(line);
-			pathbuf[old_len] = '\0';
+			pathbuf[orig_len] = '\0';
 			return 0;
 		}
 		line->next = *lines;
@@ -2699,11 +2828,11 @@ static int udb_digest_collect(UdbRecord *rec, int depth, char *pathbuf, size_t p
 	{
 		if (!udb_digest_collect(child, depth + 1, pathbuf, pathlen, lines))
 		{
-			pathbuf[old_len] = '\0';
+			pathbuf[orig_len] = '\0';
 			return 0;
 		}
 	}
-	pathbuf[old_len] = '\0';
+	pathbuf[orig_len] = '\0';
 	return 1;
 }
 
@@ -2723,7 +2852,7 @@ static int udb_compute_tree_checksum(UdbRecord *tree, unsigned long *checksum)
 	unsigned long crc = 0xFFFFFFFFUL;
 	unsigned int count = 0;
 	unsigned int i = 0;
-	char pathbuf[UDB_RECORD_PATH_MAX] = "";
+	char pathbuf[UDB_RECORD_PATH_MAX + 1] = "";
 
 	if (checksum)
 		*checksum = 0;
@@ -2799,19 +2928,21 @@ static UdbRecord *udb_stage_insert(UdbRecord *parent, const char *key, UdbSyncSe
 static int udb_stage_parse_line(UdbBlock *block, UdbSyncSession *session, const char *input)
 {
 	char *line;
-	char decoded_part[UDB_COMPONENT_MAX];
+	char decoded_part[UDB_COMPONENT_RAW_MAX + 1];
 	char *value, *part, *next;
 	UdbRecord *parent;
 	int result = 0;
 
-	if (!block || !session || !session->tree || !input || !*input || strlen(input) >= UDB_RECORD_LINE_MAX)
+	if (!block || !session || !session->tree || !input || !*input || strlen(input) > UDB_RECORD_LINE_MAX)
 		return 0;
-	line = safe_alloc(UDB_RECORD_LINE_MAX);
-	strlcpy(line, input, UDB_RECORD_LINE_MAX);
+	line = safe_alloc(UDB_RECORD_LINE_MAX + 2);
+	strlcpy(line, input, UDB_RECORD_LINE_MAX + 2);
 	value = strchr(line, ' ');
 	if (value)
 		*value++ = '\0';
 	if (!*line)
+		goto done;
+	if (!udb_record_fits_limits(line, value))
 		goto done;
 	if (!udb_record_validate(block, line, value))
 		goto done;
@@ -2905,7 +3036,7 @@ static int udb_record_path_valid(const char *path)
 	const char *component;
 	const char *p;
 
-	if (!path || !*path || strlen(path) >= UDB_RECORD_PATH_MAX)
+	if (!path || !*path || strlen(path) > UDB_RECORD_PATH_MAX || !udb_record_fits_limits(path, NULL))
 		return 0;
 	component = path;
 	for (p = path; *p; p++)
@@ -2914,8 +3045,8 @@ static int udb_record_path_valid(const char *path)
 		{
 			if (p == component || p[1] != ':' || !p[2])
 				return 0;
-			char decoded[UDB_COMPONENT_MAX];
-			char comp_buf[UDB_COMPONENT_MAX];
+			char decoded[UDB_COMPONENT_RAW_MAX + 1];
+			char comp_buf[UDB_COMPONENT_ENCODED_MAX + 1];
 			size_t clen = p - component;
 			if (clen >= sizeof(comp_buf))
 				return 0;
@@ -2929,7 +3060,7 @@ static int udb_record_path_valid(const char *path)
 	}
 	if (!*component)
 		return 0;
-	char decoded[UDB_COMPONENT_MAX];
+	char decoded[UDB_COMPONENT_RAW_MAX + 1];
 	if (!udb_path_decode_component(component, decoded, sizeof(decoded)))
 		return 0;
 	return 1;
@@ -2957,10 +3088,12 @@ static UdbRecord *udb_file_parse_line_to_tree(UdbBlock *block, UdbRecord *tree, 
 			data_str = value;
 		}
 	}
-	/* Validate before lookup/allocation: an empty component would leave rec->key NULL. */
+	const char *val_for_validation = value ? (*value == '*' ? value : data_str) : NULL;
+	if (!udb_record_fits_limits(line, val_for_validation))
+		return NULL;
 	if (!udb_record_path_valid(line))
 		return NULL;
-	if (!udb_record_validate(block, line, value ? (*value == '*' ? value : data_str) : NULL))
+	if (!udb_record_validate(block, line, val_for_validation))
 		return NULL;
 
 	char *p = line;
@@ -2968,7 +3101,7 @@ static UdbRecord *udb_file_parse_line_to_tree(UdbBlock *block, UdbRecord *tree, 
 	UdbRecord *leaf_rec = NULL;
 	while (p && *p)
 	{
-		char decoded_part[UDB_COMPONENT_MAX];
+		char decoded_part[UDB_COMPONENT_RAW_MAX + 1];
 		char *next = strstr(p, "::");
 		if (next)
 		{
@@ -3074,7 +3207,7 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 		return 0;
 	}
 
-	char *line = safe_alloc(UDB_RECORD_LINE_MAX);
+	char *line = safe_alloc(UDB_RECORD_LINE_MAX + 2);
 	unsigned int line_number = 0;
 	int parse_failed = 0;
 	UdbRecord *candidate = udb_record_create(NULL);
@@ -3083,11 +3216,13 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 	candidate->is_dynamic_key = 1;
 	candidate->data_num = 1;
 
-	while (fgets(line, UDB_RECORD_LINE_MAX, fp))
+	while (fgets(line, UDB_RECORD_LINE_MAX + 2, fp))
 	{
-		int overlong = !strchr(line, '\n') && !feof(fp);
+		size_t l_len = strlen(line);
+		int has_newline = (l_len > 0 && line[l_len - 1] == '\n');
+		int overlong = !has_newline && !feof(fp);
 		line_number++;
-		if (overlong)
+		if (overlong || l_len > UDB_RECORD_LINE_MAX + 1)
 		{
 			char logbuf[512];
 			snprintf(logbuf, sizeof(logbuf), "Overlong persisted record in block %c at line %u", block->letter,
@@ -3535,20 +3670,20 @@ static int udb_peer_authorizes_us(Client *server)
 	return udb_has_hello(server) && peer->authorizes_us;
 }
 
-static void udb_sync_hello_start(Client *server)
+static int udb_sync_hello_start(Client *server)
 {
 	UdbHelloPeer *peer;
 	const char *propagator;
 
 	if (!server || !IsServer(server) || !MyConnect(server))
-		return;
+		return 0;
 	peer = udb_hello_peer(server, 1);
 	if (peer->state)
-		return;
+		return 0;
 	peer->state = UDB_HEL_WAITING;
 	peer->deadline = time(NULL) + UDB_SYNC_TIMEOUT;
 	propagator = udb_selected_propagator(udb_ctx);
-	udb_send_db_to_one(server, ":%s DB %s HEL 4 %s", me.id, server->id, propagator ? propagator : "?");
+	return udb_send_db_to_one(server, ":%s DB %s HEL 4 %s", me.id, server->id, propagator ? propagator : "?");
 }
 
 static int udb_sync_hello_ack(Client *server)
@@ -3580,14 +3715,10 @@ static int udb_sync_begin(UdbBlock *block, Client *peer, const char *txid)
 	int abs_to =
 		(udb_cfg && udb_cfg->sync_absolute_timeout) ? udb_cfg->sync_absolute_timeout : UDB_SYNC_ABSOLUTE_TIMEOUT;
 
-	if (!block || !peer || !txid || !*txid || strlen(txid) >= sizeof(session->txid))
+	if (!block || !peer || !txid || !*txid)
 		return 0;
 	if (block->session)
-	{
-		if (block->session->peer == peer)
-			udb_sync_abort(block, "duplicate BEGIN");
-		return 0;
-	}
+		udb_sync_abort(block, "staged sync interrupted by new transaction");
 	session = safe_alloc(sizeof(*session));
 	session->peer = peer;
 	strlcpy(session->txid, txid, sizeof(session->txid));
@@ -3631,6 +3762,11 @@ static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid, const c
 		udb_sync_abort(block, "absolute sync timeout exceeded");
 		return UDB_ERR_PARAMS;
 	}
+	if (!udb_record_fits_limits(path, data))
+	{
+		udb_sync_abort(block, "PUT record exceeds limits");
+		return UDB_ERR_PARAMS;
+	}
 	session->received_puts++;
 	size_t payload_len = (path ? strlen(path) : 0) + (data ? strlen(data) : 0);
 	session->received_bytes += payload_len;
@@ -3639,8 +3775,9 @@ static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid, const c
 		udb_sync_abort(block, "staged byte limit exceeded");
 		return UDB_ERR_PARAMS;
 	}
-	line = safe_alloc(UDB_RECORD_LINE_MAX);
-	if (snprintf(line, UDB_RECORD_LINE_MAX, "%s %s", path ? path : "", data ? data : "") >= (int)UDB_RECORD_LINE_MAX)
+	line = safe_alloc(UDB_RECORD_LINE_MAX + 2);
+	if (snprintf(line, UDB_RECORD_LINE_MAX + 2, "%s %s", path ? path : "", data ? data : "") >=
+		(int)UDB_RECORD_LINE_MAX)
 	{
 		safe_free(line);
 		udb_sync_abort(block, "invalid PUT payload");
@@ -3702,32 +3839,50 @@ static void udb_sync_ack(Client *peer, const char *block)
 static int udb_sync_send_tree(Client *server, UdbRecord *rec, int depth, char *pathbuf, size_t pathlen, char letter,
 							  const char *txid)
 {
-	size_t old_len;
+	size_t orig_len;
 	UdbRecord *child;
-	char encoded_key[UDB_COMPONENT_MAX];
+	char encoded_key[UDB_COMPONENT_ENCODED_MAX + 1];
 
 	if (!rec || !rec->key)
 		return 1;
-	old_len = strlen(pathbuf);
+	orig_len = strlen(pathbuf);
 	if (!udb_path_encode_component(rec->key, encoded_key, sizeof(encoded_key)))
 		return 0;
 	size_t enc_len = strlen(encoded_key);
 	if (depth > 0)
 	{
-		if (old_len + 2 + enc_len >= pathlen)
+		if (orig_len + 2 + enc_len >= pathlen)
 			return 0;
-		memcpy(pathbuf + old_len, "::", 2);
-		old_len += 2;
+		strlcat(pathbuf, "::", pathlen);
 	}
 	else
 	{
 		if (enc_len >= pathlen)
 			return 0;
 	}
-	memcpy(pathbuf + old_len, encoded_key, enc_len + 1);
+	strlcat(pathbuf, encoded_key, pathlen);
 	if (rec->data_str || rec->data_num > 0 || !rec->child)
 	{
+		char numbuf[32];
+		const char *val_str;
 		int ok;
+
+		if (rec->data_str)
+		{
+			val_str = rec->data_str;
+		}
+		else
+		{
+			snprintf(numbuf, sizeof(numbuf), "*%lu", rec->data_num);
+			val_str = numbuf;
+		}
+
+		if (!udb_record_fits_limits(pathbuf, val_str))
+		{
+			pathbuf[orig_len] = '\0';
+			return 0;
+		}
+
 		if (rec->data_str)
 			ok = udb_send_db_to_one(server, ":%s DB %s PUT %c %s %s :%s", me.id, server->id, letter, txid, pathbuf,
 									rec->data_str);
@@ -3736,7 +3891,7 @@ static int udb_sync_send_tree(Client *server, UdbRecord *rec, int depth, char *p
 									rec->data_num);
 		if (!ok)
 		{
-			pathbuf[old_len] = '\0';
+			pathbuf[orig_len] = '\0';
 			return 0;
 		}
 	}
@@ -3744,31 +3899,31 @@ static int udb_sync_send_tree(Client *server, UdbRecord *rec, int depth, char *p
 	{
 		if (!udb_sync_send_tree(server, child, depth + 1, pathbuf, pathlen, letter, txid))
 		{
-			pathbuf[old_len] = '\0';
+			pathbuf[orig_len] = '\0';
 			return 0;
 		}
 	}
-	pathbuf[old_len] = '\0';
+	pathbuf[orig_len] = '\0';
 	return 1;
 }
 
-static void udb_sync_send_stage(Client *server, UdbBlock *block)
+static int udb_sync_send_stage(Client *server, UdbBlock *block)
 {
 	char txid[32];
-	char pathbuf[UDB_RECORD_PATH_MAX] = "";
+	char pathbuf[UDB_RECORD_PATH_MAX + 1] = "";
 	UdbRecord *rec;
 	int success = 1;
 
 	/* HEL confirms protocol support; snapshots require the selected data source. */
 	if (!udb_peer_authorizes_us(server) || !block)
-		return;
+		return 0;
 	snprintf(txid, sizeof(txid), "%08lx", ++udb_sync_txid);
 	if (!udb_send_db_to_one(server, ":%s DB %s BEGIN %c %s %08lX", me.id, server->id, block->letter, txid,
 							block->checksum))
 	{
 		udb_log(ULOG_ERROR, "UDB_SYNC_SEND_FAILED", server, "Failed to send staged sync BEGIN for block $block",
 				log_data_string("block", (char[]){block->letter, '\0'}));
-		return;
+		return 0;
 	}
 	if (block->tree)
 	{
@@ -3787,15 +3942,16 @@ static void udb_sync_send_stage(Client *server, UdbBlock *block)
 				"Failed to serialize/send tree records during staged sync for block $block, aborting transfer",
 				log_data_string("block", (char[]){block->letter, '\0'}));
 		udb_send_db_to_one(server, ":%s DB %s ERR PUT %d %c", me.id, server->id, UDB_ERR_FATAL, block->letter);
-		return;
+		return 0;
 	}
 	if (!udb_send_db_to_one(server, ":%s DB %s END %c %s %08lX", me.id, server->id, block->letter, txid,
 							block->checksum))
 	{
 		udb_log(ULOG_ERROR, "UDB_SYNC_SEND_FAILED", server, "Failed to send staged sync END for block $block",
 				log_data_string("block", (char[]){block->letter, '\0'}));
-		return;
+		return 0;
 	}
+	return 1;
 }
 
 EVENT(udb_sync_timeout_event)
@@ -3937,11 +4093,11 @@ static UdbBlock *udb_mutation_path_block(UdbContext *ctx, const char *path)
 	size_t len;
 	UdbBlock *block;
 
-	if (!path)
+	if (!path || !udb_record_fits_limits(path, NULL))
 		return NULL;
 
 	len = strlen(path);
-	if (len < 4 || len >= UDB_RECORD_PATH_MAX || path[1] != ':' || path[2] != ':' || !path[3])
+	if (len < 4 || len > UDB_RECORD_PATH_MAX || path[1] != ':' || path[2] != ':' || !path[3])
 		return NULL;
 
 	block = udb_block_by_letter(ctx, path[0]);
@@ -3953,8 +4109,8 @@ static UdbBlock *udb_mutation_path_block(UdbContext *ctx, const char *path)
 	{
 		if (separator == component || !separator[2])
 			return NULL;
-		char decoded[UDB_COMPONENT_MAX];
-		char comp_buf[UDB_COMPONENT_MAX];
+		char decoded[UDB_COMPONENT_RAW_MAX + 1];
+		char comp_buf[UDB_COMPONENT_ENCODED_MAX + 1];
 		size_t clen = separator - component;
 		if (clen >= sizeof(comp_buf))
 			return NULL;
@@ -3964,17 +4120,17 @@ static UdbBlock *udb_mutation_path_block(UdbContext *ctx, const char *path)
 			return NULL;
 		component = separator + 2;
 	}
-	char decoded[UDB_COMPONENT_MAX];
+	char decoded[UDB_COMPONENT_RAW_MAX + 1];
 	if (!*component || !udb_path_decode_component(component, decoded, sizeof(decoded)))
 		return NULL;
 
 	return block;
 }
 
-static void udb_mutation_forward_ins(Client *source, Client *except, const char *target, const char *path,
-									 const char *data)
+static int udb_mutation_forward_ins(Client *source, Client *except, const char *target, const char *path,
+									const char *data)
 {
-	udb_sendto_confirmed_servers(except, ":%s DB %s INS %s %s", source->id, target, path, data);
+	return udb_sendto_confirmed_servers(except, ":%s DB %s INS %s %s", source->id, target, path, data);
 }
 
 /* The stored value already equals the mutation payload, so no runtime effect
@@ -3992,14 +4148,14 @@ static int udb_record_data_equals(UdbRecord *rec, const char *data)
 	return !strcmp(rec->data_str, data);
 }
 
-static void udb_mutation_forward_del(Client *source, Client *except, const char *target, const char *path)
+static int udb_mutation_forward_del(Client *source, Client *except, const char *target, const char *path)
 {
-	udb_sendto_confirmed_servers(except, ":%s DB %s DEL %s", source->id, target, path);
+	return udb_sendto_confirmed_servers(except, ":%s DB %s DEL %s", source->id, target, path);
 }
 
-static void udb_mutation_persist_error(Client *client, const char *subcmd, char letter)
+static int udb_mutation_persist_error(Client *client, const char *subcmd, char letter)
 {
-	udb_send_db_to_one(client, ":%s DB %s ERR %s %d %c", me.id, client->id, subcmd, UDB_ERR_FATAL, letter);
+	return udb_send_db_to_one(client, ":%s DB %s ERR %s %d %c", me.id, client->id, subcmd, UDB_ERR_FATAL, letter);
 }
 
 static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target, const char *path, const char *data,
@@ -4008,7 +4164,7 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 	UdbBlock *block = udb_mutation_path_block(ctx, path);
 	char letter = path && *path ? path[0] : '0';
 
-	if (!block)
+	if (!block || !udb_record_fits_limits(path, data))
 	{
 		udb_protocol_params_error(client, "INS");
 		return;
@@ -4102,7 +4258,7 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, const char *target
 	UdbBlock *block = udb_mutation_path_block(ctx, path);
 	char letter = path && *path ? path[0] : '0';
 
-	if (!block)
+	if (!block || !udb_record_fits_limits(path, NULL))
 	{
 		udb_protocol_params_error(client, "DEL");
 		return;
@@ -4327,11 +4483,12 @@ static int udb_send_db_to_confirmed_servers(Client *except, const char *fmt, ...
 	return 1;
 }
 
-static void udb_sendto_confirmed_servers(Client *except, const char *fmt, ...)
+static int udb_sendto_confirmed_servers(Client *except, const char *fmt, ...)
 {
 	char *line;
 	va_list args;
 	int n;
+	int sent = 0;
 
 	line = safe_alloc(UDB_S2S_LINE_MAX);
 	va_start(args, fmt);
@@ -4346,7 +4503,10 @@ static void udb_sendto_confirmed_servers(Client *except, const char *fmt, ...)
 			if (server == except || (except && server == except->direction))
 				continue;
 			if (IsServer(server) && MyConnect(server) && udb_has_hello(server))
+			{
 				sendto_one(server, NULL, "%s", line);
+				sent++;
+			}
 		}
 	}
 	else
@@ -4354,8 +4514,11 @@ static void udb_sendto_confirmed_servers(Client *except, const char *fmt, ...)
 		udb_log(ULOG_ERROR, "UDB_S2S_OVERSIZE_BROADCAST", except,
 				"Oversized broadcast S2S frame ($length bytes) discarded to prevent truncation",
 				log_data_integer("length", n));
+		safe_free(line);
+		return 0;
 	}
 	safe_free(line);
+	return 1;
 }
 
 static void udb_protocol_params_error(Client *client, const char *subcmd)
@@ -4363,17 +4526,19 @@ static void udb_protocol_params_error(Client *client, const char *subcmd)
 	udb_send_db_to_one(client, ":%s DB %s ERR %s %d 0", me.id, client->id, subcmd ? subcmd : "0", UDB_ERR_PARAMS);
 }
 
-static void udb_sync_to_server(Client *server)
+static int udb_sync_to_server(Client *server)
 {
 	UdbBlock *block = udb_ctx->block_list;
 	if (!udb_has_hello(server))
-		return;
+		return 0;
 	while (block)
 	{
-		udb_send_db_to_one(server, ":%s DB %s INF %c %lX %lu", me.id, server->id, block->letter, block->checksum,
-						   (unsigned long)block->modified_at);
+		if (!udb_send_db_to_one(server, ":%s DB %s INF %c %lX %lu", me.id, server->id, block->letter, block->checksum,
+								(unsigned long)block->modified_at))
+			return 0;
 		block = block->next;
 	}
+	return 1;
 }
 static Client *udb_direct_peer(Client *client)
 {
@@ -4414,7 +4579,7 @@ CMD_FUNC(cmd_db)
 
 	if (parc < 4)
 	{
-		sendto_one(client, NULL, ":%s DB %s ERR 0 %i 0", me.id, client->id, UDB_ERR_PARAMS);
+		udb_send_db_to_one(client, ":%s DB %s ERR 0 %i 0", me.id, client->id, UDB_ERR_PARAMS);
 		return;
 	}
 
@@ -4450,13 +4615,13 @@ CMD_FUNC(cmd_db)
 		/* Each side sends its own request, so only an ACK confirms outbound data. */
 		if (!udb_has_hello(client))
 			udb_sync_hello_start(client);
-		sendto_one(client, NULL, ":%s DB %s HEL 4 ACK", me.id, client->id);
+		udb_send_db_to_one(client, ":%s DB %s HEL 4 ACK", me.id, client->id);
 		return;
 	}
 
 	if (!direct_peer || !udb_has_hello(direct_peer))
 	{
-		sendto_one(client, NULL, ":%s DB %s ERR %s %d 0", me.id, client->id, subcmd, UDB_ERR_FORBIDDEN);
+		udb_send_db_to_one(client, ":%s DB %s ERR %s %d 0", me.id, client->id, subcmd, UDB_ERR_FORBIDDEN);
 		return;
 	}
 
@@ -4482,8 +4647,8 @@ CMD_FUNC(cmd_db)
 			}
 			if (udb_selected_propagator(ctx) && !udb_is_propagator(ctx, client))
 			{
-				sendto_one(client, NULL, ":%s DB %s ERR BEGIN %d %c", me.id, client->id, UDB_ERR_FORBIDDEN,
-						   parv[3] ? *parv[3] : '0');
+				udb_send_db_to_one(client, ":%s DB %s ERR BEGIN %d %c", me.id, client->id, UDB_ERR_FORBIDDEN,
+								   parv[3] ? *parv[3] : '0');
 				return;
 			}
 			block = udb_block_by_letter(ctx, *parv[3]);
@@ -4491,8 +4656,8 @@ CMD_FUNC(cmd_db)
 			{
 				if (!block || !udb_sync_begin(block, client, parv[4]))
 				{
-					sendto_one(client, NULL, ":%s DB %s ERR BEGIN %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE,
-							   parv[3] ? *parv[3] : '0');
+					udb_send_db_to_one(client, ":%s DB %s ERR BEGIN %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE,
+									   parv[3] ? *parv[3] : '0');
 					return;
 				}
 				if (!is_broadcast)
@@ -4515,8 +4680,8 @@ CMD_FUNC(cmd_db)
 			}
 			if (udb_selected_propagator(ctx) && !udb_is_propagator(ctx, client))
 			{
-				sendto_one(client, NULL, ":%s DB %s ERR PUT %d %c", me.id, client->id, UDB_ERR_FORBIDDEN,
-						   parv[3] ? *parv[3] : '0');
+				udb_send_db_to_one(client, ":%s DB %s ERR PUT %d %c", me.id, client->id, UDB_ERR_FORBIDDEN,
+								   parv[3] ? *parv[3] : '0');
 				return;
 			}
 			block = udb_block_by_letter(ctx, *parv[3]);
@@ -4525,8 +4690,8 @@ CMD_FUNC(cmd_db)
 				error = udb_sync_put(block, client, parv[4], parv[5], parv[6]);
 				if (error)
 				{
-					sendto_one(client, NULL, ":%s DB %s ERR PUT %d %c", me.id, client->id, error,
-							   parv[3] ? *parv[3] : '0');
+					udb_send_db_to_one(client, ":%s DB %s ERR PUT %d %c", me.id, client->id, error,
+									   parv[3] ? *parv[3] : '0');
 					return;
 				}
 				if (!is_broadcast)
@@ -4550,8 +4715,8 @@ CMD_FUNC(cmd_db)
 			}
 			if (udb_selected_propagator(ctx) && !udb_is_propagator(ctx, client))
 			{
-				sendto_one(client, NULL, ":%s DB %s ERR END %d %c", me.id, client->id, UDB_ERR_FORBIDDEN,
-						   parv[3] ? *parv[3] : '0');
+				udb_send_db_to_one(client, ":%s DB %s ERR END %d %c", me.id, client->id, UDB_ERR_FORBIDDEN,
+								   parv[3] ? *parv[3] : '0');
 				return;
 			}
 			block = udb_block_by_letter(ctx, *parv[3]);
@@ -4560,11 +4725,11 @@ CMD_FUNC(cmd_db)
 				error = udb_sync_end(ctx, block, client, parv[4], parv[5], &digest);
 				if (error)
 				{
-					sendto_one(client, NULL, ":%s DB %s ERR END %d %c", me.id, client->id, error,
-							   parv[3] ? *parv[3] : '0');
+					udb_send_db_to_one(client, ":%s DB %s ERR END %d %c", me.id, client->id, error,
+									   parv[3] ? *parv[3] : '0');
 					return;
 				}
-				sendto_one(client, NULL, ":%s DB %s ACK %c %s %08lX", me.id, client->id, *parv[3], parv[4], digest);
+				udb_send_db_to_one(client, ":%s DB %s ACK %c %s %08lX", me.id, client->id, *parv[3], parv[4], digest);
 				if (!is_broadcast)
 					return;
 			}
@@ -4633,7 +4798,7 @@ CMD_FUNC(cmd_db)
 			if (!block)
 			{
 				if (is_for_me)
-					sendto_one(client, NULL, ":%s DB %s ERR INF %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
+					udb_send_db_to_one(client, ":%s DB %s ERR INF %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
 				return;
 			}
 			if (!udb_checksum_parse(parv[4], &crc32) || !udb_timestamp_parse(parv[5], &remote_ts))
@@ -4648,11 +4813,11 @@ CMD_FUNC(cmd_db)
 				{
 					if (remote_ts > block->modified_at)
 					{
-						sendto_one(client, NULL, ":%s DB %s RES %c", me.id, client->id, letter);
+						udb_send_db_to_one(client, ":%s DB %s RES %c", me.id, client->id, letter);
 					}
 					else if (remote_ts == block->modified_at && udb_remote_wins_equal_timestamp(client))
 					{
-						sendto_one(client, NULL, ":%s DB %s RES %c", me.id, client->id, letter);
+						udb_send_db_to_one(client, ":%s DB %s RES %c", me.id, client->id, letter);
 					}
 				}
 				if (!is_broadcast)
@@ -4681,7 +4846,7 @@ CMD_FUNC(cmd_db)
 			UdbBlock *block = udb_block_by_letter(ctx, letter);
 			if (!udb_peer_authorizes_us(client))
 			{
-				sendto_one(client, NULL, ":%s DB %s ERR RES %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
+				udb_send_db_to_one(client, ":%s DB %s ERR RES %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 				return;
 			}
 
@@ -4689,12 +4854,13 @@ CMD_FUNC(cmd_db)
 			{
 				if (!block)
 				{
-					sendto_one(client, NULL, ":%s DB %s ERR RES %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
+					udb_send_db_to_one(client, ":%s DB %s ERR RES %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
 					return;
 				}
 				if (block->syncing_from && block->syncing_from != client)
 				{
-					sendto_one(client, NULL, ":%s DB %s ERR RES %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
+					udb_send_db_to_one(client, ":%s DB %s ERR RES %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE,
+									   letter);
 					return;
 				}
 
@@ -7306,9 +7472,9 @@ static int udb_spamfilter_pattern(const char *stored, char *pattern, size_t patt
 			return 0;
 	}
 	decoded_len = (encoded_len / 4) * 3 - padding;
-	if (!decoded_len || decoded_len >= patternsz)
+	if (!decoded_len || decoded_len > UDB_SPAMFILTER_PATTERN_MAX || decoded_len >= patternsz)
 		return 0;
-	n = b64_decode(encoded, (unsigned char *)pattern, patternsz - 1);
+	n = b64_decode(encoded, (unsigned char *)pattern, patternsz);
 	if (n < 0 || (size_t)n != decoded_len || memchr(pattern, '\0', decoded_len))
 		return 0;
 	pattern[decoded_len] = '\0';
