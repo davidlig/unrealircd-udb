@@ -40,6 +40,8 @@ davidlig::oper netadmin
     memoria (OOM). Rango permitido: `1` a `10000000` (por defecto `500000`).
 *   `max-global-clones <número>;`: Límite global de conexiones/clones por IP.
 *   `password-flood <intentos>:<segundos>;`: Protección de fuerza bruta en contraseñas (por defecto `5:60`).
+*   `stale-timeout <segundos>;`: Periodo de gracia antes de transicionar de `DEGRADED` a `STALE` cuando existe una política configurada o presente en el bloque S pero no hay ningún candidato a propagador elegible disponible. Rango permitido: `1` a `604800` segundos (por defecto `300`).
+*   `stale-action <warn | deny-new-clients>;`: Política de mitigación operativa aplicada al entrar en estado `STALE`. `deny-new-clients` (por defecto) rechaza limpiamente las nuevas conexiones de clientes locales antes del registro (`HOOKTYPE_PRE_LOCAL_CONNECT`) manteniendo plenamente operativos los clientes existentes y los enlaces S2S; `warn` emite advertencias en el registro sin restringir las conexiones de nuevos clientes.
 
 **Loader Transaccional:** Durante el arranque, UDB lee cada archivo en un árbol
 candidato temporal. Solo si el archivo se lee y valida completamente sin errores
@@ -383,7 +385,35 @@ configurado.
 *   `5`: UDB_ERR_NO_SYNC (No se ha solicitado una sincronización)
 *   `6`: UDB_ERR_FORBIDDEN (Acción denegada por permisos / no es propagador)
 
-### 2.4 Redacción De Secretos En DBQ
+### 2.4 Estado Operativo y Máquina de Estados (OK / DEGRADED / STALE)
+UDB implementa una máquina de estados determinista para gestionar la fiabilidad operativa del nodo:
+*   **`OK`**: Hay un candidato a propagador upstream directamente conectado y confirmado con `HEL 4` (o el propio nodo local es el propagador autorizado, o no hay política definida). La sincronización completa de base de datos y la operativa de clientes se desarrollan con normalidad.
+*   **`DEGRADED`**: Existe una política de propagador (vía configuración local o bloque `S`), pero actualmente no hay ningún candidato elegible utilizable. El nodo opera dentro del periodo de gracia configurable (`stale-timeout`, por defecto 300s). Las mutaciones salto a salto (`INS`/`DEL`/`DRP`/`OPT`) continúan propagándose con normalidad, los clientes existentes permanecen conectados y se admiten nuevos clientes locales.
+*   **`STALE`**: El periodo de gracia ha expirado sin encontrar un propagador elegible. Si `stale-action deny-new-clients` está activo (por defecto), se rechazan limpiamente las nuevas conexiones de clientes locales con un aviso fatal antes del registro (`HOOKTYPE_PRE_LOCAL_CONNECT`). Los clientes existentes y los enlaces S2S nunca se desconectan.
+
+**Invariantes Fundamentales:**
+1.  **Invariante Estricta de Confianza:** El tiempo transcurrido *nunca* convierte el estado anunciado `HEL 4 -` en `HEL 4 ?` ni relaja las reglas de confianza. Un nodo aislado con política obsoleta jamás aceptará automáticamente snapshots por etapas de vecinos no autorizados.
+2.  **Recuperación Automática:** En cuanto un propagador elegible se conecta y confirma `HEL 4`, el nodo transiciona de inmediato a `OK`, emite el evento `UDB_SYNC_RECOVERED` y reanuda la admisión de nuevos clientes sin requerir reinicio del IRCd.
+3.  **Override Administrativo:** Los administradores pueden recuperar un nodo en estado stale actualizando `propagator "<nuevo-servidor>";` en `unrealircd.conf` y ejecutando `/REHASH`. El override local tiene precedencia sobre políticas obsoletas en base de datos.
+
+### 2.5 Comandos de Diagnóstico y Estado para Operadores
+Los operadores pueden consultar en tiempo real el estado de sincronización mediante `/UDB STATUS` o `/DBQ STATUS` (solo opers):
+```text
+/UDB STATUS
+```
+Salida:
+```text
+:server 339 oper :UDB synchronization: OK | DEGRADED | STALE
+:server 339 oper :Selected propagator: <server> | none
+:server 339 oper :Advertised state: HEL 4 <server|?|->
+:server 339 oper :Policy source: local | S | none
+:server 339 oper :Policy: <list>
+:server 339 oper :Time without propagator: <seconds>
+:server 339 oper :New local clients: ALLOWED | DENIED
+:server 339 oper :Last successful synchronization: <timestamp> | none
+```
+
+### 2.6 Redacción De Secretos En DBQ
 
 `DBQ` requiere privilegios de oper y nunca devuelve el valor de `pass`,
 `challenge` ni `encryption_key`. Las consultas directas y los listados de hijos

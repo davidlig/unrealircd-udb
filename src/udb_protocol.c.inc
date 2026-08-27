@@ -195,16 +195,50 @@ CMD_FUNC(cmd_db)
 			udb_sync_hello_ack(client);
 			return;
 		}
-		const char *prop = (parc >= 5 && parv[4]) ? parv[4] : "?";
+		if (parc < 5 || !parv[4] || !*parv[4])
+		{
+			udb_protocol_params_error(client, "HEL");
+			return;
+		}
+		const char *prop = parv[4];
+		int new_auth = 0;
+		if (!strcmp(prop, "?"))
+		{
+			new_auth = 1;
+		}
+		else if (!strcmp(prop, "-"))
+		{
+			new_auth = 0;
+		}
+		else if (udb_server_name_valid(prop))
+		{
+			new_auth = !strcasecmp(prop, me.name);
+		}
+		else
+		{
+			udb_protocol_params_error(client, "HEL");
+			return;
+		}
+
 		UdbHelloPeer *hello_peer = udb_hello_peer(client, 1);
-		hello_peer->authorizes_us =
-			(!strcmp(prop, "?") || udb_server_name_valid(prop)) && (!strcasecmp(prop, me.name) || !strcmp(prop, "?"));
+		int dynamic_transition = (hello_peer->state == UDB_HEL_CONFIRMED && hello_peer->auth_received &&
+								  !hello_peer->authorizes_us && new_auth);
+		hello_peer->authorizes_us = new_auth;
+		hello_peer->auth_received = 1;
+
 		udb_log(ULOG_INFO, "UDB_HEL_AUTHORIZATION", client,
-				"Direct peer selected $propagator as its staged-sync source", log_data_string("propagator", prop));
+				"Direct peer selected $propagator as its staged-sync source (authorizes_us=$auth)",
+				log_data_string("propagator", prop), log_data_integer("auth", new_auth));
+
 		/* Each side sends its own request, so only an ACK confirms outbound data. */
 		if (!udb_has_hello(client))
 			udb_sync_hello_start(client);
 		udb_send_db_to_one(client, ":%s DB %s HEL 4 ACK", me.id, client->id);
+
+		if (dynamic_transition)
+		{
+			udb_sync_to_server(client);
+		}
 		return;
 	}
 
@@ -525,7 +559,9 @@ static int udb_protocol_init(ModuleInfo *modinfo)
 	HookAdd(modinfo->handle, HOOKTYPE_SERVER_SYNC, 0, udb_hook_server_sync);
 	HookAdd(modinfo->handle, HOOKTYPE_REHASH, 0, udb_config_rehash);
 	HookAdd(modinfo->handle, HOOKTYPE_POSTCONF, 0, udb_config_postconf);
+	HookAdd(modinfo->handle, HOOKTYPE_REHASH_COMPLETE, 0, udb_config_postconf);
 	HookAdd(modinfo->handle, HOOKTYPE_SERVER_QUIT, 0, udb_hook_server_quit);
+	HookAdd(modinfo->handle, HOOKTYPE_PRE_LOCAL_CONNECT, -100, udb_hook_stale_pre_connect);
 	EventAdd(modinfo->handle, "udb_sync_timeout", udb_sync_timeout_event, NULL, 1000, 0);
 
 	return 0;

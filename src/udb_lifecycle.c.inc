@@ -247,6 +247,8 @@ static int udb_engine_init(void)
 		udb_engine_cleanup(udb_ctx);
 		return 0;
 	}
+	udb_last_successful_sync = time(NULL);
+	udb_sync_status_refresh();
 	return 1;
 }
 
@@ -369,6 +371,8 @@ static int udb_module_init(ModuleInfo *modinfo)
 
 static int udb_module_load(ModuleInfo *modinfo)
 {
+	Client *server;
+
 	if (udb_engine_init() == 0)
 	{
 		config_error("[UDB] Failed to initialize database engine");
@@ -378,6 +382,13 @@ static int udb_module_load(ModuleInfo *modinfo)
 	udb_nicks_load(modinfo);
 	udb_channels_load(modinfo);
 	udb_log(ULOG_INFO, "UDB_LOADED", NULL, "Unreal Database System v" UDB_VERSION " loaded successfully");
+
+	list_for_each_entry(server, &server_list, special_node)
+	{
+		if (IsServer(server) && MyConnect(server) && !IsMe(server))
+			udb_sync_hello_start(server);
+	}
+
 	return MOD_SUCCESS;
 }
 

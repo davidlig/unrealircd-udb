@@ -152,6 +152,19 @@ typedef struct UdbPasswordFailure
 	time_t since;
 } UdbPasswordFailure;
 
+typedef enum UdbSyncStatus
+{
+	UDB_SYNC_OK = 0,
+	UDB_SYNC_DEGRADED,
+	UDB_SYNC_STALE
+} UdbSyncStatus;
+
+typedef enum UdbStaleAction
+{
+	UDB_STALE_ACTION_DENY_NEW_CLIENTS = 0,
+	UDB_STALE_ACTION_WARN
+} UdbStaleAction;
+
 typedef struct UdbConfig
 {
 	char *db_directory;
@@ -165,6 +178,8 @@ typedef struct UdbConfig
 	size_t max_staged_bytes;
 	int sync_inactivity_timeout;
 	int sync_absolute_timeout;
+	int stale_timeout;
+	UdbStaleAction stale_action;
 } UdbConfig;
 
 typedef struct UdbContext
@@ -192,6 +207,9 @@ typedef struct UdbContext
 
 static UdbContext *udb_ctx = NULL;
 static UdbPasswordFailure udb_password_failures[UDB_PASSWORD_FAILURE_SLOTS];
+static UdbSyncStatus udb_sync_status = UDB_SYNC_OK;
+static time_t udb_degraded_since = 0;
+static time_t udb_last_successful_sync = 0;
 
 static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs);
 static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type);
@@ -267,7 +285,7 @@ static int udb_has_hello(Client *server);
 static int udb_has_staged_sync(Client *server);
 static int udb_peer_authorizes_us(Client *server);
 static int udb_sync_hello_start(Client *server);
-static int udb_sync_hello_ack(Client *server);
+static void udb_sync_hello_ack(Client *server);
 static void udb_sync_abort(UdbBlock *block, const char *reason);
 static int udb_sync_begin(UdbBlock *block, Client *peer, const char *txid);
 static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid, const char *path, const char *data);
@@ -282,10 +300,14 @@ static int udb_send_db_to_one(Client *to, const char *fmt, ...) __attribute__((f
 static int udb_is_propagator(UdbContext *ctx, Client *server);
 static int udb_server_name_valid(const char *srv);
 static int udb_propagator_list_valid(const char *value);
+static const char *udb_propagator_policy(UdbContext *ctx);
 static int udb_select_propagator(UdbContext *ctx, int require_hello, UdbPropagatorSelection *selected);
 static int udb_propagator_policy_present(UdbContext *ctx);
 static void udb_propagator_policy_changed(UdbContext *ctx);
 static void udb_sync_hello_refresh_all(void);
+static void udb_sync_status_refresh(void);
+static int udb_hook_stale_pre_connect(Client *client);
+static void udb_query_send_status(Client *client);
 static int udb_send_db_to_confirmed_servers(Client *except, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static int udb_sendto_confirmed_servers(Client *except, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void udb_protocol_params_error(Client *client, const char *subcmd);

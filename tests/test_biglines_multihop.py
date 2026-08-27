@@ -124,20 +124,22 @@ def stop(process):
 
 
 class MockPropagator:
-    def __init__(self, host, port, target_sid, link_password):
-        self.sid = SERVICES_SID
+    def __init__(self, host, port, target_sid, link_password, name=SERVICES_NAME, sid=SERVICES_SID, propagator_advertised=None):
+        self.name = name
+        self.sid = sid
         self.target_sid = target_sid
         self.sock = socket.create_connection((host, port), timeout=5)
         self.sock.settimeout(0.25)
         self.lines = []
         self.buffer = ""
         self.send(f"PASS :{link_password}")
-        self.send(f"PROTOCTL EAUTH={SERVICES_NAME}")
+        self.send(f"PROTOCTL EAUTH={self.name}")
         self.send("PROTOCTL NOQUIT NICKv2 SJOIN SJOIN2 UMODE2 SJ3 BIGLINES SID=" + self.sid)
-        self.send(f"SERVER {SERVICES_NAME} 1 :UDB root propagator")
+        self.send(f"SERVER {self.name} 1 :UDB root propagator")
         self.wait_for(lambda line: " 001 " in line or " EOS" in line or "NETINFO" in line, "link handshake")
         self.send("EOS")
-        self.send(f"DB {self.target_sid} HEL 4")
+        prop = propagator_advertised if propagator_advertised is not None else self.name
+        self.send(f"DB {self.target_sid} HEL 4 {prop}")
         self.wait_for(lambda line: " DB " in line and " HEL 4 " in line, "UDB HEL response")
         self.send(f"DB {self.target_sid} HEL 4 ACK")
 
@@ -293,18 +295,15 @@ def run_tests(ircd_bin, keep=False):
         print("PASS: Multi-hop live mutations of sizes 510B, 1024B, 4000B, 4096B, and ~8212B persisted identically on B and C")
 
         # -------------------------------------------------------------
-        # Restart B and C to verify transactional load and invariant checksums
+        # Restart C to verify transactional load and invariant checksums
         # -------------------------------------------------------------
         proc_c = subprocess.Popen(bwrap_command(c_dir, ircd_bin, c_conf),
                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         processes.append(proc_c)
-        proc_b = subprocess.Popen(bwrap_command(b_dir, ircd_bin, b_conf),
-                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        processes.append(proc_b)
-        time.sleep(1.5)
+        time.sleep(1.0)
 
-        # Query C directly via S2S staged export
-        prop_c = MockPropagator("127.0.0.1", c_ports[1], "0C1", link_password)
+        # Query C directly via S2S staged export from simulated propagator udb-b.test
+        prop_c = MockPropagator("127.0.0.1", c_ports[1], "0C1", link_password, name="udb-b.test", sid="0B1", propagator_advertised="udb-c.test")
         prop_c.send("DB 0C1 RES C")
         prop_c.wait_for(lambda l: " DB " in l and " BEGIN C " in l, "BEGIN C")
         prop_c.wait_for(lambda l: " DB " in l and " END C " in l, "END C")

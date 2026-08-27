@@ -15,6 +15,110 @@ static int udb_query_is_secret(const UdbRecord *rec)
 		   (!strcmp(rec->key, NKEY_PASS) || !strcmp(rec->key, NKEY_CHALLENGE) || !strcmp(rec->key, SKEY_CRYPT_KEY));
 }
 
+static void udb_query_send_status(Client *client)
+{
+	UdbContext *ctx = udb_ctx;
+	UdbPropagatorSelection selected;
+	int has_selected = ctx ? udb_select_propagator(ctx, 1, &selected) : 0;
+	int policy_present = udb_propagator_policy_present(ctx);
+	const char *sync_status_str;
+	const char *selected_str;
+	const char *advertised_str;
+	const char *policy_source_str;
+	const char *policy_str = udb_propagator_policy(ctx);
+	const char *clients_str;
+	unsigned long time_without_propagator = 0;
+	time_t now = time(NULL);
+
+	switch (udb_sync_status)
+	{
+	case UDB_SYNC_OK:
+		sync_status_str = "OK";
+		break;
+	case UDB_SYNC_DEGRADED:
+		sync_status_str = "DEGRADED";
+		break;
+	case UDB_SYNC_STALE:
+		sync_status_str = "STALE";
+		break;
+	default:
+		sync_status_str = "UNKNOWN";
+		break;
+	}
+
+	if (has_selected)
+		selected_str = selected.name;
+	else
+		selected_str = "none";
+
+	if (has_selected)
+		advertised_str = selected.name;
+	else if (policy_present)
+		advertised_str = "-";
+	else
+		advertised_str = "?";
+
+	if (udb_cfg && udb_cfg->propagator && *udb_cfg->propagator)
+		policy_source_str = "local";
+	else if (ctx && ctx->propagator_setting && *ctx->propagator_setting)
+		policy_source_str = "S";
+	else
+		policy_source_str = "none";
+
+	if (!policy_str || !*policy_str)
+		policy_str = "none";
+
+	if (udb_degraded_since > 0 && now >= udb_degraded_since)
+		time_without_propagator = (unsigned long)(now - udb_degraded_since);
+	else
+		time_without_propagator = 0;
+
+	if (udb_sync_status == UDB_SYNC_STALE && udb_cfg && udb_cfg->stale_action == UDB_STALE_ACTION_DENY_NEW_CLIENTS)
+		clients_str = "DENIED";
+	else
+		clients_str = "ALLOWED";
+
+	sendto_one(client, NULL, ":%s 339 %s :UDB synchronization: %s", me.name, client->name, sync_status_str);
+	sendto_one(client, NULL, ":%s 339 %s :Selected propagator: %s", me.name, client->name, selected_str);
+	sendto_one(client, NULL, ":%s 339 %s :Advertised state: HEL 4 %s", me.name, client->name, advertised_str);
+	sendto_one(client, NULL, ":%s 339 %s :Policy source: %s", me.name, client->name, policy_source_str);
+	sendto_one(client, NULL, ":%s 339 %s :Policy: %s", me.name, client->name, policy_str);
+	sendto_one(client, NULL, ":%s 339 %s :Time without propagator: %lu", me.name, client->name,
+			   time_without_propagator);
+	sendto_one(client, NULL, ":%s 339 %s :New local clients: %s", me.name, client->name, clients_str);
+
+	if (udb_last_successful_sync > 0)
+	{
+		char timebuf[64];
+		snprintf(timebuf, sizeof(timebuf), "%lu", (unsigned long)udb_last_successful_sync);
+		sendto_one(client, NULL, ":%s 339 %s :Last successful synchronization: %s", me.name, client->name, timebuf);
+	}
+	else
+	{
+		sendto_one(client, NULL, ":%s 339 %s :Last successful synchronization: none", me.name, client->name);
+	}
+}
+
+CMD_FUNC(cmd_udb)
+{
+	if (!IsUser(client) && !IsServer(client))
+		return;
+
+	if (IsUser(client) && !IsOper(client))
+	{
+		sendnumeric(client, ERR_NOPRIVILEGES);
+		return;
+	}
+
+	if (parc < 2 || !strcasecmp(parv[1], "STATUS"))
+	{
+		udb_query_send_status(client);
+		return;
+	}
+
+	sendto_one(client, NULL, ":%s 339 %s :Syntax: /UDB STATUS", me.name, client->name);
+}
+
 CMD_FUNC(cmd_dbq)
 {
 	char *query_str = NULL;
@@ -54,6 +158,13 @@ CMD_FUNC(cmd_dbq)
 	else
 	{
 		safe_strdup(query_str, parv[1]);
+	}
+
+	if (!strcasecmp(query_str, "STATUS"))
+	{
+		udb_query_send_status(client);
+		safe_free(query_str);
+		return;
 	}
 
 	block = udb_block_by_letter(udb_ctx, query_str[0]);
@@ -139,4 +250,5 @@ CMD_FUNC(cmd_dbq)
 static void udb_query_init(ModuleInfo *modinfo)
 {
 	CommandAdd(modinfo->handle, "DBQ", cmd_dbq, MAXPARA, CMD_USER | CMD_SERVER);
+	CommandAdd(modinfo->handle, "UDB", cmd_udb, MAXPARA, CMD_USER | CMD_SERVER);
 }

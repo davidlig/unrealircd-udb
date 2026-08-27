@@ -137,7 +137,7 @@ class MockPeer:
         self.send(f"SERVER {self.name} 1 :UDB peer {self.name}")
         self.wait_for(lambda line: " 001 " in line or " EOS" in line or "NETINFO" in line, f"{self.name} link handshake")
         self.send("EOS")
-        self.send(f"DB {self.ircd_sid} HEL 4")
+        self.send(f"DB {self.ircd_sid} HEL 4 ?")
         self.wait_for(lambda line: " DB " in line and " HEL 4 " in line, f"{self.name} HEL response")
         self.send(f"DB {self.ircd_sid} HEL 4 ACK")
 
@@ -180,7 +180,7 @@ class MockPeer:
                 if predicate(l):
                     return l
             self.receive(deadline)
-        raise AssertionError(f"Timeout waiting for {description}")
+        raise AssertionError(f"Timeout waiting for {description}; lines={self.lines[start_idx:]}")
 
     def close(self):
         try:

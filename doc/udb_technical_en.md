@@ -40,6 +40,8 @@ davidlig::oper netadmin
     Allowed range: `1` to `10000000` (default `500000`).
 *   `max-global-clones <number>;`: Global limit of connections/clones per IP.
 *   `password-flood <attempts>:<seconds>;`: Password brute-force flood protection (default `5:60`).
+*   `stale-timeout <seconds>;`: Grace period before transitioning from `DEGRADED` to `STALE` when a policy is configured or present from block S but no eligible propagator candidate is available. Allowed range: `1` to `604800` seconds (default `300`).
+*   `stale-action <warn | deny-new-clients>;`: Operational mitigation policy applied upon entering `STALE` status. `deny-new-clients` (default) cleanly rejects new local user connections before registration (`HOOKTYPE_PRE_LOCAL_CONNECT`) while leaving existing clients and S2S links fully operational; `warn` emits diagnostic warning logs without restricting new client connections.
 
 **Transactional Loader:** During startup, UDB reads each block file into a staging
 candidate tree. The active in-memory database is swapped atomically only after the
@@ -389,7 +391,35 @@ database directory.
 *   `5`: UDB_ERR_NO_SYNC (No synchronization was requested)
 *   `6`: UDB_ERR_FORBIDDEN (Action denied due to permissions / non-propagator)
 
-### 2.4 DBQ Secret Redaction
+### 2.4 Operational Health & State Machine (OK / DEGRADED / STALE)
+UDB features a deterministic health state machine to manage node reliability:
+*   **`OK`**: An eligible upstream propagator candidate is directly connected and `HEL 4`-confirmed (or the local node itself is the designated authoritative propagator, or no policy is configured). Full database synchronization and client operations proceed normally.
+*   **`DEGRADED`**: A propagator policy is present (via local config or block `S`), but no eligible candidate is currently usable. The node operates within the configurable grace period (`stale-timeout`, default 300s). Live hop-by-hop mutations (`INS`/`DEL`/`DRP`/`OPT`) continue to propagate normally, existing clients remain connected, and new local clients are accepted.
+*   **`STALE`**: The grace period has expired without an eligible propagator. If `stale-action deny-new-clients` is active (default), new incoming local client connections are cleanly rejected with a fatal error notice before registration (`HOOKTYPE_PRE_LOCAL_CONNECT`). Existing clients and S2S links are strictly never disconnected.
+
+**Key Invariants:**
+1.  **Strict Trust Invariant:** Elapsed time *never* converts advertised `HEL 4 -` into `HEL 4 ?` or relaxes trust rules. An isolated node with an obsolete policy will never automatically accept staged snapshots from unauthorized neighbors.
+2.  **Automatic Recovery:** As soon as an eligible propagator links and confirms `HEL 4`, the node immediately transitions back to `OK`, emits log notice `UDB_SYNC_RECOVERED`, and permits new client connections without requiring an IRCd restart.
+3.  **Administrative Override:** Administrators can recover a stale node by updating `propagator "<new-server>";` in `unrealircd.conf` and issuing `/REHASH`. The local config override takes precedence over obsolete database policies.
+
+### 2.5 Diagnostic & Oper Status Commands
+Operators can query live synchronization health in real time via `/UDB STATUS` or `/DBQ STATUS` (oper only):
+```text
+/UDB STATUS
+```
+Output:
+```text
+:server 339 oper :UDB synchronization: OK | DEGRADED | STALE
+:server 339 oper :Selected propagator: <server> | none
+:server 339 oper :Advertised state: HEL 4 <server|?|->
+:server 339 oper :Policy source: local | S | none
+:server 339 oper :Policy: <list>
+:server 339 oper :Time without propagator: <seconds>
+:server 339 oper :New local clients: ALLOWED | DENIED
+:server 339 oper :Last successful synchronization: <timestamp> | none
+```
+
+### 2.6 DBQ Secret Redaction
 
 `DBQ` requires oper privileges and never returns the value of `pass`,
 `challenge`, or `encryption_key`. Direct queries and child listings show

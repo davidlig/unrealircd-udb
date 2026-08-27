@@ -124,6 +124,25 @@ static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
 				errors++;
 			}
 		}
+		else if (!strcmp(cep->name, "stale-timeout"))
+		{
+			unsigned int val;
+			if (!cep->value || !udb_parse_uint_strict(cep->value, &val, 1, 604800))
+			{
+				config_error("%s:%i: udb::stale-timeout must be between 1 and 604800 seconds (default 300)",
+							 cep->file->filename, cep->line_number);
+				errors++;
+			}
+		}
+		else if (!strcmp(cep->name, "stale-action"))
+		{
+			if (!cep->value || (strcmp(cep->value, "warn") && strcmp(cep->value, "deny-new-clients")))
+			{
+				config_error("%s:%i: udb::stale-action must be 'warn' or 'deny-new-clients'", cep->file->filename,
+							 cep->line_number);
+				errors++;
+			}
+		}
 		else
 		{
 			config_error("%s:%i: unknown directive udb::%s", cep->file->filename, cep->line_number, cep->name);
@@ -213,6 +232,19 @@ static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
 			if (udb_parse_uint_strict(cep->value, &val, 1, 86400))
 				udb_cfg->sync_absolute_timeout = (int)val;
 		}
+		else if (!strcmp(cep->name, "stale-timeout"))
+		{
+			unsigned int val = 0;
+			if (udb_parse_uint_strict(cep->value, &val, 1, 604800))
+				udb_cfg->stale_timeout = (int)val;
+		}
+		else if (!strcmp(cep->name, "stale-action"))
+		{
+			if (!strcmp(cep->value, "warn"))
+				udb_cfg->stale_action = UDB_STALE_ACTION_WARN;
+			else if (!strcmp(cep->value, "deny-new-clients"))
+				udb_cfg->stale_action = UDB_STALE_ACTION_DENY_NEW_CLIENTS;
+		}
 		else if (!strcmp(cep->name, "password-flood"))
 		{
 			udb_flood_valid(cep->value, &udb_cfg->flood_attempts, &udb_cfg->flood_period);
@@ -231,6 +263,8 @@ static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
 		udb_cfg->sync_inactivity_timeout = UDB_SYNC_INACTIVITY_TIMEOUT;
 	if (udb_cfg->sync_absolute_timeout == 0)
 		udb_cfg->sync_absolute_timeout = UDB_SYNC_ABSOLUTE_TIMEOUT;
+	if (udb_cfg->stale_timeout == 0)
+		udb_cfg->stale_timeout = 300;
 	if (udb_cfg->flood_attempts == 0)
 		udb_cfg->flood_attempts = 5;
 	if (udb_cfg->flood_period == 0)

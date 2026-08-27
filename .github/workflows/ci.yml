@@ -56,7 +56,7 @@ jobs:
       - name: Verify Bundle Integrity
         run: |
           python3 scripts/bundle.py
-          git diff --exit-code dist/udb.c
+          git diff --exit-code -- dist/udb.c modules.list
 
       - name: Run Core Test Suites
         run: |
@@ -68,6 +68,7 @@ jobs:
           python3 tests/test_size_invariants.py
           python3 tests/test_spamfilter_limits.py
           python3 tests/test_propagator_validation.py
+          python3 tests/test_convergence_degraded_stale.py
 
       - name: Run Integration & Multi-Hop Test Suites
         run: |
@@ -138,6 +139,7 @@ jobs:
           python3 tests/test_size_invariants.py
           python3 tests/test_spamfilter_limits.py
           python3 tests/test_propagator_validation.py
+          python3 tests/test_convergence_degraded_stale.py
           python3 tests/test_multihop_mutations.py
           python3 tests/test_propagator_failover.py
           python3 tests/test_propagator_non_adjacent.py

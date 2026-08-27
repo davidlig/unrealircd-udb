@@ -19,6 +19,7 @@ struct UdbHelloPeer
 	time_t deadline;
 	int state;
 	int authorizes_us;
+	int auth_received;
 	UdbHelloPeer *next;
 };
 
@@ -91,20 +92,91 @@ static int udb_sync_hello_start(Client *server)
 	return 1;
 }
 
-static int udb_sync_hello_ack(Client *server)
+static void udb_sync_hello_ack(Client *server)
 {
 	UdbHelloPeer *peer = udb_hello_peer(server, 1);
 
-	if (peer->state != UDB_HEL_WAITING)
-		return 0;
-	peer->state = UDB_HEL_CONFIRMED;
-	udb_log(ULOG_INFO, "UDB_HEL_CONFIRMED", server, "UDB HEL 4 capability confirmed for directly linked server");
-	/* HEL confirmation can make this peer the first usable policy candidate.
-	 * Refresh every direct peer so old authorizes_us decisions cannot survive a
-	 * deterministic failover or recovery. */
-	udb_sync_hello_refresh_all();
-	udb_sync_to_server(server);
-	return 1;
+	if (peer->state != UDB_HEL_CONFIRMED)
+	{
+		peer->state = UDB_HEL_CONFIRMED;
+		udb_log(ULOG_INFO, "UDB_HEL_CONFIRMED", server, "UDB HEL 4 capability confirmed for directly linked server");
+		udb_propagator_policy_changed(udb_ctx);
+		if (!peer->auth_received || peer->authorizes_us)
+			udb_sync_to_server(server);
+	}
+}
+
+static void udb_sync_status_refresh(void)
+{
+	UdbContext *ctx = udb_ctx;
+	int policy_present = udb_propagator_policy_present(ctx);
+	UdbPropagatorSelection selected;
+	int has_selected = ctx ? udb_select_propagator(ctx, 1, &selected) : 0;
+	time_t now = time(NULL);
+	int timeout = (udb_cfg && udb_cfg->stale_timeout > 0) ? udb_cfg->stale_timeout : 300;
+	UdbStaleAction action = udb_cfg ? udb_cfg->stale_action : UDB_STALE_ACTION_DENY_NEW_CLIENTS;
+
+	if (!policy_present || has_selected)
+	{
+		/* We have an eligible propagator or we have no policy (bootstrap / standalone) */
+		if (udb_sync_status != UDB_SYNC_OK)
+		{
+			const char *prop_name = has_selected ? selected.name : "none";
+			udb_log(ULOG_INFO, "UDB_SYNC_RECOVERED", NULL,
+					"UDB synchronization recovered. Selected propagator: $propagator",
+					log_data_string("propagator", prop_name));
+			udb_sync_status = UDB_SYNC_OK;
+		}
+		udb_degraded_since = 0;
+		return;
+	}
+
+	/* Policy is present, but no propagator is eligible (HEL 4 -) */
+	if (udb_degraded_since == 0)
+		udb_degraded_since = now;
+
+	time_t elapsed = (now >= udb_degraded_since) ? (now - udb_degraded_since) : 0;
+
+	if (elapsed < timeout)
+	{
+		if (udb_sync_status != UDB_SYNC_DEGRADED)
+		{
+			const char *source = (udb_cfg && udb_cfg->propagator && *udb_cfg->propagator) ? "local" : "S";
+			const char *policy = udb_propagator_policy(ctx);
+			udb_log(ULOG_WARNING, "UDB_SYNC_DEGRADED", NULL,
+					"No eligible propagator. Database may become stale. Policy source: $source, Policy: $policy",
+					log_data_string("source", source), log_data_string("policy", policy ? policy : "none"));
+			udb_sync_status = UDB_SYNC_DEGRADED;
+		}
+	}
+	else
+	{
+		if (udb_sync_status != UDB_SYNC_STALE)
+		{
+			const char *action_str = (action == UDB_STALE_ACTION_WARN) ? "warn" : "deny-new-clients";
+			udb_log(
+				ULOG_ERROR, "UDB_SYNC_STALE", NULL,
+				"UDB synchronization is stale ($seconds seconds without eligible propagator). Stale action: $action",
+				log_data_integer("seconds", (int)elapsed), log_data_string("action", action_str));
+			udb_sync_status = UDB_SYNC_STALE;
+		}
+	}
+}
+
+static int udb_hook_stale_pre_connect(Client *client)
+{
+	if (!client || !MyConnect(client) || IsServer(client))
+		return HOOK_CONTINUE;
+
+	if (udb_sync_status == UDB_SYNC_STALE && udb_cfg && udb_cfg->stale_action == UDB_STALE_ACTION_DENY_NEW_CLIENTS)
+	{
+		udb_log(ULOG_WARNING, "UDB_STALE_DENY_CLIENT", client,
+				"Rejecting new local client connection due to stale UDB synchronization");
+		exit_client(client, NULL,
+					"UDB synchronization unavailable; this server is temporarily not accepting new connections");
+		return HOOK_DENY;
+	}
+	return HOOK_CONTINUE;
 }
 
 static void udb_sync_hello_refresh_all(void)
@@ -141,6 +213,12 @@ static void udb_propagator_policy_changed(UdbContext *ctx)
 
 	if (!ctx)
 		return;
+	if (!udb_propagator_policy_present(ctx))
+	{
+		udb_sync_hello_refresh_all();
+		udb_sync_status_refresh();
+		return;
+	}
 	if (udb_select_propagator(ctx, 1, &selected) && !selected.is_local)
 		peer = selected.peer;
 	for (block = ctx->block_list; block; block = block->next)
@@ -154,6 +232,7 @@ static void udb_propagator_policy_changed(UdbContext *ctx)
 			block->syncing_from = NULL;
 	}
 	udb_sync_hello_refresh_all();
+	udb_sync_status_refresh();
 }
 
 static int udb_sync_begin(UdbBlock *block, Client *peer, const char *txid)
@@ -467,6 +546,7 @@ EVENT(udb_sync_timeout_event)
 			}
 		}
 	}
+	udb_sync_status_refresh();
 }
 
 static void udb_sync_server_quit(Client *client)
