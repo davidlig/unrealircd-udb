@@ -63,20 +63,20 @@ static int udb_peer_authorizes_us(Client *server)
 	return udb_has_hello(server) && peer->authorizes_us;
 }
 
-static void udb_sync_hello_start(Client *server)
+static int udb_sync_hello_start(Client *server)
 {
 	UdbHelloPeer *peer;
 	const char *propagator;
 
 	if (!server || !IsServer(server) || !MyConnect(server))
-		return;
+		return 0;
 	peer = udb_hello_peer(server, 1);
 	if (peer->state)
-		return;
+		return 0;
 	peer->state = UDB_HEL_WAITING;
 	peer->deadline = time(NULL) + UDB_SYNC_TIMEOUT;
 	propagator = udb_selected_propagator(udb_ctx);
-	udb_send_db_to_one(server, ":%s DB %s HEL 4 %s", me.id, server->id, propagator ? propagator : "?");
+	return udb_send_db_to_one(server, ":%s DB %s HEL 4 %s", me.id, server->id, propagator ? propagator : "?");
 }
 
 static int udb_sync_hello_ack(Client *server)
@@ -108,14 +108,10 @@ static int udb_sync_begin(UdbBlock *block, Client *peer, const char *txid)
 	int abs_to =
 		(udb_cfg && udb_cfg->sync_absolute_timeout) ? udb_cfg->sync_absolute_timeout : UDB_SYNC_ABSOLUTE_TIMEOUT;
 
-	if (!block || !peer || !txid || !*txid || strlen(txid) >= sizeof(session->txid))
+	if (!block || !peer || !txid || !*txid)
 		return 0;
 	if (block->session)
-	{
-		if (block->session->peer == peer)
-			udb_sync_abort(block, "duplicate BEGIN");
-		return 0;
-	}
+		udb_sync_abort(block, "staged sync interrupted by new transaction");
 	session = safe_alloc(sizeof(*session));
 	session->peer = peer;
 	strlcpy(session->txid, txid, sizeof(session->txid));
@@ -159,6 +155,11 @@ static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid, const c
 		udb_sync_abort(block, "absolute sync timeout exceeded");
 		return UDB_ERR_PARAMS;
 	}
+	if (!udb_record_fits_limits(path, data))
+	{
+		udb_sync_abort(block, "PUT record exceeds limits");
+		return UDB_ERR_PARAMS;
+	}
 	session->received_puts++;
 	size_t payload_len = (path ? strlen(path) : 0) + (data ? strlen(data) : 0);
 	session->received_bytes += payload_len;
@@ -167,8 +168,8 @@ static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid, const c
 		udb_sync_abort(block, "staged byte limit exceeded");
 		return UDB_ERR_PARAMS;
 	}
-	line = safe_alloc(UDB_RECORD_LINE_MAX);
-	if (snprintf(line, UDB_RECORD_LINE_MAX, "%s %s", path ? path : "", data ? data : "") >= (int)UDB_RECORD_LINE_MAX)
+	line = safe_alloc(UDB_RECORD_LINE_MAX + 2);
+	if (snprintf(line, UDB_RECORD_LINE_MAX + 2, "%s %s", path ? path : "", data ? data : "") >= (int)UDB_RECORD_LINE_MAX)
 	{
 		safe_free(line);
 		udb_sync_abort(block, "invalid PUT payload");
@@ -230,32 +231,50 @@ static void udb_sync_ack(Client *peer, const char *block)
 static int udb_sync_send_tree(Client *server, UdbRecord *rec, int depth, char *pathbuf, size_t pathlen, char letter,
 							  const char *txid)
 {
-	size_t old_len;
+	size_t orig_len;
 	UdbRecord *child;
-	char encoded_key[UDB_COMPONENT_MAX];
+	char encoded_key[UDB_COMPONENT_ENCODED_MAX + 1];
 
 	if (!rec || !rec->key)
 		return 1;
-	old_len = strlen(pathbuf);
+	orig_len = strlen(pathbuf);
 	if (!udb_path_encode_component(rec->key, encoded_key, sizeof(encoded_key)))
 		return 0;
 	size_t enc_len = strlen(encoded_key);
 	if (depth > 0)
 	{
-		if (old_len + 2 + enc_len >= pathlen)
+		if (orig_len + 2 + enc_len >= pathlen)
 			return 0;
-		memcpy(pathbuf + old_len, "::", 2);
-		old_len += 2;
+		strlcat(pathbuf, "::", pathlen);
 	}
 	else
 	{
 		if (enc_len >= pathlen)
 			return 0;
 	}
-	memcpy(pathbuf + old_len, encoded_key, enc_len + 1);
+	strlcat(pathbuf, encoded_key, pathlen);
 	if (rec->data_str || rec->data_num > 0 || !rec->child)
 	{
+		char numbuf[32];
+		const char *val_str;
 		int ok;
+
+		if (rec->data_str)
+		{
+			val_str = rec->data_str;
+		}
+		else
+		{
+			snprintf(numbuf, sizeof(numbuf), "*%lu", rec->data_num);
+			val_str = numbuf;
+		}
+
+		if (!udb_record_fits_limits(pathbuf, val_str))
+		{
+			pathbuf[orig_len] = '\0';
+			return 0;
+		}
+
 		if (rec->data_str)
 			ok = udb_send_db_to_one(server, ":%s DB %s PUT %c %s %s :%s", me.id, server->id, letter, txid, pathbuf,
 									rec->data_str);
@@ -264,7 +283,7 @@ static int udb_sync_send_tree(Client *server, UdbRecord *rec, int depth, char *p
 									rec->data_num);
 		if (!ok)
 		{
-			pathbuf[old_len] = '\0';
+			pathbuf[orig_len] = '\0';
 			return 0;
 		}
 	}
@@ -272,31 +291,31 @@ static int udb_sync_send_tree(Client *server, UdbRecord *rec, int depth, char *p
 	{
 		if (!udb_sync_send_tree(server, child, depth + 1, pathbuf, pathlen, letter, txid))
 		{
-			pathbuf[old_len] = '\0';
+			pathbuf[orig_len] = '\0';
 			return 0;
 		}
 	}
-	pathbuf[old_len] = '\0';
+	pathbuf[orig_len] = '\0';
 	return 1;
 }
 
-static void udb_sync_send_stage(Client *server, UdbBlock *block)
+static int udb_sync_send_stage(Client *server, UdbBlock *block)
 {
 	char txid[32];
-	char pathbuf[UDB_RECORD_PATH_MAX] = "";
+	char pathbuf[UDB_RECORD_PATH_MAX + 1] = "";
 	UdbRecord *rec;
 	int success = 1;
 
 	/* HEL confirms protocol support; snapshots require the selected data source. */
 	if (!udb_peer_authorizes_us(server) || !block)
-		return;
+		return 0;
 	snprintf(txid, sizeof(txid), "%08lx", ++udb_sync_txid);
 	if (!udb_send_db_to_one(server, ":%s DB %s BEGIN %c %s %08lX", me.id, server->id, block->letter, txid,
 							block->checksum))
 	{
 		udb_log(ULOG_ERROR, "UDB_SYNC_SEND_FAILED", server, "Failed to send staged sync BEGIN for block $block",
 				log_data_string("block", (char[]){block->letter, '\0'}));
-		return;
+		return 0;
 	}
 	if (block->tree)
 	{
@@ -315,15 +334,16 @@ static void udb_sync_send_stage(Client *server, UdbBlock *block)
 				"Failed to serialize/send tree records during staged sync for block $block, aborting transfer",
 				log_data_string("block", (char[]){block->letter, '\0'}));
 		udb_send_db_to_one(server, ":%s DB %s ERR PUT %d %c", me.id, server->id, UDB_ERR_FATAL, block->letter);
-		return;
+		return 0;
 	}
 	if (!udb_send_db_to_one(server, ":%s DB %s END %c %s %08lX", me.id, server->id, block->letter, txid,
 							block->checksum))
 	{
 		udb_log(ULOG_ERROR, "UDB_SYNC_SEND_FAILED", server, "Failed to send staged sync END for block $block",
 				log_data_string("block", (char[]){block->letter, '\0'}));
-		return;
+		return 0;
 	}
+	return 1;
 }
 
 EVENT(udb_sync_timeout_event)

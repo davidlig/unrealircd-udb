@@ -215,11 +215,26 @@ Detailed technical documentation is available in the `doc/` directory:
   closing, or rename removes the temporary file without changing the active
   database. A directory-sync failure is reported after the rename has occurred,
    so the replacement is visible but not confirmed crash-durable.
-- Persisted records with an empty `::` path component, an invalid path, or an
-  overlong line are logged and skipped; the rest of the block still loads.
+- UDB uses strict **fail-closed transactional loading**: any persisted record with
+  an invalid path, missing key, overlong field, or malformed/truncated line immediately
+  aborts block loading, rolls back candidate changes, and leaves the database uncorrupted.
+  No malformed or overlong records are tolerated or skipped.
 - Staged `END` digests must be complete, non-empty hexadecimal values that fit
   in `unsigned long`. Invalid or overflowing input aborts the staged tree and
   leaves the active snapshot unchanged.
+
+### Limits Hierarchy
+
+| Parameter | Limit (bytes) | Constant | Description / Formula |
+|---|---|---|---|
+| Max Path Length | 8,192 | `UDB_RECORD_PATH_MAX` | Maximum full path string length (`N::...`, `C::...`, `K::...`) |
+| Max Raw Component | 4,608 | `UDB_COMPONENT_RAW_MAX` | Maximum decoded component length (`4096 + 4` for `b64:` prefix) |
+| Max Encoded Component | 4,608 | `UDB_COMPONENT_ENCODED_MAX` | Maximum percent-encoded component length (`4102` for `b64%3A...`) |
+| Max Value Length | 4,096 | `UDB_RECORD_VALUE_MAX` | Maximum payload data string length (e.g. topic, vhost, reason) |
+| Max Line Length | 12,320 | `UDB_RECORD_LINE_MAX` | `PATH_MAX (8192) + VALUE_MAX (4096) + 32` bytes overhead |
+| Max S2S Frame | 16,384 | `UDB_S2S_LINE_MAX` | `MAXLINELENGTH` (UnrealIRCd server-to-server `BIGLINES` frame) |
+| S2S Overhead Buffer | 256 | `UDB_S2S_OVERHEAD_MAX` | S2S framing buffer (`:SID DB SID CMD ...`) |
+| Max Spamfilter Regex | 3,072 | `UDB_SPAMFILTER_PATTERN_MAX` | Decoded regex pattern max (`3072 B` -> `4096 B` Base64) |
 
 
 ---

@@ -21,12 +21,13 @@
 #define UDB_DEFAULT_DB_DIRECTORY PERMDATADIR
 #define UDB_BLOCK_PATH_MAX 1024
 #define UDB_RECORD_PATH_MAX 8192
-#define UDB_COMPONENT_RAW_MAX 4096
+#define UDB_COMPONENT_RAW_MAX 4608
 #define UDB_COMPONENT_ENCODED_MAX 4608
 #define UDB_COMPONENT_MAX UDB_COMPONENT_ENCODED_MAX
 #define UDB_RECORD_VALUE_MAX 4096
 #define UDB_RECORD_LINE_MAX (UDB_RECORD_PATH_MAX + UDB_RECORD_VALUE_MAX + 32)
 #define UDB_S2S_LINE_MAX MAXLINELENGTH
+#define UDB_S2S_OVERHEAD_MAX 256
 #define UDB_SYNC_INACTIVITY_TIMEOUT 60
 #define UDB_SYNC_ABSOLUTE_TIMEOUT 300
 #define UDB_SYNC_TIMEOUT UDB_SYNC_INACTIVITY_TIMEOUT
@@ -206,6 +207,7 @@ static void udb_block_reset(UdbContext *ctx, UdbBlock *block);
 static int udb_blocks_load_all(UdbContext *ctx);
 static int udb_blocks_save_all(UdbContext *ctx);
 static UdbBlock *udb_block_by_letter(UdbContext *ctx, char letter);
+static int udb_record_fits_limits(const char *path, const char *value);
 static int udb_path_encode_component(const char *raw, char *buf, size_t bufsz);
 static int udb_path_decode_component(const char *encoded, char *buf, size_t bufsz);
 static int udb_path_append(char *dst, size_t dst_size, size_t *used, const char *component);
@@ -250,12 +252,12 @@ static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSessi
 static void udb_sync_session_free(UdbBlock *block);
 static int udb_block_letter_to_index(char letter);
 
-static void udb_sync_to_server(Client *server);
+static int udb_sync_to_server(Client *server);
 static int udb_remote_wins_equal_timestamp(Client *server);
 static int udb_has_hello(Client *server);
 static int udb_has_staged_sync(Client *server);
 static int udb_peer_authorizes_us(Client *server);
-static void udb_sync_hello_start(Client *server);
+static int udb_sync_hello_start(Client *server);
 static int udb_sync_hello_ack(Client *server);
 static void udb_sync_abort(UdbBlock *block, const char *reason);
 static int udb_sync_begin(UdbBlock *block, Client *peer, const char *txid);
@@ -265,13 +267,13 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, const ch
 static void udb_sync_ack(Client *peer, const char *block);
 static int udb_sync_send_tree(Client *server, UdbRecord *rec, int depth, char *pathbuf, size_t pathlen, char letter,
 							  const char *txid);
-static void udb_sync_send_stage(Client *server, UdbBlock *block);
+static int udb_sync_send_stage(Client *server, UdbBlock *block);
 static void udb_sync_server_quit(Client *client);
 static int udb_is_propagator(UdbContext *ctx, Client *server);
 static const char *udb_selected_propagator(UdbContext *ctx);
 static int udb_send_db_to_one(Client *to, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static int udb_send_db_to_confirmed_servers(Client *except, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
-static void udb_sendto_confirmed_servers(Client *except, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+static int udb_sendto_confirmed_servers(Client *except, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void udb_protocol_params_error(Client *client, const char *subcmd);
 static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target, const char *path, const char *data,
 							 int is_for_me, int is_broadcast);
@@ -304,6 +306,7 @@ static void udb_config_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord 
 static void udb_config_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
 static void udb_lines_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new);
 static void udb_lines_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
+static int udb_spamfilter_pattern(const char *stored, char *pattern, size_t patternsz);
 static const char *udb_get_bot_nick(const char *service_key, int force_default);
 static const char *udb_get_bot_mask(const char *service_key, int force_default);
 static Client *udb_service_source(const char *service_key);

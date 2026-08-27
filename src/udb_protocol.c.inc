@@ -72,11 +72,12 @@ static int udb_send_db_to_confirmed_servers(Client *except, const char *fmt, ...
 	return 1;
 }
 
-static void udb_sendto_confirmed_servers(Client *except, const char *fmt, ...)
+static int udb_sendto_confirmed_servers(Client *except, const char *fmt, ...)
 {
 	char *line;
 	va_list args;
 	int n;
+	int sent = 0;
 
 	line = safe_alloc(UDB_S2S_LINE_MAX);
 	va_start(args, fmt);
@@ -91,7 +92,10 @@ static void udb_sendto_confirmed_servers(Client *except, const char *fmt, ...)
 			if (server == except || (except && server == except->direction))
 				continue;
 			if (IsServer(server) && MyConnect(server) && udb_has_hello(server))
+			{
 				sendto_one(server, NULL, "%s", line);
+				sent++;
+			}
 		}
 	}
 	else
@@ -99,8 +103,11 @@ static void udb_sendto_confirmed_servers(Client *except, const char *fmt, ...)
 		udb_log(ULOG_ERROR, "UDB_S2S_OVERSIZE_BROADCAST", except,
 				"Oversized broadcast S2S frame ($length bytes) discarded to prevent truncation",
 				log_data_integer("length", n));
+		safe_free(line);
+		return 0;
 	}
 	safe_free(line);
+	return 1;
 }
 
 static void udb_protocol_params_error(Client *client, const char *subcmd)
@@ -108,17 +115,19 @@ static void udb_protocol_params_error(Client *client, const char *subcmd)
 	udb_send_db_to_one(client, ":%s DB %s ERR %s %d 0", me.id, client->id, subcmd ? subcmd : "0", UDB_ERR_PARAMS);
 }
 
-static void udb_sync_to_server(Client *server)
+static int udb_sync_to_server(Client *server)
 {
 	UdbBlock *block = udb_ctx->block_list;
 	if (!udb_has_hello(server))
-		return;
+		return 0;
 	while (block)
 	{
-		udb_send_db_to_one(server, ":%s DB %s INF %c %lX %lu", me.id, server->id, block->letter, block->checksum,
-						   (unsigned long)block->modified_at);
+		if (!udb_send_db_to_one(server, ":%s DB %s INF %c %lX %lu", me.id, server->id, block->letter, block->checksum,
+								(unsigned long)block->modified_at))
+			return 0;
 		block = block->next;
 	}
+	return 1;
 }
 static Client *udb_direct_peer(Client *client)
 {
@@ -159,7 +168,7 @@ CMD_FUNC(cmd_db)
 
 	if (parc < 4)
 	{
-		sendto_one(client, NULL, ":%s DB %s ERR 0 %i 0", me.id, client->id, UDB_ERR_PARAMS);
+		udb_send_db_to_one(client, ":%s DB %s ERR 0 %i 0", me.id, client->id, UDB_ERR_PARAMS);
 		return;
 	}
 
@@ -195,13 +204,13 @@ CMD_FUNC(cmd_db)
 		/* Each side sends its own request, so only an ACK confirms outbound data. */
 		if (!udb_has_hello(client))
 			udb_sync_hello_start(client);
-		sendto_one(client, NULL, ":%s DB %s HEL 4 ACK", me.id, client->id);
+		udb_send_db_to_one(client, ":%s DB %s HEL 4 ACK", me.id, client->id);
 		return;
 	}
 
 	if (!direct_peer || !udb_has_hello(direct_peer))
 	{
-		sendto_one(client, NULL, ":%s DB %s ERR %s %d 0", me.id, client->id, subcmd, UDB_ERR_FORBIDDEN);
+		udb_send_db_to_one(client, ":%s DB %s ERR %s %d 0", me.id, client->id, subcmd, UDB_ERR_FORBIDDEN);
 		return;
 	}
 
@@ -227,8 +236,8 @@ CMD_FUNC(cmd_db)
 			}
 			if (udb_selected_propagator(ctx) && !udb_is_propagator(ctx, client))
 			{
-				sendto_one(client, NULL, ":%s DB %s ERR BEGIN %d %c", me.id, client->id, UDB_ERR_FORBIDDEN,
-						   parv[3] ? *parv[3] : '0');
+				udb_send_db_to_one(client, ":%s DB %s ERR BEGIN %d %c", me.id, client->id, UDB_ERR_FORBIDDEN,
+								   parv[3] ? *parv[3] : '0');
 				return;
 			}
 			block = udb_block_by_letter(ctx, *parv[3]);
@@ -236,8 +245,8 @@ CMD_FUNC(cmd_db)
 			{
 				if (!block || !udb_sync_begin(block, client, parv[4]))
 				{
-					sendto_one(client, NULL, ":%s DB %s ERR BEGIN %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE,
-							   parv[3] ? *parv[3] : '0');
+					udb_send_db_to_one(client, ":%s DB %s ERR BEGIN %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE,
+									   parv[3] ? *parv[3] : '0');
 					return;
 				}
 				if (!is_broadcast)
@@ -260,8 +269,8 @@ CMD_FUNC(cmd_db)
 			}
 			if (udb_selected_propagator(ctx) && !udb_is_propagator(ctx, client))
 			{
-				sendto_one(client, NULL, ":%s DB %s ERR PUT %d %c", me.id, client->id, UDB_ERR_FORBIDDEN,
-						   parv[3] ? *parv[3] : '0');
+				udb_send_db_to_one(client, ":%s DB %s ERR PUT %d %c", me.id, client->id, UDB_ERR_FORBIDDEN,
+								   parv[3] ? *parv[3] : '0');
 				return;
 			}
 			block = udb_block_by_letter(ctx, *parv[3]);
@@ -270,8 +279,8 @@ CMD_FUNC(cmd_db)
 				error = udb_sync_put(block, client, parv[4], parv[5], parv[6]);
 				if (error)
 				{
-					sendto_one(client, NULL, ":%s DB %s ERR PUT %d %c", me.id, client->id, error,
-							   parv[3] ? *parv[3] : '0');
+					udb_send_db_to_one(client, ":%s DB %s ERR PUT %d %c", me.id, client->id, error,
+									   parv[3] ? *parv[3] : '0');
 					return;
 				}
 				if (!is_broadcast)
@@ -295,8 +304,8 @@ CMD_FUNC(cmd_db)
 			}
 			if (udb_selected_propagator(ctx) && !udb_is_propagator(ctx, client))
 			{
-				sendto_one(client, NULL, ":%s DB %s ERR END %d %c", me.id, client->id, UDB_ERR_FORBIDDEN,
-						   parv[3] ? *parv[3] : '0');
+				udb_send_db_to_one(client, ":%s DB %s ERR END %d %c", me.id, client->id, UDB_ERR_FORBIDDEN,
+								   parv[3] ? *parv[3] : '0');
 				return;
 			}
 			block = udb_block_by_letter(ctx, *parv[3]);
@@ -305,11 +314,11 @@ CMD_FUNC(cmd_db)
 				error = udb_sync_end(ctx, block, client, parv[4], parv[5], &digest);
 				if (error)
 				{
-					sendto_one(client, NULL, ":%s DB %s ERR END %d %c", me.id, client->id, error,
-							   parv[3] ? *parv[3] : '0');
+					udb_send_db_to_one(client, ":%s DB %s ERR END %d %c", me.id, client->id, error,
+									   parv[3] ? *parv[3] : '0');
 					return;
 				}
-				sendto_one(client, NULL, ":%s DB %s ACK %c %s %08lX", me.id, client->id, *parv[3], parv[4], digest);
+				udb_send_db_to_one(client, ":%s DB %s ACK %c %s %08lX", me.id, client->id, *parv[3], parv[4], digest);
 				if (!is_broadcast)
 					return;
 			}
@@ -378,7 +387,7 @@ CMD_FUNC(cmd_db)
 			if (!block)
 			{
 				if (is_for_me)
-					sendto_one(client, NULL, ":%s DB %s ERR INF %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
+					udb_send_db_to_one(client, ":%s DB %s ERR INF %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
 				return;
 			}
 			if (!udb_checksum_parse(parv[4], &crc32) || !udb_timestamp_parse(parv[5], &remote_ts))
@@ -393,11 +402,11 @@ CMD_FUNC(cmd_db)
 				{
 					if (remote_ts > block->modified_at)
 					{
-						sendto_one(client, NULL, ":%s DB %s RES %c", me.id, client->id, letter);
+						udb_send_db_to_one(client, ":%s DB %s RES %c", me.id, client->id, letter);
 					}
 					else if (remote_ts == block->modified_at && udb_remote_wins_equal_timestamp(client))
 					{
-						sendto_one(client, NULL, ":%s DB %s RES %c", me.id, client->id, letter);
+						udb_send_db_to_one(client, ":%s DB %s RES %c", me.id, client->id, letter);
 					}
 				}
 				if (!is_broadcast)
@@ -426,7 +435,7 @@ CMD_FUNC(cmd_db)
 			UdbBlock *block = udb_block_by_letter(ctx, letter);
 			if (!udb_peer_authorizes_us(client))
 			{
-				sendto_one(client, NULL, ":%s DB %s ERR RES %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
+				udb_send_db_to_one(client, ":%s DB %s ERR RES %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 				return;
 			}
 
@@ -434,12 +443,12 @@ CMD_FUNC(cmd_db)
 			{
 				if (!block)
 				{
-					sendto_one(client, NULL, ":%s DB %s ERR RES %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
+					udb_send_db_to_one(client, ":%s DB %s ERR RES %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
 					return;
 				}
 				if (block->syncing_from && block->syncing_from != client)
 				{
-					sendto_one(client, NULL, ":%s DB %s ERR RES %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
+					udb_send_db_to_one(client, ":%s DB %s ERR RES %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
 					return;
 				}
 

@@ -78,11 +78,11 @@ static UdbBlock *udb_mutation_path_block(UdbContext *ctx, const char *path)
 	size_t len;
 	UdbBlock *block;
 
-	if (!path)
+	if (!path || !udb_record_fits_limits(path, NULL))
 		return NULL;
 
 	len = strlen(path);
-	if (len < 4 || len >= UDB_RECORD_PATH_MAX || path[1] != ':' || path[2] != ':' || !path[3])
+	if (len < 4 || len > UDB_RECORD_PATH_MAX || path[1] != ':' || path[2] != ':' || !path[3])
 		return NULL;
 
 	block = udb_block_by_letter(ctx, path[0]);
@@ -94,8 +94,8 @@ static UdbBlock *udb_mutation_path_block(UdbContext *ctx, const char *path)
 	{
 		if (separator == component || !separator[2])
 			return NULL;
-		char decoded[UDB_COMPONENT_MAX];
-		char comp_buf[UDB_COMPONENT_MAX];
+		char decoded[UDB_COMPONENT_RAW_MAX + 1];
+		char comp_buf[UDB_COMPONENT_ENCODED_MAX + 1];
 		size_t clen = separator - component;
 		if (clen >= sizeof(comp_buf))
 			return NULL;
@@ -105,17 +105,17 @@ static UdbBlock *udb_mutation_path_block(UdbContext *ctx, const char *path)
 			return NULL;
 		component = separator + 2;
 	}
-	char decoded[UDB_COMPONENT_MAX];
+	char decoded[UDB_COMPONENT_RAW_MAX + 1];
 	if (!*component || !udb_path_decode_component(component, decoded, sizeof(decoded)))
 		return NULL;
 
 	return block;
 }
 
-static void udb_mutation_forward_ins(Client *source, Client *except, const char *target, const char *path,
-									 const char *data)
+static int udb_mutation_forward_ins(Client *source, Client *except, const char *target, const char *path,
+									const char *data)
 {
-	udb_sendto_confirmed_servers(except, ":%s DB %s INS %s %s", source->id, target, path, data);
+	return udb_sendto_confirmed_servers(except, ":%s DB %s INS %s %s", source->id, target, path, data);
 }
 
 /* The stored value already equals the mutation payload, so no runtime effect
@@ -133,14 +133,14 @@ static int udb_record_data_equals(UdbRecord *rec, const char *data)
 	return !strcmp(rec->data_str, data);
 }
 
-static void udb_mutation_forward_del(Client *source, Client *except, const char *target, const char *path)
+static int udb_mutation_forward_del(Client *source, Client *except, const char *target, const char *path)
 {
-	udb_sendto_confirmed_servers(except, ":%s DB %s DEL %s", source->id, target, path);
+	return udb_sendto_confirmed_servers(except, ":%s DB %s DEL %s", source->id, target, path);
 }
 
-static void udb_mutation_persist_error(Client *client, const char *subcmd, char letter)
+static int udb_mutation_persist_error(Client *client, const char *subcmd, char letter)
 {
-	udb_send_db_to_one(client, ":%s DB %s ERR %s %d %c", me.id, client->id, subcmd, UDB_ERR_FATAL, letter);
+	return udb_send_db_to_one(client, ":%s DB %s ERR %s %d %c", me.id, client->id, subcmd, UDB_ERR_FATAL, letter);
 }
 
 static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target, const char *path, const char *data,
@@ -149,7 +149,7 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, const char *target
 	UdbBlock *block = udb_mutation_path_block(ctx, path);
 	char letter = path && *path ? path[0] : '0';
 
-	if (!block)
+	if (!block || !udb_record_fits_limits(path, data))
 	{
 		udb_protocol_params_error(client, "INS");
 		return;
@@ -243,7 +243,7 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, const char *target
 	UdbBlock *block = udb_mutation_path_block(ctx, path);
 	char letter = path && *path ? path[0] : '0';
 
-	if (!block)
+	if (!block || !udb_record_fits_limits(path, NULL))
 	{
 		udb_protocol_params_error(client, "DEL");
 		return;

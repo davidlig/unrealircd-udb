@@ -8,7 +8,7 @@ module "third/udb"
 	troubleshooting "In case of problems, report issues at https://github.com/davidlig/unrealircd-udb/issues";
 	source "https://raw.githubusercontent.com/davidlig/unrealircd-udb/main/dist/udb.c";
 	sha256sum "d22ffde5bb597eec8658a2bce9e7f86394ec42999a704fa4d7068f73b522df14";
-	min-unrealircd-version "6.*";
+	min-unrealircd-version "6.2.*";
 	post-install-text
 	{
 		"The UDB module is now installed. Next steps:";

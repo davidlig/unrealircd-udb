@@ -244,7 +244,7 @@ static void udb_config_free(UdbContext *ctx)
 
 static int udb_setting_string_valid(const char *value)
 {
-	return value && *value && !strpbrk(value, "\r\n");
+	return value && *value && strlen(value) <= UDB_RECORD_VALUE_MAX && !strpbrk(value, "\r\n");
 }
 
 static int udb_suffix_valid(const char *value)

@@ -75,9 +75,9 @@ static int udb_spamfilter_pattern(const char *stored, char *pattern, size_t patt
 			return 0;
 	}
 	decoded_len = (encoded_len / 4) * 3 - padding;
-	if (!decoded_len || decoded_len >= patternsz)
+	if (!decoded_len || decoded_len > UDB_SPAMFILTER_PATTERN_MAX || decoded_len >= patternsz)
 		return 0;
-	n = b64_decode(encoded, (unsigned char *)pattern, patternsz - 1);
+	n = b64_decode(encoded, (unsigned char *)pattern, patternsz);
 	if (n < 0 || (size_t)n != decoded_len || memchr(pattern, '\0', decoded_len))
 		return 0;
 	pattern[decoded_len] = '\0';

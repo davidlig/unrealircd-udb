@@ -284,13 +284,38 @@ sincronización de ese bloque. Se rechazan mientras el bloque tenga una
 transacción staged y solo se persisten y reenvían a peers directos con HEL
 confirmado.
 
-UDB valida estrictamente mediante un sistema declarativo de esquemas que
+UDB valida estrictamente mediante un sistema declarativo de esquemas y límites numéricos que
 cualquier registro recibido vía `INS`, `PUT` o cargado desde disco pertenezca al
 catálogo de opciones válidas del bloque correspondiente y cumpla con su tipo de
 dato y formato. Claves desconocidas, anidamientos no permitidos (como rutas
-compuestas en Bloque S) o tipos incompatibles son rechazados inmediatamente con
+compuestas en Bloque S), líneas sobrelongitud o tipos incompatibles son rechazados inmediatamente con
 `ERR INS 2 <bloque>` o `ERR PUT 2 <bloque>` (`UDB_ERR_PARAMS`), y provocan que la
-carga de archivos `.db` aborte fail-closed.
+carga de archivos `.db` aborte de manera estricta y transaccional (**fail-closed**), descartando cualquier
+cambio candidato y preservando intacta la base de datos previa.
+
+### 2.2 Jerarquía de Límites Numéricos e Invariantes Matemáticos
+
+Para garantizar que ningún registro sufra truncado en ninguna etapa (memoria, serialización en disco o propagación S2S), UDB define y aplica una jerarquía unificada de límites:
+
+| Parámetro | Límite (bytes) | Constante | Descripción / Fórmula Invariante |
+|---|---|---|---|
+| Longitud máxima de ruta | 8.192 | `UDB_RECORD_PATH_MAX` | Longitud total de la ruta (`bloque::k1::...::kN`) |
+| Componente raw máximo | 4.608 | `UDB_COMPONENT_RAW_MAX` | Componente decodificado (`4096 + 4` para prefijo `b64:`) |
+| Componente codificado máx. | 4.608 | `UDB_COMPONENT_ENCODED_MAX` | Componente percent-encoded (`4102` para `b64%3A...`) |
+| Longitud máxima de valor | 4.096 | `UDB_RECORD_VALUE_MAX` | Carga útil de datos (topic, vhost, razón, clave, etc.) |
+| Línea máxima en disco | 12.320 | `UDB_RECORD_LINE_MAX` | `PATH_MAX (8192) + VALUE_MAX (4096) + 32` bytes de margen |
+| Marco S2S máximo | 16.384 | `UDB_S2S_LINE_MAX` | `MAXLINELENGTH` (límite de tramas S2S `BIGLINES` de UnrealIRCd 6) |
+| Margen de protocolo S2S | 256 | `UDB_S2S_OVERHEAD_MAX` | Espacio para cabecera `:SID DB SID CMD ...` |
+| Regex de spamfilter máx. | 3.072 | `UDB_SPAMFILTER_PATTERN_MAX` | Longitud máxima de regex sin codificar |
+
+#### Validación Matemática de Codificación Spamfilter:
+- Expresión regular raw: $\le 3072$ bytes (`UDB_SPAMFILTER_PATTERN_MAX`).
+- Codificación Base64 RFC 4648: $\lceil 3072 / 3 \rceil \times 4 = 4096$ caracteres.
+- Componente raw con prefijo `b64:`: $4 + 4096 = 4100$ bytes ($\le \text{UDB\_COMPONENT\_RAW\_MAX } 4608$).
+- Componente percent-encoded (`b64%3A`): $4100 + 2 = 4102$ bytes ($\le \text{UDB\_COMPONENT\_ENCODED\_MAX } 4608$).
+- Ruta completa (`K::F::b64%3A...::reason`): $4116$ bytes ($\le \text{UDB\_RECORD\_PATH\_MAX } 8192$).
+- Línea serializada en disco: $4116 + 1 + 4096 + 1 = 8214$ bytes ($\le \text{UDB\_RECORD\_LINE\_MAX } 12320$).
+- Trama de red S2S: $8214 + 256 = 8470$ bytes ($\le \text{UDB\_S2S\_LINE\_MAX } 16384$).
 
 Para `INS`, `DEL` y `DRP`, UDB primero clona el bloque activo y aplica el
 cambio al candidato privado. Solo después de escribir y renombrar atómicamente

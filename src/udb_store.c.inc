@@ -167,6 +167,75 @@ static UdbRecord *udb_record_find(UdbContext *ctx, const char *key, UdbRecord *p
 }
 
 /* ========================================================================
+ * Record Limits and Feasibility Validation
+ * ======================================================================== */
+static int udb_record_fits_limits(const char *path, const char *value)
+{
+	size_t path_len;
+	size_t val_len = 0;
+	size_t serialized_line_len;
+	const char *comp;
+	const char *sep;
+
+	if (!path || !*path)
+		return 0;
+
+	path_len = strlen(path);
+	if (path_len > UDB_RECORD_PATH_MAX)
+		return 0;
+
+	/* Validate each encoded component in path */
+	comp = path;
+	while ((sep = strstr(comp, "::")))
+	{
+		if (sep == comp || !sep[2])
+			return 0;
+		size_t clen = sep - comp;
+		if (clen > UDB_COMPONENT_ENCODED_MAX)
+			return 0;
+		char enc_buf[UDB_COMPONENT_ENCODED_MAX + 1];
+		char dec_buf[UDB_COMPONENT_RAW_MAX + 1];
+		memcpy(enc_buf, comp, clen);
+		enc_buf[clen] = '\0';
+		if (!udb_path_decode_component(enc_buf, dec_buf, sizeof(dec_buf)))
+			return 0;
+		if (strlen(dec_buf) > UDB_COMPONENT_RAW_MAX)
+			return 0;
+		comp = sep + 2;
+	}
+	if (!*comp)
+		return 0;
+	size_t last_clen = strlen(comp);
+	if (last_clen > UDB_COMPONENT_ENCODED_MAX)
+		return 0;
+	char dec_buf[UDB_COMPONENT_RAW_MAX + 1];
+	if (!udb_path_decode_component(comp, dec_buf, sizeof(dec_buf)))
+		return 0;
+	if (strlen(dec_buf) > UDB_COMPONENT_RAW_MAX)
+		return 0;
+
+	if (value)
+	{
+		val_len = strlen(value);
+		if (val_len > UDB_RECORD_VALUE_MAX)
+			return 0;
+		if (strpbrk(value, "\r\n"))
+			return 0;
+	}
+
+	/* Serialized line check: path + ' ' + value + '\n' */
+	serialized_line_len = path_len + (value && *value ? 1 + val_len : 0) + 1;
+	if (serialized_line_len > UDB_RECORD_LINE_MAX)
+		return 0;
+
+	/* S2S feasibility check */
+	if (path_len + (value ? val_len : 0) + UDB_S2S_OVERHEAD_MAX > UDB_S2S_LINE_MAX)
+		return 0;
+
+	return 1;
+}
+
+/* ========================================================================
  * Path Component Encoding & Decoding
  * ======================================================================== */
 static int udb_path_encode_component(const char *raw, char *buf, size_t bufsz)
@@ -253,7 +322,7 @@ static int udb_path_decode_component(const char *encoded, char *buf, size_t bufs
 
 static int udb_path_append(char *dst, size_t dst_size, size_t *used, const char *component)
 {
-	char encoded[UDB_COMPONENT_MAX];
+	char encoded[UDB_COMPONENT_ENCODED_MAX + 1];
 	size_t cur_len;
 	size_t enc_len;
 
@@ -287,13 +356,13 @@ static int udb_path_append_component(char *pathbuf, size_t bufsz, const char *ra
 
 static UdbRecord *udb_record_find_path(UdbContext *ctx, UdbBlock *block, const char *path)
 {
-	char decoded_part[UDB_COMPONENT_MAX];
-	char pathbuf[UDB_RECORD_PATH_MAX];
+	char decoded_part[UDB_COMPONENT_RAW_MAX + 1];
+	char pathbuf[UDB_RECORD_PATH_MAX + 1];
 	char *cur;
 	char *ds;
 	UdbRecord *rec;
 
-	if (!block || !block->tree || !path || strlen(path) >= sizeof(pathbuf))
+	if (!block || !block->tree || !path || strlen(path) > UDB_RECORD_PATH_MAX || !udb_record_fits_limits(path, NULL))
 		return NULL;
 	strlcpy(pathbuf, path, sizeof(pathbuf));
 	cur = pathbuf;
@@ -381,13 +450,13 @@ static unsigned int udb_record_count_tree(UdbRecord *rec)
 
 static UdbRecord *udb_record_insert_path(UdbRecord *tree, const char *path, const char *data)
 {
-	char pathbuf[UDB_RECORD_PATH_MAX];
-	char decoded_part[UDB_COMPONENT_MAX];
+	char pathbuf[UDB_RECORD_PATH_MAX + 1];
+	char decoded_part[UDB_COMPONENT_RAW_MAX + 1];
 	char *part;
 	char *next;
 	UdbRecord *parent = tree;
 
-	if (!tree || !path || !*path || strlen(path) >= sizeof(pathbuf))
+	if (!tree || !path || !*path || strlen(path) > UDB_RECORD_PATH_MAX || !udb_record_fits_limits(path, data))
 		return NULL;
 	strlcpy(pathbuf, path, sizeof(pathbuf));
 	for (part = pathbuf; part; part = next)
@@ -417,7 +486,8 @@ static UdbRecord *udb_record_insert_path(UdbRecord *tree, const char *path, cons
 		safe_free(parent->data_str);
 	if (data && *data == '*')
 	{
-		udb_strtoul_strict(data + 1, &parent->data_num);
+		if (!udb_strtoul_strict(data + 1, &parent->data_num))
+			return NULL;
 		parent->data_str = NULL;
 	}
 	else if (data)
@@ -454,7 +524,7 @@ static int udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbuf
 {
 	UdbRecord *child;
 	size_t old_len;
-	char encoded_key[UDB_COMPONENT_MAX];
+	char encoded_key[UDB_COMPONENT_ENCODED_MAX + 1];
 
 	if (!rec || !rec->key)
 		return 1;
@@ -477,11 +547,36 @@ static int udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbuf
 	if (rec->data_str || rec->data_num > 0 || !rec->child)
 	{
 		int ret;
+		size_t line_len;
+		char numbuf[32];
+		const char *val_str;
+
 		if (rec->data_str)
-			ret = fprintf(fp, "%s %s\n", pathbuf, rec->data_str);
+		{
+			val_str = rec->data_str;
+		}
 		else
-			ret = fprintf(fp, "%s *%lu\n", pathbuf, rec->data_num);
-		if (ret < 0 || ferror(fp))
+		{
+			snprintf(numbuf, sizeof(numbuf), "*%lu", rec->data_num);
+			val_str = numbuf;
+		}
+
+		if (!udb_record_fits_limits(pathbuf, val_str))
+		{
+			pathbuf[old_len] = '\0';
+			return 0;
+		}
+
+		/* path + space + value + newline */
+		line_len = strlen(pathbuf) + 1 + strlen(val_str) + 1;
+		if (line_len > UDB_RECORD_LINE_MAX)
+		{
+			pathbuf[old_len] = '\0';
+			return 0;
+		}
+
+		ret = fprintf(fp, "%s %s\n", pathbuf, val_str);
+		if (ret < 0 || (size_t)ret != line_len || ferror(fp))
 		{
 			pathbuf[old_len] = '\0';
 			return 0;
@@ -553,7 +648,7 @@ static UdbSnapshotResult udb_file_write_snapshot(UdbBlock *block, UdbRecord *tre
 {
 	char dir_path[UDB_BLOCK_PATH_MAX];
 	char tmp_path[UDB_BLOCK_PATH_MAX];
-	char pathbuf[UDB_RECORD_PATH_MAX] = "";
+	char pathbuf[UDB_RECORD_PATH_MAX + 1] = "";
 	char *slash;
 	FILE *fp = NULL;
 	UdbRecord *rec;
@@ -668,7 +763,12 @@ static int udb_file_save_block(UdbContext *ctx, UdbBlock *block)
 	if (res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
 		return 0;
 	(void)ctx;
-	udb_compute_block_checksum(block, &block->checksum);
+	if (!udb_compute_block_checksum(block, &block->checksum))
+	{
+		block->checksum = 0;
+		udb_log(ULOG_ERROR, "UDB_CHECKSUM_CALC_FAILED", NULL, "Failed to compute checksum for block $block after save",
+				log_data_string("block", (char[]){block->letter, '\0'}));
+	}
 	block->modified_at = time(NULL);
 	if (stat(block->filepath, &st) == 0)
 		block->filesize = st.st_size;

@@ -294,10 +294,35 @@ block's synchronization. They are rejected while that block has a staged
 transaction and are persisted and forwarded only to HEL-confirmed direct peers.
 
 UDB strictly validates all records received via `INS`, `PUT`, or loaded from disk
-against a declarative per-block schema catalogue. Unknown keys, invalid hierarchy
-nesting (such as composite paths in Block S), or incompatible data types are
+against a declarative per-block schema catalogue and strict numeric limits. Unknown keys,
+invalid hierarchy nesting (such as composite paths in Block S), or incompatible data types are
 immediately rejected with `ERR INS 2 <block>` or `ERR PUT 2 <block>` (`UDB_ERR_PARAMS`),
-and cause local `.db` file parsing to abort fail-closed.
+and cause local `.db` file parsing to abort fail-closed (discarding candidate changes and leaving
+the database uncorrupted).
+
+### 2.2 Numeric Limits & Mathematical Hierarchy
+
+To guarantee zero truncation across the entire lifecycle (runtime store, disk serialization, and Server-to-Server propagation), UDB strictly enforces a unified numeric hierarchy:
+
+| Parameter | Limit (bytes) | Constant | Description & Mathematical Invariants |
+|---|---|---|---|
+| Max Path Length | 8,192 | `UDB_RECORD_PATH_MAX` | Max full path length (`block::k1::...::kN`) |
+| Max Raw Component | 4,608 | `UDB_COMPONENT_RAW_MAX` | Max raw decoded component (e.g. `b64:` + 4096B regex = 4100B) |
+| Max Encoded Component | 4,608 | `UDB_COMPONENT_ENCODED_MAX` | Max percent-encoded component (e.g. `b64%3A` + 4096B = 4102B) |
+| Max Value Length | 4,096 | `UDB_RECORD_VALUE_MAX` | Max data payload (e.g. topic, vhost, reason, key) |
+| Max Line Length | 12,320 | `UDB_RECORD_LINE_MAX` | `PATH_MAX (8192) + VALUE_MAX (4096) + 32` overhead |
+| Max S2S Frame | 16,384 | `UDB_S2S_LINE_MAX` | `MAXLINELENGTH` (UnrealIRCd 6 BIGLINES frame limit) |
+| S2S Overhead Buffer | 256 | `UDB_S2S_OVERHEAD_MAX` | Header space for `:SID DB SID CMD ...` |
+| Max Spamfilter Regex | 3,072 | `UDB_SPAMFILTER_PATTERN_MAX` | Max raw regex pattern length |
+
+#### Mathematical Proof for Spamfilter Encoding:
+- Raw regex pattern $\le 3072$ bytes (`UDB_SPAMFILTER_PATTERN_MAX`).
+- RFC 4648 Base64 encoding: $\lceil 3072 / 3 \rceil \times 4 = 4096$ characters.
+- Prefixed raw component (`b64:`): $4 + 4096 = 4100$ bytes ($\le \text{UDB\_COMPONENT\_RAW\_MAX } 4608$).
+- Percent-encoded component (`b64%3A`): $4100 + 2 = 4102$ bytes ($\le \text{UDB\_COMPONENT\_ENCODED\_MAX } 4608$).
+- Full path (`K::F::b64%3A...::reason`): $4116$ bytes ($\le \text{UDB\_RECORD\_PATH\_MAX } 8192$).
+- Serialized disk record line: $4116 + 1 + 4096 + 1 = 8214$ bytes ($\le \text{UDB\_RECORD\_LINE\_MAX } 12320$).
+- S2S wire frame: $8214 + 256 = 8470$ bytes ($\le \text{UDB\_S2S\_LINE\_MAX } 16384$).
 
 For `INS`, `DEL`, and `DRP`, UDB first clones the active block and applies the
 change to that private candidate. It atomically writes and renames the candidate
