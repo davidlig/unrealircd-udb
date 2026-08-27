@@ -33,7 +33,7 @@ davidlig::oper netadmin
 *   `propagator "<server>";`: Server authorized to propagate database syncs and live mutations.
 *   `max-staged-records <number>;`: Maximum number of records allowed per block during a single
     staged sync transaction. Protects against DoS attacks and memory exhaustion (OOM).
-    Allowed range: `1000` to `10000000` (default `500000`).
+    Allowed range: `1` to `10000000` (default `500000`).
 *   `max-global-clones <number>;`: Global limit of connections/clones per IP.
 *   `password-flood <attempts>:<seconds>;`: Password brute-force flood protection (default `5:60`).
 

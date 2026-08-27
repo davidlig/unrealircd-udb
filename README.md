@@ -111,6 +111,11 @@ does not exist and stores every block file directly beneath it. If omitted, UDB
 keeps the legacy default of storing block files in UnrealIRCd's permanent data
 directory.
 
+`max-staged-records` sets the maximum number of records allowed per block during
+a staged sync transaction (range `1` to `10000000`, default `500000`). Staged syncs
+also enforce `max-staged-bytes` (default 64 MB), `sync-inactivity-timeout` (default 60s),
+and `sync-absolute-timeout` (default 300s).
+
 ---
 
 ### Step 4: Test & Start Server

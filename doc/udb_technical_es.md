@@ -33,7 +33,7 @@ davidlig::oper netadmin
 *   `propagator "<servidor>";`: Servidor autorizado para propagar sincronizaciones y mutaciones.
 *   `max-staged-records <número>;`: Límite máximo de registros permitidos por bloque en una sesión
     de sincronización transaccional (*staged sync*). Protege contra ataques DoS y agotamiento de
-    memoria (OOM). Rango permitido: `1000` a `10000000` (por defecto `500000`).
+    memoria (OOM). Rango permitido: `1` a `10000000` (por defecto `500000`).
 *   `max-global-clones <número>;`: Límite global de conexiones/clones por IP.
 *   `password-flood <intentos>:<segundos>;`: Protección de fuerza bruta en contraseñas (por defecto `5:60`).
 
