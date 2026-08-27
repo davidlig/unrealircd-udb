@@ -170,6 +170,7 @@ module
 #define UDB_RECORD_LINE_MAX (UDB_RECORD_PATH_MAX + UDB_RECORD_VALUE_MAX + 32)
 #define UDB_S2S_LINE_MAX MAXLINELENGTH
 #define UDB_S2S_OVERHEAD_MAX 256
+#define UDB_TXID_MAX 31
 #define UDB_SYNC_INACTIVITY_TIMEOUT 60
 #define UDB_SYNC_ABSOLUTE_TIMEOUT 300
 #define UDB_SYNC_TIMEOUT UDB_SYNC_INACTIVITY_TIMEOUT
@@ -266,7 +267,7 @@ struct UdbBlock
 struct UdbSyncSession
 {
 	Client *peer;
-	char txid[32];
+	char txid[UDB_TXID_MAX + 1];
 	time_t started_at;
 	time_t last_activity;
 	time_t deadline;
@@ -3714,14 +3715,31 @@ static int udb_sync_begin(UdbBlock *block, Client *peer, const char *txid)
 		(udb_cfg && udb_cfg->sync_inactivity_timeout) ? udb_cfg->sync_inactivity_timeout : UDB_SYNC_INACTIVITY_TIMEOUT;
 	int abs_to =
 		(udb_cfg && udb_cfg->sync_absolute_timeout) ? udb_cfg->sync_absolute_timeout : UDB_SYNC_ABSOLUTE_TIMEOUT;
+	size_t txid_len;
+	const char *p;
 
-	if (!block || !peer || !txid || !*txid)
-		return 0;
+	if (!block)
+		return UDB_ERR_NO_BLOCK;
+	if (!peer || !txid || !*txid)
+		return UDB_ERR_PARAMS;
+
+	txid_len = strlen(txid);
+	if (txid_len > UDB_TXID_MAX)
+		return UDB_ERR_PARAMS;
+
+	for (p = txid; *p; p++)
+	{
+		unsigned char c = (unsigned char)*p;
+		if (!isalnum(c) && c != '-' && c != '_')
+			return UDB_ERR_PARAMS;
+	}
+
 	if (block->session)
-		udb_sync_abort(block, "staged sync interrupted by new transaction");
+		return UDB_ERR_SYNC_ACTIVE;
+
 	session = safe_alloc(sizeof(*session));
 	session->peer = peer;
-	strlcpy(session->txid, txid, sizeof(session->txid));
+	memcpy(session->txid, txid, txid_len + 1);
 	session->started_at = time(NULL);
 	session->last_activity = session->started_at;
 	session->deadline = session->started_at + inact;
@@ -3735,7 +3753,7 @@ static int udb_sync_begin(UdbBlock *block, Client *peer, const char *txid)
 	session->record_count = 0;
 	block->session = session;
 	block->syncing_from = peer;
-	return 1;
+	return 0;
 }
 
 static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid, const char *path, const char *data)
@@ -3925,7 +3943,7 @@ static int udb_sync_send_tree(Client *server, UdbRecord *rec, int depth, char *p
 
 static int udb_sync_send_stage(Client *server, UdbBlock *block)
 {
-	char txid[32];
+	char txid[UDB_TXID_MAX + 1];
 	char pathbuf[UDB_RECORD_PATH_MAX + 1] = "";
 	UdbRecord *rec;
 	int success = 1;
@@ -4042,8 +4060,7 @@ static void udb_sync_server_quit(Client *client)
 
 static const char *udb_selected_propagator(UdbContext *ctx)
 {
-	static char selected_buf[512];
-	UdbRecord *link;
+	static char selected_buf[HOSTLEN + 1];
 
 	/* 1. Priority 1: Explicit local override in unrealircd.conf */
 	if (udb_cfg && udb_cfg->propagator && *udb_cfg->propagator)
@@ -4052,11 +4069,11 @@ static const char *udb_selected_propagator(UdbContext *ctx)
 	/* 2. Priority 2: Priority list in S::propagator */
 	if (ctx && ctx->propagator_setting && *ctx->propagator_setting)
 	{
-		char list_copy[512];
+		char *list_copy = NULL;
 		char *srv, *saveptr;
 		char *first_srv = NULL;
 
-		strlcpy(list_copy, ctx->propagator_setting, sizeof(list_copy));
+		safe_strdup(list_copy, ctx->propagator_setting);
 		for (srv = strtok_r(list_copy, ",", &saveptr); srv; srv = strtok_r(NULL, ",", &saveptr))
 		{
 			while (*srv == ' ')
@@ -4074,14 +4091,17 @@ static const char *udb_selected_propagator(UdbContext *ctx)
 			if (find_server(srv, NULL) || (me.name[0] && !strcasecmp(srv, me.name)))
 			{
 				strlcpy(selected_buf, srv, sizeof(selected_buf));
+				safe_free(list_copy);
 				return selected_buf;
 			}
 		}
 		if (first_srv)
 		{
 			strlcpy(selected_buf, first_srv, sizeof(selected_buf));
+			safe_free(list_copy);
 			return selected_buf;
 		}
+		safe_free(list_copy);
 	}
 
 	return NULL;
@@ -4668,11 +4688,19 @@ CMD_FUNC(cmd_db)
 				return;
 			}
 			block = udb_block_by_letter(ctx, *parv[3]);
+			if (!block)
+			{
+				if (is_for_me)
+					udb_send_db_to_one(client, ":%s DB %s ERR BEGIN %d %c", me.id, client->id, UDB_ERR_NO_BLOCK,
+									   parv[3] ? *parv[3] : '0');
+				return;
+			}
 			if (is_for_me)
 			{
-				if (!block || !udb_sync_begin(block, client, parv[4]))
+				int error = udb_sync_begin(block, client, parv[4]);
+				if (error)
 				{
-					udb_send_db_to_one(client, ":%s DB %s ERR BEGIN %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE,
+					udb_send_db_to_one(client, ":%s DB %s ERR BEGIN %d %c", me.id, client->id, error,
 									   parv[3] ? *parv[3] : '0');
 					return;
 				}
@@ -4701,6 +4729,13 @@ CMD_FUNC(cmd_db)
 				return;
 			}
 			block = udb_block_by_letter(ctx, *parv[3]);
+			if (!block)
+			{
+				if (is_for_me)
+					udb_send_db_to_one(client, ":%s DB %s ERR PUT %d %c", me.id, client->id, UDB_ERR_NO_BLOCK,
+									   parv[3] ? *parv[3] : '0');
+				return;
+			}
 			if (is_for_me)
 			{
 				error = udb_sync_put(block, client, parv[4], parv[5], parv[6]);
@@ -4736,6 +4771,13 @@ CMD_FUNC(cmd_db)
 				return;
 			}
 			block = udb_block_by_letter(ctx, *parv[3]);
+			if (!block)
+			{
+				if (is_for_me)
+					udb_send_db_to_one(client, ":%s DB %s ERR END %d %c", me.id, client->id, UDB_ERR_NO_BLOCK,
+									   parv[3] ? *parv[3] : '0');
+				return;
+			}
 			if (is_for_me)
 			{
 				error = udb_sync_end(ctx, block, client, parv[4], parv[5], &digest);
