@@ -64,10 +64,14 @@ jobs:
           python3 tests/test_numeric_strict.py
           python3 tests/test_ipv6_and_paths.py
           python3 tests/test_staged_sync_caps.py
+          python3 tests/test_staged_sync_ownership.py
+          python3 tests/test_size_invariants.py
+          python3 tests/test_spamfilter_limits.py
 
       - name: Run Integration & Multi-Hop Test Suites
         run: |
           python3 tests/test_multihop_mutations.py
+          python3 tests/test_biglines_multihop.py
           python3 tests/test_propagator_failover.py
           python3 tests/runtime_clone_limit.py
           python3 tests/runtime_channel_modes_ins.py
@@ -127,6 +131,9 @@ jobs:
           python3 tests/test_numeric_strict.py
           python3 tests/test_ipv6_and_paths.py
           python3 tests/test_staged_sync_caps.py
+          python3 tests/test_staged_sync_ownership.py
+          python3 tests/test_size_invariants.py
+          python3 tests/test_spamfilter_limits.py
           python3 tests/test_multihop_mutations.py
           python3 tests/test_propagator_failover.py
           python3 tests/runtime_clone_limit.py
