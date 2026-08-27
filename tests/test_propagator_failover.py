@@ -167,9 +167,14 @@ def main():
             (n / "modules/third").mkdir(parents=True)
             shutil.copy2(module, n / "modules/third/udb.so")
 
-        # Seed Node A with S block having propagator setting
+        # Seed Node A with S block having a long propagator priority list (> 600 bytes)
+        # where the only online server (hub-a.test) is positioned well beyond byte 511.
+        offline_prefix = ",".join([f"offline-srv-{i:03d}.test" for i in range(35)])
+        long_propagator_setting = f"{offline_prefix},hub-a.test,hub-b.test"
+        assert len(offline_prefix) > 550, f"Prefix too short: {len(offline_prefix)}"
+
         s_file_a = node_a / "data/udb_S.db"
-        s_file_a.write_text("; UDB Block S\n; Saved: 1787720000\n; Records: 2\npropagator hub-a.test,hub-b.test\nflood 5:30\n", encoding="ascii")
+        s_file_a.write_text(f"; UDB Block S\n; Saved: 1787720000\n; Records: 2\npropagator {long_propagator_setting}\nflood 5:30\n", encoding="ascii")
 
         # Seed Node A with an N record
         n_file_a = node_a / "data/udb_N.db"
@@ -223,11 +228,11 @@ def main():
         content_s = s_file_b.read_text(encoding="ascii")
         content_n = n_file_b.read_text(encoding="ascii")
 
-        assert "propagator hub-a.test,hub-b.test" in content_s, f"propagator missing in B: {content_s}"
+        assert f"propagator {long_propagator_setting}" in content_s, f"propagator missing in B: {content_s}"
         assert "davidlig::vhost root.admin.net" in content_n, f"davidlig missing in B: {content_n}"
 
-        print("PASS: Clean Leaf B successfully auto-bootstrapped and synchronized S::propagator & N block from Hub A without local propagator config!")
-        print("ALL TESTS PASSED: UDB S::propagator priority list and Auto-Bootstrap verified successfully.")
+        print("PASS: Clean Leaf B successfully auto-bootstrapped and synchronized S::propagator (>600 bytes) & N block from Hub A without local propagator config!")
+        print("ALL TESTS PASSED: UDB non-truncating S::propagator priority list (>512B) and Auto-Bootstrap verified successfully.")
         return 0
 
     finally:

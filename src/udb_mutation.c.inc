@@ -11,8 +11,7 @@
 
 static const char *udb_selected_propagator(UdbContext *ctx)
 {
-	static char selected_buf[512];
-	UdbRecord *link;
+	static char selected_buf[HOSTLEN + 1];
 
 	/* 1. Priority 1: Explicit local override in unrealircd.conf */
 	if (udb_cfg && udb_cfg->propagator && *udb_cfg->propagator)
@@ -21,11 +20,11 @@ static const char *udb_selected_propagator(UdbContext *ctx)
 	/* 2. Priority 2: Priority list in S::propagator */
 	if (ctx && ctx->propagator_setting && *ctx->propagator_setting)
 	{
-		char list_copy[512];
+		char *list_copy = NULL;
 		char *srv, *saveptr;
 		char *first_srv = NULL;
 
-		strlcpy(list_copy, ctx->propagator_setting, sizeof(list_copy));
+		safe_strdup(list_copy, ctx->propagator_setting);
 		for (srv = strtok_r(list_copy, ",", &saveptr); srv; srv = strtok_r(NULL, ",", &saveptr))
 		{
 			while (*srv == ' ')
@@ -43,14 +42,17 @@ static const char *udb_selected_propagator(UdbContext *ctx)
 			if (find_server(srv, NULL) || (me.name[0] && !strcasecmp(srv, me.name)))
 			{
 				strlcpy(selected_buf, srv, sizeof(selected_buf));
+				safe_free(list_copy);
 				return selected_buf;
 			}
 		}
 		if (first_srv)
 		{
 			strlcpy(selected_buf, first_srv, sizeof(selected_buf));
+			safe_free(list_copy);
 			return selected_buf;
 		}
+		safe_free(list_copy);
 	}
 
 	return NULL;
