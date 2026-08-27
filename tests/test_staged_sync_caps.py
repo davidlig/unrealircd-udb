@@ -290,7 +290,7 @@ def run_tests(ircd_bin, keep=False):
         # -------------------------------------------------------------
         services.send_begin("N", "tx-inact-to", "00000000")
         services.send_put("N", "tx-inact-to", "user1::vhost", "vhost1.test")
-        time.sleep(2.5)  # Wait beyond 2s inactivity timeout
+        time.sleep(3.0)  # Wait beyond 2s inactivity timeout (3s ensures deadline has strictly elapsed)
         # Next PUT will fail because session timed out and was destroyed
         services.send_put("N", "tx-inact-to", "user2::vhost", "vhost2.test")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " PUT " in l,
@@ -305,7 +305,7 @@ def run_tests(ircd_bin, keep=False):
         for i in range(3):
             time.sleep(1.0)
             services.send_put("N", "tx-abs-to", "user1::vhost", f"vhost{i}.test")
-        time.sleep(1.5)  # Now at ~4.5s (exceeds 4s absolute timeout)
+        time.sleep(2.0)  # Now at ~5.0s (exceeds 4s absolute timeout)
         services.send_put("N", "tx-abs-to", "user1::vhost", "vhost_over_abs.test")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " PUT " in l,
                           "rejection of PUT after absolute timeout")

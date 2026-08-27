@@ -150,6 +150,11 @@ static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid, const c
 			udb_sync_abort(block, "invalid PUT sequence");
 		return UDB_ERR_NO_SYNC;
 	}
+	if (now >= session->deadline)
+	{
+		udb_sync_abort(block, "inactivity sync timeout exceeded");
+		return UDB_ERR_PARAMS;
+	}
 	if (now >= session->absolute_deadline)
 	{
 		udb_sync_abort(block, "absolute sync timeout exceeded");
@@ -204,6 +209,17 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, const ch
 		if (session && session->peer == peer)
 			udb_sync_abort(block, "invalid END sequence");
 		return UDB_ERR_NO_SYNC;
+	}
+	time_t now = time(NULL);
+	if (now >= session->deadline)
+	{
+		udb_sync_abort(block, "inactivity sync timeout exceeded");
+		return UDB_ERR_PARAMS;
+	}
+	if (now >= session->absolute_deadline)
+	{
+		udb_sync_abort(block, "absolute sync timeout exceeded");
+		return UDB_ERR_PARAMS;
 	}
 	session->record_count = udb_record_count_tree(session->tree);
 	if (!udb_compute_tree_checksum(session->tree, digest))
