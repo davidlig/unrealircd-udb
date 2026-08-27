@@ -241,11 +241,19 @@ CMD_FUNC(cmd_db)
 				return;
 			}
 			block = udb_block_by_letter(ctx, *parv[3]);
+			if (!block)
+			{
+				if (is_for_me)
+					udb_send_db_to_one(client, ":%s DB %s ERR BEGIN %d %c", me.id, client->id, UDB_ERR_NO_BLOCK,
+									   parv[3] ? *parv[3] : '0');
+				return;
+			}
 			if (is_for_me)
 			{
-				if (!block || !udb_sync_begin(block, client, parv[4]))
+				int error = udb_sync_begin(block, client, parv[4]);
+				if (error)
 				{
-					udb_send_db_to_one(client, ":%s DB %s ERR BEGIN %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE,
+					udb_send_db_to_one(client, ":%s DB %s ERR BEGIN %d %c", me.id, client->id, error,
 									   parv[3] ? *parv[3] : '0');
 					return;
 				}
@@ -274,6 +282,13 @@ CMD_FUNC(cmd_db)
 				return;
 			}
 			block = udb_block_by_letter(ctx, *parv[3]);
+			if (!block)
+			{
+				if (is_for_me)
+					udb_send_db_to_one(client, ":%s DB %s ERR PUT %d %c", me.id, client->id, UDB_ERR_NO_BLOCK,
+									   parv[3] ? *parv[3] : '0');
+				return;
+			}
 			if (is_for_me)
 			{
 				error = udb_sync_put(block, client, parv[4], parv[5], parv[6]);
@@ -309,6 +324,13 @@ CMD_FUNC(cmd_db)
 				return;
 			}
 			block = udb_block_by_letter(ctx, *parv[3]);
+			if (!block)
+			{
+				if (is_for_me)
+					udb_send_db_to_one(client, ":%s DB %s ERR END %d %c", me.id, client->id, UDB_ERR_NO_BLOCK,
+									   parv[3] ? *parv[3] : '0');
+				return;
+			}
 			if (is_for_me)
 			{
 				error = udb_sync_end(ctx, block, client, parv[4], parv[5], &digest);

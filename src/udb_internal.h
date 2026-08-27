@@ -28,6 +28,7 @@
 #define UDB_RECORD_LINE_MAX (UDB_RECORD_PATH_MAX + UDB_RECORD_VALUE_MAX + 32)
 #define UDB_S2S_LINE_MAX MAXLINELENGTH
 #define UDB_S2S_OVERHEAD_MAX 256
+#define UDB_TXID_MAX 31
 #define UDB_SYNC_INACTIVITY_TIMEOUT 60
 #define UDB_SYNC_ABSOLUTE_TIMEOUT 300
 #define UDB_SYNC_TIMEOUT UDB_SYNC_INACTIVITY_TIMEOUT
@@ -124,7 +125,7 @@ struct UdbBlock
 struct UdbSyncSession
 {
 	Client *peer;
-	char txid[32];
+	char txid[UDB_TXID_MAX + 1];
 	time_t started_at;
 	time_t last_activity;
 	time_t deadline;
