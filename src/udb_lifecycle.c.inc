@@ -196,6 +196,54 @@ static void udb_engine_cleanup(UdbContext *ctx)
 		udb_ctx = NULL;
 }
 
+static int udb_is_database_initialized(UdbContext *ctx)
+{
+	const char *directory = udb_cfg ? udb_cfg->db_directory : NULL;
+	char marker_path[UDB_BLOCK_PATH_MAX];
+	UdbBlock *b;
+
+	if (!directory || !*directory)
+		return 0;
+
+	if (snprintf(marker_path, sizeof(marker_path), "%s%s.udb_ready", directory,
+				 directory[strlen(directory) - 1] == '/' ? "" : "/") < (int)sizeof(marker_path))
+	{
+		if (access(marker_path, F_OK) == 0)
+			return 1;
+	}
+
+	if (ctx)
+	{
+		for (b = ctx->block_list; b; b = b->next)
+		{
+			if (b->load_state == UDB_LOAD_SUCCESS)
+				return 1;
+		}
+	}
+	return 0;
+}
+
+static void udb_persistence_mark_ready(void)
+{
+	const char *directory = udb_cfg ? udb_cfg->db_directory : NULL;
+	char marker_path[UDB_BLOCK_PATH_MAX];
+	FILE *fp;
+
+	if (!directory || !*directory)
+		return;
+
+	if (snprintf(marker_path, sizeof(marker_path), "%s%s.udb_ready", directory,
+				 directory[strlen(directory) - 1] == '/' ? "" : "/") >= (int)sizeof(marker_path))
+		return;
+
+	fp = fopen(marker_path, "w");
+	if (fp)
+	{
+		fprintf(fp, "ready %ld\n", (long)time(NULL));
+		fclose(fp);
+	}
+}
+
 static int udb_engine_init(void)
 {
 	struct stat st = {0};
@@ -247,7 +295,37 @@ static int udb_engine_init(void)
 		udb_engine_cleanup(udb_ctx);
 		return 0;
 	}
-	udb_last_successful_sync = time(NULL);
+
+	UdbPropagatorSelection selected;
+	int policy_present = udb_propagator_policy_present(udb_ctx);
+	int has_selected = udb_select_propagator(udb_ctx, 0, &selected);
+
+	if (has_selected && selected.is_local)
+	{
+		udb_ready = 1;
+		udb_persistence_mark_ready();
+		udb_last_successful_sync = time(NULL);
+		udb_sync_status = UDB_SYNC_OK;
+	}
+	else if (udb_is_database_initialized(udb_ctx))
+	{
+		udb_ready = 1;
+		if (!policy_present)
+		{
+			udb_last_successful_sync = time(NULL);
+			udb_sync_status = UDB_SYNC_OK;
+		}
+		else
+		{
+			udb_last_successful_sync = 0;
+		}
+	}
+	else
+	{
+		udb_ready = 0;
+		udb_last_successful_sync = 0;
+	}
+
 	udb_sync_status_refresh();
 	return 1;
 }

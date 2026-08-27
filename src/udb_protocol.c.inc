@@ -268,7 +268,7 @@ CMD_FUNC(cmd_db)
 				udb_protocol_params_error(client, subcmd);
 				return;
 			}
-			if (udb_propagator_policy_present(ctx) && !udb_is_propagator(ctx, direct_peer))
+			if (!udb_is_authorized_sync_source(ctx, direct_peer))
 			{
 				udb_send_db_to_one(client, ":%s DB %s ERR BEGIN %d %c", me.id, client->id, UDB_ERR_FORBIDDEN,
 								   parv[3] ? *parv[3] : '0');
@@ -308,7 +308,7 @@ CMD_FUNC(cmd_db)
 				udb_protocol_params_error(client, subcmd);
 				return;
 			}
-			if (udb_propagator_policy_present(ctx) && !udb_is_propagator(ctx, direct_peer))
+			if (!udb_is_authorized_sync_source(ctx, direct_peer))
 			{
 				udb_send_db_to_one(client, ":%s DB %s ERR PUT %d %c", me.id, client->id, UDB_ERR_FORBIDDEN,
 								   parv[3] ? *parv[3] : '0');
@@ -349,7 +349,7 @@ CMD_FUNC(cmd_db)
 				udb_protocol_params_error(client, subcmd);
 				return;
 			}
-			if (udb_propagator_policy_present(ctx) && !udb_is_propagator(ctx, direct_peer))
+			if (!udb_is_authorized_sync_source(ctx, direct_peer))
 			{
 				udb_send_db_to_one(client, ":%s DB %s ERR END %d %c", me.id, client->id, UDB_ERR_FORBIDDEN,
 								   parv[3] ? *parv[3] : '0');
@@ -375,6 +375,8 @@ CMD_FUNC(cmd_db)
 				udb_send_db_to_one(client, ":%s DB %s ACK %c %s %08lX", me.id, client->id, *parv[3], parv[4], digest);
 				udb_sendto_confirmed_servers(client, ":%s DB * INF %c %08lX %lu", me.id, block->letter, block->checksum,
 											 (unsigned long)block->modified_at);
+				udb_reconcile_record_end(direct_peer, block->letter);
+				udb_reconcile_check(ctx);
 				if (!is_broadcast)
 					return;
 			}
@@ -450,20 +452,23 @@ CMD_FUNC(cmd_db)
 				return;
 			}
 
-			if (client == direct_peer && is_for_me &&
-				(!udb_propagator_policy_present(ctx) || udb_is_propagator(ctx, direct_peer)))
+			if (client == direct_peer && is_for_me && udb_is_authorized_sync_source(ctx, direct_peer))
 			{
+				udb_reconcile_record_inf(direct_peer, letter, crc32);
 				if (crc32 != block->checksum)
 				{
 					if (remote_ts > block->modified_at)
 					{
 						udb_send_db_to_one(client, ":%s DB %s RES %c", me.id, client->id, letter);
+						udb_reconcile_record_res(direct_peer, letter);
 					}
 					else if (remote_ts == block->modified_at && udb_remote_wins_equal_timestamp(client))
 					{
 						udb_send_db_to_one(client, ":%s DB %s RES %c", me.id, client->id, letter);
+						udb_reconcile_record_res(direct_peer, letter);
 					}
 				}
+				udb_reconcile_check(ctx);
 				if (!is_broadcast)
 					return;
 			}

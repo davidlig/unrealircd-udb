@@ -210,6 +210,26 @@ static UdbPasswordFailure udb_password_failures[UDB_PASSWORD_FAILURE_SLOTS];
 static UdbSyncStatus udb_sync_status = UDB_SYNC_OK;
 static time_t udb_degraded_since = 0;
 static time_t udb_last_successful_sync = 0;
+static int udb_ready = 0;
+static Client *udb_bootstrap_peer = NULL;
+
+#define UDB_BLOCK_MASK_N (1 << 0)
+#define UDB_BLOCK_MASK_C (1 << 1)
+#define UDB_BLOCK_MASK_I (1 << 2)
+#define UDB_BLOCK_MASK_S (1 << 3)
+#define UDB_BLOCK_MASK_L (1 << 4)
+#define UDB_BLOCK_MASK_K (1 << 5)
+#define UDB_ALL_BLOCKS_MASK 0x3F
+
+typedef struct UdbReconcileState
+{
+	Client *authority_peer;
+	unsigned int compared_blocks;
+	unsigned int divergent_blocks;
+	unsigned int completed_blocks;
+} UdbReconcileState;
+
+static UdbReconcileState udb_reconcile = {0};
 
 static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs);
 static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type);
@@ -287,6 +307,17 @@ static int udb_peer_authorizes_us(Client *server);
 static int udb_sync_hello_start(Client *server);
 static void udb_sync_hello_ack(Client *server);
 static void udb_sync_abort(UdbBlock *block, const char *reason);
+static unsigned int udb_block_letter_to_mask(char letter);
+static int udb_is_database_initialized(UdbContext *ctx);
+static void udb_persistence_mark_ready(void);
+static int udb_has_active_sessions(UdbContext *ctx);
+static void udb_reconcile_reset(void);
+static void udb_reconcile_start(Client *authority);
+static void udb_reconcile_record_inf(Client *peer, char letter, unsigned long crc32);
+static void udb_reconcile_record_res(Client *peer, char letter);
+static void udb_reconcile_record_end(Client *peer, char letter);
+static int udb_reconcile_check(UdbContext *ctx);
+static int udb_is_authorized_sync_source(UdbContext *ctx, Client *direct_peer);
 static int udb_sync_begin(UdbBlock *block, Client *peer, const char *txid);
 static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid, const char *path, const char *data);
 static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, const char *txid, const char *checksum,

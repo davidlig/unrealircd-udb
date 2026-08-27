@@ -1275,7 +1275,6 @@ static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSessi
 		block->filesize = st.st_size;
 	udb_sync_session_free(block);
 
-	udb_last_successful_sync = time(NULL);
 	udb_apply_tree_effects(ctx, block);
 	if (block->letter == 'L')
 		udb_sync_snomask_filter();

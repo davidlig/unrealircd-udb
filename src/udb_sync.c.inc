@@ -94,15 +94,171 @@ static int udb_sync_hello_start(Client *server)
 
 static void udb_sync_hello_ack(Client *server)
 {
-	UdbHelloPeer *peer = udb_hello_peer(server, 1);
+	UdbHelloPeer *peer = udb_hello_peer(server, 0);
 
-	if (peer->state != UDB_HEL_CONFIRMED)
+	if (!peer)
+		return;
+
+	if (peer->state == UDB_HEL_CONFIRMED)
+		return;
+
+	if (peer->state == UDB_HEL_WAITING)
 	{
 		peer->state = UDB_HEL_CONFIRMED;
+		peer->deadline = 0;
 		udb_log(ULOG_INFO, "UDB_HEL_CONFIRMED", server, "UDB HEL 4 capability confirmed for directly linked server");
 		udb_propagator_policy_changed(udb_ctx);
 		if (!peer->auth_received || peer->authorizes_us)
 			udb_sync_to_server(server);
+	}
+}
+
+static unsigned int udb_block_letter_to_mask(char letter)
+{
+	switch (letter)
+	{
+	case 'N':
+		return UDB_BLOCK_MASK_N;
+	case 'C':
+		return UDB_BLOCK_MASK_C;
+	case 'I':
+		return UDB_BLOCK_MASK_I;
+	case 'S':
+		return UDB_BLOCK_MASK_S;
+	case 'L':
+		return UDB_BLOCK_MASK_L;
+	case 'K':
+		return UDB_BLOCK_MASK_K;
+	default:
+		return 0;
+	}
+}
+
+static int udb_has_active_sessions(UdbContext *ctx)
+{
+	UdbBlock *block;
+	if (!ctx)
+		return 0;
+	for (block = ctx->block_list; block; block = block->next)
+	{
+		if (block->session)
+			return 1;
+	}
+	return 0;
+}
+
+static void udb_reconcile_reset(void)
+{
+	udb_reconcile.authority_peer = NULL;
+	udb_reconcile.compared_blocks = 0;
+	udb_reconcile.divergent_blocks = 0;
+	udb_reconcile.completed_blocks = 0;
+}
+
+static void udb_reconcile_start(Client *authority)
+{
+	if (udb_reconcile.authority_peer != authority)
+	{
+		udb_reconcile.authority_peer = authority;
+		udb_reconcile.compared_blocks = 0;
+		udb_reconcile.divergent_blocks = 0;
+		udb_reconcile.completed_blocks = 0;
+	}
+}
+
+static void udb_reconcile_record_inf(Client *peer, char letter, unsigned long remote_crc)
+{
+	unsigned int mask = udb_block_letter_to_mask(letter);
+	UdbBlock *block = udb_block_by_letter(udb_ctx, letter);
+
+	if (!mask || !block)
+		return;
+
+	udb_reconcile_start(peer);
+	udb_reconcile.compared_blocks |= mask;
+
+	if (remote_crc != block->checksum)
+		udb_reconcile.divergent_blocks |= mask;
+	else
+		udb_reconcile.divergent_blocks &= ~mask;
+}
+
+static void udb_reconcile_record_res(Client *peer, char letter)
+{
+	unsigned int mask = udb_block_letter_to_mask(letter);
+	if (!mask)
+		return;
+
+	udb_reconcile_start(peer);
+	udb_reconcile.divergent_blocks |= mask;
+}
+
+static void udb_reconcile_record_end(Client *peer, char letter)
+{
+	unsigned int mask = udb_block_letter_to_mask(letter);
+	if (!mask)
+		return;
+
+	udb_reconcile_start(peer);
+	udb_reconcile.compared_blocks |= mask;
+	udb_reconcile.completed_blocks |= mask;
+}
+
+static int udb_reconcile_check(UdbContext *ctx)
+{
+	if (!ctx)
+		return 0;
+
+	if ((udb_reconcile.compared_blocks & UDB_ALL_BLOCKS_MASK) != UDB_ALL_BLOCKS_MASK)
+		return 0;
+
+	if ((udb_reconcile.divergent_blocks & udb_reconcile.completed_blocks) != udb_reconcile.divergent_blocks)
+		return 0;
+
+	if (udb_has_active_sessions(ctx))
+		return 0;
+
+	int was_stale_or_degraded = (udb_sync_status == UDB_SYNC_STALE || udb_sync_status == UDB_SYNC_DEGRADED);
+	int was_not_ready = !udb_ready;
+
+	udb_ready = 1;
+	udb_persistence_mark_ready();
+
+	udb_sync_status = UDB_SYNC_OK;
+	udb_degraded_since = 0;
+	udb_last_successful_sync = time(NULL);
+
+	if (was_stale_or_degraded || was_not_ready)
+	{
+		UdbPropagatorSelection selected;
+		const char *prop_name = (ctx && udb_select_propagator(ctx, 1, &selected)) ? selected.name : "none";
+		udb_log(ULOG_INFO, "UDB_SYNC_RECOVERED", NULL,
+				"UDB synchronization recovered. Selected propagator: $propagator",
+				log_data_string("propagator", prop_name));
+	}
+
+	return 1;
+}
+
+static int udb_is_authorized_sync_source(UdbContext *ctx, Client *direct_peer)
+{
+	if (!direct_peer || !udb_has_hello(direct_peer))
+		return 0;
+
+	if (udb_propagator_policy_present(ctx))
+	{
+		return udb_is_propagator(ctx, direct_peer);
+	}
+	else
+	{
+		if (!udb_ready)
+		{
+			if (!udb_bootstrap_peer)
+				udb_bootstrap_peer = direct_peer;
+
+			return (udb_bootstrap_peer == direct_peer);
+		}
+		return 1;
 	}
 }
 
@@ -116,18 +272,42 @@ static void udb_sync_status_refresh(void)
 	int timeout = (udb_cfg && udb_cfg->stale_timeout > 0) ? udb_cfg->stale_timeout : 300;
 	UdbStaleAction action = udb_cfg ? udb_cfg->stale_action : UDB_STALE_ACTION_DENY_NEW_CLIENTS;
 
-	if (!policy_present || has_selected)
+	if (!policy_present)
 	{
-		/* We have an eligible propagator or we have no policy (bootstrap / standalone) */
-		if (udb_sync_status != UDB_SYNC_OK)
+		if (udb_ready)
 		{
-			const char *prop_name = has_selected ? selected.name : "none";
-			udb_log(ULOG_INFO, "UDB_SYNC_RECOVERED", NULL,
-					"UDB synchronization recovered. Selected propagator: $propagator",
-					log_data_string("propagator", prop_name));
-			udb_sync_status = UDB_SYNC_OK;
+			if (udb_sync_status != UDB_SYNC_OK)
+			{
+				udb_log(ULOG_INFO, "UDB_SYNC_RECOVERED", NULL,
+						"UDB synchronization recovered. Selected propagator: none");
+				udb_sync_status = UDB_SYNC_OK;
+			}
+			udb_degraded_since = 0;
 		}
-		udb_degraded_since = 0;
+		return;
+	}
+
+	if (has_selected)
+	{
+		if (udb_sync_status == UDB_SYNC_OK && udb_ready)
+		{
+			udb_degraded_since = 0;
+			return;
+		}
+
+		if (udb_degraded_since > 0)
+		{
+			time_t elapsed = (now >= udb_degraded_since) ? (now - udb_degraded_since) : 0;
+			if (elapsed >= timeout && udb_sync_status != UDB_SYNC_STALE)
+			{
+				const char *action_str = (action == UDB_STALE_ACTION_WARN) ? "warn" : "deny-new-clients";
+				udb_log(ULOG_ERROR, "UDB_SYNC_STALE", NULL,
+						"UDB synchronization is stale ($seconds seconds without eligible propagator). Stale action: "
+						"$action",
+						log_data_integer("seconds", (int)elapsed), log_data_string("action", action_str));
+				udb_sync_status = UDB_SYNC_STALE;
+			}
+		}
 		return;
 	}
 
@@ -139,7 +319,7 @@ static void udb_sync_status_refresh(void)
 
 	if (elapsed < timeout)
 	{
-		if (udb_sync_status != UDB_SYNC_DEGRADED)
+		if (udb_sync_status != UDB_SYNC_DEGRADED && udb_sync_status != UDB_SYNC_STALE)
 		{
 			const char *source = (udb_cfg && udb_cfg->propagator && *udb_cfg->propagator) ? "local" : "S";
 			const char *policy = udb_propagator_policy(ctx);
@@ -167,6 +347,15 @@ static int udb_hook_stale_pre_connect(Client *client)
 {
 	if (!client || !MyConnect(client) || IsServer(client))
 		return HOOK_CONTINUE;
+
+	if (!udb_ready)
+	{
+		udb_log(ULOG_WARNING, "UDB_NOT_READY_DENY_CLIENT", client,
+				"Rejecting new local client connection: UDB initialization pending");
+		exit_client(client, NULL,
+					"UDB synchronization unavailable; this server is temporarily not accepting new connections");
+		return HOOK_DENY;
+	}
 
 	if (udb_sync_status == UDB_SYNC_STALE && udb_cfg && udb_cfg->stale_action == UDB_STALE_ACTION_DENY_NEW_CLIENTS)
 	{
@@ -221,6 +410,12 @@ static void udb_propagator_policy_changed(UdbContext *ctx)
 	}
 	if (udb_select_propagator(ctx, 1, &selected) && !selected.is_local)
 		peer = selected.peer;
+
+	if (udb_bootstrap_peer && udb_bootstrap_peer != peer)
+		udb_bootstrap_peer = NULL;
+	if (udb_reconcile.authority_peer && udb_reconcile.authority_peer != peer)
+		udb_reconcile_reset();
+
 	for (block = ctx->block_list; block; block = block->next)
 	{
 		/* Replacing block S removes the old tree's effects while the S session
@@ -569,5 +764,11 @@ static void udb_sync_server_quit(Client *client)
 			udb_sync_abort(block, "peer quit");
 		else if (block->syncing_from == client)
 			block->syncing_from = NULL;
+
+	if (udb_bootstrap_peer == client)
+		udb_bootstrap_peer = NULL;
+	if (udb_reconcile.authority_peer == client)
+		udb_reconcile_reset();
+
 	udb_propagator_policy_changed(udb_ctx);
 }

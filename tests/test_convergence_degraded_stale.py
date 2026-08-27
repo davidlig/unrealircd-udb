@@ -141,7 +141,7 @@ def stop(process):
 
 
 class MockPeer:
-    def __init__(self, name, sid, host, port, target_sid, propagator_advertised=None, autostart_hel=True):
+    def __init__(self, name, sid, host, port, target_sid, propagator_advertised=None, autostart_hel=True, send_inf=True):
         self.name = name
         self.sid = sid
         self.target_sid = target_sid
@@ -160,6 +160,9 @@ class MockPeer:
             self.send(f"DB {self.target_sid} HEL 4 {prop}")
             self.wait_for(lambda line: " DB " in line and " HEL 4 " in line, f"{self.name} HEL response")
             self.send(f"DB {self.target_sid} HEL 4 ACK")
+            if send_inf:
+                for b in ('N', 'C', 'I', 'S', 'L', 'K'):
+                    self.send(f"DB {self.target_sid} INF {b} 00000000 0")
 
     def send_raw(self, command):
         self.sock.sendall((command + "\r\n").encode("ascii"))

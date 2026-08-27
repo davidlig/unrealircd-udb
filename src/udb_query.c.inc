@@ -73,7 +73,8 @@ static void udb_query_send_status(Client *client)
 	else
 		time_without_propagator = 0;
 
-	if (udb_sync_status == UDB_SYNC_STALE && udb_cfg && udb_cfg->stale_action == UDB_STALE_ACTION_DENY_NEW_CLIENTS)
+	if (!udb_ready ||
+		(udb_sync_status == UDB_SYNC_STALE && udb_cfg && udb_cfg->stale_action == UDB_STALE_ACTION_DENY_NEW_CLIENTS))
 		clients_str = "DENIED";
 	else
 		clients_str = "ALLOWED";

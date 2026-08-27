@@ -69,6 +69,7 @@ jobs:
           python3 tests/test_spamfilter_limits.py
           python3 tests/test_propagator_validation.py
           python3 tests/test_convergence_degraded_stale.py
+          python3 tests/test_bootstrap_readiness_and_convergence.py
 
       - name: Run Integration & Multi-Hop Test Suites
         run: |
@@ -140,6 +141,7 @@ jobs:
           python3 tests/test_spamfilter_limits.py
           python3 tests/test_propagator_validation.py
           python3 tests/test_convergence_degraded_stale.py
+          python3 tests/test_bootstrap_readiness_and_convergence.py
           python3 tests/test_multihop_mutations.py
           python3 tests/test_propagator_failover.py
           python3 tests/test_propagator_non_adjacent.py
