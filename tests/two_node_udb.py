@@ -406,6 +406,8 @@ def main():
         b_db.write_text("harness-b::vhost winner.test\n", encoding="ascii")
         a_k_db.write_text("G::*@udb-loser.test::reason loser\n", encoding="ascii")
         b_k_db.write_text(K_STAGED_RECORD + "\n", encoding="ascii")
+        (a / "data" / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787720000\n", encoding="ascii")
+        (b / "data" / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787720000\n", encoding="ascii")
         a_baseline = a_db.read_bytes()
         b_baseline = b_db.read_bytes()
         tie_time = int(time.time()) - 60

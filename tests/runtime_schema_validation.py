@@ -210,6 +210,9 @@ class FakeServicesServer:
         self.send(f"DB {self.ircd_sid} HEL 4 ?")
         self.wait_for(lambda line: " DB " in line and " HEL 4 " in line, "UDB HEL response")
         self.send(f"DB {self.ircd_sid} HEL 4 ACK")
+        for b in ('N', 'C', 'I', 'S', 'L', 'K'):
+            self.send(f"DB {self.ircd_sid} INF {b} 00000000 0")
+        time.sleep(0.2)
         self.send_uid("NickServ")
         self.send_uid("ChanServ")
 

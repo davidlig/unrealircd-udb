@@ -349,6 +349,7 @@ def run_tests(ircd_bin, keep=False):
 
         large_records_db = data_dir4 / "udb_C.db"
         large_records_db.write_text("".join(lines), encoding="ascii")
+        (data_dir4 / ".udb_state").write_text(f"STATE=READY\nLAST_SYNC={int(time.time())}\n", encoding="ascii")
 
         client_port4, server_port4, tls_port4 = free_port(), free_port(), free_port()
         config4 = node4 / "unrealircd.conf"

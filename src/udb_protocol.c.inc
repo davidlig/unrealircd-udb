@@ -212,7 +212,7 @@ CMD_FUNC(cmd_db)
 		}
 		else if (udb_server_name_valid(prop))
 		{
-			new_auth = !strcasecmp(prop, me.name);
+			new_auth = !strcasecmp(prop, me.name) || udb_propagator_in_policy(ctx, prop);
 		}
 		else
 		{
@@ -461,11 +461,13 @@ CMD_FUNC(cmd_db)
 					{
 						udb_send_db_to_one(client, ":%s DB %s RES %c", me.id, client->id, letter);
 						udb_reconcile_record_res(direct_peer, letter);
+						block->syncing_from = direct_peer;
 					}
 					else if (remote_ts == block->modified_at && udb_remote_wins_equal_timestamp(client))
 					{
 						udb_send_db_to_one(client, ":%s DB %s RES %c", me.id, client->id, letter);
 						udb_reconcile_record_res(direct_peer, letter);
+						block->syncing_from = direct_peer;
 					}
 				}
 				udb_reconcile_check(ctx);
@@ -493,7 +495,7 @@ CMD_FUNC(cmd_db)
 				return;
 			char letter = *parv[3];
 			UdbBlock *block = udb_block_by_letter(ctx, letter);
-			if (client != direct_peer || is_broadcast || !is_for_me)
+			if (client != direct_peer || is_broadcast || !is_for_me || !udb_ready)
 			{
 				udb_send_db_to_one(client, ":%s DB %s ERR RES %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
 				return;
@@ -511,7 +513,7 @@ CMD_FUNC(cmd_db)
 					udb_send_db_to_one(client, ":%s DB %s ERR RES %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
 					return;
 				}
-				if (block->syncing_from && block->syncing_from != direct_peer)
+				if (block->session || (block->syncing_from && block->syncing_from != direct_peer))
 				{
 					udb_send_db_to_one(client, ":%s DB %s ERR RES %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE,
 									   letter);
@@ -519,7 +521,6 @@ CMD_FUNC(cmd_db)
 				}
 
 				udb_sync_send_stage(direct_peer, block);
-				block->syncing_from = NULL;
 
 				if (!is_broadcast)
 					return;

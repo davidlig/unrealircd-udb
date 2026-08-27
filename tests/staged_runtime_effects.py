@@ -292,8 +292,10 @@ def main():
         (a / "data" / "udb_K.db").write_text(
             "G::*@127.0.0.1::reason staged loopback ban\n"
             "Q::banned::reason staged fresh-client rejection\n", encoding="ascii")
+        (a / "data" / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787720000\n", encoding="ascii")
+        (b / "data" / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787710000\n", encoding="ascii")
         old_time = time.time() - 120
-        for db in (b_n, b / "data" / "udb_K.db"):
+        for db in (b_n, b / "data" / "udb_K.db", b / "data" / ".udb_state"):
             os.utime(db, (old_time, old_time))
 
         a_client, a_server, a_tls, b_client, b_server, b_tls = free_ports(6)

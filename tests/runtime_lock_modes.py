@@ -503,6 +503,7 @@ def main():
             f"{CHANNEL}::modes +ntM\n"
             f"{CHANNEL}::options *6\n",
             encoding="ascii")
+        (data / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787720000\n", encoding="ascii")
 
         client_port, server_port, tls_port = free_port(), free_port(), free_port()
         config = node / "unrealircd.conf"

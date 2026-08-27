@@ -473,6 +473,7 @@ def test_suite():
 
         # Seed S.db with propagator = old-a.test,old-b.test
         (dbdirG / "udb_S.db").write_text("; UDB Block S - Version 1\npropagator old-a.test,old-b.test\n", encoding="ascii")
+        (dbdirG / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787800000\n", encoding="ascii")
 
         confG = nodeG / "unrealircd.conf"
         # No local propagator override in config, stale timeout 2s

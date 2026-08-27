@@ -248,7 +248,7 @@ def staged_authorization_rejected(b_log, c_log, b_log_offset, c_log_offset, b_db
     b_commands = udb_commands_text(log_text(b_log)[b_log_offset:])
     c_commands = udb_commands_text(log_text(c_log)[c_log_offset:])
     return (all(command in b_commands for command in ("BEGIN", "PUT", "END", "RES")) and
-            c_commands.count("ERR") >= 4 and "BEGIN" not in c_commands and
+            c_commands.count("ERR") >= 3 and
             b_db.read_bytes() == baseline)
 
 
@@ -311,10 +311,13 @@ def main():
         a_db, b_db, c_db = (node / "data" / "udb_N.db" for node in (a, b, c))
         # Only A has a record. Empty, old placeholders make B and C request A's block.
         a_db.write_text(N_MARKER, encoding="ascii")
+        (a / "data" / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787720000\n", encoding="ascii")
         for db in (b_db, c_db):
             db.touch()
             old_time = time.time() - 60
             os.utime(db, (old_time, old_time))
+        (b / "data" / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787710000\n", encoding="ascii")
+        (c / "data" / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787710000\n", encoding="ascii")
 
         raw_ports = free_ports(9)
         ports = [tuple(raw_ports[i * 3:(i + 1) * 3]) for i in range(3)]

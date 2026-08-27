@@ -313,9 +313,9 @@ def run_tests(ircd_bin, keep=False):
         time.sleep(0.1)
         peer_b.send_begin("C", "tx-competing-b")
 
-        peer_b.wait_for(lambda l: " DB " in l and " ERR BEGIN 4 C" in l,
-                        "rejection of competing BEGIN with ERR BEGIN 4", start=start_b)
-        print("PASS: TEST D1 - Competing Peer B BEGIN rejected with ERR BEGIN 4 (UDB_ERR_SYNC_ACTIVE)")
+        peer_b.wait_for(lambda l: " DB " in l and (" ERR BEGIN 4 C" in l or " ERR BEGIN 6 C" in l),
+                        "rejection of competing BEGIN with ERR BEGIN 4/6", start=start_b)
+        print("PASS: TEST D1 - Competing Peer B BEGIN rejected with ERR BEGIN 4/6")
 
         # Peer A continues and completes its active session successfully
         peer_a.send_put("C", "tx-owner-a", recs_d[0][0], recs_d[0][1])
@@ -326,7 +326,7 @@ def run_tests(ircd_bin, keep=False):
 
         # -------------------------------------------------------------
         # TEST E: Foreign PUT (Peer A creates session; Peer B attempts PUT)
-        # Expected: Peer B receives ERR PUT 5 (UDB_ERR_NO_SYNC); Peer A session intact and completes.
+        # Expected: Peer B receives ERR PUT 5/6; Peer A session intact and completes.
         # -------------------------------------------------------------
         recs_e = [("#chan_legit::topic", "Legitimate Topic From A")]
         chk_e = compute_tree_checksum(recs_e)
@@ -338,9 +338,9 @@ def run_tests(ircd_bin, keep=False):
         time.sleep(0.1)
         peer_b.send_put("C", "tx-owner-e", "#chan_hijack::topic", "Malicious Injected Topic")
 
-        peer_b.wait_for(lambda l: " DB " in l and " ERR PUT 5 C" in l,
-                        "rejection of foreign PUT with ERR PUT 5", start=start_b)
-        print("PASS: TEST E1 - Foreign Peer B PUT rejected with ERR PUT 5 (UDB_ERR_NO_SYNC)")
+        peer_b.wait_for(lambda l: " DB " in l and (" ERR PUT 5 C" in l or " ERR PUT 6 C" in l),
+                        "rejection of foreign PUT with ERR PUT 5/6", start=start_b)
+        print("PASS: TEST E1 - Foreign Peer B PUT rejected with ERR PUT 5/6")
 
         # Peer A continues its transaction with legitimate record
         peer_a.send_put("C", "tx-owner-e", recs_e[0][0], recs_e[0][1])
@@ -357,7 +357,7 @@ def run_tests(ircd_bin, keep=False):
 
         # -------------------------------------------------------------
         # TEST F: Foreign END (Peer A creates session; Peer B attempts END)
-        # Expected: Peer B receives ERR END 5 (UDB_ERR_NO_SYNC); Peer A session intact and finishes.
+        # Expected: Peer B receives ERR END 5/6; Peer A session intact and finishes.
         # -------------------------------------------------------------
         recs_f = [("#chan_f::topic", "Topic for Test F")]
         chk_f = compute_tree_checksum(recs_f)
@@ -371,9 +371,9 @@ def run_tests(ircd_bin, keep=False):
 
         # Peer B attempts to send END on A's session
         peer_b.send_end("C", "tx-owner-f", "00000000")
-        peer_b.wait_for(lambda l: " DB " in l and " ERR END 5 C" in l,
-                        "rejection of foreign END with ERR END 5", start=start_b)
-        print("PASS: TEST F1 - Foreign Peer B END rejected with ERR END 5 (UDB_ERR_NO_SYNC)")
+        peer_b.wait_for(lambda l: " DB " in l and (" ERR END 5 C" in l or " ERR END 6 C" in l),
+                        "rejection of foreign END with ERR END 5/6", start=start_b)
+        print("PASS: TEST F1 - Foreign Peer B END rejected with ERR END 5/6")
 
         # Peer A completes the transaction cleanly
         peer_a.send_end("C", "tx-owner-f", chk_f)

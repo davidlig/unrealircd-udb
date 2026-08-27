@@ -179,6 +179,7 @@ def main():
         # Seed Node A with an N record
         n_file_a = node_a / "data/udb_N.db"
         n_file_a.write_text("; UDB Block N\n; Saved: 1787720000\n; Records: 1\ndavidlig::vhost root.admin.net\n", encoding="ascii")
+        (node_a / "data/.udb_state").write_text("STATE=READY\nLAST_SYNC=1787720000\n", encoding="ascii")
 
         all_ports = free_ports(6)
         ports_a = tuple(all_ports[0:3])

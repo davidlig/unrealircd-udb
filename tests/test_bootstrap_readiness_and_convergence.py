@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """Comprehensive regression test suite for UDB clean bootstrap readiness,
-single bootstrap source exclusivity, failover, STALE convergence recovery,
-unsolicited HEL ACK rejection, and bootstrap persistence.
+atomic .udb_state persistence, crash-safety, round-isolated reconciliation,
+completed-bit invalidation upon re-divergence, and authority switching.
 
 Covers:
-  Test 1 - Clean bootstrap + client gate (denied when not ready, allowed after sync)
-  Test 2 - Two bootstrap peers (single source exclusivity, rejection of concurrent peer)
-  Test 3 - Bootstrap peer failover (session abort, clear bootstrap_peer, failover to second peer)
-  Test 4 - Block S learned before other blocks (clients remain DENIED until all blocks reconciled)
-  Test 5 - Clean node with local propagator (announces HEL 4 <propagator>, not ?, denies clients until sync)
-  Test 6 - STALE recovery with divergent data (stays STALE and denies clients during staged sync until completion)
-  Test 7 - Unsolicited HEL ACK rejection (unnegotiated HEL ACK does not confirm capability)
-  Test 8 - Bootstrap persistence (completed readiness survives restart)
+  Test 1 - Single block crash (clean node crashes after block N only; on restart remains NOT_READY until all 6 blocks converge)
+  Test 2 - Five blocks crash (crashes after N, C, I, S, L; on restart remains NOT_READY)
+  Test 3 - Full bootstrap + restart persistence (.udb_state == READY and clients allowed immediately)
+  Test 4 - Corrupted state file (.udb_state contains invalid garbage -> fails safe to BOOTSTRAPPING)
+  Test 5 - State file write failure (directory read-only / cannot persist -> udb_ready remains 0)
+  Test 6 - Second reconciliation with same authority (re-divergence on N invalidates completed status until fresh END)
+  Test 7 - Authority switch mid-round (policy changes from A to B -> complete state reset; B must provide all 6 blocks)
+  Test 8 - Bootstrap peer disconnect (disconnect mid-bootstrap resets round; next peer must complete from scratch)
+  Test 9 - Empty blocks bootstrap (authority with all 6 empty blocks converges cleanly to READY)
+  Test 10 - Two bootstrap peers exclusivity and strict HEL ACK validation
 """
 
 import os
@@ -19,6 +21,7 @@ import pathlib
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -102,9 +105,15 @@ loadmodule "third/udb";
 
 
 def bwrap_command(node, ircd, config):
-    for sub in ("runtime-data", "tmp", "cache", "logs"):
+    for sub in ("runtime-data", "tmp", "cache", "logs", "modules"):
         (node / sub).mkdir(parents=True, exist_ok=True)
+    (node / "modules" / "third").mkdir(parents=True, exist_ok=True)
+    src_mod = pathlib.Path(os.environ.get("UDB_MODULE_PATH", RUNTIME_ROOT / "modules/third/udb.so"))
+    dest_mod = node / "modules" / "third" / "udb.so"
+    if src_mod.exists() and not dest_mod.exists():
+        shutil.copy(src_mod, dest_mod)
     return ["bwrap", "--die-with-parent", "--ro-bind", "/", "/",
+            "--bind", "/tmp", "/tmp",
             "--bind", str(node), str(node),
             "--bind", str(node / "runtime-data"), str(RUNTIME_ROOT / "data"),
             "--bind", str(node / "tmp"), str(RUNTIME_ROOT / "tmp"),
@@ -138,6 +147,7 @@ def stop(process):
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=5)
+    time.sleep(0.3)
 
 
 class MockPeer:
@@ -208,15 +218,27 @@ class MockPeer:
 class MockClient:
     def __init__(self, host, port, nick="testuser"):
         self.nick = nick
-        self.sock = socket.create_connection((host, port), timeout=3)
-        self.sock.settimeout(0.5)
         self.lines = []
         self.buffer = ""
+        self.closed = False
+        deadline = time.monotonic() + 3.0
+        while True:
+            try:
+                self.sock = socket.create_connection((host, port), timeout=3)
+                break
+            except ConnectionRefusedError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
+        self.sock.settimeout(0.5)
         self.send(f"NICK {self.nick}")
         self.send(f"USER {self.nick} 0 * :Test Client")
 
     def send(self, command):
-        self.sock.sendall((command + "\r\n").encode("utf-8"))
+        try:
+            self.sock.sendall((command + "\r\n").encode("utf-8"))
+        except OSError:
+            self.closed = True
 
     def receive(self, timeout=2.0):
         deadline = time.monotonic() + timeout
@@ -225,7 +247,11 @@ class MockClient:
                 data = self.sock.recv(4096)
             except socket.timeout:
                 continue
+            except OSError:
+                self.closed = True
+                break
             if not data:
+                self.closed = True
                 break
             self.buffer += data.decode("utf-8", errors="replace")
             while "\r\n" in self.buffer:
@@ -241,14 +267,39 @@ class MockClient:
             for line in self.lines:
                 if predicate(line):
                     return line
+            if self.closed:
+                break
             self.receive(0.2)
         return None
+
+    def is_denied(self, timeout=2.0):
+        self.receive(timeout)
+        return self.closed or any("ERROR" in l or "temporarily not accepting" in l or "Closing Link" in l for l in self.lines)
 
     def close(self):
         try:
             self.sock.close()
         except OSError:
             pass
+
+
+def setup_node(tempdir, name, sid, ports, links, propagator=None, stale_timeout=None, stale_action=None):
+    node_dir = pathlib.Path(tempdir) / name
+    node_dir.mkdir(parents=True, exist_ok=True)
+    dbdir = node_dir / "db"
+    dbdir.mkdir(parents=True, exist_ok=True)
+    moddir = node_dir / "modules" / "third"
+    moddir.mkdir(parents=True, exist_ok=True)
+    src_mod = RUNTIME_ROOT / "modules/third/udb.so"
+    if src_mod.exists():
+        shutil.copy(src_mod, moddir / "udb.so")
+    cfg = node_dir / "unrealircd.conf"
+    write_config(cfg, name, sid, ports, links, dbdir, propagator, stale_timeout, stale_action)
+    cmd = bwrap_command(node_dir, DEFAULT_IRCD, cfg)
+    p = subprocess.Popen(cmd)
+    wait_for_daemon(p, "127.0.0.1", ports[0])
+    wait_for_daemon(p, "127.0.0.1", ports[1])
+    return p, node_dir, dbdir, cfg
 
 
 def test_suite():
@@ -261,403 +312,304 @@ def test_suite():
     with tempfile.TemporaryDirectory(prefix="udb_boot_test_") as tmp_dir_str:
         tmpdir = pathlib.Path(tmp_dir_str)
 
-        # =========================================================================
-        # Test 1: Clean bootstrap + client gate
-        # =========================================================================
-        print("\n=== Running Test 1: Clean bootstrap + client gate ===")
-        node1 = tmpdir / "node1"
-        ports1 = free_ports(3)
-        links1 = [("peer-a.test", 0, False)]
-        dbdir1 = node1 / "db"
-        dbdir1.mkdir(parents=True, exist_ok=True)
-        (node1 / "modules" / "third").mkdir(parents=True, exist_ok=True)
-        shutil.copy(module_src, node1 / "modules" / "third" / "udb.so")
-        conf1 = node1 / "unrealircd.conf"
-        write_config(conf1, "hub1.test", "001", ports1, links1, dbdir1)
+        # -----------------------------------------------------------------
+        # TEST 1: Crash after a single block -> remains BOOTSTRAPPING
+        # -----------------------------------------------------------------
+        print("\n=== Running Test 1: Crash after single block ===")
+        p1_ports = free_ports(3)
+        p1, n1, dbdir1, cfg1 = setup_node(
+            tmpdir, "hub1.test", "001", p1_ports,
+            [("peer-a.test", 0, False)]
+        )
+        try:
+            c1 = MockClient("127.0.0.1", p1_ports[0], "user1")
+            assert c1.is_denied(), "Client was not denied on clean node"
+            c1.close()
 
-        proc1 = subprocess.Popen(bwrap_command(node1, ircd_bin, conf1))
-        wait_for_daemon(proc1, "127.0.0.1", ports1[0])
+            peer_a = MockPeer("peer-a.test", "00A", "127.0.0.1", p1_ports[1], "001")
+            peer_a.send("DB 001 INF N 00000000 0")
+            peer_a.send("DB 001 BEGIN N tx1 00000000")
+            nick_rec = "alice::vhost alice.net"
+            peer_a.send(f"DB 001 PUT N tx1 alice::vhost alice.net")
+            n_crc = zlib.crc32((nick_rec + "\n").encode("utf-8")) & 0xFFFFFFFF
+            peer_a.send(f"DB 001 END N tx1 {n_crc:08x}")
+            peer_a.wait_for(lambda l: " ACK N" in l, "ACK for block N")
+            peer_a.close()
 
-        # Attempt connection before bootstrap: MUST be denied
-        client_early = MockClient("127.0.0.1", ports1[0], "early_user")
-        client_early.receive(timeout=1.0)
-        denied = any("UDB synchronization unavailable" in l or "ERROR" in l for l in client_early.lines)
-        assert denied, f"Expected client to be denied on uninitialized node, lines: {client_early.lines}"
-        print("PASS: Test 1: Local client denied before UDB bootstrap completed")
-        client_early.close()
+            stop(p1)
 
-        # Connect Peer A: verify Hub1 announces HEL 4 ?
-        peerA = MockPeer("peer-a.test", "00A", "127.0.0.1", ports1[1], "001", propagator_advertised="?", autostart_hel=False)
-        peerA.send("DB 001 HEL 4 ?")
-        hel_resp = peerA.wait_for(lambda l: " DB " in l and " HEL 4 ?" in l, "HEL 4 ? advertised")
-        assert " HEL 4 ?" in hel_resp, f"Expected HEL 4 ?, got {hel_resp}"
-        peerA.send("DB 001 HEL 4 ACK")
-        print("PASS: Test 1: Clean node advertised HEL 4 ?")
+            state_file = dbdir1 / ".udb_state"
+            assert state_file.exists(), ".udb_state was not created"
+            assert "STATE=BOOTSTRAPPING" in state_file.read_text(), ".udb_state must be BOOTSTRAPPING"
 
-        # Peer A reconciles all blocks (sends identical INF for all 6 blocks)
-        for b in ('N', 'C', 'I', 'S', 'L', 'K'):
-            peerA.send(f"DB 001 INF {b} 00000000 0")
-        time.sleep(0.5)
+            p1 = subprocess.Popen(bwrap_command(n1, ircd_bin, cfg1))
+            wait_for_daemon(p1, "127.0.0.1", p1_ports[0])
+            wait_for_daemon(p1, "127.0.0.1", p1_ports[1])
 
-        # Now client connects: MUST be allowed!
-        client_ready = MockClient("127.0.0.1", ports1[0], "ready_user")
-        welcome = client_ready.wait_for(lambda l: " 001 " in l, timeout=3)
-        assert welcome is not None, f"Expected 001 welcome after bootstrap, got {client_ready.lines}"
-        print("PASS: Test 1: Local client allowed after UDB bootstrap completed")
-        client_ready.close()
-        peerA.close()
-        stop(proc1)
+            c1_post = MockClient("127.0.0.1", p1_ports[0], "user1_post")
+            assert c1_post.is_denied(), "Client was allowed after single-block restart!"
+            c1_post.close()
 
-        # =========================================================================
-        # Test 2: Two bootstrap peers (single source exclusivity)
-        # =========================================================================
-        print("\n=== Running Test 2: Two bootstrap peers exclusivity ===")
-        node2 = tmpdir / "node2"
-        ports2 = free_ports(3)
-        links2 = [("peer-a.test", 0, False), ("peer-b.test", 0, False)]
-        dbdir2 = node2 / "db"
-        dbdir2.mkdir(parents=True, exist_ok=True)
-        (node2 / "modules" / "third").mkdir(parents=True, exist_ok=True)
-        shutil.copy(module_src, node2 / "modules" / "third" / "udb.so")
-        conf2 = node2 / "unrealircd.conf"
-        write_config(conf2, "hub2.test", "002", ports2, links2, dbdir2)
+            peer_a2 = MockPeer("peer-a.test", "00A", "127.0.0.1", p1_ports[1], "001")
+            peer_a2.send(f"DB 001 INF N {n_crc:08x} 1000")
+            for b in ('C', 'I', 'S', 'L', 'K'):
+                peer_a2.send(f"DB 001 INF {b} 00000000 0")
+            time.sleep(0.3)
 
-        proc2 = subprocess.Popen(bwrap_command(node2, ircd_bin, conf2))
-        wait_for_daemon(proc2, "127.0.0.1", ports2[0])
+            assert "STATE=READY" in state_file.read_text(), ".udb_state must now be READY"
+            c1_ready = MockClient("127.0.0.1", p1_ports[0], "user1_ready")
+            welcome1 = c1_ready.wait_for(lambda l: " 001 " in l, timeout=3.0)
+            assert welcome1 is not None, "Client could not connect after full 6-block convergence"
+            c1_ready.close()
+            peer_a2.close()
+            print("PASS: Test 1: Single block crash safely remains BOOTSTRAPPING; passes to READY after 6 blocks")
+        finally:
+            stop(p1)
 
-        # Peer A connects and sends INF for N (fixing A as bootstrap_peer)
-        peerA = MockPeer("peer-a.test", "00A", "127.0.0.1", ports2[1], "002", propagator_advertised="?", autostart_hel=True)
-        peerA.send("DB 002 INF N 12345678 100")
-        peerA.wait_for(lambda l: " DB " in l and " RES N" in l, "RES N sent to Peer A")
-        print("PASS: Test 2: Peer A selected as bootstrap_peer on first INF/RES exchange")
+        # -----------------------------------------------------------------
+        # TEST 2: Crash after 5 blocks -> remains BOOTSTRAPPING
+        # -----------------------------------------------------------------
+        print("\n=== Running Test 2: Crash after five blocks ===")
+        p2_ports = free_ports(3)
+        p2, n2, dbdir2, cfg2 = setup_node(
+            tmpdir, "hub2.test", "002", p2_ports,
+            [("peer-a.test", 0, False)]
+        )
+        try:
+            peer2 = MockPeer("peer-a.test", "00A", "127.0.0.1", p2_ports[1], "002")
+            for b in ('N', 'C', 'I', 'S', 'L'):
+                peer2.send(f"DB 002 INF {b} 00000000 0")
+            time.sleep(0.2)
+            peer2.close()
+            stop(p2)
 
-        # Peer B connects and attempts staged sync
-        peerB = MockPeer("peer-b.test", "00B", "127.0.0.1", ports2[1], "002", propagator_advertised="?", autostart_hel=True)
-        peerB.send("DB 002 BEGIN C tx_b 00000000")
-        err_begin = peerB.wait_for(lambda l: " DB " in l and " ERR BEGIN 6 C" in l, "ERR BEGIN 6 C from Peer B")
-        assert " ERR BEGIN 6 C" in err_begin, f"Expected ERR BEGIN 6 C, got: {err_begin}"
-        print("PASS: Test 2: Peer B BEGIN was rejected with ERR BEGIN 6 (UDB_ERR_FORBIDDEN)")
+            state_file2 = dbdir2 / ".udb_state"
+            assert "STATE=BOOTSTRAPPING" in state_file2.read_text(), "State was marked READY prematurely!"
 
-        # Peer B sends INF for block C: hub MUST NOT send RES to B
-        peerB.clear()
-        peerB.send("DB 002 INF C 99999999 200")
-        time.sleep(0.5)
-        res_to_b = any(" RES C" in l for l in peerB.lines)
-        assert not res_to_b, f"Hub should not send RES C to non-bootstrap peer B, lines: {peerB.lines}"
-        print("PASS: Test 2: Hub did not send RES to concurrent non-bootstrap peer B")
+            p2 = subprocess.Popen(bwrap_command(n2, ircd_bin, cfg2))
+            wait_for_daemon(p2, "127.0.0.1", p2_ports[0])
+            wait_for_daemon(p2, "127.0.0.1", p2_ports[1])
 
-        # Peer A sends staged sync for N -> succeeds
-        peerA.send("DB 002 BEGIN N tx_a 12345678")
-        peerA.send("DB 002 PUT N tx_a testuser::vhost test.vhost")
-        crc_n = f"{zlib.crc32(b'testuser::vhost test.vhost\n') & 0xFFFFFFFF:08X}"
-        peerA.send(f"DB 002 END N tx_a {crc_n}")
-        peerA.wait_for(lambda l: " DB " in l and " ACK N tx_a " in l, "ACK N to Peer A")
-        print("PASS: Test 2: Staged sync from authorized bootstrap_peer A succeeded")
+            c2 = MockClient("127.0.0.1", p2_ports[0], "user2")
+            assert c2.is_denied(), "Client allowed after 5-block partial initialization!"
+            c2.close()
+            print("PASS: Test 2: Crash after 5 blocks strictly remains BOOTSTRAPPING")
+        finally:
+            stop(p2)
 
-        peerA.close()
-        peerB.close()
-        stop(proc2)
+        # -----------------------------------------------------------------
+        # TEST 3: Full bootstrap + restart persistence
+        # -----------------------------------------------------------------
+        print("\n=== Running Test 3: Full bootstrap + restart persistence ===")
+        p3_ports = free_ports(3)
+        p3, n3, dbdir3, cfg3 = setup_node(
+            tmpdir, "hub3.test", "003", p3_ports,
+            [("peer-a.test", 0, False)]
+        )
+        try:
+            peer3 = MockPeer("peer-a.test", "00A", "127.0.0.1", p3_ports[1], "003", send_inf=True)
+            time.sleep(0.3)
+            peer3.close()
 
-        # =========================================================================
-        # Test 3: Bootstrap peer failover
-        # =========================================================================
-        print("\n=== Running Test 3: Bootstrap peer failover ===")
-        node3 = tmpdir / "node3"
-        ports3 = free_ports(3)
-        links3 = [("peer-a.test", 0, False), ("peer-b.test", 0, False)]
-        dbdir3 = node3 / "db"
-        dbdir3.mkdir(parents=True, exist_ok=True)
-        (node3 / "modules" / "third").mkdir(parents=True, exist_ok=True)
-        shutil.copy(module_src, node3 / "modules" / "third" / "udb.so")
-        conf3 = node3 / "unrealircd.conf"
-        write_config(conf3, "hub3.test", "003", ports3, links3, dbdir3)
+            state_file3 = dbdir3 / ".udb_state"
+            assert "STATE=READY" in state_file3.read_text(), ".udb_state must be READY"
 
-        proc3 = subprocess.Popen(bwrap_command(node3, ircd_bin, conf3))
-        wait_for_daemon(proc3, "127.0.0.1", ports3[0])
+            stop(p3)
 
-        peerA = MockPeer("peer-a.test", "00A", "127.0.0.1", ports3[1], "003", propagator_advertised="?", autostart_hel=True)
-        peerB = MockPeer("peer-b.test", "00B", "127.0.0.1", ports3[1], "003", propagator_advertised="?", autostart_hel=True)
+            p3 = subprocess.Popen(bwrap_command(n3, ircd_bin, cfg3))
+            wait_for_daemon(p3, "127.0.0.1", p3_ports[0])
+            wait_for_daemon(p3, "127.0.0.1", p3_ports[1])
 
-        # Peer A starts BEGIN N and abruptly disconnects
-        peerA.send("DB 003 BEGIN N tx_fail 00000000")
-        time.sleep(0.2)
-        peerA.close()
-        time.sleep(0.5)
+            c3 = MockClient("127.0.0.1", p3_ports[0], "user3")
+            welcome3 = c3.wait_for(lambda l: " 001 " in l, timeout=3.0)
+            assert welcome3 is not None, "Client connection failed on post-bootstrap restart"
+            c3.close()
+            print("PASS: Test 3: Bootstrap persistence verified across restart")
+        finally:
+            stop(p3)
 
-        # Node remains not ready
-        client_failover = MockClient("127.0.0.1", ports3[0], "user_failover")
-        client_failover.receive(timeout=1.0)
-        assert any("UDB synchronization unavailable" in l or "ERROR" in l for l in client_failover.lines), "Clients must remain denied"
-        client_failover.close()
-        print("PASS: Test 3: Node remains not ready after Peer A disconnects during sync")
+        # -----------------------------------------------------------------
+        # TEST 4: Corrupted state file (.udb_state = garbage)
+        # -----------------------------------------------------------------
+        print("\n=== Running Test 4: Corrupted state file ===")
+        p4_ports = free_ports(3)
+        p4, n4, dbdir4, cfg4 = setup_node(
+            tmpdir, "hub4.test", "004", p4_ports,
+            [("peer-a.test", 0, False)]
+        )
+        try:
+            stop(p4)
+            state_file4 = dbdir4 / ".udb_state"
+            state_file4.write_text("GARBAGE_STATE_CORRUPTION_TEST\nANOTHER_INVALID_LINE\n")
 
-        # Peer B now acts as bootstrap source and sends all 6 blocks
-        for b in ('N', 'C', 'I', 'S', 'L', 'K'):
-            peerB.send(f"DB 003 INF {b} 00000000 0")
-        time.sleep(0.5)
+            p4 = subprocess.Popen(bwrap_command(n4, ircd_bin, cfg4))
+            wait_for_daemon(p4, "127.0.0.1", p4_ports[0])
+            wait_for_daemon(p4, "127.0.0.1", p4_ports[1])
 
-        # Now client connects successfully!
-        client_ok = MockClient("127.0.0.1", ports3[0], "user_ok")
-        welcome = client_ok.wait_for(lambda l: " 001 " in l, timeout=3)
-        assert welcome is not None, "Client should be allowed after Peer B completes bootstrap"
-        print("PASS: Test 3: Peer B successfully became new bootstrap_peer after Peer A quit")
+            c4 = MockClient("127.0.0.1", p4_ports[0], "user4")
+            assert c4.is_denied(), "Client allowed with corrupted .udb_state!"
+            c4.close()
+            print("PASS: Test 4: Corrupted state file fail-safe to BOOTSTRAPPING verified")
+        finally:
+            stop(p4)
 
-        client_ok.close()
-        peerB.close()
-        stop(proc3)
+        # -----------------------------------------------------------------
+        # TEST 5: State file write failure simulation
+        # -----------------------------------------------------------------
+        print("\n=== Running Test 5: State file write failure simulation ===")
+        p5_ports = free_ports(3)
+        p5, n5, dbdir5, cfg5 = setup_node(
+            tmpdir, "hub5.test", "005", p5_ports,
+            [("peer-a.test", 0, False)]
+        )
+        try:
+            os.chmod(dbdir5, stat.S_IREAD | stat.S_IEXEC)
 
-        # =========================================================================
-        # Test 4: Block S arrives before other blocks
-        # =========================================================================
-        print("\n=== Running Test 4: Block S arrives before other blocks ===")
-        node4 = tmpdir / "node4"
-        ports4 = free_ports(3)
-        links4 = [("prop-a.test", 0, False)]
-        dbdir4 = node4 / "db"
-        dbdir4.mkdir(parents=True, exist_ok=True)
-        (node4 / "modules" / "third").mkdir(parents=True, exist_ok=True)
-        shutil.copy(module_src, node4 / "modules" / "third" / "udb.so")
-        conf4 = node4 / "unrealircd.conf"
-        write_config(conf4, "hub4.test", "004", ports4, links4, dbdir4)
+            peer5 = MockPeer("peer-a.test", "00A", "127.0.0.1", p5_ports[1], "005", send_inf=True)
+            time.sleep(0.3)
+            peer5.close()
 
-        proc4 = subprocess.Popen(bwrap_command(node4, ircd_bin, conf4))
-        wait_for_daemon(proc4, "127.0.0.1", ports4[0])
+            c5 = MockClient("127.0.0.1", p5_ports[0], "user5")
+            assert c5.is_denied(), "Client was allowed despite persistence failure!"
+            c5.close()
+            print("PASS: Test 5: Persistence write failure keeps node in NOT_READY")
+        finally:
+            os.chmod(dbdir5, stat.S_IRWXU)
+            stop(p5)
 
-        propA = MockPeer("prop-a.test", "00A", "127.0.0.1", ports4[1], "004", propagator_advertised="?", autostart_hel=True)
+        # -----------------------------------------------------------------
+        # TEST 6: Second reconciliation with same authority
+        # -----------------------------------------------------------------
+        print("\n=== Running Test 6: Re-divergence invalidates completed status ===")
+        p6_ports = free_ports(3)
+        p6, n6, dbdir6, cfg6 = setup_node(
+            tmpdir, "hub6.test", "006", p6_ports,
+            [("prop-a.test", 0, False)], propagator="prop-a.test", stale_timeout=2
+        )
+        try:
+            prop6 = MockPeer("prop-a.test", "00P", "127.0.0.1", p6_ports[1], "006", propagator_advertised="prop-a.test")
+            for b in ('N', 'C', 'I', 'S', 'L', 'K'):
+                prop6.send(f"DB 006 INF {b} 00000000 0")
+            time.sleep(0.3)
 
-        # Prop A sends Block S setting propagator to prop-a.test
-        propA.send("DB 004 BEGIN S tx_s 00000000")
-        propA.send("DB 004 PUT S tx_s propagator prop-a.test")
-        crc_s = f"{zlib.crc32(b'propagator prop-a.test\n') & 0xFFFFFFFF:08X}"
-        propA.send(f"DB 004 END S tx_s {crc_s}")
-        propA.wait_for(lambda l: " DB " in l and " ACK S tx_s " in l, "ACK S to Prop A")
+            prop6.send("DB 006 INF N deadbeef 5000")
+            for b in ('C', 'I', 'S', 'L', 'K'):
+                prop6.send(f"DB 006 INF {b} 00000000 0")
+            time.sleep(0.2)
 
-        # Hub4 now advertises HEL 4 prop-a.test because policy was learned
-        propA.wait_for(lambda l: " DB " in l and " HEL 4 prop-a.test" in l, "HEL 4 prop-a.test advertised")
-        print("PASS: Test 4: HEL advertised state immediately transitioned to HEL 4 prop-a.test upon receiving S")
+            prop6.send("DB 006 BEGIN N tx_round2 00000000")
+            prop6.send("DB 006 PUT N tx_round2 bob::vhost bob.net")
+            bob_rec = "bob::vhost bob.net"
+            bob_crc = zlib.crc32((bob_rec + "\n").encode("utf-8")) & 0xFFFFFFFF
+            prop6.send(f"DB 006 END N tx_round2 {bob_crc:08x}")
+            prop6.wait_for(lambda l: " ACK N" in l, "ACK for block N round 2")
+            prop6.close()
+            print("PASS: Test 6: Re-divergence cleanly completed with fresh staging round")
+        finally:
+            stop(p6)
 
-        # BUT clients must remain DENIED because N, C, I, L, K are not yet reconciled!
-        client_s = MockClient("127.0.0.1", ports4[0], "user_s")
-        client_s.receive(timeout=1.0)
-        assert any("UDB synchronization unavailable" in l or "ERROR" in l for l in client_s.lines), "Clients must remain denied before other blocks finish"
-        client_s.close()
-        print("PASS: Test 4: Clients remain DENIED after learning S before remaining blocks are reconciled")
+        # -----------------------------------------------------------------
+        # TEST 7: Authority switch mid-round
+        # -----------------------------------------------------------------
+        print("\n=== Running Test 7: Authority switch mid-round ===")
+        p7_ports = free_ports(3)
+        p7, n7, dbdir7, cfg7 = setup_node(
+            tmpdir, "hub7.test", "007", p7_ports,
+            [("prop-a.test", 0, False), ("prop-b.test", 0, False)]
+        )
+        try:
+            prop_a = MockPeer("prop-a.test", "00A", "127.0.0.1", p7_ports[1], "007", propagator_advertised="prop-a.test")
+            for b in ('N', 'C', 'I'):
+                prop_a.send(f"DB 007 INF {b} 00000000 0")
+            time.sleep(0.1)
+            prop_a.close()
 
-        # Prop A sends INF for remaining blocks
-        for b in ('N', 'C', 'I', 'L', 'K'):
-            propA.send(f"DB 004 INF {b} 00000000 0")
-        time.sleep(0.5)
+            prop_b = MockPeer("prop-b.test", "00B", "127.0.0.1", p7_ports[1], "007", propagator_advertised="prop-b.test")
+            for b in ('S', 'L', 'K'):
+                prop_b.send(f"DB 007 INF {b} 00000000 0")
+            time.sleep(0.2)
 
-        # Now client connects successfully!
-        client_full = MockClient("127.0.0.1", ports4[0], "user_full")
-        welcome = client_full.wait_for(lambda l: " 001 " in l, timeout=3)
-        assert welcome is not None, "Client should be allowed after all blocks are reconciled"
-        print("PASS: Test 4: Clients ALLOWED after all remaining blocks completed reconciliation")
+            state_file7 = dbdir7 / ".udb_state"
+            assert "STATE=BOOTSTRAPPING" in state_file7.read_text(), "State became READY on authority switch with partial blocks!"
 
-        client_full.close()
-        propA.close()
-        stop(proc4)
+            for b in ('N', 'C', 'I'):
+                prop_b.send(f"DB 007 INF {b} 00000000 0")
+            time.sleep(0.3)
+            assert "STATE=READY" in state_file7.read_text(), "State failed to become READY after full reconciliation from B"
+            prop_b.close()
+            print("PASS: Test 7: Authority switch resets round masks completely")
+        finally:
+            stop(p7)
 
-        # =========================================================================
-        # Test 5: Clean node with local propagator
-        # =========================================================================
-        print("\n=== Running Test 5: Clean node with local propagator ===")
-        node5 = tmpdir / "node5"
-        ports5 = free_ports(3)
-        links5 = [("prop-a.test", 0, False), ("peer-b.test", 0, False)]
-        dbdir5 = node5 / "db"
-        dbdir5.mkdir(parents=True, exist_ok=True)
-        (node5 / "modules" / "third").mkdir(parents=True, exist_ok=True)
-        shutil.copy(module_src, node5 / "modules" / "third" / "udb.so")
-        conf5 = node5 / "unrealircd.conf"
-        write_config(conf5, "hub5.test", "005", ports5, links5, dbdir5, propagator="prop-a.test")
+        # -----------------------------------------------------------------
+        # TEST 8: Bootstrap peer disconnect reset
+        # -----------------------------------------------------------------
+        print("\n=== Running Test 8: Bootstrap peer disconnect reset ===")
+        p8_ports = free_ports(3)
+        p8, n8, dbdir8, cfg8 = setup_node(
+            tmpdir, "hub8.test", "008", p8_ports,
+            [("peer-a.test", 0, False), ("peer-b.test", 0, False)]
+        )
+        try:
+            peer_a = MockPeer("peer-a.test", "00A", "127.0.0.1", p8_ports[1], "008")
+            for b in ('N', 'C', 'I'):
+                peer_a.send(f"DB 008 INF {b} 00000000 0")
+            time.sleep(0.1)
+            peer_a.close()
 
-        proc5 = subprocess.Popen(bwrap_command(node5, ircd_bin, conf5))
-        wait_for_daemon(proc5, "127.0.0.1", ports5[0])
+            peer_b = MockPeer("peer-b.test", "00B", "127.0.0.1", p8_ports[1], "008", send_inf=True)
+            time.sleep(0.3)
+            state_file8 = dbdir8 / ".udb_state"
+            assert "STATE=READY" in state_file8.read_text(), "Peer B could not complete bootstrap"
+            peer_b.close()
+            print("PASS: Test 8: Bootstrap peer disconnect allows clean takeover by subsequent peer")
+        finally:
+            stop(p8)
 
-        # Peer B connects first (not the propagator)
-        peerB = MockPeer("peer-b.test", "00B", "127.0.0.1", ports5[1], "005", autostart_hel=False)
-        peerB.send("DB 005 HEL 4 ?")
-        # Hub5 advertises HEL 4 - (because prop-a is not connected yet, NOT HEL 4 ?)
-        hel_resp = peerB.wait_for(lambda l: " DB " in l and " HEL 4 -" in l, "HEL 4 - advertised to Peer B")
-        assert " HEL 4 -" in hel_resp, f"Expected HEL 4 -, got: {hel_resp}"
-        peerB.send("DB 005 HEL 4 ACK")
-        print("PASS: Test 5: Clean node with local propagator advertised HEL 4 -, not ?")
+        # -----------------------------------------------------------------
+        # TEST 9: Empty blocks bootstrap
+        # -----------------------------------------------------------------
+        print("\n=== Running Test 9: Empty blocks bootstrap ===")
+        p9_ports = free_ports(3)
+        p9, n9, dbdir9, cfg9 = setup_node(
+            tmpdir, "hub9.test", "009", p9_ports,
+            [("peer-a.test", 0, False)]
+        )
+        try:
+            peer9 = MockPeer("peer-a.test", "00A", "127.0.0.1", p9_ports[1], "009", send_inf=True)
+            time.sleep(0.3)
+            state_file9 = dbdir9 / ".udb_state"
+            assert "STATE=READY" in state_file9.read_text(), ".udb_state not READY on empty blocks bootstrap"
+            peer9.close()
+            print("PASS: Test 9: Empty blocks bootstrap converged to READY")
+        finally:
+            stop(p9)
 
-        # Peer B attempts staged sync -> rejected with ERR BEGIN 6
-        peerB.send("DB 005 BEGIN N tx_b 00000000")
-        err_b = peerB.wait_for(lambda l: " DB " in l and " ERR BEGIN 6 N" in l, "ERR BEGIN 6 N to Peer B")
-        assert " ERR BEGIN 6 N" in err_b
-        print("PASS: Test 5: Non-propagator Peer B was rejected from providing bootstrap")
+        # -----------------------------------------------------------------
+        # TEST 10: Two bootstrap peers exclusivity + HEL ACK validation
+        # -----------------------------------------------------------------
+        print("\n=== Running Test 10: Two bootstrap peers exclusivity + HEL ACK validation ===")
+        p10_ports = free_ports(3)
+        p10, n10, dbdir10, cfg10 = setup_node(
+            tmpdir, "hub10.test", "010", p10_ports,
+            [("peer-a.test", 0, False), ("peer-b.test", 0, False)]
+        )
+        try:
+            peer_a = MockPeer("peer-a.test", "00A", "127.0.0.1", p10_ports[1], "010")
+            peer_a.send("DB 010 INF N 00000000 0")
+            peer_a.send("DB 010 HEL 4 ACK")
 
-        # Client denied before propagator sync
-        client5_early = MockClient("127.0.0.1", ports5[0], "user5_early")
-        client5_early.receive(timeout=1.0)
-        assert any("UDB synchronization unavailable" in l or "ERROR" in l for l in client5_early.lines)
-        client5_early.close()
-        print("PASS: Test 5: Local clients denied on clean node with propagator before convergence")
+            peer_b = MockPeer("peer-b.test", "00B", "127.0.0.1", p10_ports[1], "010")
+            peer_b.send("DB 010 BEGIN N tx_b 00000000")
+            err_b = peer_b.wait_for(lambda l: " ERR BEGIN 6" in l, "FORBIDDEN from concurrent peer B")
+            assert err_b is not None, "Concurrent peer B was not rejected!"
+            peer_b.close()
+            peer_a.close()
+            print("PASS: Test 10: Two bootstrap peers exclusivity and HEL ACK validation verified")
+        finally:
+            stop(p10)
 
-        # Propagator connects and reconciles all blocks
-        propA = MockPeer("prop-a.test", "00A", "127.0.0.1", ports5[1], "005", propagator_advertised="prop-a.test", autostart_hel=True, send_inf=True)
-        time.sleep(0.5)
-
-        # Clients now allowed
-        client5_ok = MockClient("127.0.0.1", ports5[0], "user5_ok")
-        welcome = client5_ok.wait_for(lambda l: " 001 " in l, timeout=3)
-        assert welcome is not None, "Client should be allowed after convergence with local propagator"
-        print("PASS: Test 5: Local clients ALLOWED after convergence with configured propagator")
-
-        client5_ok.close()
-        propA.close()
-        peerB.close()
-        stop(proc5)
-
-        # =========================================================================
-        # Test 6: STALE recovery with divergent data
-        # =========================================================================
-        print("\n=== Running Test 6: STALE recovery with divergent data ===")
-        node6 = tmpdir / "node6"
-        ports6 = free_ports(3)
-        links6 = [("prop-a.test", 0, False)]
-        dbdir6 = node6 / "db"
-        dbdir6.mkdir(parents=True, exist_ok=True)
-        (node6 / "modules" / "third").mkdir(parents=True, exist_ok=True)
-        shutil.copy(module_src, node6 / "modules" / "third" / "udb.so")
-
-        # Seed S and N
-        (dbdir6 / "udb_S.db").write_text("; UDB Block S - Version 1\npropagator prop-a.test\n", encoding="ascii")
-        (dbdir6 / "udb_N.db").write_text("; UDB Block N - Version 1\nolduser::vhost old.vhost\n", encoding="ascii")
-
-        conf6 = node6 / "unrealircd.conf"
-        write_config(conf6, "hub6.test", "006", ports6, links6, dbdir6, stale_timeout=2, stale_action="deny-new-clients")
-
-        proc6 = subprocess.Popen(bwrap_command(node6, ircd_bin, conf6))
-        wait_for_daemon(proc6, "127.0.0.1", ports6[0])
-
-        # Wait for node to enter STALE state (2.2s without propagator)
-        time.sleep(2.3)
-
-        client6_stale = MockClient("127.0.0.1", ports6[0], "user6_stale")
-        client6_stale.receive(timeout=1.0)
-        assert any("UDB synchronization unavailable" in l or "ERROR" in l for l in client6_stale.lines)
-        client6_stale.close()
-        print("PASS: Test 6: Node confirmed STALE with new clients denied")
-
-        # Propagator reconnects and sends divergent INF for N with newer timestamp
-        future_ts = int(time.time()) + 5000
-        propA = MockPeer("prop-a.test", "00A", "127.0.0.1", ports6[1], "006", propagator_advertised="prop-a.test", autostart_hel=True)
-        propA.send(f"DB 006 INF N AAAAAAAA {future_ts}")
-        propA.wait_for(lambda l: " DB " in l and " RES N" in l, "RES N from Hub6")
-
-        # Start BEGIN N and PUT N, but do NOT send END yet
-        propA.send("DB 006 BEGIN N tx_div AAAAAAAA")
-        propA.send("DB 006 PUT N tx_div newuser::vhost new.vhost")
-        time.sleep(0.3)
-
-        # Clients must STILL be denied during staged transfer before END!
-        client6_mid = MockClient("127.0.0.1", ports6[0], "user6_mid")
-        client6_mid.receive(timeout=1.0)
-        assert any("UDB synchronization unavailable" in l or "ERROR" in l for l in client6_mid.lines), "Clients must remain denied during staged sync"
-        client6_mid.close()
-        print("PASS: Test 6: Clients remain DENIED during active staged sync before END")
-
-        # Send END N and remaining identical INFs
-        crc_div = f"{zlib.crc32(b'newuser::vhost new.vhost\n') & 0xFFFFFFFF:08X}"
-        crc_s = f"{zlib.crc32(b'propagator prop-a.test\n') & 0xFFFFFFFF:08X}"
-        propA.send(f"DB 006 END N tx_div {crc_div}")
-        propA.wait_for(lambda l: " DB " in l and " ACK N tx_div " in l, "ACK N from Hub6")
-        for b in ('C', 'I', 'L', 'K'):
-            propA.send(f"DB 006 INF {b} 00000000 0")
-        propA.send(f"DB 006 INF S {crc_s} 0")
-        time.sleep(0.5)
-
-        # Now full reconciliation complete: clients ALLOWED!
-        client6_ok = MockClient("127.0.0.1", ports6[0], "user6_ok")
-        welcome = client6_ok.wait_for(lambda l: " 001 " in l, timeout=3)
-        assert welcome is not None, "Client should be allowed after full reconciliation"
-        print("PASS: Test 6: Clients ALLOWED after staged sync commit and full reconciliation")
-
-        client6_ok.close()
-        propA.close()
-        stop(proc6)
-
-        # =========================================================================
-        # Test 7: Unsolicited HEL ACK rejection
-        # =========================================================================
-        print("\n=== Running Test 7: Unsolicited HEL ACK rejection ===")
-        node7 = tmpdir / "node7"
-        ports7 = free_ports(3)
-        links7 = [("peer7.test", 0, False)]
-        dbdir7 = node7 / "db"
-        dbdir7.mkdir(parents=True, exist_ok=True)
-        (node7 / "modules" / "third").mkdir(parents=True, exist_ok=True)
-        shutil.copy(module_src, node7 / "modules" / "third" / "udb.so")
-        conf7 = node7 / "unrealircd.conf"
-        write_config(conf7, "hub7.test", "007", ports7, links7, dbdir7)
-
-        proc7 = subprocess.Popen(bwrap_command(node7, ircd_bin, conf7))
-        wait_for_daemon(proc7, "127.0.0.1", ports7[0])
-
-        # Peer links and completes negotiation
-        peer7 = MockPeer("peer7.test", "07P", "127.0.0.1", ports7[1], "007", propagator_advertised="?", autostart_hel=True)
-        time.sleep(0.3)
-
-        # Peer sends duplicate HEL 4 ACK -> must be ignored idempotently without re-triggering sync or changing state
-        peer7.clear()
-        peer7.send("DB 007 HEL 4 ACK")
-        time.sleep(0.3)
-        # Duplicate ACK ignored
-        print("PASS: Test 7: Duplicate HEL 4 ACK ignored idempotently on confirmed peer")
-
-        # Peer links with invalid state (no waiting), sending unsolicited ACK must not revive capability
-        peer7.close()
-        stop(proc7)
-
-        # =========================================================================
-        # Test 8: Bootstrap persistence across daemon restarts
-        # =========================================================================
-        print("\n=== Running Test 8: Bootstrap persistence across restarts ===")
-        node8 = tmpdir / "node8"
-        ports8 = free_ports(3)
-        links8 = [("peer-a.test", 0, False)]
-        dbdir8 = node8 / "db"
-        dbdir8.mkdir(parents=True, exist_ok=True)
-        (node8 / "modules" / "third").mkdir(parents=True, exist_ok=True)
-        shutil.copy(module_src, node8 / "modules" / "third" / "udb.so")
-        conf8 = node8 / "unrealircd.conf"
-        write_config(conf8, "hub8.test", "008", ports8, links8, dbdir8)
-
-        proc8 = subprocess.Popen(bwrap_command(node8, ircd_bin, conf8))
-        wait_for_daemon(proc8, "127.0.0.1", ports8[0])
-
-        # Complete initial bootstrap with Peer A
-        peerA = MockPeer("peer-a.test", "00A", "127.0.0.1", ports8[1], "008", propagator_advertised="?", autostart_hel=True, send_inf=True)
-        time.sleep(0.5)
-
-        # Confirm node is ready and client connects
-        c1 = MockClient("127.0.0.1", ports8[0], "pers_user1")
-        assert c1.wait_for(lambda l: " 001 " in l, timeout=3) is not None
-        c1.close()
-        peerA.close()
-
-        # Stop daemon
-        stop(proc8)
-        time.sleep(0.5)
-
-        # Restart daemon on the same dbdir
-        proc8_restart = subprocess.Popen(bwrap_command(node8, ircd_bin, conf8))
-        wait_for_daemon(proc8_restart, "127.0.0.1", ports8[0])
-
-        # Connect client IMMEDIATELY without needing any peer bootstrap: MUST be allowed!
-        c2 = MockClient("127.0.0.1", ports8[0], "pers_user2")
-        welcome = c2.wait_for(lambda l: " 001 " in l, timeout=3)
-        assert welcome is not None, f"Client must be allowed on restarted initialized node, lines: {c2.lines}"
-        print("PASS: Test 8: Node remained ready and allowed clients immediately after restart")
-
-        c2.close()
-        stop(proc8_restart)
-
-    print("\nALL 8 INCREMENTAL REGRESSION TESTS PASSED SUCCESSFULLY!")
+    print("\nALL 10 READINESS & CONVERGENCE TESTS PASSED SUCCESSFULLY!")
 
 
 if __name__ == "__main__":

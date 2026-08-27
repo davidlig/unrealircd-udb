@@ -79,9 +79,13 @@ static int udb_sync_hello_start(Client *server)
 	peer->state = UDB_HEL_WAITING;
 	peer->deadline = time(NULL) + UDB_SYNC_TIMEOUT;
 	if (udb_select_propagator(udb_ctx, 1, &selected))
+	{
 		propagator = selected.name;
+	}
 	else
+	{
 		propagator = udb_propagator_policy_present(udb_ctx) ? "-" : "?";
+	}
 	ok = udb_send_db_to_one(server, ":%s DB %s HEL 4 %s", me.id, server->id, propagator);
 	if (!ok)
 	{
@@ -160,6 +164,7 @@ static void udb_reconcile_start(Client *authority)
 	if (udb_reconcile.authority_peer != authority)
 	{
 		udb_reconcile.authority_peer = authority;
+		udb_reconcile.round_id++;
 		udb_reconcile.compared_blocks = 0;
 		udb_reconcile.divergent_blocks = 0;
 		udb_reconcile.completed_blocks = 0;
@@ -178,9 +183,14 @@ static void udb_reconcile_record_inf(Client *peer, char letter, unsigned long re
 	udb_reconcile.compared_blocks |= mask;
 
 	if (remote_crc != block->checksum)
+	{
 		udb_reconcile.divergent_blocks |= mask;
+		udb_reconcile.completed_blocks &= ~mask;
+	}
 	else
+	{
 		udb_reconcile.divergent_blocks &= ~mask;
+	}
 }
 
 static void udb_reconcile_record_res(Client *peer, char letter)
@@ -191,6 +201,7 @@ static void udb_reconcile_record_res(Client *peer, char letter)
 
 	udb_reconcile_start(peer);
 	udb_reconcile.divergent_blocks |= mask;
+	udb_reconcile.completed_blocks &= ~mask;
 }
 
 static void udb_reconcile_record_end(Client *peer, char letter)
@@ -218,15 +229,26 @@ static int udb_reconcile_check(UdbContext *ctx)
 	if (udb_has_active_sessions(ctx))
 		return 0;
 
+	time_t now = time(NULL);
+	if (!udb_persistence_set_state(UDB_PERSIST_READY, now))
+	{
+		udb_log(ULOG_ERROR, "UDB_STATE_PERSIST_FAILED", NULL,
+				"Failed to persist READY state to disk; database remains NOT_READY");
+		udb_ready = 0;
+		return 0;
+	}
+
 	int was_stale_or_degraded = (udb_sync_status == UDB_SYNC_STALE || udb_sync_status == UDB_SYNC_DEGRADED);
 	int was_not_ready = !udb_ready;
 
 	udb_ready = 1;
-	udb_persistence_mark_ready();
-
 	udb_sync_status = UDB_SYNC_OK;
 	udb_degraded_since = 0;
-	udb_last_successful_sync = time(NULL);
+	udb_last_successful_sync = now;
+
+	udb_reconcile.compared_blocks = 0;
+	udb_reconcile.divergent_blocks = 0;
+	udb_reconcile.completed_blocks = 0;
 
 	if (was_stale_or_degraded || was_not_ready)
 	{

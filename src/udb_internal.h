@@ -213,6 +213,12 @@ static time_t udb_last_successful_sync = 0;
 static int udb_ready = 0;
 static Client *udb_bootstrap_peer = NULL;
 
+typedef enum UdbPersistentState
+{
+	UDB_PERSIST_BOOTSTRAPPING = 0,
+	UDB_PERSIST_READY = 1
+} UdbPersistentState;
+
 #define UDB_BLOCK_MASK_N (1 << 0)
 #define UDB_BLOCK_MASK_C (1 << 1)
 #define UDB_BLOCK_MASK_I (1 << 2)
@@ -224,12 +230,16 @@ static Client *udb_bootstrap_peer = NULL;
 typedef struct UdbReconcileState
 {
 	Client *authority_peer;
+	unsigned long round_id;
 	unsigned int compared_blocks;
 	unsigned int divergent_blocks;
 	unsigned int completed_blocks;
 } UdbReconcileState;
 
 static UdbReconcileState udb_reconcile = {0};
+
+static UdbPersistentState udb_persistence_load_state(time_t *last_sync_out);
+static int udb_persistence_set_state(UdbPersistentState state, time_t last_sync);
 
 static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs);
 static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type);
@@ -333,6 +343,7 @@ static int udb_server_name_valid(const char *srv);
 static int udb_propagator_list_valid(const char *value);
 static const char *udb_propagator_policy(UdbContext *ctx);
 static int udb_select_propagator(UdbContext *ctx, int require_hello, UdbPropagatorSelection *selected);
+static int udb_propagator_in_policy(UdbContext *ctx, const char *server_name);
 static int udb_propagator_policy_present(UdbContext *ctx);
 static void udb_propagator_policy_changed(UdbContext *ctx);
 static void udb_sync_hello_refresh_all(void);

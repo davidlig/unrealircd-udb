@@ -181,6 +181,11 @@ class MockServices:
         self.send(f"DB {self.target_sid} HEL 4 {self.name}")
         self.wait_for(lambda line: " DB " in line and " HEL 4 " in line, f"{self.name} HEL response")
         self.send(f"DB {self.target_sid} HEL 4 ACK")
+        for b in ('N', 'C', 'I', 'L', 'K'):
+            self.send(f"DB {self.target_sid} INF {b} 00000000 0")
+        s_crc = tree_checksum([("flood", "5:30"), ("propagator", "services-a.test,hub-a.test,services-b.test,hub-b.test")])
+        self.send(f"DB {self.target_sid} INF S {s_crc} 1787720000")
+        time.sleep(0.2)
 
     def send_raw(self, command):
         self.sock.sendall((command + "\r\n").encode("ascii"))

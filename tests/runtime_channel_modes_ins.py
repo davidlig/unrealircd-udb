@@ -532,6 +532,7 @@ def main():
             "encryption_key " + ("a1" * 32) + "\n"
             "suffix .derived.test\n",
             encoding="ascii")
+        (data / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787720000\n", encoding="ascii")
         residual_snapshot = data / "udb_C.db.tmp"
         residual_snapshot.write_text(
             "; UDB Block C - Version 1\n"

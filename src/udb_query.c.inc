@@ -79,11 +79,16 @@ static void udb_query_send_status(Client *client)
 	else
 		clients_str = "ALLOWED";
 
+	sendto_one(client, NULL, ":%s 339 %s :Database readiness: %s", me.name, client->name,
+			   udb_ready ? "READY" : "BOOTSTRAPPING");
 	sendto_one(client, NULL, ":%s 339 %s :UDB synchronization: %s", me.name, client->name, sync_status_str);
 	sendto_one(client, NULL, ":%s 339 %s :Selected propagator: %s", me.name, client->name, selected_str);
+	sendto_one(client, NULL, ":%s 339 %s :Selected direct source: %s", me.name, client->name, selected_str);
 	sendto_one(client, NULL, ":%s 339 %s :Advertised state: HEL 4 %s", me.name, client->name, advertised_str);
+	sendto_one(client, NULL, ":%s 339 %s :Serving downstream: %s", me.name, client->name, udb_ready ? "YES" : "NO");
 	sendto_one(client, NULL, ":%s 339 %s :Policy source: %s", me.name, client->name, policy_source_str);
 	sendto_one(client, NULL, ":%s 339 %s :Policy: %s", me.name, client->name, policy_str);
+	sendto_one(client, NULL, ":%s 339 %s :Configured authority: %s", me.name, client->name, policy_str);
 	sendto_one(client, NULL, ":%s 339 %s :Time without propagator: %lu", me.name, client->name,
 			   time_without_propagator);
 	sendto_one(client, NULL, ":%s 339 %s :New local clients: %s", me.name, client->name, clients_str);

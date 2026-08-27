@@ -215,6 +215,7 @@ def test_clone_limit(ircd, module):
             f"quit_clones {custom_quit}\n",
             encoding="ascii"
         )
+        (node / "data" / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787720000\n", encoding="ascii")
 
         client_port, server_port, tls_port = free_port(), free_port(), free_port()
         config = node / "unrealircd.conf"

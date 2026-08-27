@@ -219,6 +219,7 @@ def test_node(ircd, module, enable_debug):
             (node / "data" / "udb_L.db").write_text(
                 f"{server_name}::options *0\n",
                 encoding="ascii")
+        (node / "data" / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787720000\n", encoding="ascii")
 
         client_port, server_port, tls_port = free_port(), free_port(), free_port()
         config = node / "unrealircd.conf"
