@@ -162,7 +162,7 @@ class MockPeer:
             self.send(f"DB {self.target_sid} HEL 4 ACK")
             if send_inf:
                 for b in ('N', 'C', 'I', 'S', 'L', 'K'):
-                    self.send(f"DB {self.target_sid} INF {b} 00000000 0")
+                    self.send(f"DB {self.target_sid} INF 1 {b} 00000000 0")
 
     def send_raw(self, command):
         self.sock.sendall((command + "\r\n").encode("ascii"))
@@ -278,8 +278,10 @@ def test_suite():
         p2 = MockPeer("p2.test", "002", "127.0.0.1", portsA[1], "00A", propagator_advertised="p2.test")
         time.sleep(0.3)
 
-        # P2 sends BEGIN for block N
-        p2.send("DB 00A BEGIN N tx01 00000000")
+        # P2 starts a requested round and begins block N.
+        p2.send(f"DB 00A INF 2 N deadbeef {int(time.time()) + 1000}")
+        p2.wait_for(lambda l: " RES 2 N" in l, "RES N to P2")
+        p2.send("DB 00A BEGIN 2 N tx01 00000000")
         time.sleep(0.3)
 
         # Connect P1 with autostart_hel=False so we control handshake
@@ -291,18 +293,20 @@ def test_suite():
         time.sleep(0.3)
 
         # Now P2 tries to send PUT on its old session -> should be rejected!
-        p2.send("DB 00A PUT N tx01 testuser::vhost test.vhost")
+        p2.send("DB 00A PUT 2 N tx01 testuser::vhost test.vhost")
         p2.wait_for(lambda l: " DB " in l and " ERR PUT " in l, "ERR PUT to P2")
         print("PASS: P2 staged PUT was rejected after P1 confirmed HEL ACK")
 
-        # P1 can immediately start BEGIN without error
-        p1.send("DB 00A BEGIN N tx02 00000000")
+        # P1 can immediately start a new requested round without error.
+        p1.send(f"DB 00A INF 2 N deadbeef {int(time.time()) + 1000}")
+        p1.wait_for(lambda l: " RES 2 N" in l, "RES N to P1")
+        p1.send("DB 00A BEGIN 2 N tx02 00000000")
         time.sleep(0.2)
-        p1.send("DB 00A PUT N tx02 testuser::vhost test.vhost")
+        p1.send("DB 00A PUT 2 N tx02 testuser::vhost test.vhost")
         import zlib
         crc_a = f"{zlib.crc32(b'testuser::vhost test.vhost\n') & 0xFFFFFFFF:08X}"
-        p1.send(f"DB 00A END N tx02 {crc_a}")
-        p1.wait_for(lambda l: " DB " in l and " ACK N tx02 " in l, "ACK N to P1", timeout=5)
+        p1.send(f"DB 00A END 2 N tx02 {crc_a}")
+        p1.wait_for(lambda l: " DB " in l and " ACK 2 N tx02 " in l, "ACK N to P1", timeout=5)
         print("PASS: P1 immediately started and completed staged BEGIN/PUT/END without timeout")
 
         p1.close()
@@ -372,8 +376,10 @@ def test_suite():
         peerC = MockPeer("peer.test", "001", "127.0.0.1", portsC[1], "00C", autostart_hel=False)
         # Send HEL 4 with no 5th argument
         peerC.send("DB 00C HEL 4")
-        peerC.wait_for(lambda l: " DB " in l and " ERR HEL 2 0" in l, "ERR HEL 2 0 parameter error")
-        print("PASS: Malformed HEL 4 without 5th arg was rejected with ERR HEL")
+        peerC.receive(time.monotonic() + 0.5)
+        assert not any(" ERR HEL " in line for line in peerC.lines), \
+            "Malformed HEL emitted an ERR without a valid non-zero round ID"
+        print("PASS: Malformed HEL 4 without a correlation round was rejected without an invalid ERR")
 
         peerC.close()
         stop(procC)
@@ -501,8 +507,8 @@ def test_suite():
         print("PASS: Test G: HubG advertised HEL 4 - with obsolete S::propagator")
 
         # new-a tries to send BEGIN -> must be rejected with UDB_ERR_FORBIDDEN (6)
-        new_a.send("DB 00G BEGIN N tx01 00000000")
-        new_a.wait_for(lambda l: " DB " in l and " ERR BEGIN 6 N" in l, "ERR BEGIN 6 N")
+        new_a.send("DB 00G BEGIN 1 N tx01 00000000")
+        new_a.wait_for(lambda l: " DB " in l and " ERR BEGIN 6 1 N" in l, "ERR BEGIN 6 1 N")
         print("PASS: Test G: Unauthorized peer new-a could not initiate staged sync")
 
         # Test J: Advertised state remains '-' and NEVER falls back to '?'
@@ -525,12 +531,16 @@ def test_suite():
         print("PASS: Test H: HubG selected new-a.test as authority after local config override + REHASH")
 
         # new-a can now successfully staged sync to HubG
-        new_a.send("DB 00G BEGIN N tx02 00000000")
+        new_a.send(f"DB 00G INF 1 N deadbeef {int(time.time()) + 1000}")
+        new_a.wait_for(lambda l: " RES 1 N" in l, "RES N from HubG")
+        new_a.send("DB 00G BEGIN 1 N tx02 00000000")
         time.sleep(0.2)
-        new_a.send("DB 00G PUT N tx02 admin::vhost admin.vhost")
+        new_a.send("DB 00G PUT 1 N tx02 admin::vhost admin.vhost")
         crc_h = f"{zlib.crc32(b'admin::vhost admin.vhost\n') & 0xFFFFFFFF:08X}"
-        new_a.send(f"DB 00G END N tx02 {crc_h}")
-        new_a.wait_for(lambda l: " DB " in l and " ACK N tx02 " in l, "ACK N from HubG", timeout=5)
+        new_a.send(f"DB 00G END 1 N tx02 {crc_h}")
+        new_a.wait_for(lambda l: " DB " in l and " ACK 1 N tx02 " in l, "ACK N from HubG", timeout=5)
+        for block in ('C', 'I', 'S', 'L', 'K'):
+            new_a.send(f"DB 00G INF 1 {block} 00000000 0")
         print("PASS: Test H: staged sync succeeded and node returned to OK")
 
         oper_g.close()

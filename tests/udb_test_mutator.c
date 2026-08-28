@@ -78,10 +78,11 @@ EVENT(udb_test_mutator_event)
 		}
 		/* Re-declare a different selected source so B treats C as non-propagating. */
 		sendto_one(mutator_peer, NULL, ":%s DB %s HEL 4 udb-a.test", me.id, mutator_peer->id);
-		sendto_one(mutator_peer, NULL, ":%s DB %s BEGIN N attack 00000000", me.id, mutator_peer->id);
-		sendto_one(mutator_peer, NULL, ":%s DB %s PUT N attack attack :unauthorized", me.id, mutator_peer->id);
-		sendto_one(mutator_peer, NULL, ":%s DB %s END N attack 00000000", me.id, mutator_peer->id);
-		sendto_one(mutator_peer, NULL, ":%s DB %s RES N", me.id, mutator_peer->id);
+		sendto_one(mutator_peer, NULL, ":%s DB %s BEGIN 9000 N attack 00000000", me.id, mutator_peer->id);
+		sendto_one(mutator_peer, NULL, ":%s DB %s PUT 9000 N attack attack :unauthorized", me.id,
+		           mutator_peer->id);
+		sendto_one(mutator_peer, NULL, ":%s DB %s END 9000 N attack 00000000", me.id, mutator_peer->id);
+		sendto_one(mutator_peer, NULL, ":%s DB %s RES 9000 N", me.id, mutator_peer->id);
 		mutator_state = 1;
 		unreal_log(ULOG_INFO, "udb-test-mutator", "UDB_TEST_MUTATOR", mutator_peer,
 		           "[UDB_TEST_MUTATOR] emitted unauthorized staged-sync and RES frames", NULL);
@@ -97,12 +98,17 @@ EVENT(udb_test_mutator_event)
 			return;
 		}
 		/* Each END targets an empty staged tree, whose valid digest is zero. */
-		sendto_one(mutator_peer, NULL, ":%s DB %s BEGIN N empty 00000000", me.id, mutator_peer->id);
-		sendto_one(mutator_peer, NULL, ":%s DB %s END N empty :", me.id, mutator_peer->id);
-		sendto_one(mutator_peer, NULL, ":%s DB %s BEGIN N partial 00000000", me.id, mutator_peer->id);
-		sendto_one(mutator_peer, NULL, ":%s DB %s END N partial 0badg", me.id, mutator_peer->id);
-		sendto_one(mutator_peer, NULL, ":%s DB %s BEGIN N overflow 00000000", me.id, mutator_peer->id);
-		sendto_one(mutator_peer, NULL, ":%s DB %s END N overflow FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF", me.id, mutator_peer->id);
+		sendto_one(mutator_peer, NULL, ":%s DB %s INF 9001 N FFFFFFFF 2147483647", me.id, mutator_peer->id);
+		sendto_one(mutator_peer, NULL, ":%s DB %s BEGIN 9001 N empty 00000000", me.id, mutator_peer->id);
+		sendto_one(mutator_peer, NULL, ":%s DB %s END 9001 N empty :", me.id, mutator_peer->id);
+		sendto_one(mutator_peer, NULL, ":%s DB %s INF 9002 N FFFFFFFF 2147483647", me.id, mutator_peer->id);
+		sendto_one(mutator_peer, NULL, ":%s DB %s BEGIN 9002 N partial 00000000", me.id, mutator_peer->id);
+		sendto_one(mutator_peer, NULL, ":%s DB %s END 9002 N partial 0badg", me.id, mutator_peer->id);
+		sendto_one(mutator_peer, NULL, ":%s DB %s INF 9003 N FFFFFFFF 2147483647", me.id, mutator_peer->id);
+		sendto_one(mutator_peer, NULL, ":%s DB %s BEGIN 9003 N overflow 00000000", me.id, mutator_peer->id);
+		sendto_one(mutator_peer, NULL,
+		           ":%s DB %s END 9003 N overflow FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF", me.id,
+		           mutator_peer->id);
 		mutator_state = 2;
 		unreal_log(ULOG_INFO, "udb-test-mutator", "UDB_TEST_MUTATOR", mutator_peer,
 		           "[UDB_TEST_MUTATOR] emitted malformed staged END digests", NULL);

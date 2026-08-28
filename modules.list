@@ -7,7 +7,7 @@ module "third/udb"
 	documentation "https://github.com/davidlig/unrealircd-udb";
 	troubleshooting "In case of problems, report issues at https://github.com/davidlig/unrealircd-udb/issues";
 	source "https://raw.githubusercontent.com/davidlig/unrealircd-udb/main/dist/udb.c";
-	sha256sum "9cb278c88b1cabef10d65316384c450432ad6f092315e3da4515a1da0b66dd1a";
+	sha256sum "5a7d853879bfe538377a40430a1bc9e4ca69d574db7fee389d3e18020b4ed10f";
 	min-unrealircd-version "6.2.*";
 	post-install-text
 	{

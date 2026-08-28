@@ -124,7 +124,8 @@ def stop(process):
 
 
 class MockPropagator:
-    def __init__(self, host, port, target_sid, link_password, name=SERVICES_NAME, sid=SERVICES_SID, propagator_advertised=None):
+    def __init__(self, host, port, target_sid, link_password, name=SERVICES_NAME, sid=SERVICES_SID,
+                 propagator_advertised=None, send_inventory=True):
         self.name = name
         self.sid = sid
         self.target_sid = target_sid
@@ -142,6 +143,9 @@ class MockPropagator:
         self.send(f"DB {self.target_sid} HEL 4 {prop}")
         self.wait_for(lambda line: " DB " in line and " HEL 4 " in line, "UDB HEL response")
         self.send(f"DB {self.target_sid} HEL 4 ACK")
+        if send_inventory:
+            for letter in ("N", "C", "I", "S", "L", "K"):
+                self.send(f"DB {self.target_sid} INF 1 {letter} 00000000 0")
 
     def send(self, command):
         if not command.startswith(":"):
@@ -241,7 +245,16 @@ def run_tests(ircd_bin, keep=False):
 
         # Connect MockPropagator A to Node B
         prop_a = MockPropagator("127.0.0.1", b_ports[1], "0B1", link_password)
-        time.sleep(1.0)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            b_state = b_dir / "data" / ".udb_state"
+            c_state = c_dir / "data" / ".udb_state"
+            if (b_state.exists() and c_state.exists() and
+                    "STATE=READY" in b_state.read_text() and "STATE=READY" in c_state.read_text()):
+                break
+            time.sleep(0.1)
+        else:
+            raise AssertionError("B and C did not reach READY through hop-by-hop reconciliation")
         print("PASS: Topology A (Propagator) -> B (Relay) -> C (Leaf) established with BIGLINES capability")
 
         # -------------------------------------------------------------
@@ -303,15 +316,18 @@ def run_tests(ircd_bin, keep=False):
         time.sleep(1.0)
 
         # Query C directly via S2S staged export from simulated propagator udb-b.test
-        prop_c = MockPropagator("127.0.0.1", c_ports[1], "0C1", link_password, name="udb-b.test", sid="0B1", propagator_advertised="udb-c.test")
-        prop_c.send("DB 0C1 RES C")
-        prop_c.wait_for(lambda l: " DB " in l and " BEGIN C " in l, "BEGIN C")
-        prop_c.wait_for(lambda l: " DB " in l and " END C " in l, "END C")
+        prop_c = MockPropagator("127.0.0.1", c_ports[1], "0C1", link_password, name="udb-b.test", sid="0B1",
+                                propagator_advertised="udb-c.test", send_inventory=False)
+        inventory = prop_c.wait_for(lambda l: " DB " in l and " INF " in l and " C " in l, "INF C")
+        round_id = inventory.split(" INF ", 1)[1].split(" ", 1)[0]
+        prop_c.send(f"DB 0C1 RES {round_id} C")
+        prop_c.wait_for(lambda l: " DB " in l and f" BEGIN {round_id} C " in l, "BEGIN C")
+        prop_c.wait_for(lambda l: " DB " in l and f" END {round_id} C " in l, "END C")
 
         c_records = {}
         for l in prop_c.lines:
-            if " DB " in l and " PUT C " in l:
-                parts = l.split(" PUT C ", 1)[1].split(" ", 2)
+            if " DB " in l and f" PUT {round_id} C " in l:
+                parts = l.split(f" PUT {round_id} C ", 1)[1].split(" ", 2)
                 p = parts[1]
                 d = parts[2]
                 if d.startswith(":"):

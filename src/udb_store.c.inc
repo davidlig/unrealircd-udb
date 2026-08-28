@@ -692,6 +692,7 @@ static UdbSnapshotResult udb_file_write_snapshot(UdbBlock *block, UdbRecord *tre
 		goto cleanup;
 	fd = -1;
 	if (fprintf(fp, "; UDB Block %c - Version %d\n", block->letter, block->version) < 0 ||
+		fprintf(fp, "; Generation: %lu\n", block->generation) < 0 ||
 		fprintf(fp, "; Saved: %ld\n", (long)time(NULL)) < 0 || fprintf(fp, "; Records: %u\n", record_count) < 0)
 		goto cleanup;
 	if (tree)
@@ -770,7 +771,13 @@ static int udb_file_save_block(UdbContext *ctx, UdbBlock *block)
 				log_data_string("block", (char[]){block->letter, '\0'}));
 	}
 	block->modified_at = time(NULL);
+	block->load_state = UDB_LOAD_SUCCESS;
 	if (stat(block->filepath, &st) == 0)
 		block->filesize = st.st_size;
+	if (res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
+	{
+		udb_mark_durability_uncertain(ctx, block, "snapshot");
+		return 0;
+	}
 	return 1;
 }

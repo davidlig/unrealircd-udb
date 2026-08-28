@@ -115,7 +115,8 @@ udb {{
 
 
 def bwrap_command(node, ircd, config, module, mutator=None, configtest=False, rename_failure=False,
-                   rename_failure_arm=False, fsync_failure=False):
+                    rename_failure_arm=False, fsync_failure=False, directory_fsync_failure=False,
+                    state_directory_fsync_failure=False):
     # A read-only host root leaves dependencies and installed modules available.
     # The runtime data mount isolates UnrealIRCd's control socket; UDB uses data/.
     for sub in ("runtime-data", "tmp", "cache", "logs"):
@@ -129,7 +130,7 @@ def bwrap_command(node, ircd, config, module, mutator=None, configtest=False, re
                 "--ro-bind", str(node / "modules" / "third"), str(RUNTIME_ROOT / "modules/third"),
                 "--dev-bind", "/dev", "/dev", "--proc", "/proc",
                 "--setenv", "UDB_TEST_MUTATOR_DIRECTORY", str(node / "data")]
-    if rename_failure or fsync_failure:
+    if rename_failure or fsync_failure or directory_fsync_failure or state_directory_fsync_failure:
         command.extend(("--setenv", "LD_PRELOAD", str(RENAME_FAIL_MODULE)))
     if rename_failure:
         command.extend(("--setenv", "UDB_SNAPSHOT_RENAME_FAIL_TARGET", str(node / "data" / "udb_N.db")))
@@ -138,6 +139,11 @@ def bwrap_command(node, ircd, config, module, mutator=None, configtest=False, re
                             str(node / "data" / "udb-snapshot-rename-fail-go")))
     if fsync_failure:
         command.extend(("--setenv", "UDB_SNAPSHOT_FSYNC_FAIL_TARGET", str(node / "data" / "udb_N.db.tmp")))
+    if directory_fsync_failure:
+        command.extend(("--setenv", "UDB_SNAPSHOT_DIR_FSYNC_FAIL_TARGET", str(node / "data")))
+        command.extend(("--setenv", "UDB_SNAPSHOT_DIR_FSYNC_FAIL_SNAPSHOT", str(node / "data" / "udb_N.db")))
+    if state_directory_fsync_failure:
+        command.extend(("--setenv", "UDB_STATE_DIR_FSYNC_FAIL_TARGET", str(node / "data")))
     command.extend((str(ircd), "-f", str(config)))
     if configtest:
         command.append("-c")
@@ -167,7 +173,7 @@ def build_mutator():
 
 
 def build_rename_fail_interposer():
-    if RENAME_FAIL_MODULE.is_file():
+    if RENAME_FAIL_MODULE.is_file() and RENAME_FAIL_MODULE.stat().st_mtime_ns >= RENAME_FAIL_SOURCE.stat().st_mtime_ns:
         return
     result = subprocess.run(["cc", "-shared", "-fPIC", "-o", str(RENAME_FAIL_MODULE),
                              str(RENAME_FAIL_SOURCE), "-ldl"], cwd=REPO_ROOT, text=True,
@@ -247,6 +253,23 @@ def snapshot_fsync_failure_observed(a_log, b_log, b_db, baseline):
             ("cmd=END err=3" in log_text(a_log) or "cmd=END err=6" in log_text(a_log)))
 
 
+def snapshot_directory_fsync_failure_observed(a_log, b_log, b_db, state_file, baseline):
+    return (ordered(udb_commands(b_log), ("HEL", "INF", "BEGIN", "PUT", "END")) and
+            "ERR" in udb_commands(a_log) and "Staged sync acknowledged for block N" not in log_text(a_log) and
+            b_db.read_bytes() != baseline and db_contains(b_db, "harness-b::vhost winner.test") and
+            not b_db.with_suffix(".db.tmp").exists() and
+            "UDB_TEST_SNAPSHOT_DIR_FSYNC_FAIL:" in log_text(b_log) and
+            "durability is uncertain; forcing BOOTSTRAPPING" in log_text(b_log) and state_file.is_file() and
+            "STATE=BOOTSTRAPPING" in state_file.read_text(errors="replace") and
+             ("cmd=END err=3" in log_text(a_log) or "cmd=END err=6" in log_text(a_log)))
+
+
+def state_directory_fsync_failure_observed(log, state_file):
+    return ("UDB_TEST_STATE_DIR_FSYNC_FAIL:" in log_text(log) and
+            "Failed to fsync directory for state file" in log_text(log) and state_file.is_file() and
+            "STATE=BOOTSTRAPPING" in state_file.read_text(errors="replace"))
+
+
 def db_contains(db, record):
     return record in db.read_text(errors="replace")
 
@@ -305,7 +328,7 @@ def runtime_drp_rename_failure_observed(a_log, b_log, b_db, baseline):
 def malformed_end_checksums_rejected(a_log, b_log, b_db, baseline):
     return (udb_commands(b_log).count("END") >= 3 and
             (log_text(a_log).count("cmd=END err=3") >= 3 or log_text(a_log).count("cmd=END err=6") >= 3) and
-            log_text(b_log).count("digest or persistence failure") >= 3 and
+            log_text(b_log).count("digest validation failure") >= 3 and
             b_db.read_bytes() == baseline and not db_contains(b_db, "attack"))
 
 
@@ -357,6 +380,10 @@ def main():
                         help="fail node A's UDB N snapshot rename and verify staged-sync rollback")
     parser.add_argument("--snapshot-fsync-failure", action="store_true",
                         help="fail node A's UDB N temporary snapshot fsync and verify staged-sync rollback")
+    parser.add_argument("--snapshot-directory-fsync-failure", action="store_true",
+                        help="fail node A's post-rename directory fsync and verify visible commit with NOT_READY")
+    parser.add_argument("--state-directory-fsync-failure", action="store_true",
+                        help="fail node A's post-rename .udb_state directory fsync and verify fail-closed recovery")
     parser.add_argument("--runtime-rename-failure", action="store_true",
                         help="fail node B's armed live INS snapshot rename and verify no local commit")
     parser.add_argument("--runtime-opt-rename-failure", action="store_true",
@@ -384,7 +411,9 @@ def main():
     processes = []
     try:
         build_mutator()
-        if (args.snapshot_rename_failure or args.snapshot_fsync_failure or args.runtime_rename_failure or args.runtime_opt_rename_failure or
+        if (args.snapshot_rename_failure or args.snapshot_fsync_failure or args.snapshot_directory_fsync_failure or
+                args.state_directory_fsync_failure or
+                args.runtime_rename_failure or args.runtime_opt_rename_failure or
                 args.runtime_del_rename_failure or args.runtime_drp_rename_failure):
             build_rename_fail_interposer()
         a, b = root / "node-a", root / "node-b"
@@ -443,7 +472,11 @@ def main():
                                                                                         args.runtime_opt_rename_failure or
                                                                                         args.runtime_del_rename_failure or
                                                                                         args.runtime_drp_rename_failure) and node == b,
-                                                                    fsync_failure=args.snapshot_fsync_failure and node == a),
+                                                                    fsync_failure=args.snapshot_fsync_failure and node == a,
+                                                                    directory_fsync_failure=
+                                                                    args.snapshot_directory_fsync_failure and node == a,
+                                                                    state_directory_fsync_failure=
+                                                                    args.state_directory_fsync_failure and node == a),
                                                    stdout=output, stderr=subprocess.STDOUT,
                                                    text=True))
         if not wait_for_link(processes, logs, args.timeout):
@@ -478,6 +511,28 @@ def main():
                 print_diagnostics(logs, a_db)
                 return 1
             print("PASS: failed N temporary snapshot fsync left node A baseline unchanged with no tmp or ACK/commit")
+            return 0
+        if args.snapshot_directory_fsync_failure:
+            state_file = a / "data" / ".udb_state"
+            while time.monotonic() < deadline:
+                if snapshot_directory_fsync_failure_observed(logs[1], logs[0], a_db, state_file, a_baseline):
+                    break
+                time.sleep(0.25)
+            if not snapshot_directory_fsync_failure_observed(logs[1], logs[0], a_db, state_file, a_baseline):
+                print_diagnostics(logs, a_db)
+                return 1
+            print("PASS: post-rename directory fsync failure kept active/disk committed and forced BOOTSTRAPPING")
+            return 0
+        if args.state_directory_fsync_failure:
+            state_file = a / "data" / ".udb_state"
+            while time.monotonic() < deadline:
+                if state_directory_fsync_failure_observed(logs[0], state_file):
+                    break
+                time.sleep(0.25)
+            if not state_directory_fsync_failure_observed(logs[0], state_file):
+                print_diagnostics(logs, a_db)
+                return 1
+            print("PASS: post-rename .udb_state directory fsync failure replaced visible READY with BOOTSTRAPPING")
             return 0
         while time.monotonic() < deadline:
             if ("harness-b::vhost winner.test" in a_db.read_text(errors="replace") and

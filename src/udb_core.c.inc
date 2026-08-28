@@ -766,6 +766,7 @@ static void udb_block_replace_tree(UdbContext *ctx, UdbBlock *block, UdbRecord *
 	udb_hash_clear_block(ctx, udb_block_letter_to_index(block->letter));
 	block->tree = tree;
 	block->record_count = record_count;
+	block->load_state = UDB_LOAD_SUCCESS;
 	ctx->total_records += record_count;
 	for (rec = tree->child; rec; rec = rec->sibling)
 		udb_hash_insert_record(ctx, rec, udb_block_letter_to_index(block->letter), rec->key);
@@ -834,6 +835,8 @@ static UdbRecord *udb_record_insert(UdbContext *ctx, UdbBlock *block, UdbRecord 
 		}
 		udb_block_replace_tree(ctx, block, candidate, udb_record_count_tree(candidate));
 		udb_apply_special_record(ctx, block, rec, 1);
+		if (res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
+			udb_mark_durability_uncertain(ctx, block, "record insert");
 		return rec;
 	}
 	if (!parent)
@@ -928,6 +931,8 @@ static UdbRecord *udb_record_delete(UdbContext *ctx, UdbBlock *block, UdbRecord 
 		udb_block_replace_tree(ctx, block, candidate, udb_record_count_tree(candidate));
 		if (candidate_line)
 			udb_lines_apply_effect(ctx, block, candidate_line, 0);
+		if (res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
+			udb_mark_durability_uncertain(ctx, block, "record delete");
 		return NULL;
 	}
 
@@ -1464,6 +1469,8 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 	char *line = safe_alloc(UDB_RECORD_LINE_MAX + 2);
 	unsigned int line_number = 0;
 	int parse_failed = 0;
+	int generation_seen = 0;
+	unsigned long loaded_generation = 0;
 	UdbRecord *candidate = udb_record_create(NULL);
 	candidate->block_idx = (unsigned char)udb_block_letter_to_index(block->letter);
 	safe_strdup(candidate->key, block->tree && block->tree->key ? block->tree->key : "UDB");
@@ -1492,6 +1499,16 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 		if (p)
 			*p = '\0';
 
+		if (!strncmp(line, "; Generation: ", 14))
+		{
+			if (generation_seen || !udb_strtoul_strict(line + 14, &loaded_generation))
+			{
+				parse_failed = 1;
+				break;
+			}
+			generation_seen = 1;
+			continue;
+		}
 		if (line[0] == ';' || line[0] == '\0')
 			continue;
 
@@ -1548,6 +1565,7 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 
 	udb_block_replace_tree(ctx, block, candidate, record_count);
 	block->checksum = checksum;
+	block->generation = generation_seen ? loaded_generation : 0;
 
 	for (UdbRecord *curr = block->tree->child; curr; curr = curr->sibling)
 	{

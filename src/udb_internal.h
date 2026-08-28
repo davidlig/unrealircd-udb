@@ -32,6 +32,9 @@
 #define UDB_SYNC_INACTIVITY_TIMEOUT 60
 #define UDB_SYNC_ABSOLUTE_TIMEOUT 300
 #define UDB_SYNC_TIMEOUT UDB_SYNC_INACTIVITY_TIMEOUT
+#define UDB_RECONCILE_RETRY_MAX 6
+#define UDB_RECONCILE_RETRY_BASE 2
+#define UDB_STATE_FORMAT 1
 #define UDB_DEFAULT_MAX_STAGED_BYTES (64 * 1024 * 1024) /* 64 MB */
 #define UDB_MIN_MAX_STAGED_BYTES 1024
 #define UDB_MAX_MAX_STAGED_BYTES (1024ULL * 1024 * 1024)
@@ -126,6 +129,7 @@ struct UdbBlock
 	Client *pending_from;
 	time_t pending_deadline;
 	unsigned long pending_round_id;
+	unsigned long generation;
 	unsigned int record_count;
 	char letter;
 	unsigned int version;
@@ -223,6 +227,30 @@ typedef enum UdbPersistentState
 	UDB_PERSIST_READY = 1
 } UdbPersistentState;
 
+typedef enum UdbStatePersistResult
+{
+	UDB_STATE_FAILED_BEFORE_COMMIT = 0,
+	UDB_STATE_COMMITTED = 1,
+	UDB_STATE_COMMITTED_DURABILITY_UNCERTAIN = 2
+} UdbStatePersistResult;
+
+typedef enum UdbStartupState
+{
+	UDB_STARTUP_FRESH = 0,
+	UDB_STARTUP_LEGACY_VALID,
+	UDB_STARTUP_PERSISTED_READY_VALID,
+	UDB_STARTUP_PERSISTED_BOOTSTRAPPING,
+	UDB_STARTUP_PERSISTED_INVALID,
+	UDB_STARTUP_PERSISTED_READY_INCOMPLETE
+} UdbStartupState;
+
+typedef enum UdbPersistenceOrigin
+{
+	UDB_ORIGIN_FRESH = 0,
+	UDB_ORIGIN_LEGACY,
+	UDB_ORIGIN_RECOVERY
+} UdbPersistenceOrigin;
+
 #define UDB_BLOCK_MASK_N (1 << 0)
 #define UDB_BLOCK_MASK_C (1 << 1)
 #define UDB_BLOCK_MASK_I (1 << 2)
@@ -235,16 +263,22 @@ typedef struct UdbReconcileState
 {
 	Client *authority_peer;
 	unsigned long round_id;
+	unsigned long generation;
 	int active;
 	unsigned int compared_blocks;
 	unsigned int divergent_blocks;
 	unsigned int completed_blocks;
+	unsigned int retry_count;
+	time_t next_retry_at;
 } UdbReconcileState;
 
 static UdbReconcileState udb_reconcile = {0};
 
-static UdbPersistentState udb_persistence_load_state(time_t *last_sync_out);
-static int udb_persistence_set_state(UdbPersistentState state, time_t last_sync);
+static int udb_persistence_load_state(UdbPersistentState *state_out, UdbPersistenceOrigin *origin_out,
+									  unsigned long *generation_out, time_t *last_sync_out, int *legacy_format_out);
+static UdbStatePersistResult udb_persistence_set_state(UdbPersistentState state, UdbPersistenceOrigin origin,
+													   unsigned long generation, time_t last_sync);
+static void udb_mark_durability_uncertain(UdbContext *ctx, UdbBlock *block, const char *operation);
 
 static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs);
 static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type);
@@ -332,22 +366,23 @@ static int udb_persistence_migrate_legacy(UdbContext *ctx, time_t *last_sync_out
 static void udb_block_clear_pending(UdbBlock *block);
 static int udb_has_pending_requests(UdbContext *ctx);
 static void udb_reconcile_reset(void);
-static void udb_reconcile_begin(Client *authority);
-static void udb_reconcile_abort(UdbContext *ctx, const char *reason);
-static void udb_reconcile_start(Client *authority);
-static void udb_reconcile_record_inf(Client *peer, char letter, unsigned long crc32);
-static void udb_reconcile_record_res(Client *peer, char letter);
+static void udb_reconcile_begin(Client *authority, unsigned long round_id);
+static void udb_reconcile_abort(UdbContext *ctx, const char *reason, int schedule_retry);
+static void udb_reconcile_start(Client *authority, unsigned long round_id);
+static void udb_reconcile_record_inf(Client *peer, unsigned long round_id, char letter, unsigned long crc32);
+static void udb_reconcile_record_res(Client *peer, unsigned long round_id, char letter);
 static void udb_reconcile_record_end(Client *peer, char letter, unsigned long round_id);
 static int udb_reconcile_check(UdbContext *ctx);
 static int udb_is_authorized_sync_source(UdbContext *ctx, Client *direct_peer);
-static int udb_sync_begin(UdbBlock *block, Client *peer, const char *txid);
-static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid, const char *path, const char *data);
-static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, const char *txid, const char *checksum,
-						unsigned long *digest);
+static int udb_sync_begin(UdbBlock *block, Client *peer, unsigned long round_id, const char *txid);
+static int udb_sync_put(UdbBlock *block, Client *peer, unsigned long round_id, const char *txid, const char *path,
+						const char *data);
+static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, unsigned long round_id, const char *txid,
+						const char *checksum, unsigned long *digest);
 static void udb_sync_ack(Client *peer, const char *block);
-static int udb_sync_send_tree(Client *server, UdbRecord *rec, int depth, char *pathbuf, size_t pathlen, char letter,
-							  const char *txid);
-static int udb_sync_send_stage(Client *server, UdbBlock *block);
+static int udb_sync_send_tree(Client *server, UdbRecord *rec, int depth, char *pathbuf, size_t pathlen,
+							  unsigned long round_id, char letter, const char *txid);
+static int udb_sync_send_stage(Client *server, UdbBlock *block, unsigned long round_id);
 static void udb_sync_server_quit(Client *client);
 static int udb_send_db_to_one(Client *to, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static int udb_is_propagator(UdbContext *ctx, Client *server);
@@ -363,7 +398,7 @@ static int udb_hook_stale_pre_connect(Client *client);
 static void udb_query_send_status(Client *client);
 static int udb_send_db_to_confirmed_servers(Client *except, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static int udb_sendto_confirmed_servers(Client *except, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
-static void udb_protocol_params_error(Client *client, const char *subcmd);
+static void udb_protocol_mutation_error(Client *client, const char *subcmd, int error, char letter);
 static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, const char *path,
 							 const char *data, int is_for_me, int is_broadcast);
 static void udb_mutation_del(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, const char *path,

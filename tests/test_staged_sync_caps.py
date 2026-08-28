@@ -119,6 +119,7 @@ class MockServices:
         self.sock.settimeout(0.25)
         self.lines = []
         self.buffer = ""
+        self.round_id = 0
         self.send(f"PASS :{LINK_PASSWORD}")
         self.send(f"PROTOCTL EAUTH={SERVICES_NAME}")
         self.send("PROTOCTL NOQUIT NICKv2 SJOIN SJOIN2 UMODE2 SJ3 BIGLINES SID=" + self.sid)
@@ -139,14 +140,18 @@ class MockServices:
         self.send(f"DB {self.ircd_sid} INS {path} {val}")
 
     def send_begin(self, letter, txid, checksum):
-        self.send(f"DB {self.ircd_sid} BEGIN {letter} {txid} {checksum}")
+        self.round_id += 1
+        self.send(f"DB {self.ircd_sid} INF {self.round_id} {letter} deadbeef {int(time.time()) + 1000}")
+        self.wait_for(lambda line: f" RES {self.round_id} {letter}" in line,
+                      f"RES for round {self.round_id} block {letter}")
+        self.send(f"DB {self.ircd_sid} BEGIN {self.round_id} {letter} {txid} {checksum}")
 
     def send_put(self, letter, txid, path, data):
         val = f":{data}" if " " in str(data) and not str(data).startswith(":") else str(data)
-        self.send(f"DB {self.ircd_sid} PUT {letter} {txid} {path} {val}")
+        self.send(f"DB {self.ircd_sid} PUT {self.round_id} {letter} {txid} {path} {val}")
 
     def send_end(self, letter, txid, checksum):
-        self.send(f"DB {self.ircd_sid} END {letter} {txid} {checksum}")
+        self.send(f"DB {self.ircd_sid} END {self.round_id} {letter} {txid} {checksum}")
 
     def receive(self, deadline):
         while time.monotonic() < deadline:

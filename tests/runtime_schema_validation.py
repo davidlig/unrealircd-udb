@@ -211,7 +211,7 @@ class FakeServicesServer:
         self.wait_for(lambda line: " DB " in line and " HEL 4 " in line, "UDB HEL response")
         self.send(f"DB {self.ircd_sid} HEL 4 ACK")
         for b in ('N', 'C', 'I', 'S', 'L', 'K'):
-            self.send(f"DB {self.ircd_sid} INF {b} 00000000 0")
+            self.send(f"DB {self.ircd_sid} INF 1 {b} 00000000 0")
         time.sleep(0.2)
         self.send_uid("NickServ")
         self.send_uid("ChanServ")
@@ -307,17 +307,17 @@ def run_tests(ircd_bin, keep=False):
         services.send_ins(f"C::{CHANNEL}::testunknownkey", "valor")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " C" in l,
                           "rejection of unknown key testunknownkey in Block C")
-        print("PASS: INS of unknown key testunknownkey in Block C was rejected with ERR INS 2 C")
+        print("PASS: INS of unknown key testunknownkey in Block C was rejected with correlated ERR INS 2")
 
         services.send_ins(f"C::{CHANNEL}::testkey", "*1")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " C" in l,
                           "rejection of unknown key testkey in Block C")
-        print("PASS: INS of unknown key testkey in Block C was rejected with ERR INS 2 C")
+        print("PASS: INS of unknown key testkey in Block C was rejected with correlated ERR INS 2")
 
         services.send_ins(f"C::{CHANNEL}::testinvalidkey", "ascac")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " C" in l,
                           "rejection of unknown key testinvalidkey in Block C")
-        print("PASS: INS of unknown key testinvalidkey in Block C was rejected with ERR INS 2 C")
+        print("PASS: INS of unknown key testinvalidkey in Block C was rejected with correlated ERR INS 2")
 
         # -------------------------------------------------------------
         # Test 2: Rejection of wrong data types in Block C
@@ -347,12 +347,12 @@ def run_tests(ircd_bin, keep=False):
         services.send_ins("S::#test::testunknownkey", "ascac")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " S" in l,
                           "rejection of nested path in Block S")
-        print("PASS: INS of nested path S::#test::testunknownkey was rejected with ERR INS 2 S")
+        print("PASS: INS of nested path S::#test::testunknownkey was rejected with correlated ERR INS 2")
 
         services.send_ins("S::testunknownkey", "ascac")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " S" in l,
                           "rejection of unknown key in Block S")
-        print("PASS: INS of unknown key testunknownkey in Block S was rejected with ERR INS 2 S")
+        print("PASS: INS of unknown key testunknownkey in Block S was rejected with correlated ERR INS 2")
 
         services.send_ins("S::clones", "textvalue")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " S" in l,
@@ -373,27 +373,27 @@ def run_tests(ircd_bin, keep=False):
         services.send_ins("N::davidlig::testunknownkey", "valor")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " N" in l,
                           "rejection of unknown key in Block N")
-        print("PASS: INS of unknown key in Block N was rejected with ERR INS 2 N")
+        print("PASS: INS of unknown key in Block N was rejected with correlated ERR INS 2")
 
         services.send_ins("I::127.0.0.1::testunknownkey", "*1")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " I" in l,
                           "rejection of unknown key in Block I")
-        print("PASS: INS of unknown key in Block I was rejected with ERR INS 2 I")
+        print("PASS: INS of unknown key in Block I was rejected with correlated ERR INS 2")
 
         services.send_ins(f"L::{SERVICES_NAME}::testunknownkey", "*1")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " L" in l,
                           "rejection of unknown key in Block L")
-        print("PASS: INS of unknown key in Block L was rejected with ERR INS 2 L")
+        print("PASS: INS of unknown key in Block L was rejected with correlated ERR INS 2")
 
         services.send_ins("K::X::*@bad.test::reason", "bad")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " K" in l,
                           "rejection of invalid TKL type in Block K")
-        print("PASS: INS of invalid TKL type 'X' in Block K was rejected with ERR INS 2 K")
+        print("PASS: INS of invalid TKL type 'X' in Block K was rejected with correlated ERR INS 2")
 
         services.send_ins("K::G::*@bad.test::testunknownkey", "bad")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " K" in l,
                           "rejection of unknown subkey in Block K")
-        print("PASS: INS of unknown subkey in Block K was rejected with ERR INS 2 K")
+        print("PASS: INS of unknown subkey in Block K was rejected with correlated ERR INS 2")
 
         # -------------------------------------------------------------
         # Test 6b: Spamfilter regex pattern length limits (3071, 3072, 3073 bytes)
@@ -408,7 +408,7 @@ def run_tests(ircd_bin, keep=False):
         services.send_ins(f"K::F::{pat3072}::type", "c")
         time.sleep(0.1)
 
-        # Pattern of 3073 bytes (over max) -> Rejected with ERR INS 2 K
+        # Pattern of 3073 bytes (over max) -> Rejected with correlated ERR INS 2
         pat3073 = "c" * 3073
         services.send_ins(f"K::F::{pat3073}::type", "c")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " K" in l,

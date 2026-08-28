@@ -237,6 +237,18 @@ Detailed technical documentation is available in the `doc/` directory:
   an invalid path, missing key, overlong field, or malformed/truncated line immediately
   aborts block loading, rolls back candidate changes, and leaves the database uncorrupted.
   No malformed or overlong records are tolerated or skipped.
+- `READY` means that all six required snapshots (`N`, `C`, `I`, `S`, `L`, and
+  `K`) belong to one durable generation. A genuinely fresh local authority may
+  initialize an empty database, but a missing snapshot, malformed state marker,
+  partial legacy database, or generation mismatch stays fail-closed in recovery.
+- Reconciliation is an explicit HEL-driven state machine. HEL request and ACK
+  ordering is idempotent; each inventory and staged frame carries a wire round
+  ID; `BEGIN` is accepted only after the matching `RES`; and timeout, `ERR`,
+  disconnect, failover, or failback aborts the whole round and schedules a
+  bounded retry against the currently selected direct authority.
+- HEL 4 reconciliation frames require a non-zero round ID. The same round ID is
+  carried by `INF`, `RES`, `BEGIN`, `PUT`, `END`, and `ACK`; frames that do not
+  belong to the active round are rejected and cannot complete another round.
 - Staged `END` digests must be complete, non-empty hexadecimal values that fit
   in `unsigned long`. Invalid or overflowing input aborts the staged tree and
   leaves the active snapshot unchanged.

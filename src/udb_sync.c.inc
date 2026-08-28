@@ -20,6 +20,8 @@ struct UdbHelloPeer
 	int state;
 	int authorizes_us;
 	int auth_received;
+	int local_selection_sent;
+	int reconciliation_offered;
 	UdbHelloPeer *next;
 };
 
@@ -28,6 +30,43 @@ struct UdbHelloPeer
 #define UDB_HEL_UNSUPPORTED 3
 
 static UdbHelloPeer *udb_hello_peers = NULL;
+static UdbHelloPeer *udb_hello_peer(Client *server, int create);
+
+static void udb_hello_cleanup_all(void)
+{
+	while (udb_hello_peers)
+	{
+		UdbHelloPeer *next = udb_hello_peers->next;
+		safe_free(udb_hello_peers);
+		udb_hello_peers = next;
+	}
+}
+
+static void udb_maybe_start_reconciliation(Client *server, int force_offer)
+{
+	UdbHelloPeer *peer = udb_hello_peer(server, 0);
+
+	if (!peer || !udb_has_hello(server) || !IsServer(server) || !MyConnect(server))
+		return;
+	if (peer->authorizes_us && udb_ready && (force_offer || !peer->reconciliation_offered))
+	{
+		if (udb_sync_to_server(server))
+			peer->reconciliation_offered = 1;
+	}
+}
+
+static void udb_offer_reconciliation_to_downstreams(void)
+{
+	Client *server;
+
+	if (!udb_ready)
+		return;
+	list_for_each_entry(server, &server_list, special_node)
+	{
+		if (IsServer(server) && MyConnect(server) && udb_has_hello(server) && udb_peer_authorizes_us(server))
+			udb_maybe_start_reconciliation(server, 1);
+	}
+}
 
 static UdbHelloPeer *udb_hello_peer(Client *server, int create)
 {
@@ -74,7 +113,7 @@ static int udb_sync_hello_start(Client *server)
 	if (!server || !IsServer(server) || !MyConnect(server))
 		return 0;
 	peer = udb_hello_peer(server, 1);
-	if (peer->state)
+	if (peer->state == UDB_HEL_WAITING || peer->state == UDB_HEL_CONFIRMED)
 		return 0;
 	peer->state = UDB_HEL_WAITING;
 	peer->deadline = time(NULL) + UDB_SYNC_TIMEOUT;
@@ -93,6 +132,7 @@ static int udb_sync_hello_start(Client *server)
 		peer->deadline = 0;
 		return 0;
 	}
+	peer->local_selection_sent = 1;
 	return 1;
 }
 
@@ -112,8 +152,7 @@ static void udb_sync_hello_ack(Client *server)
 		peer->deadline = 0;
 		udb_log(ULOG_INFO, "UDB_HEL_CONFIRMED", server, "UDB HEL 4 capability confirmed for directly linked server");
 		udb_propagator_policy_changed(udb_ctx);
-		if (peer->authorizes_us && !udb_is_authorized_sync_source(udb_ctx, server))
-			udb_sync_to_server(server);
+		udb_maybe_start_reconciliation(server, 0);
 	}
 }
 
@@ -171,9 +210,10 @@ static void udb_reconcile_reset(void)
 	udb_reconcile.compared_blocks = 0;
 	udb_reconcile.divergent_blocks = 0;
 	udb_reconcile.completed_blocks = 0;
+	udb_reconcile.generation = 0;
 }
 
-static void udb_reconcile_abort(UdbContext *ctx, const char *reason)
+static void udb_reconcile_abort(UdbContext *ctx, const char *reason, int schedule_retry)
 {
 	UdbBlock *block;
 	if (!udb_reconcile.active && !udb_reconcile.authority_peer)
@@ -187,39 +227,53 @@ static void udb_reconcile_abort(UdbContext *ctx, const char *reason)
 	{
 		for (block = ctx->block_list; block; block = block->next)
 		{
-			if (block->pending_from)
-			{
-				block->pending_from = NULL;
-				block->pending_deadline = 0;
-				block->pending_round_id = 0;
-			}
+			udb_block_clear_pending(block);
+			if (block->session)
+				udb_sync_abort(block, reason ? reason : "reconciliation aborted");
 		}
+	}
+	if (schedule_retry && udb_reconcile.retry_count < UDB_RECONCILE_RETRY_MAX)
+	{
+		udb_reconcile.retry_count++;
+		unsigned int shift = udb_reconcile.retry_count > 4 ? 4 : udb_reconcile.retry_count;
+		udb_reconcile.next_retry_at = time(NULL) + (UDB_RECONCILE_RETRY_BASE << shift);
+	}
+	else
+	{
+		udb_reconcile.retry_count = 0;
+		udb_reconcile.next_retry_at = 0;
 	}
 	udb_reconcile_reset();
 }
 
-static void udb_reconcile_begin(Client *authority)
+static void udb_reconcile_begin(Client *authority, unsigned long round_id)
 {
+	unsigned int retry_count = udb_reconcile.retry_count;
 	udb_reconcile.authority_peer = authority;
-	udb_reconcile.round_id++;
+	udb_reconcile.round_id = round_id;
+	udb_reconcile.generation = round_id ? round_id : 1;
 	udb_reconcile.active = 1;
 	udb_reconcile.compared_blocks = 0;
 	udb_reconcile.divergent_blocks = 0;
 	udb_reconcile.completed_blocks = 0;
+	udb_reconcile.retry_count = retry_count;
+	udb_reconcile.next_retry_at = 0;
 	udb_log(ULOG_INFO, "UDB_RECONCILE_ROUND_START", authority,
 			"Started reconciliation round $round with authority peer $peer",
 			log_data_integer("round", (int)udb_reconcile.round_id), log_data_client("peer", authority));
 }
 
-static void udb_reconcile_start(Client *authority)
+static void udb_reconcile_start(Client *authority, unsigned long round_id)
 {
-	if (udb_reconcile.authority_peer != authority || !udb_reconcile.active)
+	if (udb_reconcile.authority_peer != authority || !udb_reconcile.active || udb_reconcile.round_id != round_id)
 	{
-		udb_reconcile_begin(authority);
+		if (udb_reconcile.active)
+			udb_reconcile_abort(udb_ctx, "new reconciliation round", 0);
+		udb_reconcile_begin(authority, round_id);
 	}
 }
 
-static void udb_reconcile_record_inf(Client *peer, char letter, unsigned long remote_crc)
+static void udb_reconcile_record_inf(Client *peer, unsigned long round_id, char letter, unsigned long remote_crc)
 {
 	unsigned int mask = udb_block_letter_to_mask(letter);
 	UdbBlock *block = udb_block_by_letter(udb_ctx, letter);
@@ -227,7 +281,9 @@ static void udb_reconcile_record_inf(Client *peer, char letter, unsigned long re
 	if (!mask || !block)
 		return;
 
-	udb_reconcile_start(peer);
+	if (udb_reconcile.active && udb_reconcile.authority_peer == peer && round_id < udb_reconcile.round_id)
+		return;
+	udb_reconcile_start(peer, round_id);
 	udb_reconcile.compared_blocks |= mask;
 
 	if (remote_crc != block->checksum)
@@ -241,13 +297,14 @@ static void udb_reconcile_record_inf(Client *peer, char letter, unsigned long re
 	}
 }
 
-static void udb_reconcile_record_res(Client *peer, char letter)
+static void udb_reconcile_record_res(Client *peer, unsigned long round_id, char letter)
 {
 	unsigned int mask = udb_block_letter_to_mask(letter);
 	if (!mask)
 		return;
 
-	udb_reconcile_start(peer);
+	if (!udb_reconcile.active || udb_reconcile.authority_peer != peer || udb_reconcile.round_id != round_id)
+		return;
 	udb_reconcile.divergent_blocks |= mask;
 	udb_reconcile.completed_blocks &= ~mask;
 }
@@ -296,10 +353,9 @@ static int udb_reconcile_check(UdbContext *ctx)
 	udb_sync_status = UDB_SYNC_OK;
 	udb_degraded_since = 0;
 
-	udb_reconcile.compared_blocks = 0;
-	udb_reconcile.divergent_blocks = 0;
-	udb_reconcile.completed_blocks = 0;
-	udb_reconcile.active = 0;
+	udb_reconcile_reset();
+	udb_reconcile.retry_count = 0;
+	udb_reconcile.next_retry_at = 0;
 
 	if (was_stale_or_degraded || was_not_ready)
 	{
@@ -454,7 +510,11 @@ static void udb_sync_hello_refresh_all(void)
 	list_for_each_entry(server, &server_list, special_node)
 	{
 		if (IsServer(server) && MyConnect(server) && udb_has_hello(server))
-			udb_send_db_to_one(server, ":%s DB %s HEL 4 %s", me.id, server->id, propagator);
+		{
+			UdbHelloPeer *hello = udb_hello_peer(server, 0);
+			if (udb_send_db_to_one(server, ":%s DB %s HEL 4 %s", me.id, server->id, propagator) && hello)
+				hello->local_selection_sent = 1;
+		}
 	}
 }
 
@@ -496,7 +556,7 @@ static void udb_propagator_policy_changed(UdbContext *ctx)
 	if (udb_bootstrap_peer && udb_bootstrap_peer != peer)
 		udb_bootstrap_peer = NULL;
 	if (udb_reconcile.authority_peer && udb_reconcile.authority_peer != peer)
-		udb_reconcile_abort(ctx, "propagator policy changed");
+		udb_reconcile_abort(ctx, "propagator policy changed", 0);
 
 	for (block = ctx->block_list; block; block = block->next)
 	{
@@ -519,12 +579,10 @@ static void udb_propagator_policy_changed(UdbContext *ctx)
 	udb_sync_status_refresh();
 
 	if (peer && udb_has_hello(peer) && (!udb_ready || udb_sync_status != UDB_SYNC_OK))
-	{
-		udb_sync_to_server(peer);
-	}
+		udb_maybe_start_reconciliation(peer, 0);
 }
 
-static int udb_sync_begin(UdbBlock *block, Client *peer, const char *txid)
+static int udb_sync_begin(UdbBlock *block, Client *peer, unsigned long round_id, const char *txid)
 {
 	UdbSyncSession *session;
 	int inact =
@@ -552,15 +610,13 @@ static int udb_sync_begin(UdbBlock *block, Client *peer, const char *txid)
 
 	if (block->session)
 		return UDB_ERR_SYNC_ACTIVE;
-
-	if (!udb_reconcile.active || udb_reconcile.authority_peer != peer)
-	{
-		udb_reconcile_start(peer);
-	}
+	if (!udb_reconcile.active || udb_reconcile.authority_peer != peer || udb_reconcile.round_id != round_id ||
+		block->pending_from != peer || block->pending_round_id != round_id)
+		return UDB_ERR_NO_SYNC;
 
 	session = safe_alloc(sizeof(*session));
 	session->peer = peer;
-	session->round_id = udb_reconcile.round_id;
+	session->round_id = round_id;
 	memcpy(session->txid, txid, txid_len + 1);
 	session->started_at = time(NULL);
 	session->last_activity = session->started_at;
@@ -575,10 +631,12 @@ static int udb_sync_begin(UdbBlock *block, Client *peer, const char *txid)
 	session->record_count = 0;
 	block->session = session;
 	block->syncing_from = peer;
+	udb_block_clear_pending(block);
 	return 0;
 }
 
-static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid, const char *path, const char *data)
+static int udb_sync_put(UdbBlock *block, Client *peer, unsigned long round_id, const char *txid, const char *path,
+						const char *data)
 {
 	UdbSyncSession *session = block ? block->session : NULL;
 	char *line;
@@ -591,7 +649,7 @@ static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid, const c
 		(udb_cfg && udb_cfg->max_staged_records) ? udb_cfg->max_staged_records : UDB_DEFAULT_MAX_STAGED_RECORDS;
 	int parse_ok;
 
-	if (!session || session->peer != peer || strcmp(session->txid, txid))
+	if (!session || session->peer != peer || session->round_id != round_id || strcmp(session->txid, txid))
 	{
 		if (session && session->peer == peer)
 			udb_sync_abort(block, "invalid PUT sequence");
@@ -645,13 +703,14 @@ static int udb_sync_put(UdbBlock *block, Client *peer, const char *txid, const c
 	return 0;
 }
 
-static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, const char *txid, const char *checksum,
-						unsigned long *digest)
+static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, unsigned long round_id, const char *txid,
+						const char *checksum, unsigned long *digest)
 {
 	UdbSyncSession *session = block ? block->session : NULL;
 	unsigned long received_digest;
+	unsigned long previous_generation;
 
-	if (!session || session->peer != peer || strcmp(session->txid, txid))
+	if (!session || session->peer != peer || session->round_id != round_id || strcmp(session->txid, txid))
 	{
 		if (session && session->peer == peer)
 			udb_sync_abort(block, "invalid END sequence");
@@ -674,13 +733,33 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, const ch
 		udb_sync_abort(block, "digest calculation failure");
 		return UDB_ERR_FATAL;
 	}
-	UdbSnapshotResult snap_res = UDB_SNAPSHOT_FAILED_BEFORE_COMMIT;
-	if (!udb_checksum_parse(checksum, &received_digest) || *digest != received_digest ||
-		(snap_res = udb_file_write_snapshot(block, session->tree, session->record_count)) ==
-			UDB_SNAPSHOT_FAILED_BEFORE_COMMIT ||
-		!udb_block_commit_stage(ctx, block, session, *digest))
+	if (!udb_checksum_parse(checksum, &received_digest) || *digest != received_digest)
 	{
+		udb_sync_abort(block, "digest validation failure");
+		return UDB_ERR_FATAL;
+	}
+
+	previous_generation = block->generation;
+	block->generation = udb_reconcile.generation;
+	UdbSnapshotResult snap_res = udb_file_write_snapshot(block, session->tree, session->record_count);
+	if (snap_res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
+	{
+		block->generation = previous_generation;
 		udb_sync_abort(block, "digest or persistence failure");
+		return UDB_ERR_FATAL;
+	}
+	if (!udb_block_commit_stage(ctx, block, session, *digest))
+	{
+		block->generation = previous_generation;
+		udb_sync_abort(block, "staged commit failure");
+		return UDB_ERR_FATAL;
+	}
+	if (snap_res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
+	{
+		/* rename(2) is the irreversible point: keep memory equal to the visible
+		 * snapshot, but fail the round and readiness until durability is proven. */
+		udb_mark_durability_uncertain(ctx, block, "staged snapshot");
+		udb_reconcile_abort(ctx, "snapshot durability uncertain", 1);
 		return UDB_ERR_FATAL;
 	}
 	return 0;
@@ -692,8 +771,8 @@ static void udb_sync_ack(Client *peer, const char *block)
 			log_data_string("block", block));
 }
 
-static int udb_sync_send_tree(Client *server, UdbRecord *rec, int depth, char *pathbuf, size_t pathlen, char letter,
-							  const char *txid)
+static int udb_sync_send_tree(Client *server, UdbRecord *rec, int depth, char *pathbuf, size_t pathlen,
+							  unsigned long round_id, char letter, const char *txid)
 {
 	size_t orig_len;
 	UdbRecord *child;
@@ -740,11 +819,11 @@ static int udb_sync_send_tree(Client *server, UdbRecord *rec, int depth, char *p
 		}
 
 		if (rec->data_str)
-			ok = udb_send_db_to_one(server, ":%s DB %s PUT %c %s %s :%s", me.id, server->id, letter, txid, pathbuf,
-									rec->data_str);
+			ok = udb_send_db_to_one(server, ":%s DB %s PUT %lu %c %s %s :%s", me.id, server->id, round_id, letter, txid,
+									pathbuf, rec->data_str);
 		else
-			ok = udb_send_db_to_one(server, ":%s DB %s PUT %c %s %s *%lu", me.id, server->id, letter, txid, pathbuf,
-									rec->data_num);
+			ok = udb_send_db_to_one(server, ":%s DB %s PUT %lu %c %s %s *%lu", me.id, server->id, round_id, letter,
+									txid, pathbuf, rec->data_num);
 		if (!ok)
 		{
 			pathbuf[orig_len] = '\0';
@@ -753,7 +832,7 @@ static int udb_sync_send_tree(Client *server, UdbRecord *rec, int depth, char *p
 	}
 	for (child = rec->child; child; child = child->sibling)
 	{
-		if (!udb_sync_send_tree(server, child, depth + 1, pathbuf, pathlen, letter, txid))
+		if (!udb_sync_send_tree(server, child, depth + 1, pathbuf, pathlen, round_id, letter, txid))
 		{
 			pathbuf[orig_len] = '\0';
 			return 0;
@@ -763,7 +842,7 @@ static int udb_sync_send_tree(Client *server, UdbRecord *rec, int depth, char *p
 	return 1;
 }
 
-static int udb_sync_send_stage(Client *server, UdbBlock *block)
+static int udb_sync_send_stage(Client *server, UdbBlock *block, unsigned long round_id)
 {
 	char txid[UDB_TXID_MAX + 1];
 	char pathbuf[UDB_RECORD_PATH_MAX + 1] = "";
@@ -774,7 +853,7 @@ static int udb_sync_send_stage(Client *server, UdbBlock *block)
 	if (!udb_peer_authorizes_us(server) || !block)
 		return 0;
 	snprintf(txid, sizeof(txid), "%08lx", ++udb_sync_txid);
-	if (!udb_send_db_to_one(server, ":%s DB %s BEGIN %c %s %08lX", me.id, server->id, block->letter, txid,
+	if (!udb_send_db_to_one(server, ":%s DB %s BEGIN %lu %c %s %08lX", me.id, server->id, round_id, block->letter, txid,
 							block->checksum))
 	{
 		udb_log(ULOG_ERROR, "UDB_SYNC_SEND_FAILED", server, "Failed to send staged sync BEGIN for block $block",
@@ -785,7 +864,7 @@ static int udb_sync_send_stage(Client *server, UdbBlock *block)
 	{
 		for (rec = block->tree->child; rec; rec = rec->sibling)
 		{
-			if (!udb_sync_send_tree(server, rec, 0, pathbuf, sizeof(pathbuf), block->letter, txid))
+			if (!udb_sync_send_tree(server, rec, 0, pathbuf, sizeof(pathbuf), round_id, block->letter, txid))
 			{
 				success = 0;
 				break;
@@ -797,10 +876,11 @@ static int udb_sync_send_stage(Client *server, UdbBlock *block)
 		udb_log(ULOG_ERROR, "UDB_SYNC_SEND_FAILED", server,
 				"Failed to serialize/send tree records during staged sync for block $block, aborting transfer",
 				log_data_string("block", (char[]){block->letter, '\0'}));
-		udb_send_db_to_one(server, ":%s DB %s ERR PUT %d %c", me.id, server->id, UDB_ERR_FATAL, block->letter);
+		udb_send_db_to_one(server, ":%s DB %s ERR PUT %d %lu %c", me.id, server->id, UDB_ERR_FATAL, round_id,
+						   block->letter);
 		return 0;
 	}
-	if (!udb_send_db_to_one(server, ":%s DB %s END %c %s %08lX", me.id, server->id, block->letter, txid,
+	if (!udb_send_db_to_one(server, ":%s DB %s END %lu %c %s %08lX", me.id, server->id, round_id, block->letter, txid,
 							block->checksum))
 	{
 		udb_log(ULOG_ERROR, "UDB_SYNC_SEND_FAILED", server, "Failed to send staged sync END for block $block",
@@ -815,26 +895,27 @@ EVENT(udb_sync_timeout_event)
 	UdbBlock *block;
 	UdbHelloPeer *peer, *next;
 	time_t now = time(NULL);
+	const char *abort_reason = NULL;
 
 	for (block = udb_ctx ? udb_ctx->block_list : NULL; block; block = block->next)
 	{
 		if (block->session)
 		{
 			if (block->session->deadline <= now)
-				udb_sync_abort(block, "inactivity timeout");
+				abort_reason = "snapshot inactivity timeout";
 			else if (block->session->absolute_deadline <= now)
-				udb_sync_abort(block, "absolute timeout");
+				abort_reason = "snapshot absolute timeout";
 		}
 		if (block->pending_from && block->pending_deadline <= now)
 		{
 			udb_log(ULOG_WARNING, "UDB_PENDING_RES_TIMEOUT", block->pending_from,
 					"Pending RES request for block $block timed out waiting for BEGIN",
 					log_data_string("block", (char[]){block->letter, '\0'}));
-			block->pending_from = NULL;
-			block->pending_deadline = 0;
-			block->pending_round_id = 0;
+			abort_reason = "RES timeout";
 		}
 	}
+	if (abort_reason)
+		udb_reconcile_abort(udb_ctx, abort_reason, 1);
 	for (peer = udb_hello_peers; peer; peer = next)
 	{
 		next = peer->next;
@@ -847,6 +928,24 @@ EVENT(udb_sync_timeout_event)
 			if (c)
 			{
 				exit_client_fmt(c, NULL, "Link aborted: server does not support UDB protocol (HEL timeout)");
+			}
+		}
+	}
+	if (!udb_reconcile.active && udb_reconcile.next_retry_at && udb_reconcile.next_retry_at <= now)
+	{
+		UdbPropagatorSelection selected;
+		udb_reconcile.next_retry_at = 0;
+		if (udb_select_propagator(udb_ctx, 1, &selected) && !selected.is_local && selected.peer)
+		{
+			udb_sync_hello_refresh_all();
+			udb_maybe_start_reconciliation(selected.peer, 1);
+			/* Keep retrying if the HEL refresh or resulting inventory is lost. Any
+			 * accepted INF starts the round and clears this deadline. */
+			if (!udb_reconcile.active && udb_reconcile.retry_count < UDB_RECONCILE_RETRY_MAX)
+			{
+				udb_reconcile.retry_count++;
+				unsigned int shift = udb_reconcile.retry_count > 4 ? 4 : udb_reconcile.retry_count;
+				udb_reconcile.next_retry_at = now + (UDB_RECONCILE_RETRY_BASE << shift);
 			}
 		}
 	}
@@ -890,7 +989,7 @@ static void udb_sync_server_quit(Client *client)
 		udb_log(ULOG_INFO, "UDB_AUTHORITY_FAILOVER", client,
 				"Authority peer $client disconnected; resetting reconciliation round",
 				log_data_client("client", client));
-		udb_reconcile_reset();
+		udb_reconcile_abort(udb_ctx, "authority disconnected", 0);
 	}
 
 	udb_propagator_policy_changed(udb_ctx);

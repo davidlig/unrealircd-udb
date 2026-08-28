@@ -134,7 +134,8 @@ static int udb_mutation_forward_del(Client *source, Client *except, const char *
 
 static int udb_mutation_persist_error(Client *client, const char *subcmd, char letter)
 {
-	return udb_send_db_to_one(client, ":%s DB %s ERR %s %d %c", me.id, client->id, subcmd, UDB_ERR_FATAL, letter);
+	udb_protocol_mutation_error(client, subcmd, UDB_ERR_FATAL, letter);
+	return 1;
 }
 
 static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, const char *path,
@@ -145,19 +146,19 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 
 	if (!block || !udb_record_fits_limits(path, data))
 	{
-		udb_protocol_params_error(client, "INS");
+		udb_protocol_mutation_error(client, "INS", UDB_ERR_PARAMS, letter);
 		return;
 	}
 	if (is_for_me)
 	{
 		if (block->session || (block->syncing_from && block->syncing_from != direct_peer))
 		{
-			udb_send_db_to_one(client, ":%s DB %s ERR INS %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
+			udb_protocol_mutation_error(client, "INS", UDB_ERR_SYNC_ACTIVE, letter);
 			return;
 		}
-		if (block->syncing_from != direct_peer && !udb_is_propagator(ctx, direct_peer))
+		if (!udb_is_propagator(ctx, direct_peer))
 		{
-			udb_send_db_to_one(client, ":%s DB %s ERR INS %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
+			udb_protocol_mutation_error(client, "INS", UDB_ERR_FORBIDDEN, letter);
 			return;
 		}
 		UdbRecord *old_rec;
@@ -169,7 +170,7 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 		{
 			udb_log(ULOG_WARNING, "UDB_INS_SCHEMA_REJECT", client,
 					"Rejected S2S INS for invalid or unknown record: $path", log_data_string("path", path));
-			udb_send_db_to_one(client, ":%s DB %s ERR INS %d %c", me.id, client->id, UDB_ERR_PARAMS, letter);
+			udb_protocol_mutation_error(client, "INS", UDB_ERR_PARAMS, letter);
 			return;
 		}
 		old_rec = udb_record_find_path(ctx, block, path + 3);
@@ -212,6 +213,12 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 			if (block->letter == 'L')
 				udb_sync_snomask_filter();
 		}
+		if (snap_res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
+		{
+			udb_mark_durability_uncertain(ctx, block, "INS snapshot");
+			udb_mutation_persist_error(client, "INS", letter);
+			return;
+		}
 		char logbuf[512];
 		snprintf(logbuf, sizeof(logbuf), "Inserted record via S2S: %s -> %s", path, data);
 		udb_log(ULOG_INFO, "UDB_INS_RECEIVED", client, "$msg", log_data_string("msg", logbuf));
@@ -229,19 +236,19 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, Client *direct_pee
 
 	if (!block || !udb_record_fits_limits(path, NULL))
 	{
-		udb_protocol_params_error(client, "DEL");
+		udb_protocol_mutation_error(client, "DEL", UDB_ERR_PARAMS, letter);
 		return;
 	}
 	if (is_for_me)
 	{
 		if (block->session || (block->syncing_from && block->syncing_from != direct_peer))
 		{
-			udb_send_db_to_one(client, ":%s DB %s ERR DEL %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
+			udb_protocol_mutation_error(client, "DEL", UDB_ERR_SYNC_ACTIVE, letter);
 			return;
 		}
-		if (block->syncing_from != direct_peer && !udb_is_propagator(ctx, direct_peer))
+		if (!udb_is_propagator(ctx, direct_peer))
 		{
-			udb_send_db_to_one(client, ":%s DB %s ERR DEL %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
+			udb_protocol_mutation_error(client, "DEL", UDB_ERR_FORBIDDEN, letter);
 			return;
 		}
 		UdbRecord *old_rec = udb_record_find_path(ctx, block, path + 3);
@@ -276,6 +283,12 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, Client *direct_pee
 			udb_lines_apply_effect(ctx, block, candidate_line, 0);
 		if (block->letter == 'L')
 			udb_sync_snomask_filter();
+		if (snap_res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
+		{
+			udb_mark_durability_uncertain(ctx, block, "DEL snapshot");
+			udb_mutation_persist_error(client, "DEL", letter);
+			return;
+		}
 		char logbuf[512];
 		snprintf(logbuf, sizeof(logbuf), "Deleted record via S2S: %s", path);
 		udb_log(ULOG_INFO, "UDB_DEL_RECEIVED", client, "$msg", log_data_string("msg", logbuf));
@@ -293,17 +306,17 @@ static void udb_mutation_drp(UdbContext *ctx, Client *client, Client *direct_pee
 		UdbBlock *block = udb_block_by_letter(ctx, letter);
 		if (!block)
 		{
-			udb_send_db_to_one(client, ":%s DB %s ERR DRP %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
+			udb_protocol_mutation_error(client, "DRP", UDB_ERR_NO_BLOCK, letter);
 			return;
 		}
 		if (block->session || (block->syncing_from && block->syncing_from != direct_peer))
 		{
-			udb_send_db_to_one(client, ":%s DB %s ERR DRP %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
+			udb_protocol_mutation_error(client, "DRP", UDB_ERR_SYNC_ACTIVE, letter);
 			return;
 		}
 		if (!udb_is_propagator(ctx, direct_peer))
 		{
-			udb_send_db_to_one(client, ":%s DB %s ERR DRP %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
+			udb_protocol_mutation_error(client, "DRP", UDB_ERR_FORBIDDEN, letter);
 			return;
 		}
 		if (!block->tree->child)
@@ -326,6 +339,12 @@ static void udb_mutation_drp(UdbContext *ctx, Client *client, Client *direct_pee
 		/* Reset removes the old block's runtime effects only after persistence. */
 		udb_block_reset(ctx, block);
 		udb_block_replace_tree(ctx, block, tree, 0);
+		if (snap_res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
+		{
+			udb_mark_durability_uncertain(ctx, block, "DRP snapshot");
+			udb_mutation_persist_error(client, "DRP", letter);
+			return;
+		}
 		if (!is_broadcast)
 			return;
 	}
@@ -340,17 +359,17 @@ static void udb_mutation_opt(UdbContext *ctx, Client *client, Client *direct_pee
 		UdbBlock *block = udb_block_by_letter(ctx, letter);
 		if (!block)
 		{
-			udb_send_db_to_one(client, ":%s DB %s ERR OPT %d %c", me.id, client->id, UDB_ERR_NO_BLOCK, letter);
+			udb_protocol_mutation_error(client, "OPT", UDB_ERR_NO_BLOCK, letter);
 			return;
 		}
 		if (block->session)
 		{
-			udb_send_db_to_one(client, ":%s DB %s ERR OPT %d %c", me.id, client->id, UDB_ERR_SYNC_ACTIVE, letter);
+			udb_protocol_mutation_error(client, "OPT", UDB_ERR_SYNC_ACTIVE, letter);
 			return;
 		}
 		if (!udb_is_propagator(ctx, direct_peer))
 		{
-			udb_send_db_to_one(client, ":%s DB %s ERR OPT %d %c", me.id, client->id, UDB_ERR_FORBIDDEN, letter);
+			udb_protocol_mutation_error(client, "OPT", UDB_ERR_FORBIDDEN, letter);
 			return;
 		}
 		if (!udb_file_save_block(ctx, block))

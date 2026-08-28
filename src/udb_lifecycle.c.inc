@@ -135,14 +135,15 @@ static void udb_block_unload(UdbContext *ctx, UdbBlock *block)
 static int udb_blocks_load_all(UdbContext *ctx)
 {
 	UdbBlock *b;
+	int success = 1;
 	if (!ctx)
 		return 0;
 	for (b = ctx->block_list; b; b = b->next)
 	{
 		if (!udb_block_load(ctx, b))
-			return 0;
+			success = 0;
 	}
-	return 1;
+	return success;
 }
 
 static int udb_blocks_save_all(UdbContext *ctx)
@@ -189,6 +190,7 @@ static void udb_engine_cleanup(UdbContext *ctx)
 	if (!ctx)
 		return;
 	udb_ips_shutdown();
+	udb_hello_cleanup_all();
 	for (b = ctx->block_list; b;)
 	{
 		UdbBlock *next = b->next;
@@ -206,7 +208,8 @@ static void udb_engine_cleanup(UdbContext *ctx)
 		udb_ctx = NULL;
 }
 
-static int udb_persistence_set_state(UdbPersistentState state, time_t last_sync)
+static UdbStatePersistResult udb_persistence_set_state(UdbPersistentState state, UdbPersistenceOrigin origin,
+													   unsigned long generation, time_t last_sync)
 {
 	const char *directory = udb_cfg ? udb_cfg->db_directory : NULL;
 	char tmp_path[UDB_BLOCK_PATH_MAX];
@@ -221,15 +224,15 @@ static int udb_persistence_set_state(UdbPersistentState state, time_t last_sync)
 	int saved_errno;
 
 	if (!directory || !*directory)
-		return 0;
+		return UDB_STATE_FAILED_BEFORE_COMMIT;
 
 	if (snprintf(tmp_path, sizeof(tmp_path), "%s%s.udb_state.tmp", directory,
 				 directory[strlen(directory) - 1] == '/' ? "" : "/") >= (int)sizeof(tmp_path))
-		return 0;
+		return UDB_STATE_FAILED_BEFORE_COMMIT;
 
 	if (snprintf(final_path, sizeof(final_path), "%s%s.udb_state", directory,
 				 directory[strlen(directory) - 1] == '/' ? "" : "/") >= (int)sizeof(final_path))
-		return 0;
+		return UDB_STATE_FAILED_BEFORE_COMMIT;
 
 	strlcpy(dir_path, final_path, sizeof(dir_path));
 	slash = strrchr(dir_path, '/');
@@ -249,7 +252,7 @@ static int udb_persistence_set_state(UdbPersistentState state, time_t last_sync)
 		saved_errno = errno;
 		udb_log(ULOG_ERROR, "UDB_STATE_PERSIST_FAILED", NULL, "Failed to open temporary state file $path: $error",
 				log_data_string("path", tmp_path), log_data_string("error", strerror(saved_errno)));
-		return 0;
+		return UDB_STATE_FAILED_BEFORE_COMMIT;
 	}
 	tmp_created = 1;
 
@@ -270,7 +273,9 @@ static int udb_persistence_set_state(UdbPersistentState state, time_t last_sync)
 	fd = -1;
 
 	const char *state_str = (state == UDB_PERSIST_READY) ? "READY" : "BOOTSTRAPPING";
-	if (fprintf(fp, "STATE=%s\nLAST_SYNC=%ld\n", state_str, (long)last_sync) < 0)
+	const char *origin_str = origin == UDB_ORIGIN_FRESH ? "FRESH" : origin == UDB_ORIGIN_LEGACY ? "LEGACY" : "RECOVERY";
+	if (fprintf(fp, "FORMAT=%d\nSTATE=%s\nORIGIN=%s\nGENERATION=%lu\nLAST_SYNC=%ld\n", UDB_STATE_FORMAT, state_str,
+				origin_str, generation, (long)last_sync) < 0)
 		goto cleanup;
 
 	if (fflush(fp) != 0 || fsync(fileno(fp)) != 0)
@@ -294,13 +299,27 @@ static int udb_persistence_set_state(UdbPersistentState state, time_t last_sync)
 				"Failed to fsync directory for state file $path after commit: $error",
 				log_data_string("path", final_path), log_data_string("error", strerror(saved_errno)));
 		close(dir_fd);
-		return 0;
+		/* rename(2) is the irreversible point. A visible READY file with uncertain
+		 * durability must never authorize readiness, so replace it with a visible
+		 * BOOTSTRAPPING marker before reporting the uncertain commit. */
+		if (state == UDB_PERSIST_READY)
+			(void)udb_persistence_set_state(UDB_PERSIST_BOOTSTRAPPING, UDB_ORIGIN_RECOVERY, generation, 0);
+		return UDB_STATE_COMMITTED_DURABILITY_UNCERTAIN;
 	}
-	close(dir_fd);
+	if (close(dir_fd) != 0)
+	{
+		saved_errno = errno;
+		udb_log(ULOG_ERROR, "UDB_STATE_DIR_CLOSE_FAILED", NULL,
+				"Failed to close directory descriptor for state file $path after commit: $error",
+				log_data_string("path", final_path), log_data_string("error", strerror(saved_errno)));
+		if (state == UDB_PERSIST_READY)
+			(void)udb_persistence_set_state(UDB_PERSIST_BOOTSTRAPPING, UDB_ORIGIN_RECOVERY, generation, 0);
+		return UDB_STATE_COMMITTED_DURABILITY_UNCERTAIN;
+	}
 
 	udb_log(ULOG_INFO, "UDB_STATE_PERSISTED", NULL, "Persistent UDB state updated to $state",
 			log_data_string("state", state_str));
-	return 1;
+	return UDB_STATE_COMMITTED;
 
 cleanup:
 	saved_errno = errno;
@@ -314,35 +333,61 @@ cleanup:
 		close(dir_fd);
 	if (tmp_created)
 		unlink(tmp_path);
-	return 0;
+	return UDB_STATE_FAILED_BEFORE_COMMIT;
 }
 
-static UdbPersistentState udb_persistence_load_state(time_t *last_sync_out)
+static void udb_mark_durability_uncertain(UdbContext *ctx, UdbBlock *block, const char *operation)
+{
+	unsigned long generation = block ? block->generation : 0;
+
+	(void)ctx;
+	udb_ready = 0;
+	udb_last_successful_sync = 0;
+	udb_log(ULOG_ERROR, "UDB_DURABILITY_UNCERTAIN", NULL,
+			"The $operation rename for block $block is visible, so active state was committed, but durability is "
+			"uncertain; "
+			"forcing BOOTSTRAPPING",
+			log_data_string("operation", operation ? operation : "snapshot"),
+			log_data_string("block", block ? (char[]){block->letter, '\0'} : "0"));
+	if (udb_persistence_set_state(UDB_PERSIST_BOOTSTRAPPING, UDB_ORIGIN_RECOVERY, generation, 0) != UDB_STATE_COMMITTED)
+		udb_log(ULOG_ERROR, "UDB_DURABILITY_STATE_FAILED", NULL,
+				"Failed to durably record BOOTSTRAPPING after a visible but durability-uncertain snapshot commit");
+}
+
+static int udb_persistence_load_state(UdbPersistentState *state_out, UdbPersistenceOrigin *origin_out,
+									  unsigned long *generation_out, time_t *last_sync_out, int *legacy_format_out)
 {
 	const char *directory = udb_cfg ? udb_cfg->db_directory : NULL;
 	char state_path[UDB_BLOCK_PATH_MAX];
 	char line[256];
 	FILE *fp;
-	int state_parsed = 0;
-	int sync_parsed = 0;
+	unsigned int seen = 0;
 	UdbPersistentState state = UDB_PERSIST_BOOTSTRAPPING;
+	UdbPersistenceOrigin origin = UDB_ORIGIN_RECOVERY;
+	unsigned long generation = 0;
 	time_t parsed_sync = 0;
+	int legacy_format = 0;
+#define UDB_STATE_SEEN_FORMAT (1U << 0)
+#define UDB_STATE_SEEN_STATE (1U << 1)
+#define UDB_STATE_SEEN_ORIGIN (1U << 2)
+#define UDB_STATE_SEEN_GENERATION (1U << 3)
+#define UDB_STATE_SEEN_LAST_SYNC (1U << 4)
 
 	if (last_sync_out)
 		*last_sync_out = 0;
 
 	if (!directory || !*directory)
-		return UDB_PERSIST_BOOTSTRAPPING;
+		return 0;
 
 	if (snprintf(state_path, sizeof(state_path), "%s%s.udb_state", directory,
 				 directory[strlen(directory) - 1] == '/' ? "" : "/") >= (int)sizeof(state_path))
-		return UDB_PERSIST_BOOTSTRAPPING;
+		return 0;
 
 	fp = fopen(state_path, "r");
 	if (!fp)
 	{
 		/* Missing .udb_state */
-		return UDB_PERSIST_BOOTSTRAPPING;
+		return 0;
 	}
 
 	while (fgets(line, sizeof(line), fp))
@@ -351,60 +396,101 @@ static UdbPersistentState udb_persistence_load_state(time_t *last_sync_out)
 		if (nl)
 			*nl = '\0';
 
-		if (line[0] == '#' || line[0] == ';' || line[0] == '\0')
-			continue;
-
-		if (!strncmp(line, "STATE=", 6))
+		if (line[0] == '\0' || line[0] == '#' || line[0] == ';')
+			goto invalid;
+		if (!strncmp(line, "FORMAT=", 7))
+		{
+			unsigned int format;
+			if ((seen & UDB_STATE_SEEN_FORMAT) || !udb_parse_uint_strict(line + 7, &format, 1, UINT_MAX) ||
+				format != UDB_STATE_FORMAT)
+				goto invalid;
+			seen |= UDB_STATE_SEEN_FORMAT;
+		}
+		else if (!strncmp(line, "STATE=", 6))
 		{
 			const char *val = line + 6;
+			if (seen & UDB_STATE_SEEN_STATE)
+				goto invalid;
 			if (!strcmp(val, "READY"))
 			{
 				state = UDB_PERSIST_READY;
-				state_parsed = 1;
 			}
 			else if (!strcmp(val, "BOOTSTRAPPING"))
 			{
 				state = UDB_PERSIST_BOOTSTRAPPING;
-				state_parsed = 1;
 			}
 			else
 			{
 				/* Invalid state string */
-				state_parsed = -1;
-				break;
+				goto invalid;
 			}
+			seen |= UDB_STATE_SEEN_STATE;
+		}
+		else if (!strncmp(line, "ORIGIN=", 7))
+		{
+			const char *val = line + 7;
+			if (seen & UDB_STATE_SEEN_ORIGIN)
+				goto invalid;
+			if (!strcmp(val, "FRESH"))
+				origin = UDB_ORIGIN_FRESH;
+			else if (!strcmp(val, "LEGACY"))
+				origin = UDB_ORIGIN_LEGACY;
+			else if (!strcmp(val, "RECOVERY"))
+				origin = UDB_ORIGIN_RECOVERY;
+			else
+				goto invalid;
+			seen |= UDB_STATE_SEEN_ORIGIN;
+		}
+		else if (!strncmp(line, "GENERATION=", 11))
+		{
+			if ((seen & UDB_STATE_SEEN_GENERATION) || !udb_strtoul_strict(line + 11, &generation))
+				goto invalid;
+			seen |= UDB_STATE_SEEN_GENERATION;
 		}
 		else if (!strncmp(line, "LAST_SYNC=", 10))
 		{
-			if (udb_parse_time_t(line + 10, &parsed_sync))
-				sync_parsed = 1;
-			else
-			{
-				state_parsed = -1;
-				break;
-			}
+			if ((seen & UDB_STATE_SEEN_LAST_SYNC) || !udb_parse_time_t(line + 10, &parsed_sync))
+				goto invalid;
+			seen |= UDB_STATE_SEEN_LAST_SYNC;
 		}
 		else
-		{
-			/* Unrecognized line in .udb_state */
-			state_parsed = -1;
-			break;
-		}
+			goto invalid;
 	}
+	if (ferror(fp))
+		goto invalid;
+	if (seen == (UDB_STATE_SEEN_STATE | UDB_STATE_SEEN_LAST_SYNC))
+		legacy_format = 1;
+	else if (seen != (UDB_STATE_SEEN_FORMAT | UDB_STATE_SEEN_STATE | UDB_STATE_SEEN_ORIGIN | UDB_STATE_SEEN_GENERATION |
+					  UDB_STATE_SEEN_LAST_SYNC))
+		goto invalid;
+	if (state == UDB_PERSIST_READY && !legacy_format && generation == 0)
+		goto invalid;
 	fclose(fp);
-
-	if (state_parsed != 1)
-	{
-		udb_log(ULOG_ERROR, "UDB_STATE_INVALID", NULL,
-				"Corrupted or invalid .udb_state file in $directory; treating as BOOTSTRAPPING",
-				log_data_string("directory", directory));
-		return UDB_PERSIST_BOOTSTRAPPING;
-	}
-
+	if (state_out)
+		*state_out = state;
+	if (origin_out)
+		*origin_out = origin;
+	if (generation_out)
+		*generation_out = generation;
 	if (last_sync_out)
 		*last_sync_out = parsed_sync;
+	if (legacy_format_out)
+		*legacy_format_out = legacy_format;
+	return 1;
 
-	return state;
+invalid:
+	fclose(fp);
+	{
+		udb_log(ULOG_ERROR, "UDB_STATE_INVALID", NULL,
+				"Corrupted or invalid .udb_state file in $directory; refusing automatic READY",
+				log_data_string("directory", directory));
+		return 0;
+	}
+#undef UDB_STATE_SEEN_FORMAT
+#undef UDB_STATE_SEEN_STATE
+#undef UDB_STATE_SEEN_ORIGIN
+#undef UDB_STATE_SEEN_GENERATION
+#undef UDB_STATE_SEEN_LAST_SYNC
 }
 
 static int udb_persistence_has_state_file(void)
@@ -436,12 +522,11 @@ static int udb_persistence_migrate_legacy(UdbContext *ctx, time_t *last_sync_out
 				 directory[strlen(directory) - 1] == '/' ? "" : "/") >= (int)sizeof(legacy_path))
 		return 0;
 
-	if (stat(legacy_path, &st) != 0)
-		return 0;
+	int has_marker = stat(legacy_path, &st) == 0;
 
 	for (b = ctx->block_list; b; b = b->next)
 	{
-		if (b->load_state == UDB_LOAD_FAILED)
+		if (b->load_state != UDB_LOAD_SUCCESS)
 		{
 			udb_log(ULOG_ERROR, "UDB_MIGRATION_FAILED", NULL,
 					"Cannot migrate legacy database: block $block failed to load",
@@ -450,7 +535,12 @@ static int udb_persistence_migrate_legacy(UdbContext *ctx, time_t *last_sync_out
 		}
 	}
 
-	sync_time = (st.st_mtime > 0) ? st.st_mtime : time(NULL);
+	sync_time = has_marker && st.st_mtime > 0 ? st.st_mtime : time(NULL);
+	unsigned long generation = (unsigned long)sync_time;
+	if (!generation)
+		generation = 1;
+	for (b = ctx->block_list; b; b = b->next)
+		b->generation = generation;
 
 	if (!udb_blocks_save_all(ctx))
 	{
@@ -459,7 +549,7 @@ static int udb_persistence_migrate_legacy(UdbContext *ctx, time_t *last_sync_out
 		return 0;
 	}
 
-	if (!udb_persistence_set_state(UDB_PERSIST_READY, sync_time))
+	if (udb_persistence_set_state(UDB_PERSIST_READY, UDB_ORIGIN_LEGACY, generation, sync_time) != UDB_STATE_COMMITTED)
 	{
 		udb_log(ULOG_ERROR, "UDB_MIGRATION_FAILED", NULL,
 				"Cannot migrate legacy database: failed to persist .udb_state");
@@ -470,13 +560,14 @@ static int udb_persistence_migrate_legacy(UdbContext *ctx, time_t *last_sync_out
 		*last_sync_out = sync_time;
 
 	udb_log(ULOG_INFO, "UDB_LEGACY_MIGRATION", NULL,
-			"Migrated legacy database state (.udb_ready) to persistent READY (.udb_state)");
+			"Migrated complete legacy snapshots to versioned persistent READY state");
 	return 1;
 }
 
 static int udb_transition_to_ready(UdbContext *ctx, time_t sync_time)
 {
 	UdbBlock *b;
+	unsigned long generation;
 
 	if (!ctx)
 		return 0;
@@ -492,6 +583,12 @@ static int udb_transition_to_ready(UdbContext *ctx, time_t sync_time)
 		}
 	}
 
+	generation = udb_reconcile.active && udb_reconcile.generation ? udb_reconcile.generation : (unsigned long)sync_time;
+	if (!generation)
+		generation = 1;
+	for (b = ctx->block_list; b; b = b->next)
+		b->generation = generation;
+
 	if (!udb_blocks_save_all(ctx))
 	{
 		udb_log(ULOG_ERROR, "UDB_READY_SAVE_FAILED", NULL,
@@ -499,7 +596,7 @@ static int udb_transition_to_ready(UdbContext *ctx, time_t sync_time)
 		return 0;
 	}
 
-	if (!udb_persistence_set_state(UDB_PERSIST_READY, sync_time))
+	if (udb_persistence_set_state(UDB_PERSIST_READY, UDB_ORIGIN_FRESH, generation, sync_time) != UDB_STATE_COMMITTED)
 	{
 		udb_log(ULOG_ERROR, "UDB_STATE_PERSIST_FAILED", NULL,
 				"Failed to persist READY state to disk; database remains NOT_READY");
@@ -558,82 +655,88 @@ static int udb_engine_init(void)
 	udb_block_set_context_root(udb_ctx, udb_ctx->blocks['S']);
 	udb_block_set_context_root(udb_ctx, udb_ctx->blocks['L']);
 	udb_block_set_context_root(udb_ctx, udb_ctx->blocks['K']);
-	if (!udb_blocks_load_all(udb_ctx))
-	{
-		udb_engine_cleanup(udb_ctx);
-		return 0;
-	}
+	(void)udb_blocks_load_all(udb_ctx);
 
 	int policy_present = udb_propagator_policy_present(udb_ctx);
 	time_t persisted_last_sync = 0;
 	UdbPersistentState persisted_state = UDB_PERSIST_BOOTSTRAPPING;
+	UdbPersistenceOrigin persisted_origin = UDB_ORIGIN_RECOVERY;
+	unsigned long persisted_generation = 0;
+	int legacy_state_format = 0;
+	UdbStartupState startup_state = UDB_STARTUP_FRESH;
+	int all_present_valid = 1;
+	int all_missing = 1;
+	UdbBlock *startup_block;
+
+	for (startup_block = udb_ctx->block_list; startup_block; startup_block = startup_block->next)
+	{
+		if (startup_block->load_state != UDB_LOAD_SUCCESS)
+			all_present_valid = 0;
+		if (startup_block->load_state != UDB_LOAD_EMPTY)
+			all_missing = 0;
+	}
 
 	if (udb_persistence_has_state_file())
 	{
-		persisted_state = udb_persistence_load_state(&persisted_last_sync);
-		if (persisted_state == UDB_PERSIST_READY)
+		if (!udb_persistence_load_state(&persisted_state, &persisted_origin, &persisted_generation,
+										&persisted_last_sync, &legacy_state_format))
 		{
-			/* Invariant R2: Validate that all required block snapshots were materialized on disk */
-			int missing_block = 0;
-			UdbBlock *b;
-			for (b = udb_ctx->block_list; b; b = b->next)
-			{
-				if (b->load_state == UDB_LOAD_EMPTY)
-				{
-					udb_log(ULOG_ERROR, "UDB_READY_MISSING_BLOCK", NULL,
-							"Persisted READY state found, but snapshot for block $block is missing from disk; refusing "
-							"to start READY",
-							log_data_string("block", (char[]){b->letter, '\0'}));
-					missing_block = 1;
-				}
-			}
-			if (missing_block)
-			{
-				persisted_state = UDB_PERSIST_BOOTSTRAPPING;
-				persisted_last_sync = 0;
-			}
+			startup_state = UDB_STARTUP_PERSISTED_INVALID;
 		}
+		else if (persisted_state == UDB_PERSIST_READY)
+		{
+			int generation_matches = legacy_state_format;
+			if (!legacy_state_format)
+			{
+				generation_matches = 1;
+				for (startup_block = udb_ctx->block_list; startup_block; startup_block = startup_block->next)
+					if (startup_block->generation != persisted_generation)
+						generation_matches = 0;
+			}
+			if (!all_present_valid || !generation_matches)
+			{
+				startup_state = UDB_STARTUP_PERSISTED_READY_INCOMPLETE;
+				udb_log(ULOG_ERROR, "UDB_READY_INCOMPLETE", NULL,
+						"Persisted READY does not have six valid snapshots from its generation; refusing READY");
+			}
+			else if (legacy_state_format)
+				startup_state = UDB_STARTUP_LEGACY_VALID;
+			else
+				startup_state = UDB_STARTUP_PERSISTED_READY_VALID;
+		}
+		else
+			startup_state = UDB_STARTUP_PERSISTED_BOOTSTRAPPING;
 	}
-	else
+	else if (all_present_valid)
 	{
-		/* Attempt legacy migration if .udb_ready exists */
 		if (udb_persistence_migrate_legacy(udb_ctx, &persisted_last_sync))
 		{
 			persisted_state = UDB_PERSIST_READY;
+			startup_state = UDB_STARTUP_LEGACY_VALID;
 		}
 		else
-		{
-			persisted_state = UDB_PERSIST_BOOTSTRAPPING;
-		}
+			startup_state = UDB_STARTUP_PERSISTED_INVALID;
 	}
+	else if (!all_missing)
+		startup_state = UDB_STARTUP_PERSISTED_INVALID;
 
 	UdbPropagatorSelection selected;
 	int has_propagator = udb_select_propagator(udb_ctx, 0, &selected);
 	int is_primary_local = (has_propagator && selected.is_local);
 
-	if (is_primary_local)
+	if (is_primary_local && startup_state == UDB_STARTUP_FRESH)
 	{
-		if (persisted_state != UDB_PERSIST_READY)
+		if (udb_transition_to_ready(udb_ctx, time(NULL)))
 		{
-			/* Local primary authoritative propagator starting clean: enter durable READY */
-			if (udb_transition_to_ready(udb_ctx, time(NULL)))
-			{
-				udb_sync_status = UDB_SYNC_OK;
-			}
-			else
-			{
-				udb_ready = 0;
-				udb_last_successful_sync = 0;
-			}
+			udb_sync_status = UDB_SYNC_OK;
 		}
 		else
 		{
-			udb_ready = 1;
-			udb_last_successful_sync = persisted_last_sync ? persisted_last_sync : time(NULL);
-			udb_sync_status = UDB_SYNC_OK;
+			udb_ready = 0;
+			udb_last_successful_sync = 0;
 		}
 	}
-	else if (persisted_state == UDB_PERSIST_READY)
+	else if (startup_state == UDB_STARTUP_PERSISTED_READY_VALID || startup_state == UDB_STARTUP_LEGACY_VALID)
 	{
 		udb_ready = 1;
 		udb_last_successful_sync = persisted_last_sync;
@@ -646,7 +749,11 @@ static int udb_engine_init(void)
 	{
 		udb_ready = 0;
 		udb_last_successful_sync = 0;
-		udb_persistence_set_state(UDB_PERSIST_BOOTSTRAPPING, 0);
+		/* Preserve malformed state verbatim, but downgrade a valid READY marker whose snapshots are incomplete. */
+		if (startup_state == UDB_STARTUP_FRESH)
+			udb_persistence_set_state(UDB_PERSIST_BOOTSTRAPPING, UDB_ORIGIN_FRESH, 0, 0);
+		else if (startup_state == UDB_STARTUP_PERSISTED_READY_INCOMPLETE)
+			udb_persistence_set_state(UDB_PERSIST_BOOTSTRAPPING, UDB_ORIGIN_RECOVERY, persisted_generation, 0);
 	}
 
 	udb_sync_status_refresh();
@@ -657,7 +764,11 @@ static void udb_engine_shutdown(void)
 {
 	if (!udb_ctx)
 		return;
-	udb_blocks_save_all(udb_ctx);
+	if (udb_ready)
+		udb_blocks_save_all(udb_ctx);
+	else
+		udb_log(ULOG_WARNING, "UDB_SHUTDOWN_NOT_READY", NULL,
+				"Skipping shutdown snapshot save because the database is not READY");
 	udb_engine_cleanup(udb_ctx);
 }
 

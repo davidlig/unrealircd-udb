@@ -172,6 +172,7 @@ class MockServices:
         self.sock.settimeout(0.25)
         self.lines = []
         self.buffer = ""
+        self.round_id = 1
         self.send_raw(f"PASS :{LINK_PASSWORD}")
         self.send_raw(f"PROTOCTL EAUTH={self.name}")
         self.send_raw("PROTOCTL NOQUIT NICKv2 SJOIN SJOIN2 UMODE2 SJ3 BIGLINES SID=" + self.sid)
@@ -182,9 +183,9 @@ class MockServices:
         self.wait_for(lambda line: " DB " in line and " HEL 4 " in line, f"{self.name} HEL response")
         self.send(f"DB {self.target_sid} HEL 4 ACK")
         for b in ('N', 'C', 'I', 'L', 'K'):
-            self.send(f"DB {self.target_sid} INF {b} 00000000 0")
+            self.send(f"DB {self.target_sid} INF 1 {b} 00000000 0")
         s_crc = tree_checksum([("flood", "5:30"), ("propagator", "services-a.test,hub-a.test,services-b.test,hub-b.test")])
-        self.send(f"DB {self.target_sid} INF S {s_crc} 1787720000")
+        self.send(f"DB {self.target_sid} INF 1 S {s_crc} 1787720000")
         time.sleep(0.2)
 
     def send_raw(self, command):
@@ -201,11 +202,20 @@ class MockServices:
     def send_snapshot(self, records, txid):
         checksum = tree_checksum(records)
         start = len(self.lines)
-        self.send(f"DB {self.target_sid} BEGIN N {txid} {checksum}")
+        self.round_id += 1
+        self.send(f"DB {self.target_sid} INF {self.round_id} N {checksum} {int(time.time()) + 1000}")
+        for block in ("C", "I", "L", "K"):
+            self.send(f"DB {self.target_sid} INF {self.round_id} {block} 00000000 0")
+        s_crc = tree_checksum([("flood", "5:30"),
+                               ("propagator", "services-a.test,hub-a.test,services-b.test,hub-b.test")])
+        self.send(f"DB {self.target_sid} INF {self.round_id} S {s_crc} 1787720000")
+        self.wait_for(lambda line: f" RES {self.round_id} N" in line,
+                      f"RES for staged snapshot {txid}", start_idx=start)
+        self.send(f"DB {self.target_sid} BEGIN {self.round_id} N {txid} {checksum}")
         for path, value in records:
-            self.send(f"DB {self.target_sid} PUT N {txid} {path} :{value}")
-        self.send(f"DB {self.target_sid} END N {txid} {checksum}")
-        self.wait_for(lambda line: " DB " in line and f" ACK N {txid} " in line,
+            self.send(f"DB {self.target_sid} PUT {self.round_id} N {txid} {path} :{value}")
+        self.send(f"DB {self.target_sid} END {self.round_id} N {txid} {checksum}")
+        self.wait_for(lambda line: " DB " in line and f" ACK {self.round_id} N {txid} " in line,
                       f"ACK for staged snapshot {txid}", start_idx=start)
 
     def receive(self, deadline):

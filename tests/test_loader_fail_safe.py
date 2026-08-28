@@ -366,19 +366,19 @@ def run_tests(ircd_bin, keep=False):
 
         # Connect S2S MockServices to verify exact full loaded records across BIGLINES transfer
         services4 = MockServices("127.0.0.1", server_port4, ircd_sid="0A4")
-        services4.send(f"DB 0A4 RES C")
+        services4.send(f"DB 0A4 RES 1 C")
         try:
-            services4.wait_for(lambda l: " DB " in l and " BEGIN C " in l, "BEGIN C frame", timeout=5)
-            services4.wait_for(lambda l: " DB " in l and " END C " in l, "END C frame", timeout=5)
+            services4.wait_for(lambda l: " DB " in l and " BEGIN 1 C " in l, "BEGIN C frame", timeout=5)
+            services4.wait_for(lambda l: " DB " in l and " END 1 C " in l, "END C frame", timeout=5)
         except Exception as e:
             print(f"DEBUG services4 lines: {services4.lines}", file=sys.stderr)
             raise
 
         received_puts = {}
         for l in services4.lines:
-            if " DB " in l and " PUT C " in l:
-                # :0A4 DB 002 PUT C <txid> <path> :<data>
-                parts = l.split(" PUT C ", 1)[1].split(" ", 2)
+            if " DB " in l and " PUT 1 C " in l:
+                # :0A4 DB 002 PUT 1 C <txid> <path> :<data>
+                parts = l.split(" PUT 1 C ", 1)[1].split(" ", 2)
                 path = parts[1]
                 data = parts[2]
                 if data.startswith(":"):

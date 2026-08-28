@@ -14,6 +14,11 @@ Covers:
   Test 8 - Bootstrap peer disconnect (disconnect mid-bootstrap resets round; next peer must complete from scratch)
   Test 9 - Empty blocks bootstrap (authority with all 6 empty blocks converges cleanly to READY)
   Test 10 - Two bootstrap peers exclusivity and strict HEL ACK validation
+  Test 11 - Missing READY snapshot on a local primary remains fail-closed
+  Test 12 - Corrupt persisted state on a local primary is preserved and rejected
+  Test 13 - Same-peer stale INF, END, and ERR frames cannot affect a newer round
+  Test 14 - HEL selection/ACK ordering is idempotent and round IDs are mandatory
+  Test 15 - Pending RES timeout/current-round ERR retry while stale ERR is ignored
 """
 
 import os
@@ -48,7 +53,8 @@ def free_ports(count):
     return ports
 
 
-def write_config(path, name, sid, ports, links, dbdir, propagator=None, stale_timeout=None, stale_action=None):
+def write_config(path, name, sid, ports, links, dbdir, propagator=None, stale_timeout=None, stale_action=None,
+                 sync_timeout=None):
     link_text = ""
     for peer, peer_port, autoconnect in links:
         outgoing = (f'    outgoing {{ bind-ip "127.0.0.1"; hostname "127.0.0.1"; port {peer_port}; '
@@ -62,9 +68,10 @@ def write_config(path, name, sid, ports, links, dbdir, propagator=None, stale_ti
     udb_prop = f'    propagator "{propagator}";\n' if propagator is not None else ""
     udb_stale_to = f'    stale-timeout {stale_timeout};\n' if stale_timeout is not None else ""
     udb_stale_act = f'    stale-action {stale_action};\n' if stale_action is not None else ""
+    udb_sync_timeout = f'    sync-inactivity-timeout {sync_timeout};\n' if sync_timeout is not None else ""
     udb_block = f'''udb {{
     database-directory "{dbdir}";
-{udb_prop}{udb_stale_to}{udb_stale_act}}}'''
+{udb_prop}{udb_stale_to}{udb_stale_act}{udb_sync_timeout}}}'''
 
     path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
 include "{RUNTIME_ROOT}/conf/snomasks.default.conf";
@@ -172,7 +179,7 @@ class MockPeer:
             self.send(f"DB {self.target_sid} HEL 4 ACK")
             if send_inf:
                 for b in ('N', 'C', 'I', 'S', 'L', 'K'):
-                    self.send(f"DB {self.target_sid} INF {b} 00000000 0")
+                    self.send(f"DB {self.target_sid} INF 1 {b} 00000000 0")
 
     def send_raw(self, command):
         self.sock.sendall((command + "\r\n").encode("ascii"))
@@ -261,7 +268,7 @@ class MockClient:
                     cookie = line.split(" ", 1)[1]
                     self.send(f"PONG {cookie}")
 
-    def wait_for(self, predicate, timeout=3.0):
+    def wait_for(self, predicate, description="condition", timeout=3.0):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             for line in self.lines:
@@ -270,7 +277,7 @@ class MockClient:
             if self.closed:
                 break
             self.receive(0.2)
-        return None
+        raise TimeoutError(f"timed out waiting for {description}; lines={self.lines}")
 
     def is_denied(self, timeout=2.0):
         self.receive(timeout)
@@ -283,18 +290,19 @@ class MockClient:
             pass
 
 
-def setup_node(tempdir, name, sid, ports, links, propagator=None, stale_timeout=None, stale_action=None):
+def setup_node(tempdir, name, sid, ports, links, propagator=None, stale_timeout=None, stale_action=None,
+               sync_timeout=None):
     node_dir = pathlib.Path(tempdir) / name
     node_dir.mkdir(parents=True, exist_ok=True)
     dbdir = node_dir / "db"
     dbdir.mkdir(parents=True, exist_ok=True)
     moddir = node_dir / "modules" / "third"
     moddir.mkdir(parents=True, exist_ok=True)
-    src_mod = RUNTIME_ROOT / "modules/third/udb.so"
+    src_mod = pathlib.Path(os.environ.get("UDB_MODULE_PATH", RUNTIME_ROOT / "modules/third/udb.so"))
     if src_mod.exists():
         shutil.copy(src_mod, moddir / "udb.so")
     cfg = node_dir / "unrealircd.conf"
-    write_config(cfg, name, sid, ports, links, dbdir, propagator, stale_timeout, stale_action)
+    write_config(cfg, name, sid, ports, links, dbdir, propagator, stale_timeout, stale_action, sync_timeout)
     cmd = bwrap_command(node_dir, DEFAULT_IRCD, cfg)
     p = subprocess.Popen(cmd)
     wait_for_daemon(p, "127.0.0.1", ports[0])
@@ -327,13 +335,14 @@ def test_suite():
             c1.close()
 
             peer_a = MockPeer("peer-a.test", "00A", "127.0.0.1", p1_ports[1], "001")
-            peer_a.send("DB 001 INF N 00000000 0")
-            peer_a.send("DB 001 BEGIN N tx1 00000000")
             nick_rec = "alice::vhost alice.net"
-            peer_a.send(f"DB 001 PUT N tx1 alice::vhost alice.net")
             n_crc = zlib.crc32((nick_rec + "\n").encode("utf-8")) & 0xFFFFFFFF
-            peer_a.send(f"DB 001 END N tx1 {n_crc:08x}")
-            peer_a.wait_for(lambda l: " ACK N" in l, "ACK for block N")
+            peer_a.send(f"DB 001 INF 1 N {n_crc:08x} 1000")
+            peer_a.wait_for(lambda l: " RES 1 N" in l, "RES for block N")
+            peer_a.send("DB 001 BEGIN 1 N tx1 00000000")
+            peer_a.send(f"DB 001 PUT 1 N tx1 alice::vhost alice.net")
+            peer_a.send(f"DB 001 END 1 N tx1 {n_crc:08x}")
+            peer_a.wait_for(lambda l: " ACK 1 N " in l, "ACK for block N")
             peer_a.close()
 
             stop(p1)
@@ -351,9 +360,9 @@ def test_suite():
             c1_post.close()
 
             peer_a2 = MockPeer("peer-a.test", "00A", "127.0.0.1", p1_ports[1], "001")
-            peer_a2.send(f"DB 001 INF N {n_crc:08x} 1000")
+            peer_a2.send(f"DB 001 INF 2 N {n_crc:08x} 1000")
             for b in ('C', 'I', 'S', 'L', 'K'):
-                peer_a2.send(f"DB 001 INF {b} 00000000 0")
+                peer_a2.send(f"DB 001 INF 2 {b} 00000000 0")
             time.sleep(0.3)
 
             assert "STATE=READY" in state_file.read_text(), ".udb_state must now be READY"
@@ -378,7 +387,7 @@ def test_suite():
         try:
             peer2 = MockPeer("peer-a.test", "00A", "127.0.0.1", p2_ports[1], "002")
             for b in ('N', 'C', 'I', 'S', 'L'):
-                peer2.send(f"DB 002 INF {b} 00000000 0")
+                peer2.send(f"DB 002 INF 1 {b} 00000000 0")
             time.sleep(0.2)
             peer2.close()
             stop(p2)
@@ -489,20 +498,20 @@ def test_suite():
         try:
             prop6 = MockPeer("prop-a.test", "00P", "127.0.0.1", p6_ports[1], "006", propagator_advertised="prop-a.test")
             for b in ('N', 'C', 'I', 'S', 'L', 'K'):
-                prop6.send(f"DB 006 INF {b} 00000000 0")
+                prop6.send(f"DB 006 INF 1 {b} 00000000 0")
             time.sleep(0.3)
 
-            prop6.send("DB 006 INF N deadbeef 5000")
+            prop6.send(f"DB 006 INF 2 N deadbeef {int(time.time()) + 1000}")
             for b in ('C', 'I', 'S', 'L', 'K'):
-                prop6.send(f"DB 006 INF {b} 00000000 0")
+                prop6.send(f"DB 006 INF 2 {b} 00000000 0")
             time.sleep(0.2)
 
-            prop6.send("DB 006 BEGIN N tx_round2 00000000")
-            prop6.send("DB 006 PUT N tx_round2 bob::vhost bob.net")
+            prop6.send("DB 006 BEGIN 2 N tx_round2 00000000")
+            prop6.send("DB 006 PUT 2 N tx_round2 bob::vhost bob.net")
             bob_rec = "bob::vhost bob.net"
             bob_crc = zlib.crc32((bob_rec + "\n").encode("utf-8")) & 0xFFFFFFFF
-            prop6.send(f"DB 006 END N tx_round2 {bob_crc:08x}")
-            prop6.wait_for(lambda l: " ACK N" in l, "ACK for block N round 2")
+            prop6.send(f"DB 006 END 2 N tx_round2 {bob_crc:08x}")
+            prop6.wait_for(lambda l: " ACK 2 N " in l, "ACK for block N round 2")
             prop6.close()
             print("PASS: Test 6: Re-divergence cleanly completed with fresh staging round")
         finally:
@@ -520,20 +529,20 @@ def test_suite():
         try:
             prop_a = MockPeer("prop-a.test", "00A", "127.0.0.1", p7_ports[1], "007", propagator_advertised="prop-a.test")
             for b in ('N', 'C', 'I'):
-                prop_a.send(f"DB 007 INF {b} 00000000 0")
+                prop_a.send(f"DB 007 INF 1 {b} 00000000 0")
             time.sleep(0.1)
             prop_a.close()
 
             prop_b = MockPeer("prop-b.test", "00B", "127.0.0.1", p7_ports[1], "007", propagator_advertised="prop-b.test")
             for b in ('S', 'L', 'K'):
-                prop_b.send(f"DB 007 INF {b} 00000000 0")
+                prop_b.send(f"DB 007 INF 2 {b} 00000000 0")
             time.sleep(0.2)
 
             state_file7 = dbdir7 / ".udb_state"
             assert "STATE=BOOTSTRAPPING" in state_file7.read_text(), "State became READY on authority switch with partial blocks!"
 
             for b in ('N', 'C', 'I'):
-                prop_b.send(f"DB 007 INF {b} 00000000 0")
+                prop_b.send(f"DB 007 INF 2 {b} 00000000 0")
             time.sleep(0.3)
             assert "STATE=READY" in state_file7.read_text(), "State failed to become READY after full reconciliation from B"
             prop_b.close()
@@ -553,7 +562,7 @@ def test_suite():
         try:
             peer_a = MockPeer("peer-a.test", "00A", "127.0.0.1", p8_ports[1], "008")
             for b in ('N', 'C', 'I'):
-                peer_a.send(f"DB 008 INF {b} 00000000 0")
+                peer_a.send(f"DB 008 INF 1 {b} 00000000 0")
             time.sleep(0.1)
             peer_a.close()
 
@@ -596,11 +605,11 @@ def test_suite():
         )
         try:
             peer_a = MockPeer("peer-a.test", "00A", "127.0.0.1", p10_ports[1], "010")
-            peer_a.send("DB 010 INF N 00000000 0")
+            peer_a.send("DB 010 INF 1 N 00000000 0")
             peer_a.send("DB 010 HEL 4 ACK")
 
             peer_b = MockPeer("peer-b.test", "00B", "127.0.0.1", p10_ports[1], "010")
-            peer_b.send("DB 010 BEGIN N tx_b 00000000")
+            peer_b.send("DB 010 BEGIN 1 N tx_b 00000000")
             err_b = peer_b.wait_for(lambda l: " ERR BEGIN 6" in l, "FORBIDDEN from concurrent peer B")
             assert err_b is not None, "Concurrent peer B was not rejected!"
             peer_b.close()
@@ -609,7 +618,186 @@ def test_suite():
         finally:
             stop(p10)
 
-    print("\nALL 10 READINESS & CONVERGENCE TESTS PASSED SUCCESSFULLY!")
+        # -----------------------------------------------------------------
+        # TEST 11: A local primary must not repair a missing READY snapshot
+        # -----------------------------------------------------------------
+        print("\n=== Running Test 11: Local primary missing READY snapshot ===")
+        p11_ports = free_ports(3)
+        p11, n11, dbdir11, cfg11 = setup_node(
+            tmpdir, "primary11.test", "011", p11_ports, [], propagator="primary11.test"
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if (dbdir11 / ".udb_state").exists() and "STATE=READY" in (dbdir11 / ".udb_state").read_text():
+                    break
+                time.sleep(0.05)
+            else:
+                raise TimeoutError("fresh local primary did not become READY")
+            stop(p11)
+            n_snapshot = dbdir11 / "udb_N.db"
+            n_snapshot.write_text(n_snapshot.read_text(encoding="ascii") + "alice::vhost alice.example\n", encoding="ascii")
+            p11 = subprocess.Popen(bwrap_command(n11, ircd_bin, cfg11))
+            wait_for_daemon(p11, "127.0.0.1", p11_ports[0])
+            ready = MockClient("127.0.0.1", p11_ports[0], "before_loss")
+            ready.wait_for(lambda line: " 001 " in line, "welcome before snapshot loss")
+            ready.close()
+            stop(p11)
+            n_snapshot.unlink()
+
+            p11 = subprocess.Popen(bwrap_command(n11, ircd_bin, cfg11))
+            wait_for_daemon(p11, "127.0.0.1", p11_ports[0])
+            denied = MockClient("127.0.0.1", p11_ports[0], "missing_snapshot")
+            assert denied.is_denied(), "Local primary became READY after losing a READY snapshot"
+            denied.close()
+            assert not n_snapshot.exists(), "Missing snapshot was recreated as authoritative empty data"
+            assert "STATE=READY" not in (dbdir11 / ".udb_state").read_text(encoding="ascii")
+            print("PASS: Test 11: Missing READY snapshot remains fail-closed on local primary")
+        finally:
+            stop(p11)
+
+        # -----------------------------------------------------------------
+        # TEST 12: A local primary must not overwrite corrupt state as fresh
+        # -----------------------------------------------------------------
+        print("\n=== Running Test 12: Local primary corrupt persisted state ===")
+        p12_ports = free_ports(3)
+        p12, n12, dbdir12, cfg12 = setup_node(
+            tmpdir, "primary12.test", "012", p12_ports, [], propagator="primary12.test"
+        )
+        try:
+            stop(p12)
+            state12 = dbdir12 / ".udb_state"
+            state12.write_text("FORMAT=1\nSTATE=READY\nSTATE=BOOTSTRAPPING\nLAST_SYNC=1\n", encoding="ascii")
+            p12 = subprocess.Popen(bwrap_command(n12, ircd_bin, cfg12))
+            wait_for_daemon(p12, "127.0.0.1", p12_ports[0])
+            denied = MockClient("127.0.0.1", p12_ports[0], "corrupt_state")
+            assert denied.is_denied(), "Local primary promoted corrupt persisted state to READY"
+            denied.close()
+            assert state12.read_text(encoding="ascii").count("STATE=") == 2, "Corruption evidence was overwritten"
+            print("PASS: Test 12: Corrupt state remains fail-closed and preserved")
+        finally:
+            stop(p12)
+
+        # -----------------------------------------------------------------
+        # TEST 13: Same-peer rounds reject stale INF and END frames
+        # -----------------------------------------------------------------
+        print("\n=== Running Test 13: Same-peer wire round isolation ===")
+        p13_ports = free_ports(3)
+        p13, n13, dbdir13, cfg13 = setup_node(
+            tmpdir, "round13.test", "013", p13_ports,
+            [("prop13.test", 0, False)], propagator="prop13.test"
+        )
+        try:
+            prop13 = MockPeer("prop13.test", "03P", "127.0.0.1", p13_ports[1], "013",
+                              propagator_advertised="prop13.test")
+            prop13.send(f"DB 013 INF 1 N deadbeef {int(time.time()) + 1000}")
+            prop13.wait_for(lambda line: " RES 1 N" in line, "RES for round 1 N")
+            prop13.send("DB 013 BEGIN 1 N stale_tx 00000000")
+            prop13.send("DB 013 PUT 1 N stale_tx stale::vhost stale.example")
+
+            # A newer inventory round aborts the old staged session.
+            prop13.send("DB 013 INF 2 C 00000000 0")
+            stale_crc = zlib.crc32(b"stale::vhost stale.example\n") & 0xFFFFFFFF
+            prop13.send(f"DB 013 END 1 N stale_tx {stale_crc:08x}")
+            prop13.wait_for(lambda line: " ERR END 5 1 N" in line, "stale END rejection")
+
+            # A late round-1 INF cannot contribute K to round 2.
+            prop13.send("DB 013 INF 1 K 00000000 0")
+            for block in ('I', 'S', 'L', 'K'):
+                if block != 'K':
+                    prop13.send(f"DB 013 INF 2 {block} 00000000 0")
+            time.sleep(0.2)
+            assert "STATE=READY" not in (dbdir13 / ".udb_state").read_text(), \
+                "Stale round-1 INF/END completed round 2"
+
+            prop13.send("DB 013 INF 2 K 00000000 0")
+            prop13.send("DB 013 INF 2 N 00000000 0")
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if "STATE=READY" in (dbdir13 / ".udb_state").read_text():
+                    break
+                time.sleep(0.05)
+            else:
+                raise TimeoutError("complete round 2 did not reach READY")
+            prop13.close()
+            print("PASS: Test 13: Same-peer partial rounds, stale INF, and stale END remained isolated")
+        finally:
+            stop(p13)
+
+        # -----------------------------------------------------------------
+        # TEST 14: HEL selection/ACK order is idempotent
+        # -----------------------------------------------------------------
+        print("\n=== Running Test 14: HEL event ordering ===")
+        p14_ports = free_ports(3)
+        p14, n14, dbdir14, cfg14 = setup_node(
+            tmpdir, "primary14.test", "014", p14_ports,
+            [("peer14a.test", 0, False), ("peer14b.test", 0, False)], propagator="primary14.test"
+        )
+        try:
+            peer14a = MockPeer("peer14a.test", "04A", "127.0.0.1", p14_ports[1], "014", autostart_hel=False)
+            peer14a.send("DB 014 HEL 4 primary14.test")
+            peer14a.send("DB 014 HEL 4 ACK")
+            peer14a.wait_for(lambda line: " DB " in line and " INF " in line,
+                             "inventory after selection-before-ACK")
+            peer14a.close()
+
+            peer14b = MockPeer("peer14b.test", "04B", "127.0.0.1", p14_ports[1], "014", autostart_hel=False)
+            peer14b.send("DB 014 HEL 4 ACK")
+            peer14b.send("DB 014 HEL 4 primary14.test")
+            peer14b.wait_for(lambda line: " DB " in line and " INF " in line,
+                             "inventory after ACK-before-selection")
+            peer14b.send("DB 014 INF N 00000000 0")
+            time.sleep(0.2)
+            assert not any(" ERR INF " in line for line in peer14b.lines), \
+                "INF without a valid round ID produced a legacy uncorrelated ERR"
+            peer14b.close()
+            print("PASS: Test 14: HEL event order converged and INF without a round ID was rejected")
+        finally:
+            stop(p14)
+
+        # -----------------------------------------------------------------
+        # TEST 15: Pending RES timeout and ERR both trigger bounded retry
+        # -----------------------------------------------------------------
+        print("\n=== Running Test 15: Reconciliation retry after timeout and ERR ===")
+        p15_ports = free_ports(3)
+        p15, n15, dbdir15, cfg15 = setup_node(
+            tmpdir, "retry15.test", "015", p15_ports,
+            [("prop15.test", 0, False)], propagator="prop15.test", sync_timeout=2
+        )
+        try:
+            prop15 = MockPeer("prop15.test", "05P", "127.0.0.1", p15_ports[1], "015",
+                              propagator_advertised="prop15.test")
+            prop15.send(f"DB 015 INF 1 N deadbeef {int(time.time()) + 1000}")
+            prop15.wait_for(lambda line: " RES 1 N" in line, "initial RES before timeout")
+            prop15.clear()
+            prop15.wait_for(lambda line: " HEL 4 prop15.test" in line,
+                            "HEL retry after pending RES timeout", timeout=8.0)
+
+            prop15.send(f"DB 015 INF 2 N deadbeef {int(time.time()) + 1000}")
+            prop15.wait_for(lambda line: " RES 2 N" in line, "RES before injected ERR")
+            prop15.clear()
+            for invalid_round in ("0", "+2", "2x"):
+                prop15.send(f"DB 015 ERR RES 3 {invalid_round} N")
+            prop15.receive(time.monotonic() + 0.4)
+            assert not any(" HEL 4 prop15.test" in line for line in prop15.lines), \
+                "Malformed or zero ERR round aborted active round 2"
+
+            prop15.clear()
+            prop15.send("DB 015 ERR RES 3 1 N")
+            prop15.receive(time.monotonic() + 0.4)
+            assert not any(" HEL 4 prop15.test" in line for line in prop15.lines), \
+                "Late ERR from round 1 aborted active round 2"
+
+            prop15.clear()
+            prop15.send("DB 015 ERR RES 3 2 N")
+            prop15.wait_for(lambda line: " HEL 4 prop15.test" in line,
+                            "HEL retry after ERR RES", timeout=20.0)
+            prop15.close()
+            print("PASS: Test 15: stale ERR was ignored; timeout and current-round ERR retried with backoff")
+        finally:
+            stop(p15)
+
+    print("\nALL 15 READINESS & CONVERGENCE TESTS PASSED SUCCESSFULLY!")
 
 
 if __name__ == "__main__":

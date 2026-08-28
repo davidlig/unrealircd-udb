@@ -317,6 +317,8 @@ def main():
         (data / "udb_L.db").write_text(
             "udb-one.test::options *1\n",
             encoding="ascii")
+        for block in ("I", "S", "K"):
+            (data / f"udb_{block}.db").write_text("", encoding="ascii")
         port, tls_port = free_port(), free_port()
         config = node / "unrealircd.conf"
         write_config(config, "udb-one.test", "0A1", port, tls_port, args.module, data)

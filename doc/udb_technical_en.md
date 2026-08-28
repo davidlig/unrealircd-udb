@@ -1,6 +1,6 @@
 # UDB 4 (Unreal DataBase) - Technical Specification & Protocol
 
-This documentation details the internal workings, database design, and Server-to-Server (S2S) protocol of the **UDB 4 (Unreal DataBase v4.0.0)** module for UnrealIRCd 6.2.x.
+This documentation details the internal workings, database design, and Server-to-Server (S2S) protocol of the **UDB 4 (Unreal DataBase v4.1.0)** module for UnrealIRCd 6.2.x.
 
 This document is designed for developers who wish to implement clients, IRC Services, or other bots compatible with the UDB protocol.
 
@@ -253,10 +253,10 @@ no staged-sync authorization and therefore cannot silently broaden access.
 `:<sid> DB <direct-peer-sid> HEL 4 ACK`
 
 **INF (Block Information):**
-`:<sid> DB <target> INF <block_letter> <crc32_hex> <timestamp>`
+`:<sid> DB <target> INF <round_id> <block_letter> <crc32_hex> <timestamp>`
 
 **RES (Sync Request):**
-`:<sid> DB <target> RES <block_letter>`
+`:<sid> DB <target> RES <round_id> <block_letter>`
 
 When checksums differ, the newer `timestamp` wins. If timestamps are equal,
 the lexicographically higher server SID wins. The SID is the immutable server
@@ -266,15 +266,18 @@ snapshot exchanges while retaining the configured direct-propagator checks.
 
 For peers with the staged capability, `RES` is answered with a transaction:
 
-**BEGIN:** `:<sid> DB <target> BEGIN <block> <txid> <digest>`
+**BEGIN:** `:<sid> DB <target> BEGIN <round_id> <block> <txid> <digest>`
 
-**PUT:** `:<sid> DB <target> PUT <block> <txid> <path> :<value>`
+**PUT:** `:<sid> DB <target> PUT <round_id> <block> <txid> <path> :<value>`
 
-**END:** `:<sid> DB <target> END <block> <txid> <digest>`
+**END:** `:<sid> DB <target> END <round_id> <block> <txid> <digest>`
 
-**ACK:** `:<sid> DB <target> ACK <block> <txid> <digest>`
+**ACK:** `:<sid> DB <target> ACK <round_id> <block> <txid> <digest>`
 
-The requester and receiver of this transaction must be the selected direct
+The receiver accepts `BEGIN` only when it previously emitted `RES` for the same
+direct peer, block, and active round. Late `INF`, `BEGIN`, `PUT`, or `END` from
+another round cannot advance the current round. The requester and receiver of
+this transaction must be the selected direct
 propagator. A HEL-confirmed peer that is not selected receives
 `UDB_ERR_FORBIDDEN` for `RES`, `BEGIN`, `PUT`, and `END`; it cannot create or
 continue a staged session, trigger a block export, or cause those frames to be
@@ -324,7 +327,7 @@ transaction and are persisted and forwarded only to HEL-confirmed direct peers.
 UDB strictly validates all records received via `INS`, `PUT`, or loaded from disk
 against a declarative per-block schema catalogue and strict numeric limits. Unknown keys,
 invalid hierarchy nesting (such as composite paths in Block S), or incompatible data types are
-immediately rejected with `ERR INS 2 <block>` or `ERR PUT 2 <block>` (`UDB_ERR_PARAMS`),
+immediately rejected with `ERR INS 2 <correlation_id> <block>` or `ERR PUT 2 <round_id> <block>` (`UDB_ERR_PARAMS`),
 and cause local `.db` file parsing to abort fail-closed (discarding candidate changes and leaving
 the database uncorrupted).
 
@@ -371,10 +374,13 @@ the process umask. Where the platform provides `O_NOFOLLOW`, it is used as an
 additional symlink safeguard. UDB flushes and `fsync`s the temporary snapshot
 before closing and renaming it, then `fsync`s the containing directory after the
 rename. UDB aborts and removes its temporary snapshot on open, permission,
-stream, file-sync, close, or rename failure. A directory-sync failure is
-reported after the replacement is visible, but before its crash durability is
-confirmed; snapshots and active block files always remain beneath the configured
-database directory.
+stream, file-sync, close, or rename failure. A successful rename is the
+irreversible point: if the following directory `fsync` fails, UDB keeps the
+visible snapshot as active state, writes `.udb_state` as `BOOTSTRAPPING`, returns
+a persistence error, and neither acknowledges the round nor permits `READY`.
+If the same failure follows a visible `.udb_state` rename to `READY`, UDB keeps
+`udb_ready=0` and replaces the visible marker with `BOOTSTRAPPING`; this is
+classified as a durability-uncertain commit, not as a pre-commit failure.
 
 **DRP (Drop / Empty Block):**
 `:<sid> DB * DRP <block_letter>`
@@ -383,7 +389,14 @@ database directory.
 `:<sid> DB * OPT <block_letter>`
 
 ### 2.3 Error Handling (ERR)
-`:<sid> DB <target> ERR <subcommand> <error_code> <extra>`
+All errors use only:
+`:<sid> DB <target> ERR <subcommand> <error_code> <round_id> <block>`
+
+`round_id` is a strict non-zero decimal value. An ERR clears pending/session
+state or aborts reconciliation only when its command is reconciliation-related
+and the direct authority peer, block, and round match the active state; stale
+errors are ignored. Real-time mutation errors use a non-zero sender-local
+correlation ID and never alter reconciliation.
 *   `1`: UDB_ERR_NO_BLOCK (Specified block does not exist)
 *   `2`: UDB_ERR_PARAMS (Missing or invalid command parameters)
 *   `3`: UDB_ERR_FATAL (Fatal internal or persistence error)
@@ -402,8 +415,8 @@ UDB enforces deterministic invariants for database readiness, durable persistenc
 5. **Direct Authority & Hop-by-Hop S2S (Invariant R5):** UDB staged synchronization is strictly hop-by-hop. In topology `Services A -> Hub B -> Leaf C`, B selects A as its direct authority, and C selects B as its direct authority. Staged `BEGIN`/`PUT`/`END`/`RES` synchronization is never a transparent multi-hop routed transaction. A direct peer authorizes exports only when `HEL 4 <prop>` specifies `<prop> == me.name` (or `?` during bootstrap).
 6. **Round Isolation & Lifecycle (Invariant R6):** Every reconciliation round has an explicit `round_id` and isolated bitmasks (`compared_blocks`, `divergent_blocks`, `completed_blocks`). Masks reset when starting a new round even with the same peer. Staged `END` commits verify `session->round_id == udb_reconcile.round_id`.
 7. **Reconciliation Convergence Check (Invariant R7):** Transition to `READY` requires all 6 blocks compared in the active round, all divergent blocks committed in that round, and no active or pending sync sessions.
-8. **Bounded Pending RES State (Invariant R8):** Requested sync state (`pending_from`, `pending_deadline`, `pending_round_id`) is bounded and tracked separately from active `session`. Pending requests are cleaned up on `BEGIN`, `ERR`, timeout, peer disconnect, policy changes, and shutdown.
-9. **Backward-Compatible Migration:** When `.udb_state` is absent, UDB inspects legacy `.udb_ready`, materializes all 6 snapshots, atomically writes `.udb_state` with `STATE=READY`, derives `LAST_SYNC`, and logs `UDB_LEGACY_MIGRATION`.
+8. **Bounded Pending RES State (Invariant R8):** Requested sync state (`pending_from`, `pending_deadline`, `pending_round_id`) is bounded and tracked separately from active `session`. Only a same-round `ERR`, plus `BEGIN`, timeout, peer disconnect, policy changes, and shutdown, can clean up pending state. Current-round failures schedule a bounded exponential-backoff retry.
+9. **Legacy Storage Migration:** When `.udb_state` is absent, UDB accepts only a complete, loadable six-snapshot legacy database (with or without `.udb_ready`), materializes one generation, atomically writes `.udb_state` with `STATE=READY`, derives `LAST_SYNC`, and logs `UDB_LEGACY_MIGRATION`. Partial or corrupt legacy storage remains NOT_READY.
 10. **Crash Consistency:** Atomically renames `.udb_state.tmp` to `.udb_state` and invokes `fsync` on the containing directory descriptor before closing.
 
 ### 2.5 Operational Health State Machine (OK / DEGRADED / STALE)

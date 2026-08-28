@@ -176,6 +176,12 @@ def main():
         s_file_a = node_a / "data/udb_S.db"
         s_file_a.write_text(f"; UDB Block S\n; Saved: 1787720000\n; Records: 2\npropagator {long_propagator_setting}\nflood 5:30\n", encoding="ascii")
 
+        # Seed one complete six-block database. Auto-bootstrap must use a
+        # genuinely READY source rather than a partial fixture.
+        for letter in ("N", "C", "I", "L", "K"):
+            (node_a / f"data/udb_{letter}.db").write_text(
+                f"; UDB Block {letter}\n; Saved: 1787720000\n; Records: 0\n", encoding="ascii")
+
         # Seed Node A with an N record
         n_file_a = node_a / "data/udb_N.db"
         n_file_a.write_text("; UDB Block N\n; Saved: 1787720000\n; Records: 1\ndavidlig::vhost root.admin.net\n", encoding="ascii")

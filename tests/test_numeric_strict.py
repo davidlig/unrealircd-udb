@@ -134,7 +134,7 @@ class MockServices:
         self.send(f"DB {self.ircd_sid} INS {path} {val}")
 
     def send_inf(self, letter, checksum, timestamp):
-        self.send(f"DB {self.ircd_sid} INF {letter} {checksum} {timestamp}")
+        self.send(f"DB {self.ircd_sid} INF 1 {letter} {checksum} {timestamp}")
 
     def receive(self, deadline):
         while time.monotonic() < deadline:

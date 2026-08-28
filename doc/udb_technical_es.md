@@ -1,6 +1,6 @@
 # UDB 4 (Unreal DataBase) - Especificación Técnica y Protocolo
 
-Esta documentación detalla el funcionamiento interno, el diseño de la base de datos y el protocolo Server-to-Server (S2S) del módulo **UDB 4 (Unreal DataBase v4.0.0)** para UnrealIRCd 6.2.x.
+Esta documentación detalla el funcionamiento interno, el diseño de la base de datos y el protocolo Server-to-Server (S2S) del módulo **UDB 4 (Unreal DataBase v4.1.0)** para UnrealIRCd 6.2.x.
 
 Este documento está diseñado para desarrolladores que deseen implementar clientes, servicios (IRC Services) u otros bots compatibles con el protocolo UDB.
 
@@ -218,6 +218,10 @@ con un nodo que no tenga UDB activo durante el handshake inicial `SMOD`.
 **Estructura general:**
 `:<sid_origen> DB <destino> <subcomando> <parametros>`
 
+HEL 4 exige un ID de ronda decimal distinto de cero en cada frame de inventario,
+transferencia staged y error. Los frames que no cumplen esta gramática se
+rechazan.
+
 ### 2.1 Sincronización Inicial (Handshake)
 Cuando un servidor se conecta a otro, se verifica el estado de los bloques con
 un CRC32 de los registros lógicos canónicos. El digest ordena los registros
@@ -243,10 +247,10 @@ autorización staged y evita ampliar el acceso de forma silenciosa.
 `:<sid> DB <sid-peer-directo> HEL 4 ACK`
 
 **INF (Información del Bloque):**
-`:<sid> DB <destino> INF <letra_bloque> <crc32_hex> <timestamp>`
+`:<sid> DB <destino> INF <id_ronda> <letra_bloque> <crc32_hex> <timestamp>`
 
 **RES (Request / Petición de Sincronización):**
-`:<sid> DB <destino> RES <letra_bloque>`
+`:<sid> DB <destino> RES <id_ronda> <letra_bloque>`
 
 Cuando los checksums difieren, gana el `timestamp` más reciente. Si los
 timestamps son iguales, gana el SID de servidor lexicográficamente mayor. El
@@ -257,15 +261,18 @@ alterar las comprobaciones del propagador directo configurado.
 
 Para peers con capacidad staged, `RES` se responde mediante una transacción:
 
-**BEGIN:** `:<sid> DB <destino> BEGIN <bloque> <txid> <digest>`
+**BEGIN:** `:<sid> DB <destino> BEGIN <id_ronda> <bloque> <txid> <digest>`
 
-**PUT:** `:<sid> DB <destino> PUT <bloque> <txid> <ruta> :<valor>`
+**PUT:** `:<sid> DB <destino> PUT <id_ronda> <bloque> <txid> <ruta> :<valor>`
 
-**END:** `:<sid> DB <destino> END <bloque> <txid> <digest>`
+**END:** `:<sid> DB <destino> END <id_ronda> <bloque> <txid> <digest>`
 
-**ACK:** `:<sid> DB <destino> ACK <bloque> <txid> <digest>`
+**ACK:** `:<sid> DB <destino> ACK <id_ronda> <bloque> <txid> <digest>`
 
-El solicitante y receptor de esta transacción debe ser el propagador directo
+El receptor solo acepta `BEGIN` si previamente emitió `RES` para el mismo peer
+directo, bloque y ronda activa. Los frames `INF`, `BEGIN`, `PUT` o `END` tardíos
+de otra ronda no pueden avanzar la ronda actual. El solicitante y el receptor de
+esta transacción deben corresponder al propagador directo
 seleccionado. Un peer confirmado por HEL pero no seleccionado recibe
 `UDB_ERR_FORBIDDEN` para `RES`, `BEGIN`, `PUT` y `END`; no puede crear ni
 continuar una sesión staged, provocar una exportación de bloque ni hacer que
@@ -317,7 +324,7 @@ cualquier registro recibido vía `INS`, `PUT` o cargado desde disco pertenezca a
 catálogo de opciones válidas del bloque correspondiente y cumpla con su tipo de
 dato y formato. Claves desconocidas, anidamientos no permitidos (como rutas
 compuestas en Bloque S), líneas sobrelongitud o tipos incompatibles son rechazados inmediatamente con
-`ERR INS 2 <bloque>` o `ERR PUT 2 <bloque>` (`UDB_ERR_PARAMS`), y provocan que la
+`ERR INS 2 <id_correlacion> <bloque>` o `ERR PUT 2 <id_ronda> <bloque>` (`UDB_ERR_PARAMS`), y provocan que la
 carga de archivos `.db` aborte de manera estricta y transaccional (**fail-closed**), descartando cualquier
 cambio candidato y preservando intacta la base de datos previa.
 
@@ -365,10 +372,14 @@ protección adicional contra enlaces simbólicos. UDB vacía y ejecuta `fsync` d
 snapshot temporal antes de cerrarlo y renombrarlo, y después ejecuta `fsync` del
 directorio contenedor. UDB aborta y elimina su snapshot temporal ante un fallo
 de apertura, permisos, flujo, sincronización del archivo, cierre o renombrado.
-Un fallo al sincronizar el directorio se informa después de que el reemplazo sea
-visible, pero antes de confirmar su durabilidad ante un fallo; los snapshots y
-bloques activos siempre permanecen bajo el directorio de base de datos
-configurado.
+El `rename` exitoso es el punto irreversible: si después falla el `fsync` del
+directorio, UDB conserva el snapshot visible como estado activo para evitar una
+divergencia entre memoria y disco, marca `.udb_state` como `BOOTSTRAPPING`,
+devuelve un error de persistencia y no confirma la ronda ni permite `READY`.
+Si el mismo fallo ocurre después del `rename` visible de `.udb_state` a `READY`,
+UDB mantiene `udb_ready=0` y sustituye el marcador visible por
+`BOOTSTRAPPING`; el resultado se clasifica como commit con durabilidad incierta,
+no como un fallo anterior al commit.
 
 **DRP (Drop / Vaciar Bloque):**
 `:<sid> DB * DRP <letra_bloque>`
@@ -377,7 +388,15 @@ configurado.
 `:<sid> DB * OPT <letra_bloque>`
 
 ### 2.3 Manejo de Errores (ERR)
-`:<sid> DB <destino> ERR <subcomando> <codigo_error> <extra>`
+Todos los errores usan exclusivamente:
+`:<sid> DB <destino> ERR <subcomando> <codigo_error> <id_ronda> <bloque>`
+
+`id_ronda` debe ser decimal, estricto y distinto de cero. Un `ERR` solo puede
+limpiar una solicitud pendiente, abortar una sesión staged o abortar la ronda si
+el peer directo, el bloque y el ID coinciden con el estado vigente. Los errores
+tardíos se ignoran. Para errores de mutaciones en tiempo real (`INS`, `DEL`,
+`DRP` y `OPT`), el campo contiene un identificador de correlación local no nulo;
+esos comandos nunca pueden modificar el estado de reconciliación.
 *   `1`: UDB_ERR_NO_BLOCK (El bloque especificado no existe)
 *   `2`: UDB_ERR_PARAMS (Parámetros insuficientes o inválidos)
 *   `3`: UDB_ERR_FATAL (Error interno fatal o fallo de persistencia)
@@ -385,7 +404,22 @@ configurado.
 *   `5`: UDB_ERR_NO_SYNC (No se ha solicitado una sincronización)
 *   `6`: UDB_ERR_FORBIDDEN (Acción denegada por permisos / no es propagador)
 
-### 2.4 Estado Operativo y Máquina de Estados (OK / DEGRADED / STALE)
+### 2.4 Readiness Operativa, Persistencia y Salud (Invariantes R1 - R9)
+
+UDB aplica invariantes deterministas para readiness de la base de datos,
+persistencia durable, reconciliación aislada por rondas y topología salto a salto:
+
+1. **Readiness Durable (Invariante R1):** `udb_ready=1` solo se alcanza después de persistir de forma durable los seis bloques (`N, C, I, S, L, K`), escribir atómicamente `.udb_state` con `STATE=READY` —incluido `fsync` del directorio— y, únicamente entonces, establecer `udb_ready=1`.
+2. **Validación de Snapshots al Reiniciar (Invariante R2):** si `.udb_state` indica `READY` pero falta cualquier snapshot `udb_X.db` requerido, o su generación no coincide, el nodo no inicia en `READY`; falla de forma cerrada a `BOOTSTRAPPING`.
+3. **Integridad de Bootstrap (Invariante R3):** un nodo en bootstrap no puede servir snapshots staged downstream (`RES` se rechaza con `ERR RES FORBIDDEN`) ni aceptar clientes locales normales.
+4. **Independencia entre Readiness y Salud (Invariante R4):** `READY + OK`, `READY + DEGRADED` y `READY + STALE` son estados válidos e independientes. Perder el upstream no elimina un `udb_ready=1` durable.
+5. **Autoridad Directa y S2S Salto a Salto (Invariante R5):** la sincronización staged es estrictamente salto a salto. En `Services A -> Hub B -> Leaf C`, B selecciona A como autoridad directa y C selecciona B. Las transacciones `BEGIN`/`PUT`/`END`/`RES` nunca se enrutan de forma transparente entre varios saltos.
+6. **Aislamiento y Ciclo de Vida de Rondas (Invariante R6):** cada ronda tiene un `round_id` explícito y máscaras aisladas (`compared_blocks`, `divergent_blocks`, `completed_blocks`). Las máscaras se reinician al iniciar una ronda nueva, incluso con el mismo peer, y `END` verifica que la sesión pertenezca a la ronda activa.
+7. **Convergencia de Reconciliación (Invariante R7):** la transición a `READY` exige comparar los seis bloques en la ronda activa, confirmar todos los bloques divergentes en esa ronda y no dejar sesiones activas ni solicitudes pendientes.
+8. **Estado RES Pendiente Acotado (Invariante R8):** `pending_from`, `pending_deadline` y `pending_round_id` se controlan por separado de la sesión activa. Solo un `ERR` de la misma ronda, además de `BEGIN`, timeout, desconexión, cambio de política y shutdown, puede limpiar ese estado. Los fallos vigentes abortan toda la ronda y programan un retry con backoff exponencial y límite finito.
+9. **Consistencia ante Fallos:** `.udb_state.tmp` se renombra atómicamente a `.udb_state` y se ejecuta `fsync` sobre el descriptor del directorio contenedor antes de cerrarlo. Si falla el `fsync` posterior a un rename visible, el estado operativo permanece `BOOTSTRAPPING`; nunca se promueve `READY` con durabilidad incierta.
+
+### 2.5 Máquina de Estados de Salud Operativa (OK / DEGRADED / STALE)
 UDB implementa una máquina de estados determinista para gestionar la fiabilidad operativa del nodo:
 *   **`OK`**: Hay un candidato a propagador upstream directamente conectado y confirmado con `HEL 4` (o el propio nodo local es el propagador autorizado, o no hay política definida). La sincronización completa de base de datos y la operativa de clientes se desarrollan con normalidad.
 *   **`DEGRADED`**: Existe una política de propagador (vía configuración local o bloque `S`), pero actualmente no hay ningún candidato elegible utilizable. El nodo opera dentro del periodo de gracia configurable (`stale-timeout`, por defecto 300s). Las mutaciones salto a salto (`INS`/`DEL`/`DRP`/`OPT`) continúan propagándose con normalidad, los clientes existentes permanecen conectados y se admiten nuevos clientes locales.
@@ -396,7 +430,7 @@ UDB implementa una máquina de estados determinista para gestionar la fiabilidad
 2.  **Recuperación Automática:** En cuanto un propagador elegible se conecta y confirma `HEL 4`, el nodo transiciona de inmediato a `OK`, emite el evento `UDB_SYNC_RECOVERED` y reanuda la admisión de nuevos clientes sin requerir reinicio del IRCd.
 3.  **Override Administrativo:** Los administradores pueden recuperar un nodo en estado stale actualizando `propagator "<nuevo-servidor>";` en `unrealircd.conf` y ejecutando `/REHASH`. El override local tiene precedencia sobre políticas obsoletas en base de datos.
 
-### 2.5 Comandos de Diagnóstico y Estado para Operadores
+### 2.6 Comandos de Diagnóstico y Estado para Operadores
 Los operadores pueden consultar en tiempo real el estado de sincronización mediante `/UDB STATUS` o `/DBQ STATUS` (solo opers):
 ```text
 /UDB STATUS
@@ -404,6 +438,7 @@ Los operadores pueden consultar en tiempo real el estado de sincronización medi
 Salida:
 ```text
 :server 339 oper :UDB synchronization: OK | DEGRADED | STALE
+:server 339 oper :Database readiness: READY | BOOTSTRAPPING
 :server 339 oper :Selected propagator: <server> | none
 :server 339 oper :Advertised state: HEL 4 <server|?|->
 :server 339 oper :Policy source: local | S | none
@@ -413,7 +448,7 @@ Salida:
 :server 339 oper :Last successful synchronization: <timestamp> | none
 ```
 
-### 2.6 Redacción De Secretos En DBQ
+### 2.7 Redacción de Secretos en DBQ
 
 `DBQ` requiere privilegios de oper y nunca devuelve el valor de `pass`,
 `challenge` ni `encryption_key`. Las consultas directas y los listados de hijos

@@ -158,6 +158,7 @@ class MockPeer:
         self.sock.settimeout(0.25)
         self.lines = []
         self.buffer = ""
+        self.round_id = 0
         self.send_raw(f"PASS :{LINK_PASSWORD}")
         self.send_raw(f"PROTOCTL EAUTH={self.name}")
         self.send_raw("PROTOCTL NOQUIT NICKv2 SJOIN SJOIN2 UMODE2 SJ3 BIGLINES SID=" + self.sid)
@@ -170,8 +171,25 @@ class MockPeer:
             self.wait_for(lambda line: " DB " in line and " HEL 4 " in line, f"{self.name} HEL response")
             self.send(f"DB {self.target_sid} HEL 4 ACK")
             if send_inf:
-                for b in ('N', 'C', 'I', 'S', 'L', 'K'):
-                    self.send(f"DB {self.target_sid} INF {b} 00000000 0")
+                self.send_inventory()
+
+    def send_inventory(self, checksums=None, timestamp=0):
+        self.round_id += 1
+        checksums = checksums or {}
+        for letter in ('N', 'C', 'I', 'S', 'L', 'K'):
+            checksum, block_timestamp = checksums.get(letter, ("00000000", timestamp))
+            self.send(f"DB {self.target_sid} INF {self.round_id} {letter} {checksum} {block_timestamp}")
+
+    def send_snapshot(self, letter, txid, records, checksum, timestamp=None):
+        self.round_id += 1
+        remote_timestamp = timestamp if timestamp is not None else int(time.time()) + 1000
+        self.send(f"DB {self.target_sid} INF {self.round_id} {letter} {checksum} {remote_timestamp}")
+        self.wait_for(lambda line: f" RES {self.round_id} {letter}" in line,
+                      f"RES round {self.round_id} block {letter}")
+        self.send(f"DB {self.target_sid} BEGIN {self.round_id} {letter} {txid} 00000000")
+        for path, value in records:
+            self.send(f"DB {self.target_sid} PUT {self.round_id} {letter} {txid} {path} :{value}")
+        self.send(f"DB {self.target_sid} END {self.round_id} {letter} {txid} {checksum}")
 
     def send_raw(self, command):
         self.sock.sendall((command + "\r\n").encode("ascii"))
@@ -234,6 +252,7 @@ class MockClient:
         self.sock.settimeout(0.5)
         self.send(f"NICK {self.nick}")
         self.send(f"USER {self.nick} 0 * :Test Client")
+        self.wait_for(lambda line: " 001 " in line, "client registration", timeout=3.0)
 
     def send(self, command):
         try:
@@ -262,7 +281,7 @@ class MockClient:
                     cookie = line.split(" ", 1)[1]
                     self.send(f"PONG {cookie}")
 
-    def wait_for(self, predicate, timeout=3.0):
+    def wait_for(self, predicate, description="condition", timeout=3.0):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             for line in self.lines:
@@ -271,7 +290,7 @@ class MockClient:
             if self.closed:
                 break
             self.receive(0.2)
-        return None
+        raise TimeoutError(f"timed out waiting for {description}; lines={self.lines}")
 
     def is_denied(self, timeout=2.0):
         self.receive(timeout)
@@ -327,8 +346,7 @@ def test_suite():
         try:
             # Services connects and initializes all 6 blocks
             services = MockPeer("services.test", "00S", "127.0.0.1", p1_ports[1], "001", propagator_advertised="services.test")
-            for b in ('N', 'C', 'I', 'S', 'L', 'K'):
-                services.send(f"DB 001 INF {b} 00000000 0")
+            services.send_inventory()
             time.sleep(0.3)
 
             state_file1 = dbdir1 / ".udb_state"
@@ -403,13 +421,10 @@ def test_suite():
         try:
             # Services synchronizes a nick record to Hub3, then disconnects
             services3 = MockPeer("services.test", "00S", "127.0.0.1", p3_ports[1], "003", propagator_advertised="services.test")
-            services3.send("DB 003 BEGIN N tx_init 00000000")
-            services3.send("DB 003 PUT N tx_init alice::vhost alice.hub")
             crc_n = zlib.crc32(b"alice::vhost alice.hub\n") & 0xFFFFFFFF
-            services3.send(f"DB 003 END N tx_init {crc_n:08x}")
-            services3.wait_for(lambda l: " ACK N" in l, "ACK N from Hub3")
-            for b in ('C', 'I', 'S', 'L', 'K'):
-                services3.send(f"DB 003 INF {b} 00000000 0")
+            services3.send_snapshot("N", "tx_init", [("alice::vhost", "alice.hub")], f"{crc_n:08x}")
+            services3.wait_for(lambda l: f" ACK {services3.round_id} N tx_init " in l, "ACK N from Hub3")
+            services3.send_inventory({"N": (f"{crc_n:08x}", int(time.time()))})
             time.sleep(0.3)
             services3.close()
 
@@ -423,12 +438,11 @@ def test_suite():
             leaf.send("DB 003 HEL 4 ACK")
 
             # Leaf asks for snapshot of N from Hub3 via RES
-            leaf.send("DB 003 RES N")
+            leaf.send("DB 003 RES 1 N")
             # Hub3 must serve snapshot even while STALE
-            leaf.wait_for(lambda l: " DB " in l and " BEGIN N " in l, "BEGIN N from Hub3")
+            leaf.wait_for(lambda l: " DB " in l and " BEGIN 1 N " in l, "BEGIN N from Hub3")
             leaf.wait_for(lambda l: "alice::vhost" in l and "alice.hub" in l, "PUT alice from Hub3")
-            leaf.wait_for(lambda l: " DB " in l and " END N " in l, "END N from Hub3")
-            leaf.send(f"DB 003 ACK N tx_init {crc_n:08x}")
+            leaf.wait_for(lambda l: " DB " in l and " END 1 N " in l, "END N from Hub3")
             leaf.close()
             print("PASS: Test HUB 3: STALE Hub successfully served committed snapshots downstream")
         finally:
@@ -447,7 +461,7 @@ def test_suite():
             # Hub4 is clean and NOT_READY (udb_ready == 0)
             leaf4 = MockPeer("leaf.test", "00L", "127.0.0.1", p4_ports[1], "004", propagator_advertised="services.test")
             leaf4.send("DB 004 HEL 4 ACK")
-            leaf4.send("DB 004 RES N")
+            leaf4.send("DB 004 RES 1 N")
 
             # Hub4 must reject RES because !udb_ready
             err_res = leaf4.wait_for(lambda l: " DB " in l and (" ERR RES 6" in l or " ERR RES 2" in l), "ERR RES 6 from Bootstrapping Hub")
@@ -469,8 +483,7 @@ def test_suite():
         )
         try:
             services5 = MockPeer("services.test", "00S", "127.0.0.1", p5_ports[1], "005", propagator_advertised="services.test")
-            for b in ('N', 'C', 'I', 'S', 'L', 'K'):
-                services5.send(f"DB 005 INF {b} 00000000 0")
+            services5.send_inventory()
             time.sleep(0.3)
             services5.close()
             time.sleep(2.5)
@@ -480,15 +493,9 @@ def test_suite():
             new_rec = "carol::vhost carol.org"
             crc_new = zlib.crc32((new_rec + "\n").encode("utf-8")) & 0xFFFFFFFF
             now_ts = int(time.time()) + 1000
-            services5_new.send(f"DB 005 INF N {crc_new:08x} {now_ts}")
-            for b in ('C', 'I', 'S', 'L', 'K'):
-                services5_new.send(f"DB 005 INF {b} 00000000 0")
-            services5_new.wait_for(lambda l: " DB " in l and " RES N" in l, "RES N sent by Hub5")
-
-            services5_new.send("DB 005 BEGIN N tx_upd 00000000")
-            services5_new.send(f"DB 005 PUT N tx_upd {new_rec}")
-            services5_new.send(f"DB 005 END N tx_upd {crc_new:08x}")
-            services5_new.wait_for(lambda l: " ACK N" in l, "ACK N for update")
+            services5_new.send_snapshot("N", "tx_upd", [("carol::vhost", "carol.org")], f"{crc_new:08x}", now_ts)
+            services5_new.wait_for(lambda l: f" ACK {services5_new.round_id} N tx_upd " in l, "ACK N for update")
+            services5_new.send_inventory({"N": (f"{crc_new:08x}", now_ts)})
             time.sleep(0.3)
 
             oper5 = MockClient("127.0.0.1", p5_ports[0], "oper5")
@@ -520,16 +527,15 @@ def test_suite():
         try:
             # Services links to Hub only
             services6 = MockPeer("services.test", "00S", "127.0.0.1", p6_hub_ports[1], "006", propagator_advertised="services.test")
-            for b in ('N', 'C', 'I', 'S', 'L', 'K'):
-                services6.send(f"DB 006 INF {b} 00000000 0")
+            services6.send_inventory()
             time.sleep(0.5)
 
             # Check Hub reached READY
             oper6_hub = MockClient("127.0.0.1", p6_hub_ports[0], "oper6_hub")
             oper6_hub.send("OPER testoper operpass")
-            oper6_hub.wait_for(lambda l: " 381 " in l, timeout=3.0)
+            oper6_hub.wait_for(lambda l: " 381 " in l, "Hub operator login", timeout=3.0)
             oper6_hub.send("UDB STATUS")
-            oper6_hub.wait_for(lambda l: "Database readiness: READY" in l, timeout=3.0)
+            oper6_hub.wait_for(lambda l: "Database readiness: READY" in l, "Hub READY status", timeout=3.0)
             oper6_hub.close()
 
             # Leaf connects to Hub and reconciles from direct source hub6.test
@@ -538,10 +544,10 @@ def test_suite():
             # Oper on Leaf verifies Leaf reached READY through Hub and selected direct source hub6.test
             oper6 = MockClient("127.0.0.1", p6_leaf_ports[0], "oper6")
             oper6.send("OPER testoper operpass")
-            oper6.wait_for(lambda l: " 381 " in l, timeout=3.0)
+            oper6.wait_for(lambda l: " 381 " in l, "Leaf operator login", timeout=3.0)
             oper6.send("UDB STATUS")
-            oper6.wait_for(lambda l: "Database readiness: READY" in l, timeout=3.0)
-            oper6.wait_for(lambda l: "Selected direct source: hub6.test" in l, timeout=3.0)
+            oper6.wait_for(lambda l: "Database readiness: READY" in l, "Leaf READY status", timeout=3.0)
+            oper6.wait_for(lambda l: "Selected direct source: hub6.test" in l, "Leaf direct authority", timeout=3.0)
 
             # Services broadcasts mutation INS
             services6.send("DB * INS N::dave::vhost dave.org")
@@ -549,7 +555,7 @@ def test_suite():
 
             # Oper on Leaf queries the exact record value via DBQ
             oper6.send("DBQ N::dave::vhost")
-            oper6.wait_for(lambda l: "dave.org" in l, timeout=3.0)
+            oper6.wait_for(lambda l: "dave.org" in l, "Leaf DBQ mutation value", timeout=3.0)
             oper6.close()
             services6.close()
 
@@ -559,7 +565,23 @@ def test_suite():
             assert leaf_n_db.exists(), "Leaf snapshot file udb_N.db must exist on disk"
             assert "dave::vhost dave.org" in leaf_n_db.read_text(), "Leaf snapshot file must contain dave.org"
 
-            print("PASS: Test HUB 6: Multi-hop mutation propagated across 3 nodes successfully")
+            # Restart the Leaf with both upstream processes offline. Durable READY and
+            # the exact mutation must be available before any new reconciliation.
+            stop(p6_hub)
+            p6_leaf = subprocess.Popen(bwrap_command(n6_leaf, ircd_bin, cfg6_leaf))
+            wait_for_daemon(p6_leaf, "127.0.0.1", p6_leaf_ports[0])
+            restarted_leaf = MockClient("127.0.0.1", p6_leaf_ports[0], "oper6_restart")
+            restarted_leaf.send("OPER testoper operpass")
+            restarted_leaf.wait_for(lambda line: " 381 " in line, "restarted Leaf operator login", timeout=3.0)
+            restarted_leaf.send("UDB STATUS")
+            restarted_leaf.wait_for(lambda line: "Database readiness: READY" in line,
+                                     "restarted Leaf durable READY", timeout=3.0)
+            restarted_leaf.send("DBQ N::dave::vhost")
+            restarted_leaf.wait_for(lambda line: "dave.org" in line,
+                                     "restarted Leaf persisted mutation", timeout=3.0)
+            restarted_leaf.close()
+
+            print("PASS: Test HUB 6: Hop-by-hop READY, mutation, disk persistence, and offline Leaf restart verified")
         finally:
             stop(p6_leaf)
             stop(p6_hub)
@@ -571,19 +593,19 @@ def test_suite():
         p7_ports = free_ports(3)
         p7, n7, dbdir7, cfg7 = setup_node(
             tmpdir, "leaf7.test", "007", p7_ports,
-            [("hub.test", 0, False), ("evil.test", 0, False)], propagator="services.test"
+            [("hub.test", 0, False), ("evil.test", 0, False)], propagator="hub.test"
         )
         try:
             # Authorized Hub connects and initializes leaf
             hub7 = MockPeer("hub.test", "00H", "127.0.0.1", p7_ports[1], "007", propagator_advertised="services.test")
-            for b in ('N', 'C', 'I', 'S', 'L', 'K'):
-                hub7.send(f"DB 007 INF {b} 00000000 0")
+            hub7.send_inventory()
             time.sleep(0.3)
 
             # Evil peer connects and tries to inject staged sync / mutation
             evil = MockPeer("evil.test", "00E", "127.0.0.1", p7_ports[1], "007", propagator_advertised="evil.test")
-            evil.send("DB 007 BEGIN N tx_evil 00000000")
-            err_evil = evil.wait_for(lambda l: " DB " in l and " ERR BEGIN 6" in l, "ERR BEGIN 6 from evil peer")
+            evil.send("DB 007 BEGIN 1 N tx_evil 00000000")
+            err_evil = evil.wait_for(lambda l: " DB " in l and " ERR BEGIN 6 1 N" in l,
+                                     "ERR BEGIN 6 from evil peer")
             assert " ERR BEGIN 6" in err_evil, f"Expected ERR BEGIN 6, got: {err_evil}"
 
             evil.send("DB * INS N::evil::vhost evil.net")
@@ -607,8 +629,7 @@ def test_suite():
         )
         try:
             services8 = MockPeer("services.test", "00S", "127.0.0.1", p8_ports[1], "008", propagator_advertised="services.test")
-            for b in ('N', 'C', 'I', 'S', 'L', 'K'):
-                services8.send(f"DB 008 INF {b} 00000000 0")
+            services8.send_inventory()
             time.sleep(0.3)
 
             oper8 = MockClient("127.0.0.1", p8_ports[0], "oper8")

@@ -125,7 +125,7 @@ class MockServices:
         self.wait_for(lambda line: " DB " in line and " HEL 4 " in line, "UDB HEL response")
         self.send(f"DB {self.ircd_sid} HEL 4 ACK")
         for b in ('N', 'C', 'I', 'S', 'L', 'K'):
-            self.send(f"DB {self.ircd_sid} INF {b} 00000000 0")
+            self.send(f"DB {self.ircd_sid} INF 1 {b} 00000000 0")
         time.sleep(0.2)
 
     def send(self, command):
@@ -167,14 +167,14 @@ class MockServices:
 
     def query_block(self, letter):
         start_idx = len(self.lines)
-        self.send(f"DB {self.ircd_sid} RES {letter}")
-        begin_line = self.wait_for(lambda l: " DB " in l and f" BEGIN {letter} " in l, f"BEGIN {letter} frame", start=start_idx, timeout=5)
-        end_line = self.wait_for(lambda l: " DB " in l and f" END {letter} " in l, f"END {letter} frame", start=start_idx, timeout=5)
+        self.send(f"DB {self.ircd_sid} RES 1 {letter}")
+        begin_line = self.wait_for(lambda l: " DB " in l and f" BEGIN 1 {letter} " in l, f"BEGIN {letter} frame", start=start_idx, timeout=5)
+        end_line = self.wait_for(lambda l: " DB " in l and f" END 1 {letter} " in l, f"END {letter} frame", start=start_idx, timeout=5)
         checksum = end_line.strip().split()[-1]
         records = {}
         for l in self.lines[start_idx:]:
-            if " DB " in l and f" PUT {letter} " in l:
-                parts = l.split(f" PUT {letter} ", 1)[1].split(" ", 2)
+            if " DB " in l and f" PUT 1 {letter} " in l:
+                parts = l.split(f" PUT 1 {letter} ", 1)[1].split(" ", 2)
                 path = parts[1]
                 data = parts[2]
                 if data.startswith(":"):
