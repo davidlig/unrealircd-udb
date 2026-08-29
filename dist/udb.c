@@ -353,6 +353,7 @@ static UdbContext *udb_ctx = NULL;
 static UdbPasswordFailure udb_password_failures[UDB_PASSWORD_FAILURE_SLOTS];
 static UdbSyncStatus udb_sync_status = UDB_SYNC_OK;
 static time_t udb_degraded_since = 0;
+static time_t udb_propagator_unavailable_since = 0;
 static time_t udb_last_successful_sync = 0;
 static int udb_ready = 0;
 static Client *udb_bootstrap_peer = NULL;
@@ -536,6 +537,7 @@ static int udb_propagator_policy_present(UdbContext *ctx);
 static void udb_propagator_policy_changed(UdbContext *ctx);
 static void udb_propagator_policy_flush(UdbContext *ctx);
 static void udb_sync_hello_refresh_all(void);
+static void udb_propagator_availability_refresh(void);
 static void udb_sync_status_refresh(void);
 static int udb_hook_readiness_pre_connect(Client *client);
 static void udb_query_send_status(Client *client);
@@ -3250,6 +3252,7 @@ static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSessi
 	udb_propagator_policy_flush(ctx);
 	if (block->letter == 'L')
 		udb_sync_snomask_filter();
+	udb_propagator_availability_refresh();
 	udb_sync_status_refresh();
 	return 1;
 }
@@ -4300,6 +4303,23 @@ static int udb_is_authorized_sync_source(UdbContext *ctx, Client *direct_peer)
 	}
 }
 
+/* Observability-only tracker: how long no eligible propagator has been
+ * usable. It never touches udb_ready, udb_sync_status or client admission;
+ * the bootstrap ladder uses udb_degraded_since instead. */
+static void udb_propagator_availability_refresh(void)
+{
+	UdbContext *ctx = udb_ctx;
+	UdbPropagatorSelection selected;
+
+	if (!udb_propagator_policy_present(ctx) || udb_select_propagator(ctx, 1, &selected))
+	{
+		udb_propagator_unavailable_since = 0;
+		return;
+	}
+	if (udb_propagator_unavailable_since == 0)
+		udb_propagator_unavailable_since = time(NULL);
+}
+
 static void udb_sync_status_refresh(void)
 {
 	UdbContext *ctx = udb_ctx;
@@ -4445,6 +4465,7 @@ static void udb_propagator_policy_changed(UdbContext *ctx)
 		}
 	}
 	udb_sync_hello_refresh_all();
+	udb_propagator_availability_refresh();
 	udb_sync_status_refresh();
 
 	if (peer && udb_has_hello(peer) && (!udb_ready || udb_sync_status != UDB_SYNC_OK))
@@ -4842,6 +4863,7 @@ EVENT(udb_sync_timeout_event)
 			}
 		}
 	}
+	udb_propagator_availability_refresh();
 	udb_sync_status_refresh();
 }
 
@@ -8730,8 +8752,8 @@ static void udb_query_send_status(Client *client)
 	if (!policy_str || !*policy_str)
 		policy_str = "none";
 
-	if (udb_degraded_since > 0 && now >= udb_degraded_since)
-		time_without_propagator = (unsigned long)(now - udb_degraded_since);
+	if (udb_propagator_unavailable_since > 0 && now >= udb_propagator_unavailable_since)
+		time_without_propagator = (unsigned long)(now - udb_propagator_unavailable_since);
 	else
 		time_without_propagator = 0;
 
@@ -9726,6 +9748,7 @@ static int udb_engine_init(void)
 			udb_persistence_set_state(UDB_PERSIST_BOOTSTRAPPING, UDB_ORIGIN_RECOVERY, persisted_generation, 0);
 	}
 
+	udb_propagator_availability_refresh();
 	udb_sync_status_refresh();
 	return 1;
 }

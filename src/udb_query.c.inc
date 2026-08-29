@@ -68,8 +68,8 @@ static void udb_query_send_status(Client *client)
 	if (!policy_str || !*policy_str)
 		policy_str = "none";
 
-	if (udb_degraded_since > 0 && now >= udb_degraded_since)
-		time_without_propagator = (unsigned long)(now - udb_degraded_since);
+	if (udb_propagator_unavailable_since > 0 && now >= udb_propagator_unavailable_since)
+		time_without_propagator = (unsigned long)(now - udb_propagator_unavailable_since);
 	else
 		time_without_propagator = 0;
 

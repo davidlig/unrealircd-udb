@@ -1289,6 +1289,7 @@ static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSessi
 	udb_propagator_policy_flush(ctx);
 	if (block->letter == 'L')
 		udb_sync_snomask_filter();
+	udb_propagator_availability_refresh();
 	udb_sync_status_refresh();
 	return 1;
 }

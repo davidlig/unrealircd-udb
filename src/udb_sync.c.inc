@@ -454,6 +454,23 @@ static int udb_is_authorized_sync_source(UdbContext *ctx, Client *direct_peer)
 	}
 }
 
+/* Observability-only tracker: how long no eligible propagator has been
+ * usable. It never touches udb_ready, udb_sync_status or client admission;
+ * the bootstrap ladder uses udb_degraded_since instead. */
+static void udb_propagator_availability_refresh(void)
+{
+	UdbContext *ctx = udb_ctx;
+	UdbPropagatorSelection selected;
+
+	if (!udb_propagator_policy_present(ctx) || udb_select_propagator(ctx, 1, &selected))
+	{
+		udb_propagator_unavailable_since = 0;
+		return;
+	}
+	if (udb_propagator_unavailable_since == 0)
+		udb_propagator_unavailable_since = time(NULL);
+}
+
 static void udb_sync_status_refresh(void)
 {
 	UdbContext *ctx = udb_ctx;
@@ -599,6 +616,7 @@ static void udb_propagator_policy_changed(UdbContext *ctx)
 		}
 	}
 	udb_sync_hello_refresh_all();
+	udb_propagator_availability_refresh();
 	udb_sync_status_refresh();
 
 	if (peer && udb_has_hello(peer) && (!udb_ready || udb_sync_status != UDB_SYNC_OK))
@@ -996,6 +1014,7 @@ EVENT(udb_sync_timeout_event)
 			}
 		}
 	}
+	udb_propagator_availability_refresh();
 	udb_sync_status_refresh();
 }
 

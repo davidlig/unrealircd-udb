@@ -426,6 +426,16 @@ def test_suite():
         client1.wait_for(lambda l: " 339 " in l and "New local clients: ALLOWED" in l, timeout=2)
         print("PASS: Tests D/E: READY node stayed OK and kept accepting clients past the stale timeout")
 
+        # The propagator availability clock is observability-only: it advances
+        # while the node is READY + OK and never feeds the health ladder.
+        client1.lines.clear()
+        client1.send("UDB STATUS")
+        timer_line = client1.wait_for(lambda l: " 339 " in l and "Time without propagator:" in l, timeout=3)
+        assert timer_line is not None, "STATUS must report the propagator availability clock"
+        seconds = int(timer_line.rsplit(":", 1)[1].strip())
+        assert seconds >= 1, f"Propagator offline clock must advance while READY + OK, got: {timer_line}"
+        print(f"PASS: Test D/E: Time without propagator advanced to {seconds}s while health stayed OK")
+
         # Test F: propagator returns; inventory converges and the node remains OK
         propD2 = MockPeer("prop.test", "001", "127.0.0.1", portsD[1], "00D", propagator_advertised="prop.test")
         time.sleep(0.5)

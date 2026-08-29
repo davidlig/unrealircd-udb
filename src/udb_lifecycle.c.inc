@@ -798,6 +798,7 @@ static int udb_engine_init(void)
 			udb_persistence_set_state(UDB_PERSIST_BOOTSTRAPPING, UDB_ORIGIN_RECOVERY, persisted_generation, 0);
 	}
 
+	udb_propagator_availability_refresh();
 	udb_sync_status_refresh();
 	return 1;
 }
