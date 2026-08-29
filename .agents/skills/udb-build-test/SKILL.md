@@ -34,6 +34,26 @@ make custommodule MODULEFILE=udb/src/udb
 
 Do not rebuild all UnrealIRCd unless needed.
 
+### Installed-module freshness (mandatory before runtime tests)
+
+Runtime and integration tests load the module installed in the test
+UnrealIRCd tree (`$HOME/unrealircd/modules/third/udb.so`, or
+`UDB_TEST_IRCD_ROOT`/`UDB_MODULE_PATH` overrides), NOT the freshly built
+`src/udb.so`. A stale installed `.so` silently validates old behavior.
+
+After every build and before any runtime/integration test, refresh and
+verify:
+
+```bash
+cp src/udb.so "$HOME/unrealircd/modules/third/udb.so"
+python3 .agentic/test_runtime_module_fresh.py
+```
+
+The contract test fails with the exact copy command whenever the installed
+module hash differs from the build, and skips cleanly when there is nothing
+to compare (no build, or no runtime tree). `ci-check.sh` runs it as part of
+the local/CI gate.
+
 ## Test matrix
 
 ### Parsing, persistence, limits, paths
