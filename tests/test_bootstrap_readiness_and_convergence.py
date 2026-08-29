@@ -33,7 +33,7 @@ import tempfile
 import time
 import zlib
 
-from udb_state_seed import seed_block, seed_bootstrapping_state, seed_ready_state
+from udb_state_seed import seed_block, seed_bootstrapping_state, seed_ready_state, wait_for_state
 
 ROOT = pathlib.Path(__file__).resolve().parents[5]
 RUNTIME_ROOT = pathlib.Path(os.environ.get("UDB_TEST_IRCD_ROOT", pathlib.Path.home() / "unrealircd"))
@@ -366,9 +366,8 @@ def test_suite():
             peer_a2.send(f"DB 001 INF 2 N {n_crc:08x} 1000")
             for b in ('C', 'I', 'S', 'L', 'K'):
                 peer_a2.send(f"DB 001 INF 2 {b} 00000000 0")
-            time.sleep(0.3)
 
-            assert "STATE=READY" in state_file.read_text(), ".udb_state must now be READY"
+            assert wait_for_state(state_file, "STATE=READY"), ".udb_state must now be READY"
             c1_ready = MockClient("127.0.0.1", p1_ports[0], "user1_ready")
             welcome1 = c1_ready.wait_for(lambda l: " 001 " in l, timeout=3.0)
             assert welcome1 is not None, "Client could not connect after full 6-block convergence"
@@ -420,11 +419,10 @@ def test_suite():
         )
         try:
             peer3 = MockPeer("peer-a.test", "00A", "127.0.0.1", p3_ports[1], "003", send_inf=True)
-            time.sleep(0.3)
             peer3.close()
 
             state_file3 = dbdir3 / ".udb_state"
-            assert "STATE=READY" in state_file3.read_text(), ".udb_state must be READY"
+            assert wait_for_state(state_file3, "STATE=READY"), ".udb_state must be READY"
 
             stop(p3)
 
@@ -680,8 +678,7 @@ def test_suite():
 
             for b in ('N', 'C', 'I'):
                 prop_b.send(f"DB 007 INF 2 {b} 00000000 0")
-            time.sleep(0.3)
-            assert "STATE=READY" in state_file7.read_text(), "State failed to become READY after full reconciliation from B"
+            assert wait_for_state(state_file7, "STATE=READY"), "State failed to become READY after full reconciliation from B"
             prop_b.close()
             print("PASS: Test 7: Authority switch resets round masks completely")
         finally:
@@ -717,9 +714,8 @@ def test_suite():
             peer_b.send(f"DB 008 INF 2 S {s_crc8:08x} 0")
             for b in ('N', 'C', 'I', 'L', 'K'):
                 peer_b.send(f"DB 008 INF 2 {b} 00000000 0")
-            time.sleep(0.3)
             state_file8 = dbdir8 / ".udb_state"
-            assert "STATE=READY" in state_file8.read_text(), "Peer B could not complete bootstrap"
+            assert wait_for_state(state_file8, "STATE=READY"), "Peer B could not complete bootstrap"
             peer_b.close()
             print("PASS: Test 8: Bootstrap peer disconnect allows clean takeover by subsequent peer")
         finally:
@@ -736,9 +732,8 @@ def test_suite():
         )
         try:
             peer9 = MockPeer("peer-a.test", "00A", "127.0.0.1", p9_ports[1], "009", send_inf=True)
-            time.sleep(0.3)
             state_file9 = dbdir9 / ".udb_state"
-            assert "STATE=READY" in state_file9.read_text(), ".udb_state not READY on empty blocks bootstrap"
+            assert wait_for_state(state_file9, "STATE=READY"), ".udb_state not READY on empty blocks bootstrap"
             peer9.close()
             print("PASS: Test 9: Empty blocks bootstrap converged to READY")
         finally:

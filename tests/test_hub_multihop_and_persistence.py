@@ -28,6 +28,8 @@ import tempfile
 import time
 import zlib
 
+from udb_state_seed import wait_for_state
+
 ROOT = pathlib.Path(__file__).resolve().parents[5]
 RUNTIME_ROOT = pathlib.Path(os.environ.get("UDB_TEST_IRCD_ROOT", pathlib.Path.home() / "unrealircd"))
 DEFAULT_IRCD = RUNTIME_ROOT / "bin/unrealircd"
@@ -347,10 +349,9 @@ def test_suite():
             # Services connects and initializes all 6 blocks
             services = MockPeer("services.test", "00S", "127.0.0.1", p1_ports[1], "001", propagator_advertised="services.test")
             services.send_inventory()
-            time.sleep(0.3)
 
             state_file1 = dbdir1 / ".udb_state"
-            assert "STATE=READY" in state_file1.read_text(), "Hub1 must be READY after full sync"
+            assert wait_for_state(state_file1, "STATE=READY"), "Hub1 must be READY after full sync"
 
             # Local client allowed in OK state
             c1 = MockClient("127.0.0.1", p1_ports[0], "user_ok")

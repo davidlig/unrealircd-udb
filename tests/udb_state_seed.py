@@ -7,8 +7,28 @@ A READY seeding must pair the state file with six block files whose
 "; Generation: " headers match the seeded GENERATION.
 """
 
+import time
+
 UDB_STATE_FORMAT = 1
 DEFAULT_SEED_GENERATION = 1
+
+
+def wait_for_state(state_path, needle, timeout=10.0, poll=0.2):
+    """Poll a .udb_state file until it contains needle (e.g. STATE=READY).
+
+    Persisting READY involves six snapshot writes plus fsyncs, which can take
+    longer than a fixed sleep on slow or sanitized (ASan) environments; tests
+    must poll instead of racing a fixed delay.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if needle in state_path.read_text(encoding="ascii", errors="replace"):
+                return True
+        except OSError:
+            pass
+        time.sleep(poll)
+    return False
 
 
 def block_header(letter, generation=DEFAULT_SEED_GENERATION):
