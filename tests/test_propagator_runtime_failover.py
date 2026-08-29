@@ -38,6 +38,8 @@ import tempfile
 import time
 import zlib
 
+from udb_state_seed import seed_block, seed_ready_state
+
 ROOT = pathlib.Path(__file__).resolve().parents[5]
 RUNTIME_ROOT = pathlib.Path(os.environ.get("UDB_TEST_IRCD_ROOT", pathlib.Path.home() / "unrealircd"))
 DEFAULT_IRCD = RUNTIME_ROOT / "bin/unrealircd"
@@ -286,12 +288,26 @@ def main():
         # 3: services-b.test (attached to Relay B)
         # 4: hub-b.test
         propagator_list = "services-a.test,hub-a.test,services-b.test,hub-b.test"
+        seed_generation = 1
 
         for n in (node_a, node_b, node_c):
-            (n / "data/udb_S.db").write_text(
-                f"; UDB Block S\n; Saved: 1787720000\n; Records: 2\npropagator {propagator_list}\nflood 5:30\n",
-                encoding="ascii"
-            )
+            data_dir = n / "data"
+            for letter in ("N", "C", "I", "L", "K"):
+                seed_block(data_dir / f"udb_{letter}.db", letter, generation=seed_generation)
+            seed_block(data_dir / "udb_S.db", "S",
+                       f"propagator {propagator_list}\nflood 5:30\n", generation=seed_generation)
+            seed_ready_state(data_dir, generation=seed_generation)
+
+        # This is a READY runtime fixture, not a bootstrap fixture.
+        for n in (node_a, node_b, node_c):
+            data_dir = n / "data"
+            for letter in ("N", "C", "I", "S", "L", "K"):
+                block = data_dir / f"udb_{letter}.db"
+                assert block.is_file(), f"missing READY fixture block {block}"
+                assert f"; Generation: {seed_generation}\n" in block.read_text(encoding="ascii")
+            state = (data_dir / ".udb_state").read_text(encoding="ascii")
+            assert "FORMAT=1\nSTATE=READY\n" in state
+            assert f"GENERATION={seed_generation}\n" in state
 
         all_ports = free_ports(9)
         ports_a = tuple(all_ports[0:3])
