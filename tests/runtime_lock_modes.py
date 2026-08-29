@@ -491,10 +491,9 @@ def main():
         third_modules.mkdir(parents=True)
         shutil.copy2(args.module, third_modules / "udb.so")
 
-        (data / "udb_S.db").write_text(
-            f"nickserv {NICKSERV_MASK}\n"
-            f"chanserv {CHANSERV_MASK}\n",
-            encoding="ascii")
+        seed_block(data / "udb_S.db", "S",
+                   f"nickserv {NICKSERV_MASK}\n"
+                   f"chanserv {CHANSERV_MASK}\n")
         seed_block(data / "udb_N.db", "N",
                    f"davidlig::pass sha256:{sha256('secret')}\n"
                    "davidlig::challenge sha256\n"
