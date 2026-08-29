@@ -251,6 +251,18 @@ typedef enum UdbBlockLoadState
 	UDB_LOAD_FAILED
 } UdbBlockLoadState;
 
+/* Startup files are parsed before their trees are allowed to affect runtime
+ * state. The context flag keeps the loader side-effect-free until the full
+ * six-block READY set has been accepted. */
+typedef struct UdbStartupCandidate
+{
+	UdbRecord *tree;
+	unsigned int record_count;
+	unsigned long checksum;
+	unsigned long generation;
+	UdbBlockLoadState load_state;
+} UdbStartupCandidate;
+
 typedef enum UdbSnapshotResult
 {
 	UDB_SNAPSHOT_FAILED_BEFORE_COMMIT = 0,
@@ -337,6 +349,8 @@ typedef struct UdbContext
 	UdbRecord *links;
 	UdbRecord *lines;
 	UdbRecord **hash_table[UDB_NUM_BLOCKS];
+	UdbStartupCandidate startup_candidates[UDB_NUM_BLOCKS];
+	char *startup_propagator_setting;
 	char *propagator_setting;
 	char *quit_ips;
 	char *quit_clones;
@@ -347,6 +361,7 @@ typedef struct UdbContext
 	char *ipserv_mask;
 	int block_count;
 	int total_records;
+	int startup_loading;
 } UdbContext;
 
 static UdbContext *udb_ctx = NULL;
@@ -425,6 +440,8 @@ static int udb_persistence_load_state(UdbPersistentState *state_out, UdbPersiste
 static UdbStatePersistResult udb_persistence_set_state(UdbPersistentState state, UdbPersistenceOrigin origin,
 													   unsigned long generation, time_t last_sync);
 static void udb_mark_durability_uncertain(UdbContext *ctx, UdbBlock *block, const char *operation);
+static void udb_handle_persistence_failure(UdbContext *ctx, Client *peer, UdbBlock *block,
+											const char *operation, int commit_uncertain);
 
 static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs);
 static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type);
@@ -447,6 +464,9 @@ static int udb_block_load(UdbContext *ctx, UdbBlock *block);
 static void udb_block_unload(UdbContext *ctx, UdbBlock *block);
 static void udb_block_reset(UdbContext *ctx, UdbBlock *block);
 static int udb_blocks_load_all(UdbContext *ctx);
+static void udb_startup_candidates_discard(UdbContext *ctx);
+static int udb_startup_publish(UdbContext *ctx);
+static void udb_startup_load_policy(UdbContext *ctx);
 static int udb_blocks_save_all(UdbContext *ctx);
 static UdbBlock *udb_block_by_letter(UdbContext *ctx, char letter);
 static int udb_record_fits_limits(const char *path, const char *value);
@@ -3414,23 +3434,38 @@ static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *li
 
 static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 {
+	UdbStartupCandidate *startup_candidate = NULL;
 	if (!block || !block->filepath)
 		return 0;
+	if (ctx && ctx->startup_loading)
+	{
+		startup_candidate = &ctx->startup_candidates[udb_block_letter_to_index(block->letter)];
+		udb_record_free_tree(startup_candidate->tree);
+		memset(startup_candidate, 0, sizeof(*startup_candidate));
+	}
 
 	FILE *fp = fopen(block->filepath, "r");
 	if (!fp)
 	{
 		if (errno == ENOENT)
 		{
-			udb_block_reset(ctx, block);
-			block->load_state = UDB_LOAD_EMPTY;
-			block->checksum = 0;
-			block->modified_at = 0;
-			block->filesize = 0;
+			if (startup_candidate)
+				startup_candidate->load_state = UDB_LOAD_EMPTY;
+			else
+			{
+				udb_block_reset(ctx, block);
+				block->load_state = UDB_LOAD_EMPTY;
+				block->checksum = 0;
+				block->modified_at = 0;
+				block->filesize = 0;
+			}
 			return 1;
 		}
 		int saved_errno = errno;
-		block->load_state = UDB_LOAD_FAILED;
+		if (startup_candidate)
+			startup_candidate->load_state = UDB_LOAD_FAILED;
+		else
+			block->load_state = UDB_LOAD_FAILED;
 		udb_log(ULOG_ERROR, "UDB_FILE_OPEN_FAILED", NULL, "Cannot open database file $file for block $block: $error",
 				log_data_string("file", block->filepath), log_data_string("block", (char[]){block->letter, '\0'}),
 				log_data_string("error", strerror(saved_errno)));
@@ -3505,7 +3540,10 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 		}
 		safe_free(line);
 		udb_record_free_tree(candidate);
-		block->load_state = UDB_LOAD_FAILED;
+		if (startup_candidate)
+			startup_candidate->load_state = UDB_LOAD_FAILED;
+		else
+			block->load_state = UDB_LOAD_FAILED;
 		fclose(fp);
 		return 0;
 	}
@@ -3519,7 +3557,10 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 				log_data_string("block", (char[]){block->letter, '\0'}), log_data_string("file", block->filepath),
 				log_data_string("error", strerror(saved_errno)));
 		udb_record_free_tree(candidate);
-		block->load_state = UDB_LOAD_FAILED;
+		if (startup_candidate)
+			startup_candidate->load_state = UDB_LOAD_FAILED;
+		else
+			block->load_state = UDB_LOAD_FAILED;
 		return 0;
 	}
 
@@ -3530,36 +3571,46 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 		udb_log(ULOG_ERROR, "UDB_FILE_CHECKSUM_FAILED", NULL, "Failed to compute checksum for block $block file $file",
 				log_data_string("block", (char[]){block->letter, '\0'}), log_data_string("file", block->filepath));
 		udb_record_free_tree(candidate);
-		block->load_state = UDB_LOAD_FAILED;
+		if (startup_candidate)
+			startup_candidate->load_state = UDB_LOAD_FAILED;
+		else
+			block->load_state = UDB_LOAD_FAILED;
 		return 0;
 	}
 
-	udb_block_replace_tree(ctx, block, candidate, record_count);
-	block->checksum = checksum;
-	block->generation = generation_seen ? loaded_generation : 0;
-
-	for (UdbRecord *curr = block->tree->child; curr; curr = curr->sibling)
+	if (startup_candidate)
 	{
-		for (UdbRecord *sub = curr->child; sub; sub = sub->sibling)
-			udb_apply_special_record(ctx, block, sub, 1);
-		udb_apply_special_record(ctx, block, curr, 1);
+		startup_candidate->tree = candidate;
+		startup_candidate->record_count = record_count;
+		startup_candidate->checksum = checksum;
+		startup_candidate->generation = generation_seen ? loaded_generation : 0;
+		startup_candidate->load_state = UDB_LOAD_SUCCESS;
+	}
+	else
+	{
+		udb_block_replace_tree(ctx, block, candidate, record_count);
+		block->checksum = checksum;
+		block->generation = generation_seen ? loaded_generation : 0;
+		udb_apply_tree_effects(ctx, block);
+		block->load_state = UDB_LOAD_SUCCESS;
 	}
 
-	block->load_state = UDB_LOAD_SUCCESS;
-
-	struct stat st;
-	if (stat(block->filepath, &st) == 0)
+	if (!startup_candidate)
 	{
-		block->filesize = st.st_size;
-		block->modified_at = st.st_mtime;
+		struct stat st;
+		if (stat(block->filepath, &st) == 0)
+		{
+			block->filesize = st.st_size;
+			block->modified_at = st.st_mtime;
+		}
 	}
 
 	char logbuf[512];
 	snprintf(logbuf, sizeof(logbuf), "Loaded block %c from %s (%u records)", block->letter, block->filepath,
-			 block->record_count);
+			 startup_candidate ? startup_candidate->record_count : block->record_count);
 	udb_log(ULOG_INFO, "UDB_FILE_LOADED", NULL, "$msg", log_data_string("msg", logbuf));
 
-	if (block->letter == 'L')
+	if (!startup_candidate && block->letter == 'L')
 		udb_sync_snomask_filter();
 
 	return 1;
@@ -4117,6 +4168,28 @@ static void udb_reconcile_abort(UdbContext *ctx, const char *reason, int schedul
 	udb_reconcile_reset();
 }
 
+/* One recovery boundary for every operation whose persistence outcome is not
+ * trustworthy.  It intentionally reuses authority selection and retry bounds;
+ * it does not alter HEL negotiation or hop-by-hop routing. */
+static void udb_handle_persistence_failure(UdbContext *ctx, Client *peer, UdbBlock *block,
+											const char *operation, int commit_uncertain)
+{
+	if (commit_uncertain)
+		udb_mark_durability_uncertain(ctx, block, operation);
+	udb_ready = 0;
+	udb_last_successful_sync = 0;
+	udb_sync_status = UDB_SYNC_DEGRADED;
+	udb_degraded_since = time(NULL);
+	if (udb_reconcile.active)
+		udb_reconcile_abort(ctx, operation ? operation : "persistence failure", 1);
+	else if (udb_reconcile.retry_count < UDB_RECONCILE_RETRY_MAX)
+	{
+		udb_reconcile.retry_count++;
+		udb_reconcile.next_retry_at = time(NULL) + (UDB_RECONCILE_RETRY_BASE << udb_reconcile.retry_count);
+	}
+	(void)peer;
+}
+
 static void udb_sync_round_failure(UdbBlock *block, Client *peer, unsigned long round_id, const char *reason)
 {
 	if (block && peer && udb_reconcile.active && udb_reconcile.authority_peer == peer &&
@@ -4665,6 +4738,7 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, unsigned
 	{
 		block->generation = previous_generation;
 		udb_sync_abort(block, "digest or persistence failure");
+		udb_handle_persistence_failure(ctx, peer, block, "END snapshot", 0);
 		return UDB_ERR_FATAL;
 	}
 	if (!udb_block_commit_stage(ctx, block, session, *digest))
@@ -4677,8 +4751,7 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, unsigned
 	{
 		/* rename(2) is the irreversible point: keep memory equal to the visible
 		 * snapshot, but fail the round and readiness until durability is proven. */
-		udb_mark_durability_uncertain(ctx, block, "staged snapshot");
-		udb_reconcile_abort(ctx, "snapshot durability uncertain", 1);
+		udb_handle_persistence_failure(ctx, peer, block, "END snapshot", 1);
 		return UDB_ERR_FATAL;
 	}
 	return 0;
@@ -4941,7 +5014,9 @@ static const char *udb_propagator_policy(UdbContext *ctx)
 {
 	if (udb_cfg && udb_cfg->propagator && *udb_cfg->propagator)
 		return udb_cfg->propagator;
-	return ctx && ctx->propagator_setting && *ctx->propagator_setting ? ctx->propagator_setting : NULL;
+	if (ctx && ctx->propagator_setting && *ctx->propagator_setting)
+		return ctx->propagator_setting;
+	return ctx && ctx->startup_propagator_setting && *ctx->startup_propagator_setting ? ctx->startup_propagator_setting : NULL;
 }
 
 static int udb_propagator_policy_present(UdbContext *ctx)
@@ -5122,6 +5197,7 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 		if (snap_res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
 		{
 			udb_record_free_tree(tree);
+			udb_handle_persistence_failure(ctx, direct_peer, block, "INS snapshot", 0);
 			udb_mutation_persist_error(client, "INS", letter);
 			return;
 		}
@@ -5143,7 +5219,7 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 		}
 		if (snap_res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
 		{
-			udb_mark_durability_uncertain(ctx, block, "INS snapshot");
+			udb_handle_persistence_failure(ctx, direct_peer, block, "INS snapshot", 1);
 			udb_mutation_persist_error(client, "INS", letter);
 			return;
 		}
@@ -5201,6 +5277,7 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, Client *direct_pee
 		if (snap_res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
 		{
 			udb_record_free_tree(tree);
+			udb_handle_persistence_failure(ctx, direct_peer, block, "DEL snapshot", 0);
 			udb_mutation_persist_error(client, "DEL", letter);
 			return;
 		}
@@ -5213,7 +5290,7 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, Client *direct_pee
 			udb_sync_snomask_filter();
 		if (snap_res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
 		{
-			udb_mark_durability_uncertain(ctx, block, "DEL snapshot");
+			udb_handle_persistence_failure(ctx, direct_peer, block, "DEL snapshot", 1);
 			udb_mutation_persist_error(client, "DEL", letter);
 			return;
 		}
@@ -5261,6 +5338,7 @@ static void udb_mutation_drp(UdbContext *ctx, Client *client, Client *direct_pee
 		if (snap_res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
 		{
 			udb_record_free_tree(tree);
+			udb_handle_persistence_failure(ctx, direct_peer, block, "DRP snapshot", 0);
 			udb_mutation_persist_error(client, "DRP", letter);
 			return;
 		}
@@ -5269,7 +5347,7 @@ static void udb_mutation_drp(UdbContext *ctx, Client *client, Client *direct_pee
 		udb_block_replace_tree(ctx, block, tree, 0);
 		if (snap_res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
 		{
-			udb_mark_durability_uncertain(ctx, block, "DRP snapshot");
+			udb_handle_persistence_failure(ctx, direct_peer, block, "DRP snapshot", 1);
 			udb_mutation_persist_error(client, "DRP", letter);
 			return;
 		}
@@ -5944,6 +6022,7 @@ struct UdbNickPasswordCache
 };
 
 static ModDataInfo *udb_nick_password_cache_md = NULL;
+static ModDataInfo *udb_nick_oper_owned_md = NULL;
 
 static void udb_nick_password_cache_free(ModData *m)
 {
@@ -6086,13 +6165,15 @@ static void udb_nick_grant_oper(Client *client, UdbRecord *nick_rec, UdbRecord *
 	}
 
 	make_oper(client, "UDB", operclass, NULL, 0, NULL, NULL, NULL);
+	if (IsOper(client) && udb_nick_oper_owned_md)
+		moddata_local_client(client, udb_nick_oper_owned_md).i = 1;
 }
 
 static void udb_nick_revoke_oper(Client *client)
 {
 	long old_umodes;
 
-	if (!client || !IsOper(client))
+	if (!client || !IsOper(client) || !udb_nick_oper_owned_md || !moddata_local_client(client, udb_nick_oper_owned_md).i)
 		return;
 
 	old_umodes = client->umodes & ALL_UMODES;
@@ -6105,6 +6186,7 @@ static void udb_nick_revoke_oper(Client *client)
 	if (irccounts.operators > 0)
 		irccounts.operators--;
 	remove_oper_privileges(client, 0);
+	moddata_local_client(client, udb_nick_oper_owned_md).i = 0;
 	send_umode_out(client, 1, old_umodes);
 }
 
@@ -6191,7 +6273,11 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync)
 	/* If this is a hot sync, check if the user is identified */
 	if (is_hot_sync)
 	{
-		if (!has_user_mode(client, 'r'))
+		/* A full-N replacement must not evict the account that already owns
+		 * this profile; +r alone is insufficient without the matching account. */
+		int matching_account = client->user && has_user_mode(client, 'r') &&
+			strcmp(client->user->account, "*") && !strcasecmp(client->user->account, nick_rec->key);
+		if (!matching_account)
 		{
 			UdbRecord *pass_rec = udb_record_find(udb_ctx, NKEY_PASS, nick_rec);
 			if (pass_rec)
@@ -6816,6 +6902,10 @@ int udb_nicks_init(ModuleInfo *modinfo)
 	mreq.type = MODDATATYPE_LOCAL_CLIENT;
 	mreq.free = udb_nick_password_cache_free;
 	udb_nick_password_cache_md = ModDataAdd(modinfo->handle, mreq);
+	memset(&mreq, 0, sizeof(mreq));
+	mreq.name = "udb_nick_oper_owned";
+	mreq.type = MODDATATYPE_LOCAL_CLIENT;
+	udb_nick_oper_owned_md = ModDataAdd(modinfo->handle, mreq);
 
 	CommandAdd(modinfo->handle, "GHOST", cmd_ghost, 3, CMD_USER);
 	HookAdd(modinfo->handle, HOOKTYPE_CAN_USE_NICK, 0, udb_hook_can_use_nick);
@@ -9108,6 +9198,78 @@ static int udb_blocks_load_all(UdbContext *ctx)
 	return success;
 }
 
+static void udb_startup_candidates_discard(UdbContext *ctx)
+{
+	unsigned int i;
+
+	if (!ctx)
+		return;
+	for (i = 0; i < UDB_NUM_BLOCKS; i++)
+	{
+		udb_record_free_tree(ctx->startup_candidates[i].tree);
+		memset(&ctx->startup_candidates[i], 0, sizeof(ctx->startup_candidates[i]));
+	}
+}
+
+/* The S candidate is the sole pre-publication policy input. It is read-only:
+ * no active root, hash entry, or runtime callback observes it before READY. */
+static void udb_startup_load_policy(UdbContext *ctx)
+{
+	UdbStartupCandidate *candidate;
+	UdbRecord *record;
+
+	if (!ctx)
+		return;
+	safe_free(ctx->startup_propagator_setting);
+	candidate = &ctx->startup_candidates[udb_block_letter_to_index('S')];
+	if (candidate->load_state != UDB_LOAD_SUCCESS || !candidate->tree)
+		return;
+	for (record = candidate->tree->child; record; record = record->sibling)
+	{
+		if (!strcasecmp(record->key, SKEY_PROPAGATOR) && record->data_str && *record->data_str)
+		{
+			safe_strdup(ctx->startup_propagator_setting, record->data_str);
+			break;
+		}
+	}
+}
+
+static int udb_startup_publish(UdbContext *ctx)
+{
+	UdbBlock *block;
+
+	if (!ctx)
+		return 0;
+	for (block = ctx->block_list; block; block = block->next)
+	{
+		UdbStartupCandidate *candidate = &ctx->startup_candidates[udb_block_letter_to_index(block->letter)];
+		UdbRecord *record;
+		struct stat st;
+
+		if (candidate->load_state != UDB_LOAD_SUCCESS || !candidate->tree)
+			return 0;
+		udb_record_free_tree(block->tree);
+		udb_hash_clear_block(ctx, udb_block_letter_to_index(block->letter));
+		block->tree = candidate->tree;
+		block->record_count = candidate->record_count;
+		block->checksum = candidate->checksum;
+		block->generation = candidate->generation;
+		block->load_state = UDB_LOAD_SUCCESS;
+		candidate->tree = NULL;
+		ctx->total_records += block->record_count;
+		for (record = block->tree->child; record; record = record->sibling)
+			udb_hash_insert_record(ctx, record, udb_block_letter_to_index(block->letter), record->key);
+		udb_block_set_context_root(ctx, block);
+		if (stat(block->filepath, &st) == 0)
+		{
+			block->filesize = st.st_size;
+			block->modified_at = st.st_mtime;
+		}
+	}
+	udb_startup_candidates_discard(ctx);
+	return 1;
+}
+
 static int udb_fsync_parent_directory(const char *path)
 {
 	char dir_path[UDB_BLOCK_PATH_MAX];
@@ -9239,6 +9401,10 @@ static void udb_engine_cleanup(UdbContext *ctx)
 
 	if (!ctx)
 		return;
+	/* Runtime callbacks need their source records; remove every UDB-owned
+	 * effect before releasing any block tree. */
+	for (b = ctx->block_list; b; b = b->next)
+		udb_remove_tree_effects(ctx, b);
 	udb_ips_shutdown();
 	udb_hello_cleanup_all();
 	for (b = ctx->block_list; b;)
@@ -9252,6 +9418,8 @@ static void udb_engine_cleanup(UdbContext *ctx)
 		b = next;
 	}
 	udb_hash_destroy(ctx);
+	udb_startup_candidates_discard(ctx);
+	safe_free(ctx->startup_propagator_setting);
 	udb_config_free(ctx);
 	safe_free(ctx);
 	if (udb_ctx == ctx)
@@ -9659,9 +9827,9 @@ static int udb_engine_init(void)
 	udb_block_set_context_root(udb_ctx, udb_ctx->blocks['S']);
 	udb_block_set_context_root(udb_ctx, udb_ctx->blocks['L']);
 	udb_block_set_context_root(udb_ctx, udb_ctx->blocks['K']);
+	udb_ctx->startup_loading = 1;
 	(void)udb_blocks_load_all(udb_ctx);
 
-	int policy_present = udb_propagator_policy_present(udb_ctx);
 	time_t persisted_last_sync = 0;
 	UdbPersistentState persisted_state = UDB_PERSIST_BOOTSTRAPPING;
 	unsigned long persisted_generation = 0;
@@ -9680,10 +9848,19 @@ static int udb_engine_init(void)
 			backup_present = 1;
 		else if (lstat(backup_path, &backup_st) == 0 || errno != ENOENT)
 			backup_present = 1;
-		if (startup_block->load_state != UDB_LOAD_SUCCESS)
+		UdbStartupCandidate *candidate = &udb_ctx->startup_candidates[udb_block_letter_to_index(startup_block->letter)];
+		if (candidate->load_state != UDB_LOAD_SUCCESS)
 			all_present_valid = 0;
-		if (startup_block->load_state != UDB_LOAD_EMPTY)
+		if (candidate->load_state != UDB_LOAD_EMPTY)
 			all_missing = 0;
+		/* Missing snapshots have no candidate tree. The pre-existing empty active
+		 * root is safe to mark initialized for a later authoritative bootstrap. */
+		if (candidate->load_state == UDB_LOAD_EMPTY)
+		{
+			startup_block->load_state = UDB_LOAD_EMPTY;
+			startup_block->checksum = 0;
+			startup_block->generation = 0;
+		}
 	}
 
 	if (backup_present)
@@ -9702,7 +9879,8 @@ static int udb_engine_init(void)
 		{
 			int generation_matches = 1;
 			for (startup_block = udb_ctx->block_list; startup_block; startup_block = startup_block->next)
-				if (startup_block->generation != persisted_generation)
+				if (udb_ctx->startup_candidates[udb_block_letter_to_index(startup_block->letter)].generation !=
+					persisted_generation)
 					generation_matches = 0;
 			if (!all_present_valid || !generation_matches)
 			{
@@ -9724,6 +9902,8 @@ static int udb_engine_init(void)
 					"Complete snapshots exist but no valid .udb_state; refusing automatic READY");
 	}
 
+	udb_startup_load_policy(udb_ctx);
+	int policy_present = udb_propagator_policy_present(udb_ctx);
 	UdbPropagatorSelection selected;
 	int has_propagator = udb_select_propagator(udb_ctx, 0, &selected);
 	int is_primary_local = (has_propagator && selected.is_local);
@@ -9733,6 +9913,13 @@ static int udb_engine_init(void)
 	 * selected. */
 	if ((is_primary_local || !policy_present) && startup_state == UDB_STARTUP_FRESH)
 	{
+		/* A genuinely fresh database has no candidate ownership to publish, but
+		 * its original empty active roots are safe to persist as generation one. */
+		for (startup_block = udb_ctx->block_list; startup_block; startup_block = startup_block->next)
+		{
+			startup_block->load_state = UDB_LOAD_EMPTY;
+			startup_block->checksum = 0;
+		}
 		if (udb_transition_to_ready(udb_ctx, time(NULL)))
 		{
 			udb_sync_status = UDB_SYNC_OK;
@@ -9745,12 +9932,28 @@ static int udb_engine_init(void)
 	}
 	else if (startup_state == UDB_STARTUP_PERSISTED_READY_VALID)
 	{
+		/* This is the sole persisted-startup publication point. */
+		if (!udb_startup_publish(udb_ctx))
+		{
+			udb_startup_candidates_discard(udb_ctx);
+			udb_ready = 0;
+			udb_last_successful_sync = 0;
+			return 0;
+		}
+		udb_ctx->startup_loading = 0;
+		for (startup_block = udb_ctx->block_list; startup_block; startup_block = startup_block->next)
+			udb_apply_tree_effects(udb_ctx, startup_block);
+		safe_free(udb_ctx->startup_propagator_setting);
 		udb_ready = 1;
 		udb_last_successful_sync = persisted_last_sync;
 		udb_sync_status = UDB_SYNC_OK;
 	}
 	else
 	{
+		/* Reject every candidate as a set without touching active roots, hashes,
+		 * or effects. The context retains only its original empty block roots. */
+		udb_startup_candidates_discard(udb_ctx);
+		udb_ctx->startup_loading = 0;
 		udb_ready = 0;
 		udb_last_successful_sync = 0;
 		/* Preserve malformed state verbatim, but downgrade a valid READY marker whose snapshots are incomplete. */
@@ -9760,6 +9963,8 @@ static int udb_engine_init(void)
 			udb_persistence_set_state(UDB_PERSIST_BOOTSTRAPPING, UDB_ORIGIN_RECOVERY, persisted_generation, 0);
 	}
 
+	udb_startup_candidates_discard(udb_ctx);
+	udb_ctx->startup_loading = 0;
 	udb_propagator_availability_refresh();
 	udb_sync_status_refresh();
 	return 1;

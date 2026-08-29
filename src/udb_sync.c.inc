@@ -267,6 +267,28 @@ static void udb_reconcile_abort(UdbContext *ctx, const char *reason, int schedul
 	udb_reconcile_reset();
 }
 
+/* One recovery boundary for every operation whose persistence outcome is not
+ * trustworthy.  It intentionally reuses authority selection and retry bounds;
+ * it does not alter HEL negotiation or hop-by-hop routing. */
+static void udb_handle_persistence_failure(UdbContext *ctx, Client *peer, UdbBlock *block,
+											const char *operation, int commit_uncertain)
+{
+	if (commit_uncertain)
+		udb_mark_durability_uncertain(ctx, block, operation);
+	udb_ready = 0;
+	udb_last_successful_sync = 0;
+	udb_sync_status = UDB_SYNC_DEGRADED;
+	udb_degraded_since = time(NULL);
+	if (udb_reconcile.active)
+		udb_reconcile_abort(ctx, operation ? operation : "persistence failure", 1);
+	else if (udb_reconcile.retry_count < UDB_RECONCILE_RETRY_MAX)
+	{
+		udb_reconcile.retry_count++;
+		udb_reconcile.next_retry_at = time(NULL) + (UDB_RECONCILE_RETRY_BASE << udb_reconcile.retry_count);
+	}
+	(void)peer;
+}
+
 static void udb_sync_round_failure(UdbBlock *block, Client *peer, unsigned long round_id, const char *reason)
 {
 	if (block && peer && udb_reconcile.active && udb_reconcile.authority_peer == peer &&
@@ -815,6 +837,7 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, unsigned
 	{
 		block->generation = previous_generation;
 		udb_sync_abort(block, "digest or persistence failure");
+		udb_handle_persistence_failure(ctx, peer, block, "END snapshot", 0);
 		return UDB_ERR_FATAL;
 	}
 	if (!udb_block_commit_stage(ctx, block, session, *digest))
@@ -827,8 +850,7 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, unsigned
 	{
 		/* rename(2) is the irreversible point: keep memory equal to the visible
 		 * snapshot, but fail the round and readiness until durability is proven. */
-		udb_mark_durability_uncertain(ctx, block, "staged snapshot");
-		udb_reconcile_abort(ctx, "snapshot durability uncertain", 1);
+		udb_handle_persistence_failure(ctx, peer, block, "END snapshot", 1);
 		return UDB_ERR_FATAL;
 	}
 	return 0;

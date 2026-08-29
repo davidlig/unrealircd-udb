@@ -167,6 +167,7 @@ class MockPeer:
         self.sock.settimeout(0.25)
         self.lines = []
         self.buffer = ""
+        self.round_id = 0
         self.send_raw(f"PASS :{LINK_PASSWORD}")
         self.send_raw(f"PROTOCTL EAUTH={self.name}")
         self.send_raw("PROTOCTL NOQUIT NICKv2 SJOIN SJOIN2 UMODE2 SJ3 BIGLINES SID=" + self.sid)
@@ -184,6 +185,22 @@ class MockPeer:
 
     def send_raw(self, command):
         self.sock.sendall((command + "\r\n").encode("ascii"))
+
+    def send_snapshots(self, snapshots, timestamp):
+        self.round_id += 1
+        for letter, txid, records, advertised_checksum, checksum in snapshots:
+            self.send(f"DB {self.target_sid} INF {self.round_id} {letter} {advertised_checksum} {timestamp}")
+        for letter, txid, records, advertised_checksum, checksum in snapshots:
+            self.wait_for(lambda l, letter=letter: f" RES {self.round_id} {letter}" in l,
+                          f"RES for block {letter}")
+        for letter, txid, records, advertised_checksum, checksum in snapshots:
+            self.send(f"DB {self.target_sid} BEGIN {self.round_id} {letter} {txid} 00000000")
+            for path, value in records:
+                self.send(f"DB {self.target_sid} PUT {self.round_id} {letter} {txid} {path} {value}")
+            self.send(f"DB {self.target_sid} END {self.round_id} {letter} {txid} {checksum}")
+            self.wait_for(lambda l, letter=letter, txid=txid:
+                          f" ACK {self.round_id} {letter} {txid} " in l,
+                          f"ACK for block {letter}")
 
     def send(self, command):
         if not command.startswith(":"):
@@ -363,9 +380,11 @@ def test_suite():
             c1_post.close()
 
             peer_a2 = MockPeer("peer-a.test", "00A", "127.0.0.1", p1_ports[1], "001")
-            peer_a2.send(f"DB 001 INF 2 N {n_crc:08x} 1000")
-            for b in ('C', 'I', 'S', 'L', 'K'):
-                peer_a2.send(f"DB 001 INF 2 {b} 00000000 0")
+            sync_timestamp = int(time.time()) + 1000
+            peer_a2.send_snapshots(
+                [("N", "tx2_N", [("alice::vhost", "alice.net")], "deadbeef", f"{n_crc:08x}")]
+                + [(b, f"tx2_{b}", [], "deadbeef", "00000000") for b in ('C', 'I', 'S', 'L', 'K')],
+                sync_timestamp)
 
             assert wait_for_state(state_file, "STATE=READY"), ".udb_state must now be READY"
             c1_ready = MockClient("127.0.0.1", p1_ports[0], "user1_ready")

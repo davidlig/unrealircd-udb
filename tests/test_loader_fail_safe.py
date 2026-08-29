@@ -13,7 +13,7 @@ import sys
 import tempfile
 import time
 
-from udb_state_seed import seed_block, seed_ready_state
+from udb_state_seed import seed_block, seed_bootstrapping_state, seed_ready_state
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[5]
@@ -464,6 +464,60 @@ def run_tests(ircd_bin, keep=False):
         if nicks_db.read_bytes() != nicks_bytes or channels_db.read_bytes() != channels_bytes:
             raise AssertionError("Database files were modified during failed multi-block initialization!")
         print("PASS: Multi-block initialization failure protected all .db files against unwarranted persistence")
+
+        # -------------------------------------------------------------
+        # Test 7: rejected candidate sets never publish the K-line effect
+        # -------------------------------------------------------------
+        # Keep a valid K-line in every fixture.  A legacy per-block loader
+        # would export it even when another block was absent, mismatched, or
+        # the persisted state was not READY.  Candidate publication must leave
+        # K empty until the complete six-block READY generation validates.
+        invalid_candidates = (
+            ("missing", "C", None, True),
+            ("mixed", "C", 2, True),
+            ("non-ready", None, None, False),
+        )
+        for offset, (name, changed_block, generation, ready) in enumerate(invalid_candidates):
+            node7 = tmpdir / f"node7-{name}"
+            data_dir7 = node7 / "data"
+            data_dir7.mkdir(parents=True)
+            (node7 / "runtime-data").mkdir()
+            (node7 / "tmp").mkdir()
+            third_modules7 = node7 / "modules" / "third"
+            third_modules7.mkdir(parents=True)
+            shutil.copy2(module_path, third_modules7 / "udb.so")
+
+            for letter in ("N", "C", "I", "S", "L", "K"):
+                if letter == changed_block and generation is None:
+                    continue
+                body = "Q::blocked::reason candidate must not publish this line\n" if letter == "K" else ""
+                seed_block(data_dir7 / f"udb_{letter}.db", letter, body,
+                           generation=generation if letter == changed_block else 1)
+            if ready:
+                seed_ready_state(data_dir7)
+            else:
+                seed_bootstrapping_state(data_dir7)
+
+            client_port7, server_port7, tls_port7 = free_port(), free_port(), free_port()
+            config7 = node7 / "unrealircd.conf"
+            write_config(config7, f"udb-node7-{offset}.test", f"0B{offset}", client_port7, server_port7,
+                         tls_port7, module_path, data_dir7)
+            proc7 = subprocess.Popen(bwrap_command(node7, ircd_bin, config7),
+                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            time.sleep(1.0)
+            if proc7.poll() is not None:
+                stdout7, _ = proc7.communicate()
+                raise RuntimeError(f"ircd failed to start with {name} candidate set:\n{stdout7}")
+
+            services7 = MockServices("127.0.0.1", server_port7, ircd_sid=f"0B{offset}")
+            services7.send(f"DB 0B{offset} RES 1 K")
+            services7.receive(time.monotonic() + 1)
+            if any(" DB " in line and (" BEGIN 1 K " in line or " PUT 1 K " in line or
+                                          " END 1 K " in line) for line in services7.lines):
+                raise AssertionError(f"{name} candidate set exported a K record before READY publication")
+            services7.close()
+            stop(proc7)
+            print(f"PASS: {name} candidate set exported no K records before complete READY validation")
 
     finally:
         if not keep:

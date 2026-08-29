@@ -108,6 +108,18 @@ typedef enum UdbBlockLoadState
 	UDB_LOAD_FAILED
 } UdbBlockLoadState;
 
+/* Startup files are parsed before their trees are allowed to affect runtime
+ * state. The context flag keeps the loader side-effect-free until the full
+ * six-block READY set has been accepted. */
+typedef struct UdbStartupCandidate
+{
+	UdbRecord *tree;
+	unsigned int record_count;
+	unsigned long checksum;
+	unsigned long generation;
+	UdbBlockLoadState load_state;
+} UdbStartupCandidate;
+
 typedef enum UdbSnapshotResult
 {
 	UDB_SNAPSHOT_FAILED_BEFORE_COMMIT = 0,
@@ -194,6 +206,8 @@ typedef struct UdbContext
 	UdbRecord *links;
 	UdbRecord *lines;
 	UdbRecord **hash_table[UDB_NUM_BLOCKS];
+	UdbStartupCandidate startup_candidates[UDB_NUM_BLOCKS];
+	char *startup_propagator_setting;
 	char *propagator_setting;
 	char *quit_ips;
 	char *quit_clones;
@@ -204,6 +218,7 @@ typedef struct UdbContext
 	char *ipserv_mask;
 	int block_count;
 	int total_records;
+	int startup_loading;
 } UdbContext;
 
 static UdbContext *udb_ctx = NULL;
@@ -282,6 +297,8 @@ static int udb_persistence_load_state(UdbPersistentState *state_out, UdbPersiste
 static UdbStatePersistResult udb_persistence_set_state(UdbPersistentState state, UdbPersistenceOrigin origin,
 													   unsigned long generation, time_t last_sync);
 static void udb_mark_durability_uncertain(UdbContext *ctx, UdbBlock *block, const char *operation);
+static void udb_handle_persistence_failure(UdbContext *ctx, Client *peer, UdbBlock *block,
+											const char *operation, int commit_uncertain);
 
 static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs);
 static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type);
@@ -304,6 +321,9 @@ static int udb_block_load(UdbContext *ctx, UdbBlock *block);
 static void udb_block_unload(UdbContext *ctx, UdbBlock *block);
 static void udb_block_reset(UdbContext *ctx, UdbBlock *block);
 static int udb_blocks_load_all(UdbContext *ctx);
+static void udb_startup_candidates_discard(UdbContext *ctx);
+static int udb_startup_publish(UdbContext *ctx);
+static void udb_startup_load_policy(UdbContext *ctx);
 static int udb_blocks_save_all(UdbContext *ctx);
 static UdbBlock *udb_block_by_letter(UdbContext *ctx, char letter);
 static int udb_record_fits_limits(const char *path, const char *value);

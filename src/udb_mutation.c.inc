@@ -13,7 +13,9 @@ static const char *udb_propagator_policy(UdbContext *ctx)
 {
 	if (udb_cfg && udb_cfg->propagator && *udb_cfg->propagator)
 		return udb_cfg->propagator;
-	return ctx && ctx->propagator_setting && *ctx->propagator_setting ? ctx->propagator_setting : NULL;
+	if (ctx && ctx->propagator_setting && *ctx->propagator_setting)
+		return ctx->propagator_setting;
+	return ctx && ctx->startup_propagator_setting && *ctx->startup_propagator_setting ? ctx->startup_propagator_setting : NULL;
 }
 
 static int udb_propagator_policy_present(UdbContext *ctx)
@@ -194,6 +196,7 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 		if (snap_res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
 		{
 			udb_record_free_tree(tree);
+			udb_handle_persistence_failure(ctx, direct_peer, block, "INS snapshot", 0);
 			udb_mutation_persist_error(client, "INS", letter);
 			return;
 		}
@@ -215,7 +218,7 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 		}
 		if (snap_res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
 		{
-			udb_mark_durability_uncertain(ctx, block, "INS snapshot");
+			udb_handle_persistence_failure(ctx, direct_peer, block, "INS snapshot", 1);
 			udb_mutation_persist_error(client, "INS", letter);
 			return;
 		}
@@ -273,6 +276,7 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, Client *direct_pee
 		if (snap_res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
 		{
 			udb_record_free_tree(tree);
+			udb_handle_persistence_failure(ctx, direct_peer, block, "DEL snapshot", 0);
 			udb_mutation_persist_error(client, "DEL", letter);
 			return;
 		}
@@ -285,7 +289,7 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, Client *direct_pee
 			udb_sync_snomask_filter();
 		if (snap_res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
 		{
-			udb_mark_durability_uncertain(ctx, block, "DEL snapshot");
+			udb_handle_persistence_failure(ctx, direct_peer, block, "DEL snapshot", 1);
 			udb_mutation_persist_error(client, "DEL", letter);
 			return;
 		}
@@ -333,6 +337,7 @@ static void udb_mutation_drp(UdbContext *ctx, Client *client, Client *direct_pee
 		if (snap_res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
 		{
 			udb_record_free_tree(tree);
+			udb_handle_persistence_failure(ctx, direct_peer, block, "DRP snapshot", 0);
 			udb_mutation_persist_error(client, "DRP", letter);
 			return;
 		}
@@ -341,7 +346,7 @@ static void udb_mutation_drp(UdbContext *ctx, Client *client, Client *direct_pee
 		udb_block_replace_tree(ctx, block, tree, 0);
 		if (snap_res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
 		{
-			udb_mark_durability_uncertain(ctx, block, "DRP snapshot");
+			udb_handle_persistence_failure(ctx, direct_peer, block, "DRP snapshot", 1);
 			udb_mutation_persist_error(client, "DRP", letter);
 			return;
 		}

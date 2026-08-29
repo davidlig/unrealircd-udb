@@ -19,6 +19,7 @@ struct UdbNickPasswordCache
 };
 
 static ModDataInfo *udb_nick_password_cache_md = NULL;
+static ModDataInfo *udb_nick_oper_owned_md = NULL;
 
 static void udb_nick_password_cache_free(ModData *m)
 {
@@ -161,13 +162,15 @@ static void udb_nick_grant_oper(Client *client, UdbRecord *nick_rec, UdbRecord *
 	}
 
 	make_oper(client, "UDB", operclass, NULL, 0, NULL, NULL, NULL);
+	if (IsOper(client) && udb_nick_oper_owned_md)
+		moddata_local_client(client, udb_nick_oper_owned_md).i = 1;
 }
 
 static void udb_nick_revoke_oper(Client *client)
 {
 	long old_umodes;
 
-	if (!client || !IsOper(client))
+	if (!client || !IsOper(client) || !udb_nick_oper_owned_md || !moddata_local_client(client, udb_nick_oper_owned_md).i)
 		return;
 
 	old_umodes = client->umodes & ALL_UMODES;
@@ -180,6 +183,7 @@ static void udb_nick_revoke_oper(Client *client)
 	if (irccounts.operators > 0)
 		irccounts.operators--;
 	remove_oper_privileges(client, 0);
+	moddata_local_client(client, udb_nick_oper_owned_md).i = 0;
 	send_umode_out(client, 1, old_umodes);
 }
 
@@ -266,7 +270,11 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync)
 	/* If this is a hot sync, check if the user is identified */
 	if (is_hot_sync)
 	{
-		if (!has_user_mode(client, 'r'))
+		/* A full-N replacement must not evict the account that already owns
+		 * this profile; +r alone is insufficient without the matching account. */
+		int matching_account = client->user && has_user_mode(client, 'r') &&
+			strcmp(client->user->account, "*") && !strcasecmp(client->user->account, nick_rec->key);
+		if (!matching_account)
 		{
 			UdbRecord *pass_rec = udb_record_find(udb_ctx, NKEY_PASS, nick_rec);
 			if (pass_rec)
@@ -891,6 +899,10 @@ int udb_nicks_init(ModuleInfo *modinfo)
 	mreq.type = MODDATATYPE_LOCAL_CLIENT;
 	mreq.free = udb_nick_password_cache_free;
 	udb_nick_password_cache_md = ModDataAdd(modinfo->handle, mreq);
+	memset(&mreq, 0, sizeof(mreq));
+	mreq.name = "udb_nick_oper_owned";
+	mreq.type = MODDATATYPE_LOCAL_CLIENT;
+	udb_nick_oper_owned_md = ModDataAdd(modinfo->handle, mreq);
 
 	CommandAdd(modinfo->handle, "GHOST", cmd_ghost, 3, CMD_USER);
 	HookAdd(modinfo->handle, HOOKTYPE_CAN_USE_NICK, 0, udb_hook_can_use_nick);

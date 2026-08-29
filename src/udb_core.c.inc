@@ -1450,23 +1450,38 @@ static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *li
 
 static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 {
+	UdbStartupCandidate *startup_candidate = NULL;
 	if (!block || !block->filepath)
 		return 0;
+	if (ctx && ctx->startup_loading)
+	{
+		startup_candidate = &ctx->startup_candidates[udb_block_letter_to_index(block->letter)];
+		udb_record_free_tree(startup_candidate->tree);
+		memset(startup_candidate, 0, sizeof(*startup_candidate));
+	}
 
 	FILE *fp = fopen(block->filepath, "r");
 	if (!fp)
 	{
 		if (errno == ENOENT)
 		{
-			udb_block_reset(ctx, block);
-			block->load_state = UDB_LOAD_EMPTY;
-			block->checksum = 0;
-			block->modified_at = 0;
-			block->filesize = 0;
+			if (startup_candidate)
+				startup_candidate->load_state = UDB_LOAD_EMPTY;
+			else
+			{
+				udb_block_reset(ctx, block);
+				block->load_state = UDB_LOAD_EMPTY;
+				block->checksum = 0;
+				block->modified_at = 0;
+				block->filesize = 0;
+			}
 			return 1;
 		}
 		int saved_errno = errno;
-		block->load_state = UDB_LOAD_FAILED;
+		if (startup_candidate)
+			startup_candidate->load_state = UDB_LOAD_FAILED;
+		else
+			block->load_state = UDB_LOAD_FAILED;
 		udb_log(ULOG_ERROR, "UDB_FILE_OPEN_FAILED", NULL, "Cannot open database file $file for block $block: $error",
 				log_data_string("file", block->filepath), log_data_string("block", (char[]){block->letter, '\0'}),
 				log_data_string("error", strerror(saved_errno)));
@@ -1541,7 +1556,10 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 		}
 		safe_free(line);
 		udb_record_free_tree(candidate);
-		block->load_state = UDB_LOAD_FAILED;
+		if (startup_candidate)
+			startup_candidate->load_state = UDB_LOAD_FAILED;
+		else
+			block->load_state = UDB_LOAD_FAILED;
 		fclose(fp);
 		return 0;
 	}
@@ -1555,7 +1573,10 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 				log_data_string("block", (char[]){block->letter, '\0'}), log_data_string("file", block->filepath),
 				log_data_string("error", strerror(saved_errno)));
 		udb_record_free_tree(candidate);
-		block->load_state = UDB_LOAD_FAILED;
+		if (startup_candidate)
+			startup_candidate->load_state = UDB_LOAD_FAILED;
+		else
+			block->load_state = UDB_LOAD_FAILED;
 		return 0;
 	}
 
@@ -1566,36 +1587,46 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 		udb_log(ULOG_ERROR, "UDB_FILE_CHECKSUM_FAILED", NULL, "Failed to compute checksum for block $block file $file",
 				log_data_string("block", (char[]){block->letter, '\0'}), log_data_string("file", block->filepath));
 		udb_record_free_tree(candidate);
-		block->load_state = UDB_LOAD_FAILED;
+		if (startup_candidate)
+			startup_candidate->load_state = UDB_LOAD_FAILED;
+		else
+			block->load_state = UDB_LOAD_FAILED;
 		return 0;
 	}
 
-	udb_block_replace_tree(ctx, block, candidate, record_count);
-	block->checksum = checksum;
-	block->generation = generation_seen ? loaded_generation : 0;
-
-	for (UdbRecord *curr = block->tree->child; curr; curr = curr->sibling)
+	if (startup_candidate)
 	{
-		for (UdbRecord *sub = curr->child; sub; sub = sub->sibling)
-			udb_apply_special_record(ctx, block, sub, 1);
-		udb_apply_special_record(ctx, block, curr, 1);
+		startup_candidate->tree = candidate;
+		startup_candidate->record_count = record_count;
+		startup_candidate->checksum = checksum;
+		startup_candidate->generation = generation_seen ? loaded_generation : 0;
+		startup_candidate->load_state = UDB_LOAD_SUCCESS;
+	}
+	else
+	{
+		udb_block_replace_tree(ctx, block, candidate, record_count);
+		block->checksum = checksum;
+		block->generation = generation_seen ? loaded_generation : 0;
+		udb_apply_tree_effects(ctx, block);
+		block->load_state = UDB_LOAD_SUCCESS;
 	}
 
-	block->load_state = UDB_LOAD_SUCCESS;
-
-	struct stat st;
-	if (stat(block->filepath, &st) == 0)
+	if (!startup_candidate)
 	{
-		block->filesize = st.st_size;
-		block->modified_at = st.st_mtime;
+		struct stat st;
+		if (stat(block->filepath, &st) == 0)
+		{
+			block->filesize = st.st_size;
+			block->modified_at = st.st_mtime;
+		}
 	}
 
 	char logbuf[512];
 	snprintf(logbuf, sizeof(logbuf), "Loaded block %c from %s (%u records)", block->letter, block->filepath,
-			 block->record_count);
+			 startup_candidate ? startup_candidate->record_count : block->record_count);
 	udb_log(ULOG_INFO, "UDB_FILE_LOADED", NULL, "$msg", log_data_string("msg", logbuf));
 
-	if (block->letter == 'L')
+	if (!startup_candidate && block->letter == 'L')
 		udb_sync_snomask_filter();
 
 	return 1;
