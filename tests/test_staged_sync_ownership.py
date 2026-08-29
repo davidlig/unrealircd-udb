@@ -94,6 +94,7 @@ loadmodule "cloak_sha256";
 loadmodule "third/udb";
 udb {{
     database-directory "{dbdir}";
+    propagator "{SERVICES_A_NAME}";
 }}
 ''', encoding="ascii")
 
@@ -123,7 +124,7 @@ def stop(process):
 
 
 class MockPeer:
-    def __init__(self, name, sid, host, port):
+    def __init__(self, name, sid, host, port, propagator_advertised="?"):
         self.name = name
         self.sid = sid
         self.ircd_sid = IRCD_SID
@@ -138,7 +139,7 @@ class MockPeer:
         self.send(f"SERVER {self.name} 1 :UDB peer {self.name}")
         self.wait_for(lambda line: " 001 " in line or " EOS" in line or "NETINFO" in line, f"{self.name} link handshake")
         self.send("EOS")
-        self.send(f"DB {self.ircd_sid} HEL 4 ?")
+        self.send(f"DB {self.ircd_sid} HEL 4 {propagator_advertised}")
         self.wait_for(lambda line: " DB " in line and " HEL 4 " in line, f"{self.name} HEL response")
         self.send(f"DB {self.ircd_sid} HEL 4 ACK")
 
@@ -147,10 +148,12 @@ class MockPeer:
             command = ":" + self.sid + " " + command
         self.sock.sendall((command + "\r\n").encode("ascii"))
 
-    def send_begin(self, letter, txid, checksum="00000000", request=True):
+    def send_begin(self, letter, txid, checksum="DEADBEEF", request=True):
         if request:
             self.round_id += 1
-            self.send(f"DB {self.ircd_sid} INF {self.round_id} {letter} {checksum} {int(time.time()) + 1000}")
+            for inventory_letter in "NCISLK":
+                inventory_checksum = checksum if inventory_letter == letter else "00000000"
+                self.send(f"DB {self.ircd_sid} INF {self.round_id} {inventory_letter} {inventory_checksum} {int(time.time()) + 1000}")
             self.wait_for(lambda line: f" RES {self.round_id} {letter}" in line,
                           f"RES for round {self.round_id} block {letter}")
         self.send(f"DB {self.ircd_sid} BEGIN {self.round_id or 1} {letter} {txid} {checksum}")

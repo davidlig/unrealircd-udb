@@ -6,9 +6,6 @@ on:
   pull_request:
     branches: [ main ]
 
-env:
-  UDB_MODULE_PATH: ${{ github.workspace }}/src/udb.so
-
 jobs:
   agentic:
     name: Agent Configuration
@@ -114,6 +111,9 @@ jobs:
           ln -s "$GITHUB_WORKSPACE" "$UNREALIRCD_SOURCE/src/modules/third/udb"
           cd "$UNREALIRCD_SOURCE"
           make custommodule MODULEFILE=udb/src/udb
+          UDB_MODULE_PATH="$UNREALIRCD_SOURCE/src/modules/third/udb/src/udb.so"
+          test -f "$UDB_MODULE_PATH"
+          echo "UDB_MODULE_PATH=$UDB_MODULE_PATH" >> "$GITHUB_ENV"
           mkdir -p "$UDB_TEST_IRCD_ROOT/modules/third"
           cp src/modules/third/udb/src/udb.so "$UDB_TEST_IRCD_ROOT/modules/third/"
           make custommodule MODULEFILE=udb/tests/udb_test_mutator

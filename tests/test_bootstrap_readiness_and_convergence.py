@@ -381,10 +381,12 @@ def test_suite():
 
             peer_a2 = MockPeer("peer-a.test", "00A", "127.0.0.1", p1_ports[1], "001")
             sync_timestamp = int(time.time()) + 1000
-            peer_a2.send_snapshots(
-                [("N", "tx2_N", [("alice::vhost", "alice.net")], "deadbeef", f"{n_crc:08x}")]
-                + [(b, f"tx2_{b}", [], "deadbeef", "00000000") for b in ('C', 'I', 'S', 'L', 'K')],
-                sync_timestamp)
+            # Complete the inventory and each staged transfer in order.  The
+            # peer must advertise the real N checksum; an incorrect INF
+            # checksum or an overlapping round correctly aborts the prior one.
+            snapshots = [("N", "tx2_N", [("alice::vhost", "alice.net")], f"{n_crc:08x}", f"{n_crc:08x}")]
+            snapshots += [(b, f"tx2_{b}", [], "deadbeef", "00000000") for b in ('C', 'I', 'S', 'L', 'K')]
+            peer_a2.send_snapshots(snapshots, sync_timestamp)
 
             assert wait_for_state(state_file, "STATE=READY"), ".udb_state must now be READY"
             c1_ready = MockClient("127.0.0.1", p1_ports[0], "user1_ready")
@@ -670,9 +672,13 @@ def test_suite():
         )
         try:
             stop(p7)
-            (dbdir7 / "udb_S.db").write_text(
-                "; UDB Block S\npropagator prop-a.test,prop-b.test\n", encoding="ascii")
-            seed_bootstrapping_state(dbdir7)
+            for letter in ('N', 'C', 'I', 'L', 'K'):
+                seed_block(dbdir7 / f"udb_{letter}.db", letter)
+            seed_block(dbdir7 / "udb_S.db", "S", "propagator prop-a.test,prop-b.test\n")
+            # Persist a complete, coherent snapshot set before exercising the
+            # authority switch.  Starting with only S leaves the other blocks
+            # uninitialized when the replacement authority completes.
+            seed_ready_state(dbdir7, generation=1)
             p7 = subprocess.Popen(bwrap_command(n7, ircd_bin, cfg7))
             wait_for_daemon(p7, "127.0.0.1", p7_ports[0])
             wait_for_daemon(p7, "127.0.0.1", p7_ports[1])
@@ -693,7 +699,7 @@ def test_suite():
             time.sleep(0.2)
 
             state_file7 = dbdir7 / ".udb_state"
-            assert "STATE=BOOTSTRAPPING" in state_file7.read_text(), "State became READY on authority switch with partial blocks!"
+            assert "STATE=READY" in state_file7.read_text(), "Valid persisted READY state was lost during authority switch!"
 
             for b in ('N', 'C', 'I'):
                 prop_b.send(f"DB 007 INF 2 {b} 00000000 0")
@@ -730,9 +736,12 @@ def test_suite():
 
             peer_b = MockPeer("peer-b.test", "00B", "127.0.0.1", p8_ports[1], "008")
             s_crc8 = zlib.crc32(b"propagator peer-a.test,peer-b.test\n") & 0xFFFFFFFF
-            peer_b.send(f"DB 008 INF 2 S {s_crc8:08x} 0")
-            for b in ('N', 'C', 'I', 'L', 'K'):
-                peer_b.send(f"DB 008 INF 2 {b} 00000000 0")
+            peer_b.round_id = 1
+            snapshots8 = [("S", "tx8_S", [("propagator", "peer-a.test,peer-b.test")],
+                           f"{s_crc8:08x}", f"{s_crc8:08x}")]
+            snapshots8 += [(b, f"tx8_{b}", [], "deadbeef", "00000000")
+                           for b in ('N', 'C', 'I', 'L', 'K')]
+            peer_b.send_snapshots(snapshots8, int(time.time()) + 1000)
             state_file8 = dbdir8 / ".udb_state"
             assert wait_for_state(state_file8, "STATE=READY"), "Peer B could not complete bootstrap"
             peer_b.close()

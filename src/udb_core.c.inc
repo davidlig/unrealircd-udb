@@ -1274,6 +1274,7 @@ static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSessi
 	block->tree = session->tree;
 	session->tree = NULL;
 	block->record_count = real_count;
+	block->load_state = real_count ? UDB_LOAD_SUCCESS : UDB_LOAD_EMPTY;
 	ctx->total_records += block->record_count;
 	for (rec = block->tree->child; rec; rec = rec->sibling)
 		udb_hash_insert_record(ctx, rec, udb_block_letter_to_index(block->letter), rec->key);
