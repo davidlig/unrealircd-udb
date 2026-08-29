@@ -116,7 +116,7 @@ udb {{
 
 def bwrap_command(node, ircd, config, module, mutator=None, configtest=False, rename_failure=False,
                     rename_failure_arm=False, fsync_failure=False, directory_fsync_failure=False,
-                    state_directory_fsync_failure=False):
+                    state_directory_fsync_failure=False, rename_failure_target=None):
     # A read-only host root leaves dependencies and installed modules available.
     # The runtime data mount isolates UnrealIRCd's control socket; UDB uses data/.
     for sub in ("runtime-data", "tmp", "cache", "logs"):
@@ -133,7 +133,8 @@ def bwrap_command(node, ircd, config, module, mutator=None, configtest=False, re
     if rename_failure or fsync_failure or directory_fsync_failure or state_directory_fsync_failure:
         command.extend(("--setenv", "LD_PRELOAD", str(RENAME_FAIL_MODULE)))
     if rename_failure:
-        command.extend(("--setenv", "UDB_SNAPSHOT_RENAME_FAIL_TARGET", str(node / "data" / "udb_N.db")))
+        command.extend(("--setenv", "UDB_SNAPSHOT_RENAME_FAIL_TARGET",
+                        str(rename_failure_target or (node / "data" / "udb_N.db"))))
         if rename_failure_arm:
             command.extend(("--setenv", "UDB_SNAPSHOT_RENAME_FAIL_ARM",
                             str(node / "data" / "udb-snapshot-rename-fail-go")))
@@ -226,13 +227,15 @@ def staged_snapshot_observed(a_log, b_log):
             ordered(udb_commands(a_log), ("HEL", "RES", "ACK")))
 
 
-def equal_timestamp_winner_observed(a_log, b_log):
-    # 0B1 wins over 0A1, so only A requests B's divergent equal-time blocks.
+def authority_directed_sync_observed(a_log, b_log):
+    # A is the sole authority: B may only answer with RES and ACK, and only A
+    # sends INF/BEGIN/PUT/END.  Exactly two divergent blocks (N and K) are
+    # requested; no reverse request may appear.
     a_commands = udb_commands(a_log)
     b_commands = udb_commands(b_log)
-    return (ordered(a_commands, ("HEL", "INF", "BEGIN", "PUT", "END")) and
-            ordered(b_commands, ("HEL", "INF", "RES", "ACK")) and
-            a_commands.count("RES") == 0 and b_commands.count("RES") == 2)
+    return (ordered(a_commands, ("HEL", "RES", "ACK")) and
+            ordered(b_commands, ("HEL", "INF", "BEGIN", "PUT", "END")) and
+            a_commands.count("RES") == 2 and b_commands.count("RES") == 0)
 
 
 def snapshot_rename_failure_observed(a_log, b_log, b_db, baseline):
@@ -256,7 +259,7 @@ def snapshot_fsync_failure_observed(a_log, b_log, b_db, baseline):
 def snapshot_directory_fsync_failure_observed(a_log, b_log, b_db, state_file, baseline):
     return (ordered(udb_commands(b_log), ("HEL", "INF", "BEGIN", "PUT", "END")) and
             "ERR" in udb_commands(a_log) and "Staged sync acknowledged for block N" not in log_text(a_log) and
-            b_db.read_bytes() != baseline and db_contains(b_db, "harness-b::vhost winner.test") and
+            b_db.read_bytes() != baseline and db_contains(b_db, "harness-a::vhost winner.test") and
             not b_db.with_suffix(".db.tmp").exists() and
             "UDB_TEST_SNAPSHOT_DIR_FSYNC_FAIL:" in log_text(b_log) and
             "durability is uncertain; forcing BOOTSTRAPPING" in log_text(b_log) and state_file.is_file() and
@@ -267,6 +270,24 @@ def snapshot_directory_fsync_failure_observed(a_log, b_log, b_db, state_file, ba
 def state_directory_fsync_failure_observed(log, state_file):
     return ("UDB_TEST_STATE_DIR_FSYNC_FAIL:" in log_text(log) and
             "Failed to fsync directory for state file" in log_text(log) and state_file.is_file() and
+            "STATE=BOOTSTRAPPING" in state_file.read_text(errors="replace"))
+
+
+def snapshot_set_rename_failure_observed(b_log, state_file, data_dir, baselines, imported):
+    # A mid-set failure during the six-block READY transition must leave every
+    # snapshot either byte-identical to its pre-transition content (blocks that
+    # were not divergent) or at the authoritative imported content (blocks
+    # already committed), with no visible READY and no leftover backups.
+    for letter in ('N', 'C', 'I', 'S', 'L', 'K'):
+        db = data_dir / f"udb_{letter}.db"
+        expected = imported.get(letter, baselines[letter])
+        if not db.is_file() or db.read_bytes() != expected:
+            return False
+        if db.with_suffix(".db.udb_previous").exists():
+            return False
+    return ("UDB_TEST_SNAPSHOT_RENAME_FAIL:" in log_text(b_log) and
+            "Cannot enter READY: failed to save block snapshots to disk" in log_text(b_log) and
+            state_file.is_file() and
             "STATE=BOOTSTRAPPING" in state_file.read_text(errors="replace"))
 
 
@@ -326,7 +347,7 @@ def runtime_del_rename_failure_observed(a_log, b_log, b_db, baseline):
 
 def runtime_drp_rename_failure_observed(a_log, b_log, b_db, baseline):
     return ("DRP" in udb_commands(b_log) and "ERR" in udb_commands(a_log) and
-            b_db.read_bytes() == baseline and db_contains(b_db, "harness-b::vhost winner.test") and
+            b_db.read_bytes() == baseline and db_contains(b_db, "harness-a::vhost winner.test") and
             not b_db.with_suffix(".db.tmp").exists() and
             "UDB_TEST_SNAPSHOT_RENAME_FAIL:" in log_text(b_log) and
             ("cmd=DRP err=3" in log_text(a_log) or "cmd=DRP err=6" in log_text(a_log)))
@@ -387,6 +408,8 @@ def main():
                         help="fail node A's UDB N snapshot rename and verify staged-sync rollback")
     parser.add_argument("--snapshot-fsync-failure", action="store_true",
                         help="fail node A's UDB N temporary snapshot fsync and verify staged-sync rollback")
+    parser.add_argument("--snapshot-set-rename-failure", action="store_true",
+                        help="fail node B's block I publication during the six-block READY transition and verify full rollback")
     parser.add_argument("--snapshot-directory-fsync-failure", action="store_true",
                         help="fail node A's post-rename directory fsync and verify visible commit with NOT_READY")
     parser.add_argument("--state-directory-fsync-failure", action="store_true",
@@ -419,7 +442,7 @@ def main():
     try:
         build_mutator()
         if (args.snapshot_rename_failure or args.snapshot_fsync_failure or args.snapshot_directory_fsync_failure or
-                args.state_directory_fsync_failure or
+                args.state_directory_fsync_failure or args.snapshot_set_rename_failure or
                 args.runtime_rename_failure or args.runtime_opt_rename_failure or
                 args.runtime_del_rename_failure or args.runtime_drp_rename_failure):
             build_rename_fail_interposer()
@@ -432,36 +455,50 @@ def main():
             third_modules.mkdir(parents=True)
             shutil.copy2(args.module, third_modules / "udb.so")
         shutil.copy2(MUTATOR_MODULE, a / "modules" / "third" / "udb_test_mutator.so")
-        # Seed divergent blocks with the same mtime. B's higher immutable SID
-        # (0B1 > 0A1) must win, with A issuing the sole RES request.
+        # Seed divergent blocks.  Node A is the configured authority and holds
+        # the winning records; node B holds divergent data with a NEWER mtime
+        # and a higher SID (0B1 > 0A1).  Neither timestamp nor SID may win:
+        # B must import A's blocks because A is the selected authority.
         a_db = a / "data" / "udb_N.db"
         b_db = b / "data" / "udb_N.db"
         a_k_db = a / "data" / "udb_K.db"
         b_k_db = b / "data" / "udb_K.db"
-        a_db.write_text("harness-a::vhost loser.test\n", encoding="ascii")
-        b_db.write_text("harness-b::vhost winner.test\n", encoding="ascii")
-        a_k_db.write_text("G::*@udb-loser.test::reason loser\n", encoding="ascii")
-        b_k_db.write_text(K_STAGED_RECORD + "\n", encoding="ascii")
+        a_db.write_text("harness-a::vhost winner.test\n", encoding="ascii")
+        b_db.write_text("harness-b::vhost loser.test\n", encoding="ascii")
+        a_k_db.write_text(K_STAGED_RECORD + "\n", encoding="ascii")
+        b_k_db.write_text("G::*@udb-loser.test::reason loser\n", encoding="ascii")
         for n in (a, b):
             for letter in ('C', 'I', 'S', 'L'):
                 (n / "data" / f"udb_{letter}.db").write_text(f"; UDB Block {letter} - Version 1\n", encoding="ascii")
         (a / "data" / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787720000\n", encoding="ascii")
-        (b / "data" / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787720000\n", encoding="ascii")
+        # The state-fsync failure mode needs node B to attempt a READY
+        # transition during the run, so it starts NOT_READY.  The six-block
+        # set-rename failure mode exercises the same transition path.
+        if args.state_directory_fsync_failure or args.snapshot_set_rename_failure:
+            (b / "data" / ".udb_state").write_text("STATE=BOOTSTRAPPING\nLAST_SYNC=0\n", encoding="ascii")
+        else:
+            (b / "data" / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787720000\n", encoding="ascii")
         a_baseline = a_db.read_bytes()
         b_baseline = b_db.read_bytes()
+        set_baselines = {letter: (b / "data" / f"udb_{letter}.db").read_bytes()
+                         for letter in ('N', 'C', 'I', 'S', 'L', 'K')}
         tie_time = int(time.time()) - 60
-        for db in (a_db, b_db, a_k_db, b_k_db):
+        for db in (a_db, a_k_db):
             os.utime(db, (tie_time, tie_time))
+        newer_time = tie_time + 3600
+        for db in (b_db, b_k_db):
+            os.utime(db, (newer_time, newer_time))
 
         a_client, a_server, a_tls, b_client, b_server, b_tls = free_ports(6)
         a_conf, b_conf = a / "unrealircd.conf", b / "unrealircd.conf"
         link_password = "udb-test-" + secrets.token_hex(32)
+        # A is the sole authority (it selects itself); B selects A and imports.
         write_config(a_conf, "udb-a.test", "0A1", a_client, a_server, a_tls,
-                      "udb-b.test", b_server, args.module, a / "data", "udb-b.test", True,
-                      link_password, load_mutator=True)
+                     "udb-b.test", b_server, args.module, a / "data", "udb-a.test", True,
+                     link_password, load_mutator=True)
         write_config(b_conf, "udb-b.test", "0B1", b_client, b_server, b_tls,
-                      "udb-a.test", a_server, args.module, b / "data", "udb-a.test", False,
-                      link_password)
+                     "udb-a.test", a_server, args.module, b / "data", "udb-a.test", False,
+                     link_password)
         run_configtest(a, args.ircd, a_conf, args.module, MUTATOR_MODULE)
         run_configtest(b, args.ircd, b_conf, args.module)
 
@@ -470,20 +507,25 @@ def main():
             with log.open("w") as output:
                 mutator = MUTATOR_MODULE if node == a else None
                 processes.append(subprocess.Popen(bwrap_command(node, args.ircd, config, args.module, mutator,
-                                                                  rename_failure=(args.snapshot_rename_failure and node == a) or
+                                                                  rename_failure=((args.snapshot_rename_failure or
+                                                                                   args.snapshot_set_rename_failure) and node == b) or
                                                                                   ((args.runtime_rename_failure or
                                                                                     args.runtime_opt_rename_failure or
                                                                                     args.runtime_del_rename_failure or
                                                                                     args.runtime_drp_rename_failure) and node == b),
-                                                                    rename_failure_arm=(args.runtime_rename_failure or
-                                                                                        args.runtime_opt_rename_failure or
-                                                                                        args.runtime_del_rename_failure or
-                                                                                        args.runtime_drp_rename_failure) and node == b,
-                                                                    fsync_failure=args.snapshot_fsync_failure and node == a,
-                                                                    directory_fsync_failure=
-                                                                    args.snapshot_directory_fsync_failure and node == a,
-                                                                    state_directory_fsync_failure=
-                                                                    args.state_directory_fsync_failure and node == a),
+                                                                  rename_failure_arm=(args.runtime_rename_failure or
+                                                                                      args.runtime_opt_rename_failure or
+                                                                                      args.runtime_del_rename_failure or
+                                                                                      args.runtime_drp_rename_failure) and node == b,
+                                                                  fsync_failure=args.snapshot_fsync_failure and node == b,
+                                                                  directory_fsync_failure=
+                                                                  args.snapshot_directory_fsync_failure and node == b,
+                                                                  state_directory_fsync_failure=
+                                                                  args.state_directory_fsync_failure and node == b,
+                                                                  rename_failure_target=
+                                                                  (b / "data" / "udb_I.db")
+                                                                  if (args.snapshot_set_rename_failure and node == b)
+                                                                  else None),
                                                    stdout=output, stderr=subprocess.STDOUT,
                                                    text=True))
         if not wait_for_link(processes, logs, args.timeout):
@@ -501,66 +543,86 @@ def main():
         deadline = time.monotonic() + args.timeout
         if args.snapshot_rename_failure:
             while time.monotonic() < deadline:
-                if snapshot_rename_failure_observed(logs[1], logs[0], a_db, a_baseline):
+                if snapshot_rename_failure_observed(logs[0], logs[1], b_db, b_baseline):
                     break
                 time.sleep(0.25)
-            if not snapshot_rename_failure_observed(logs[1], logs[0], a_db, a_baseline):
-                print_diagnostics(logs, a_db)
+            if not snapshot_rename_failure_observed(logs[0], logs[1], b_db, b_baseline):
+                print_diagnostics(logs, b_db)
                 return 1
-            print("PASS: failed N snapshot rename left node A baseline unchanged with no tmp or ACK/commit")
+            print("PASS: failed N snapshot rename left node B baseline unchanged with no tmp or ACK/commit")
             return 0
         if args.snapshot_fsync_failure:
             while time.monotonic() < deadline:
-                if snapshot_fsync_failure_observed(logs[1], logs[0], a_db, a_baseline):
+                if snapshot_fsync_failure_observed(logs[0], logs[1], b_db, b_baseline):
                     break
                 time.sleep(0.25)
-            if not snapshot_fsync_failure_observed(logs[1], logs[0], a_db, a_baseline):
-                print_diagnostics(logs, a_db)
+            if not snapshot_fsync_failure_observed(logs[0], logs[1], b_db, b_baseline):
+                print_diagnostics(logs, b_db)
                 return 1
-            print("PASS: failed N temporary snapshot fsync left node A baseline unchanged with no tmp or ACK/commit")
+            print("PASS: failed N temporary snapshot fsync left node B baseline unchanged with no tmp or ACK/commit")
             return 0
         if args.snapshot_directory_fsync_failure:
-            state_file = a / "data" / ".udb_state"
+            state_file = b / "data" / ".udb_state"
             while time.monotonic() < deadline:
-                if snapshot_directory_fsync_failure_observed(logs[1], logs[0], a_db, state_file, a_baseline):
+                if snapshot_directory_fsync_failure_observed(logs[0], logs[1], b_db, state_file, b_baseline):
                     break
                 time.sleep(0.25)
-            if not snapshot_directory_fsync_failure_observed(logs[1], logs[0], a_db, state_file, a_baseline):
-                print_diagnostics(logs, a_db)
+            if not snapshot_directory_fsync_failure_observed(logs[0], logs[1], b_db, state_file, b_baseline):
+                print_diagnostics(logs, b_db)
                 return 1
             print("PASS: post-rename directory fsync failure kept active/disk committed and forced BOOTSTRAPPING")
             return 0
         if args.state_directory_fsync_failure:
-            state_file = a / "data" / ".udb_state"
+            state_file = b / "data" / ".udb_state"
             while time.monotonic() < deadline:
-                if state_directory_fsync_failure_observed(logs[0], state_file):
+                if state_directory_fsync_failure_observed(logs[1], state_file):
                     break
                 time.sleep(0.25)
-            if not state_directory_fsync_failure_observed(logs[0], state_file):
-                print_diagnostics(logs, a_db)
+            if not state_directory_fsync_failure_observed(logs[1], state_file):
+                print_diagnostics(logs, b_db)
                 return 1
             print("PASS: post-rename .udb_state directory fsync failure replaced visible READY with BOOTSTRAPPING")
             return 0
+        if args.snapshot_set_rename_failure:
+            state_file = b / "data" / ".udb_state"
+            # N and K were committed from the authority before the transition;
+            # their durable content must be A's winner records, not B's seeds.
+            imported = {
+                "N": (b / "data" / "udb_N.db").read_bytes(),
+                "K": (b / "data" / "udb_K.db").read_bytes(),
+            }
+            while time.monotonic() < deadline:
+                if snapshot_set_rename_failure_observed(logs[1], state_file, b / "data", set_baselines, imported):
+                    break
+                time.sleep(0.25)
+            if not snapshot_set_rename_failure_observed(logs[1], state_file, b / "data", set_baselines, imported):
+                print_diagnostics(logs, b_db)
+                return 1
+            print("PASS: block I publication failure during the six-block READY transition restored the complete previous snapshot set")
+            return 0
         while time.monotonic() < deadline:
-            a_db_text = db_text_if_present(a_db)
-            a_k_db_text = db_text_if_present(a_k_db)
-            if (a_db_text is not None and "harness-b::vhost winner.test" in a_db_text and
-                    a_k_db_text is not None and K_STAGED_RECORD in a_k_db_text and
-                    equal_timestamp_winner_observed(logs[0], logs[1])):
+            b_db_text = db_text_if_present(b_db)
+            b_k_db_text = db_text_if_present(b_k_db)
+            if (b_db_text is not None and "harness-a::vhost winner.test" in b_db_text and
+                    b_k_db_text is not None and K_STAGED_RECORD in b_k_db_text and
+                    authority_directed_sync_observed(logs[0], logs[1])):
                 break
             time.sleep(0.25)
         a_db_text = db_text_if_present(a_db)
-        a_k_db_text = db_text_if_present(a_k_db)
-        if (a_db_text is None or "harness-b::vhost winner.test" not in a_db_text or
-                a_k_db_text is None or K_STAGED_RECORD not in a_k_db_text or
-                not equal_timestamp_winner_observed(logs[0], logs[1])):
-            print_diagnostics(logs, a_db)
-            return skip("S2S linked, but deterministic equal-timestamp staged transfer was not observed; this is not a PASS")
-        if not snapshot_is_private(a_db):
-            print(f"FAIL: node A active UDB snapshot mode is {stat.S_IMODE(a_db.stat().st_mode):04o}, expected 0600",
+        b_db_text = db_text_if_present(b_db)
+        b_k_db_text = db_text_if_present(b_k_db)
+        if (b_db_text is None or "harness-a::vhost winner.test" not in b_db_text or
+                b_k_db_text is None or K_STAGED_RECORD not in b_k_db_text or
+                a_db_text is None or a_db_text != a_baseline.decode("ascii") or
+                not authority_directed_sync_observed(logs[0], logs[1])):
+            print_diagnostics(logs, b_db)
+            return 1
+        if not snapshot_is_private(b_db):
+            print(f"FAIL: node B active UDB snapshot mode is {stat.S_IMODE(b_db.stat().st_mode):04o}, expected 0600",
                   file=sys.stderr)
             return 1
-        print("PASS: higher-SID B won divergent equal-timestamp N and nested K blocks with one RES per block")
+        print("PASS: authority A won divergent N and K blocks despite B's newer timestamp and higher SID, "
+              "with exactly one RES per divergent block and no reverse transfer")
         if args.malformed_end_checksum:
             b_baseline = b_db.read_bytes()
             (a / "data" / MUTATOR_END_TRIGGER).touch()

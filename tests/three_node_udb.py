@@ -326,8 +326,10 @@ def main():
         ports = [tuple(raw_ports[i * 3:(i + 1) * 3]) for i in range(3)]
         a_conf, b_conf, c_conf = (node / "unrealircd.conf" for node in (a, b, c))
         link_password = "udb-test-" + secrets.token_hex(32)
+        # A is the root authority (it selects itself); B selects A and C
+        # selects B, so the staged record travels strictly downstream.
         write_config(a_conf, "udb-a.test", "0A1", ports[0], (("udb-b.test", ports[1][1], True),),
-                     args.module, a / "data", "udb-b.test", link_password, True)
+                     args.module, a / "data", "udb-a.test", link_password, True)
         write_config(b_conf, "udb-b.test", "0B1", ports[1],
                      (("udb-a.test", ports[0][1], False), ("udb-c.test", ports[2][1], True)),
                      args.module, b / "data", "udb-a.test", link_password, True)

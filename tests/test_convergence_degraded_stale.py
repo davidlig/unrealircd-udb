@@ -547,7 +547,7 @@ def test_suite():
         new_a.close()
         stop(procG)
 
-        print("\n=== Running Test I: Clean node without policy announces HEL 4 ? (Bootstrap) ===")
+        print("\n=== Running Test I: No-policy node semantics (standalone READY vs bootstrap) ===")
         nodeI = tmpdir / "nodeI"
         portsI = free_ports(3)
         linksI = [("peer.test", 0, False)]
@@ -561,14 +561,49 @@ def test_suite():
         procI = subprocess.Popen(bwrap_command(nodeI, ircd_bin, confI))
         wait_for_daemon(procI, "127.0.0.1", portsI[0])
 
+        # A clean node without policy is its own standalone authority: it goes
+        # READY locally and advertises itself, never a bootstrap wildcard.
+        state_I = dbdirI / ".udb_state"
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if state_I.exists() and "STATE=READY" in state_I.read_text():
+                break
+            time.sleep(0.1)
+        else:
+            raise AssertionError("Clean no-policy node did not become standalone READY")
+
         peerI = MockPeer("peer.test", "001", "127.0.0.1", portsI[1], "00I", autostart_hel=False)
         peerI.send("DB 00I HEL 4 ?")
-        hel_resp_I = peerI.wait_for(lambda l: " DB " in l and " HEL 4 ?" in l, "HEL 4 ? response")
-        assert " HEL 4 ?" in hel_resp_I, f"Expected HEL 4 ?, got: {hel_resp_I}"
-        print("PASS: Test I: Clean node without policy announced HEL 4 ? preserving bootstrap")
+        hel_resp_I = peerI.wait_for(lambda l: " DB " in l and " HEL 4 " in l, "HEL 4 response")
+        assert " HEL 4 hubI.test" in hel_resp_I, f"Expected standalone HEL 4 hubI.test, got: {hel_resp_I}"
+        print("PASS: Test I1: Clean no-policy node is standalone READY and announces itself")
 
         peerI.close()
         stop(procI)
+
+        # A node with persisted BOOTSTRAPPING state keeps seeking an exclusive
+        # bootstrap source and announces the bootstrap wildcard.
+        nodeI2 = tmpdir / "nodeI2"
+        portsI2 = free_ports(3)
+        dbdirI2 = nodeI2 / "db"
+        dbdirI2.mkdir(parents=True, exist_ok=True)
+        (nodeI2 / "modules" / "third").mkdir(parents=True, exist_ok=True)
+        shutil.copy(module_src, nodeI2 / "modules" / "third" / "udb.so")
+        confI2 = nodeI2 / "unrealircd.conf"
+        write_config(confI2, "hubI2.test", "00J", portsI2, linksI, dbdirI2)
+        (dbdirI2 / ".udb_state").write_text("STATE=BOOTSTRAPPING\nLAST_SYNC=0\n", encoding="ascii")
+
+        procI2 = subprocess.Popen(bwrap_command(nodeI2, ircd_bin, confI2))
+        wait_for_daemon(procI2, "127.0.0.1", portsI2[0])
+
+        peerI2 = MockPeer("peer.test", "001", "127.0.0.1", portsI2[1], "00J", autostart_hel=False)
+        peerI2.send("DB 00J HEL 4 ?")
+        hel_resp_I2 = peerI2.wait_for(lambda l: " DB " in l and " HEL 4 " in l, "HEL 4 response (bootstrap)")
+        assert " HEL 4 ?" in hel_resp_I2, f"Expected bootstrap HEL 4 ?, got: {hel_resp_I2}"
+        print("PASS: Test I2: Persisted BOOTSTRAPPING node announces HEL 4 ? (bootstrap)")
+
+        peerI2.close()
+        stop(procI2)
 
         print("\nALL REGRESSION TESTS PASSED: Tests A through J completed successfully.")
 

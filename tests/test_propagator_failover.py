@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Integration test for UDB S::propagator priority list failover and auto-bootstrap."""
+"""Integration test for UDB S::propagator priority list propagation and direct-authority sync."""
 
 import os
 import pathlib
@@ -156,8 +156,10 @@ def main():
     processes = []
 
     try:
-        # Hub A has S::propagator set to "hub-a.test,hub-b.test"
-        # Leaf B has NO propagator configured in unrealircd.conf (clean bootstrap test)
+        # Hub A has S::propagator set to "hub-a.test,hub-b.test" and is READY:
+        # it selects itself as authority and serves the database downstream.
+        # Leaf B has an explicit propagator policy pointing at Hub A, so it
+        # must import the full database from its direct authority.
         node_a = temp_root / "node-a"
         node_b = temp_root / "node-b"
         for n in (node_a, node_b):
@@ -199,10 +201,12 @@ def main():
                      [("leaf-b.test", ports_b[1], False)],
                      node_a / "data", propagator=None, link_password=link_pw)
 
-        # Node B has NO propagator in config! Tests auto-bootstrap from Hub A!
+        # Node B selects Hub A explicitly: only the selected direct authority
+        # may feed it.  (A fresh node without any policy is a standalone
+        # authority and must never import automatically.)
         write_config(config_b, "leaf-b.test", "00B", ports_b,
                      [("hub-a.test", ports_a[1], True)],
-                     node_b / "data", propagator=None, link_password=link_pw)
+                     node_b / "data", propagator="hub-a.test", link_password=link_pw)
 
         log_a = node_a / "ircd.log"
         log_b = node_b / "ircd.log"
@@ -238,8 +242,16 @@ def main():
         assert f"propagator {long_propagator_setting}" in content_s, f"propagator missing in B: {content_s}"
         assert "davidlig::vhost root.admin.net" in content_n, f"davidlig missing in B: {content_n}"
 
-        print("PASS: Clean Leaf B successfully auto-bootstrapped and synchronized S::propagator (>600 bytes) & N block from Hub A without local propagator config!")
-        print("ALL TESTS PASSED: UDB non-truncating S::propagator priority list (>512B) and Auto-Bootstrap verified successfully.")
+        state_b = node_b / "data/.udb_state"
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if state_b.exists() and "STATE=READY" in state_b.read_text():
+                break
+            time.sleep(0.2)
+        assert state_b.exists() and "STATE=READY" in state_b.read_text(), "Leaf B did not reach READY after import"
+
+        print("PASS: Leaf B selected Hub A as direct authority and synchronized S::propagator (>600 bytes) & N block")
+        print("ALL TESTS PASSED: UDB non-truncating S::propagator priority list (>512B) and direct-authority sync verified successfully.")
         return 0
 
     finally:

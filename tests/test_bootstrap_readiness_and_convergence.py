@@ -322,12 +322,14 @@ def test_suite():
 
         # -----------------------------------------------------------------
         # TEST 1: Crash after a single block -> remains BOOTSTRAPPING
+        # (explicit propagator policy: a fresh node without any policy is a
+        # standalone authority and goes READY immediately)
         # -----------------------------------------------------------------
         print("\n=== Running Test 1: Crash after single block ===")
         p1_ports = free_ports(3)
         p1, n1, dbdir1, cfg1 = setup_node(
             tmpdir, "hub1.test", "001", p1_ports,
-            [("peer-a.test", 0, False)]
+            [("peer-a.test", 0, False)], propagator="peer-a.test"
         )
         try:
             c1 = MockClient("127.0.0.1", p1_ports[0], "user1")
@@ -382,7 +384,7 @@ def test_suite():
         p2_ports = free_ports(3)
         p2, n2, dbdir2, cfg2 = setup_node(
             tmpdir, "hub2.test", "002", p2_ports,
-            [("peer-a.test", 0, False)]
+            [("peer-a.test", 0, False)], propagator="peer-a.test"
         )
         try:
             peer2 = MockPeer("peer-a.test", "00A", "127.0.0.1", p2_ports[1], "002")
@@ -413,7 +415,7 @@ def test_suite():
         p3_ports = free_ports(3)
         p3, n3, dbdir3, cfg3 = setup_node(
             tmpdir, "hub3.test", "003", p3_ports,
-            [("peer-a.test", 0, False)]
+            [("peer-a.test", 0, False)], propagator="peer-a.test"
         )
         try:
             peer3 = MockPeer("peer-a.test", "00A", "127.0.0.1", p3_ports[1], "003", send_inf=True)
@@ -464,6 +466,9 @@ def test_suite():
 
         # -----------------------------------------------------------------
         # TEST 5: State file write failure simulation
+        # (the read-only directory must be in place before the daemon starts:
+        # a node that already went standalone READY on a writable directory
+        # legitimately stays READY)
         # -----------------------------------------------------------------
         print("\n=== Running Test 5: State file write failure simulation ===")
         p5_ports = free_ports(3)
@@ -472,7 +477,17 @@ def test_suite():
             [("peer-a.test", 0, False)]
         )
         try:
+            stop(p5)
+            # Discard the artifacts of the first (writable) run so the restart
+            # is genuinely fresh; otherwise the persisted READY marker would be
+            # promoted without touching the read-only directory.
+            for artifact in dbdir5.iterdir():
+                artifact.unlink()
             os.chmod(dbdir5, stat.S_IREAD | stat.S_IEXEC)
+
+            p5 = subprocess.Popen(bwrap_command(n5, ircd_bin, cfg5))
+            wait_for_daemon(p5, "127.0.0.1", p5_ports[0])
+            wait_for_daemon(p5, "127.0.0.1", p5_ports[1])
 
             peer5 = MockPeer("peer-a.test", "00A", "127.0.0.1", p5_ports[1], "005", send_inf=True)
             time.sleep(0.3)
@@ -518,7 +533,8 @@ def test_suite():
             stop(p6)
 
         # -----------------------------------------------------------------
-        # TEST 7: Authority switch mid-round
+        # TEST 7: Authority switch mid-round (S::propagator list failover
+        # A -> B; udb::propagator only accepts a single name)
         # -----------------------------------------------------------------
         print("\n=== Running Test 7: Authority switch mid-round ===")
         p7_ports = free_ports(3)
@@ -527,6 +543,14 @@ def test_suite():
             [("prop-a.test", 0, False), ("prop-b.test", 0, False)]
         )
         try:
+            stop(p7)
+            (dbdir7 / "udb_S.db").write_text(
+                "; UDB Block S\npropagator prop-a.test,prop-b.test\n", encoding="ascii")
+            (dbdir7 / ".udb_state").write_text("STATE=BOOTSTRAPPING\nLAST_SYNC=0\n", encoding="ascii")
+            p7 = subprocess.Popen(bwrap_command(n7, ircd_bin, cfg7))
+            wait_for_daemon(p7, "127.0.0.1", p7_ports[0])
+            wait_for_daemon(p7, "127.0.0.1", p7_ports[1])
+
             prop_a = MockPeer("prop-a.test", "00A", "127.0.0.1", p7_ports[1], "007", propagator_advertised="prop-a.test")
             for b in ('N', 'C', 'I'):
                 prop_a.send(f"DB 007 INF 1 {b} 00000000 0")
@@ -534,7 +558,11 @@ def test_suite():
             prop_a.close()
 
             prop_b = MockPeer("prop-b.test", "00B", "127.0.0.1", p7_ports[1], "007", propagator_advertised="prop-b.test")
-            for b in ('S', 'L', 'K'):
+            # The seeded S block carries the propagator list, so its canonical
+            # checksum is non-zero; B must advertise the matching value.
+            s_crc7 = zlib.crc32(b"propagator prop-a.test,prop-b.test\n") & 0xFFFFFFFF
+            prop_b.send(f"DB 007 INF 2 S {s_crc7:08x} 0")
+            for b in ('L', 'K'):
                 prop_b.send(f"DB 007 INF 2 {b} 00000000 0")
             time.sleep(0.2)
 
@@ -551,22 +579,35 @@ def test_suite():
             stop(p7)
 
         # -----------------------------------------------------------------
-        # TEST 8: Bootstrap peer disconnect reset
+        # TEST 8: Selected authority disconnect allows clean takeover by the
+        # next S::propagator list candidate
         # -----------------------------------------------------------------
-        print("\n=== Running Test 8: Bootstrap peer disconnect reset ===")
+        print("\n=== Running Test 8: Authority disconnect takeover ===")
         p8_ports = free_ports(3)
         p8, n8, dbdir8, cfg8 = setup_node(
             tmpdir, "hub8.test", "008", p8_ports,
             [("peer-a.test", 0, False), ("peer-b.test", 0, False)]
         )
         try:
+            stop(p8)
+            (dbdir8 / "udb_S.db").write_text(
+                "; UDB Block S\npropagator peer-a.test,peer-b.test\n", encoding="ascii")
+            (dbdir8 / ".udb_state").write_text("STATE=BOOTSTRAPPING\nLAST_SYNC=0\n", encoding="ascii")
+            p8 = subprocess.Popen(bwrap_command(n8, ircd_bin, cfg8))
+            wait_for_daemon(p8, "127.0.0.1", p8_ports[0])
+            wait_for_daemon(p8, "127.0.0.1", p8_ports[1])
+
             peer_a = MockPeer("peer-a.test", "00A", "127.0.0.1", p8_ports[1], "008")
             for b in ('N', 'C', 'I'):
                 peer_a.send(f"DB 008 INF 1 {b} 00000000 0")
             time.sleep(0.1)
             peer_a.close()
 
-            peer_b = MockPeer("peer-b.test", "00B", "127.0.0.1", p8_ports[1], "008", send_inf=True)
+            peer_b = MockPeer("peer-b.test", "00B", "127.0.0.1", p8_ports[1], "008")
+            s_crc8 = zlib.crc32(b"propagator peer-a.test,peer-b.test\n") & 0xFFFFFFFF
+            peer_b.send(f"DB 008 INF 2 S {s_crc8:08x} 0")
+            for b in ('N', 'C', 'I', 'L', 'K'):
+                peer_b.send(f"DB 008 INF 2 {b} 00000000 0")
             time.sleep(0.3)
             state_file8 = dbdir8 / ".udb_state"
             assert "STATE=READY" in state_file8.read_text(), "Peer B could not complete bootstrap"
@@ -576,13 +617,13 @@ def test_suite():
             stop(p8)
 
         # -----------------------------------------------------------------
-        # TEST 9: Empty blocks bootstrap
+        # TEST 9: Empty blocks bootstrap from the selected authority
         # -----------------------------------------------------------------
         print("\n=== Running Test 9: Empty blocks bootstrap ===")
         p9_ports = free_ports(3)
         p9, n9, dbdir9, cfg9 = setup_node(
             tmpdir, "hub9.test", "009", p9_ports,
-            [("peer-a.test", 0, False)]
+            [("peer-a.test", 0, False)], propagator="peer-a.test"
         )
         try:
             peer9 = MockPeer("peer-a.test", "00A", "127.0.0.1", p9_ports[1], "009", send_inf=True)
@@ -596,6 +637,8 @@ def test_suite():
 
         # -----------------------------------------------------------------
         # TEST 10: Two bootstrap peers exclusivity + HEL ACK validation
+        # (persisted BOOTSTRAPPING state: without it a fresh no-policy node is
+        # a standalone authority and never enters bootstrap mode)
         # -----------------------------------------------------------------
         print("\n=== Running Test 10: Two bootstrap peers exclusivity + HEL ACK validation ===")
         p10_ports = free_ports(3)
@@ -604,6 +647,14 @@ def test_suite():
             [("peer-a.test", 0, False), ("peer-b.test", 0, False)]
         )
         try:
+            stop(p10)
+            for artifact in dbdir10.iterdir():
+                artifact.unlink()
+            (dbdir10 / ".udb_state").write_text("STATE=BOOTSTRAPPING\nLAST_SYNC=0\n", encoding="ascii")
+            p10 = subprocess.Popen(bwrap_command(n10, ircd_bin, cfg10))
+            wait_for_daemon(p10, "127.0.0.1", p10_ports[0])
+            wait_for_daemon(p10, "127.0.0.1", p10_ports[1])
+
             peer_a = MockPeer("peer-a.test", "00A", "127.0.0.1", p10_ports[1], "010")
             peer_a.send("DB 010 INF 1 N 00000000 0")
             peer_a.send("DB 010 HEL 4 ACK")

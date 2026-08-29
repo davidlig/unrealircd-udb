@@ -228,7 +228,7 @@ def run_tests(ircd_bin, keep=False):
                      (("udb-c.test", c_ports[1], True),),
                      module_path, b_dir / "data", SERVICES_NAME, link_password)
         write_config(c_conf, "udb-c.test", "0C1", c_ports,
-                     (("udb-b.test", b_ports[1], False),),
+                     (("udb-b.test", b_ports[1], False), ("udb-export.test", 0, False)),
                      module_path, c_dir / "data", "udb-b.test", link_password)
 
         b_log, c_log = b_dir / "ircd.log", c_dir / "ircd.log"
@@ -315,8 +315,11 @@ def run_tests(ircd_bin, keep=False):
         processes.append(proc_c)
         time.sleep(1.0)
 
-        # Query C directly via S2S staged export from simulated propagator udb-b.test
-        prop_c = MockPropagator("127.0.0.1", c_ports[1], "0C1", link_password, name="udb-b.test", sid="0B1",
+        # Query C via S2S staged export from a genuine downstream requester.
+        # The requester selects C as its propagator, so C serves it hop-by-hop;
+        # posing as C's own upstream (udb-b.test) would model an authority
+        # cycle that strict directionality correctly refuses to serve.
+        prop_c = MockPropagator("127.0.0.1", c_ports[1], "0C1", link_password, name="udb-export.test", sid="0E1",
                                 propagator_advertised="udb-c.test", send_inventory=False)
         inventory = prop_c.wait_for(lambda l: " DB " in l and " INF " in l and " C " in l, "INF C")
         round_id = inventory.split(" INF ", 1)[1].split(" ", 1)[0]
