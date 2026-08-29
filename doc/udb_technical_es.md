@@ -204,8 +204,12 @@ El protocolo UDB se integra en el tráfico S2S nativo de UnrealIRCd utilizando e
 Los peers directamente enlazados que completan explícitamente el intercambio
 HEL de UDB tienen capacidad de protocolo UDB V4. La capacidad no autoriza el
 acceso a datos: las importaciones staged `BEGIN`, `PUT` y `END`, y las
-peticiones y exportaciones `RES`, se aceptan del peer directo seleccionado
-como propagador o durante el auto-bootstrap de un nodo limpio. Esto permite propagación A-a-B-a-C local por
+peticiones y exportaciones `RES`, se aceptan únicamente en la dirección estricta
+de autoridad: un nodo fresco sin ninguna política de propagador solo puede ser
+alimentado por su único peer de bootstrap exclusivo, y un nodo con política
+acepta datos staged solo del peer directo que seleccionó como propagador. Una
+vez READY sin política, el nodo es su propia autoridad standalone y no acepta
+importaciones remotas. Esto permite propagación A-a-B-a-C local por
 enlace cuando B selecciona A y C selecciona B, así como arquitecturas de Ingest Gateway donde un Hub aísla a los Servicios del resto de la red. Las mutaciones en caliente deben
 proceder igualmente de la autoridad configurada; un peer que sirve una
 sincronización autorizada solo puede enviar registros de ese bloque.
@@ -238,8 +242,11 @@ aceptado antes de confirmar y nunca se reenvía fuera del enlace directo.
 `:<sid> DB <sid-peer-directo> HEL 4 <propagador-seleccionado>`
 
 El campo de propagador seleccionado es `?` solo cuando no existe ninguna fuente
-de propagator configurada. Permite al nodo limpio descubrir la autoridad y
-autoriza al peer directo a entregar el snapshot inicial. Un servidor configurado
+de propagator configurada y el nodo aún no está READY. Permite a ese nodo
+descubrir la autoridad del clúster y
+autoriza al peer de bootstrap exclusivo a entregar el snapshot inicial. Un nodo
+READY sin política es una autoridad standalone y se anuncia con su propio nombre
+en lugar de `?`. Un servidor configurado
 pero no disponible se anuncia como `HEL 4 -`, no como `?`; `-` no concede
 autorización staged y evita ampliar el acceso de forma silenciosa.
 
@@ -252,12 +259,13 @@ autorización staged y evita ampliar el acceso de forma silenciosa.
 **RES (Request / Petición de Sincronización):**
 `:<sid> DB <destino> RES <id_ronda> <letra_bloque>`
 
-Cuando los checksums difieren, gana el `timestamp` más reciente. Si los
-timestamps son iguales, gana el SID de servidor lexicográficamente mayor. El
-SID es la identidad inmutable del servidor que ya contiene el frame DB, a
-diferencia de un nombre configurable o del orden de llegada del enlace. Solo el
-perdedor envía `RES` por bloque; esto evita intercambios recíprocos de RES y snapshots sin
-alterar las comprobaciones del propagador directo configurado.
+El timestamp de `INF` es metadata informativa (logs, diagnóstico y
+`/UDB STATUS`); nunca decide la autoridad. Cuando los checksums difieren, el
+receptor siempre solicita el bloque a su autoridad seleccionada mediante `RES`:
+la autoridad es el propagador directo configurado (o el peer de bootstrap
+exclusivo antes de READY), nunca una comparación de timestamps o SIDs. Solo el
+follower envía `RES`; una autoridad nunca solicita a sus followers, lo que
+evita ciclos recíprocos de RES y snapshots.
 
 Para peers con capacidad staged, `RES` se responde mediante una transacción:
 

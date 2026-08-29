@@ -216,7 +216,11 @@ The UDB protocol integrates into UnrealIRCd's native S2S traffic using the exten
 Only directly linked peers that explicitly complete the UDB HEL exchange have
 the UDB V4 protocol capability. Capability does not authorize data access:
 staged `BEGIN`, `PUT`, and `END` imports, and `RES` requests and exports, are
-accepted from the direct peer selected as propagator or during auto-bootstrap of a fresh node. This
+accepted only along the strict authority direction: a fresh node without any
+propagator policy may be fed exclusively by its single bootstrap peer, and a
+configured node accepts staged data only from the direct peer it selected as
+propagator. Once READY without a policy, a node is its own standalone
+authority and accepts no remote imports. This
 permits edge-local A-to-B-to-C propagation when B selects A and C selects B, as well as Ingest Gateway topologies where a Hub shields Services from the rest of the network.
 Real-time mutations must likewise originate from the configured authority; a peer that is actively serving an authorized block
 synchronization may only send records for that block.
@@ -244,8 +248,11 @@ never routed beyond the direct link.
 `:<sid> DB <direct-peer-sid> HEL 4 <selected-propagator>`
 
 The selected propagator field is `?` only when neither propagator source is
-configured. It allows a clean node to discover cluster authority and authorizes
-the direct peer to supply the initial staged snapshot. A configured but
+configured and the node is not yet READY; it allows that node to discover
+cluster authority and authorizes
+the single exclusive bootstrap peer to supply the initial staged snapshot. A node
+that is READY without any policy is a standalone authority and advertises its
+own name instead of `?`. A configured but
 unavailable policy is advertised as `HEL 4 -`, not converted to `?`; `-` grants
 no staged-sync authorization and therefore cannot silently broaden access.
 
@@ -258,11 +265,13 @@ no staged-sync authorization and therefore cannot silently broaden access.
 **RES (Sync Request):**
 `:<sid> DB <target> RES <round_id> <block_letter>`
 
-When checksums differ, the newer `timestamp` wins. If timestamps are equal,
-the lexicographically higher server SID wins. The SID is the immutable server
-identity already carried in the DB frame, unlike a configurable server name or
-link arrival order. Only the loser sends `RES` for each block; this prevents reciprocal RES and
-snapshot exchanges while retaining the configured direct-propagator checks.
+The `INF` timestamp is informational metadata only (logging, diagnostics, and
+`/UDB STATUS`); it never decides authority. When checksums differ, the
+receiver always requests the block from its selected authority with `RES`:
+authority is the configured direct propagator (or the exclusive bootstrap peer
+before READY), never a timestamp or SID comparison. Only the follower sends
+`RES`; an authority never pulls from its followers, which prevents reciprocal
+RES and snapshot exchange loops.
 
 For peers with the staged capability, `RES` is answered with a transaction:
 

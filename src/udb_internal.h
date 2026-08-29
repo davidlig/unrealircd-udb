@@ -277,6 +277,13 @@ typedef struct UdbReconcileState
 
 static UdbReconcileState udb_reconcile = {0};
 
+/* While a staged commit is swapping a block tree (notably S), policy-change
+ * notifications are deferred: the transient state between removing the old
+ * tree's effects and installing the new tree must not abort the in-flight
+ * session or the active round. */
+static int udb_policy_notify_deferred = 0;
+static int udb_policy_notify_pending = 0;
+
 static int udb_persistence_load_state(UdbPersistentState *state_out, UdbPersistenceOrigin *origin_out,
 									  unsigned long *generation_out, time_t *last_sync_out, int *legacy_format_out);
 static UdbStatePersistResult udb_persistence_set_state(UdbPersistentState state, UdbPersistenceOrigin origin,
@@ -352,7 +359,6 @@ static void udb_sync_session_free(UdbBlock *block);
 static int udb_block_letter_to_index(char letter);
 
 static int udb_sync_to_server(Client *server);
-static int udb_remote_wins_equal_timestamp(Client *server);
 static int udb_has_hello(Client *server);
 static int udb_has_staged_sync(Client *server);
 static int udb_peer_authorizes_us(Client *server);
@@ -395,6 +401,7 @@ static const char *udb_propagator_policy(UdbContext *ctx);
 static int udb_select_propagator(UdbContext *ctx, int require_hello, UdbPropagatorSelection *selected);
 static int udb_propagator_policy_present(UdbContext *ctx);
 static void udb_propagator_policy_changed(UdbContext *ctx);
+static void udb_propagator_policy_flush(UdbContext *ctx);
 static void udb_sync_hello_refresh_all(void);
 static void udb_sync_status_refresh(void);
 static int udb_hook_stale_pre_connect(Client *client);

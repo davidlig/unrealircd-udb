@@ -167,12 +167,6 @@ static Client *udb_direct_peer(Client *client)
 	return NULL;
 }
 
-/* Server SIDs identify servers independently of names, links, and frame order. */
-static int udb_remote_wins_equal_timestamp(Client *server)
-{
-	return server && *server->id && *me.id && strcmp(server->id, me.id) > 0;
-}
-
 static int udb_hook_server_sync(Client *client)
 {
 	if (!client || !IsServer(client) || !MyConnect(client))

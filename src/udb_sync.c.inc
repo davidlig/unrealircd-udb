@@ -51,11 +51,14 @@ static void udb_maybe_start_reconciliation(Client *server, int force_offer)
 
 	if (!peer || !udb_has_hello(server) || !IsServer(server) || !MyConnect(server))
 		return;
-	/* The selected propagator is the sole authority.  A peer authorizing us
-	 * identifies this side as its upstream; it does not authorize a reverse
-	 * pull.  In particular, never start a second offer while another
-	 * authority/round is active: that was the source of bilateral RES churn. */
-	if (!peer->authorizes_us || !udb_ready || !udb_select_propagator(udb_ctx, 1, &selected) || !selected.is_local)
+	/* A peer authorizing us identifies this side as its upstream; it does not
+	 * authorize a reverse pull.  Offer our committed snapshot only while
+	 * READY, never while another authority/round is active, and never to our
+	 * own selected upstream: that would reverse the authority direction and
+	 * was the source of bilateral RES churn. */
+	if (!peer->authorizes_us || !udb_ready)
+		return;
+	if (udb_select_propagator(udb_ctx, 1, &selected) && !selected.is_local && selected.peer == server)
 		return;
 	if (udb_reconcile.active || udb_has_active_sessions(udb_ctx) || udb_has_pending_requests(udb_ctx))
 		return;
@@ -132,9 +135,15 @@ static int udb_sync_hello_start(Client *server)
 	{
 		propagator = selected.name;
 	}
+	else if (!udb_propagator_policy_present(udb_ctx))
+	{
+		/* No policy: a fresh node is seeking a bootstrap source, while a READY
+		 * node is its own standalone authority. */
+		propagator = udb_ready ? me.name : "?";
+	}
 	else
 	{
-		propagator = udb_propagator_policy_present(udb_ctx) ? "-" : "?";
+		propagator = "-";
 	}
 	ok = udb_send_db_to_one(server, ":%s DB %s HEL 4 %s", me.id, server->id, propagator);
 	if (!ok)
@@ -387,6 +396,7 @@ static int udb_reconcile_check(UdbContext *ctx)
 
 	udb_sync_status = UDB_SYNC_OK;
 	udb_degraded_since = 0;
+	udb_bootstrap_peer = NULL;
 
 	udb_reconcile_reset();
 	udb_reconcile.retry_count = 0;
@@ -415,6 +425,9 @@ static int udb_is_authorized_sync_source(UdbContext *ctx, Client *direct_peer)
 	}
 	else
 	{
+		/* Without a policy there is no remote authority once READY: this node
+		 * is a standalone authority and accepts no imports.  Before READY only
+		 * the exclusive bootstrap owner may feed us. */
 		if (!udb_ready)
 		{
 			if (!udb_bootstrap_peer)
@@ -422,7 +435,7 @@ static int udb_is_authorized_sync_source(UdbContext *ctx, Client *direct_peer)
 
 			return (udb_bootstrap_peer == direct_peer);
 		}
-		return 1;
+		return 0;
 	}
 }
 
@@ -540,8 +553,10 @@ static void udb_sync_hello_refresh_all(void)
 
 	if (udb_select_propagator(udb_ctx, 1, &selected))
 		propagator = selected.name;
+	else if (!udb_propagator_policy_present(udb_ctx))
+		propagator = udb_ready ? me.name : "?";
 	else
-		propagator = udb_propagator_policy_present(udb_ctx) ? "-" : "?";
+		propagator = "-";
 	list_for_each_entry(server, &server_list, special_node)
 	{
 		if (IsServer(server) && MyConnect(server) && udb_has_hello(server))
@@ -580,10 +595,19 @@ static void udb_propagator_policy_changed(UdbContext *ctx)
 
 	if (!ctx)
 		return;
+	if (udb_policy_notify_deferred)
+	{
+		/* A block commit is mid-flight; replay once the new tree is installed. */
+		udb_policy_notify_pending = 1;
+		return;
+	}
 	if (udb_propagator_policy_present(ctx) && udb_select_propagator(ctx, 1, &selected) && !selected.is_local)
 		peer = selected.peer;
 
-	if (udb_bootstrap_peer && udb_bootstrap_peer != peer)
+	/* Without a policy the exclusive bootstrap owner stays valid until it
+	 * disconnects or READY completes; a later HEL from another peer must not
+	 * steal the ownership. */
+	if (udb_propagator_policy_present(ctx) && udb_bootstrap_peer && udb_bootstrap_peer != peer)
 		udb_bootstrap_peer = NULL;
 	if (udb_reconcile.authority_peer && udb_reconcile.authority_peer != peer)
 		udb_reconcile_abort(ctx, "propagator policy changed", 1);
@@ -610,6 +634,14 @@ static void udb_propagator_policy_changed(UdbContext *ctx)
 
 	if (peer && udb_has_hello(peer) && (!udb_ready || udb_sync_status != UDB_SYNC_OK))
 		udb_maybe_start_reconciliation(peer, 0);
+}
+
+static void udb_propagator_policy_flush(UdbContext *ctx)
+{
+	if (!udb_policy_notify_pending || udb_policy_notify_deferred)
+		return;
+	udb_policy_notify_pending = 0;
+	udb_propagator_policy_changed(ctx);
 }
 
 static int udb_sync_begin(UdbBlock *block, Client *peer, unsigned long round_id, const char *txid)
