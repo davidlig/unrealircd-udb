@@ -305,6 +305,19 @@ static void udb_reconcile_start(Client *authority, unsigned long round_id)
 	}
 }
 
+/* Latch READY health to DEGRADED the moment divergence with the authority is
+ * confirmed. Idempotent: only the OK -> DEGRADED transition is acted upon, and
+ * only udb_reconcile_check() may ever perform the reverse transition. */
+static void udb_sync_mark_degraded(Client *peer, const char *reason)
+{
+	if (!udb_ready || udb_sync_status != UDB_SYNC_OK)
+		return;
+	udb_sync_status = UDB_SYNC_DEGRADED;
+	udb_log(ULOG_WARNING, "UDB_SYNC_DIVERGED", peer,
+			"Database divergence confirmed ($reason); recovery required before health returns to OK",
+			log_data_string("reason", reason ? reason : "unknown"));
+}
+
 static void udb_reconcile_record_inf(Client *peer, unsigned long round_id, char letter, unsigned long remote_crc)
 {
 	unsigned int mask = udb_block_letter_to_mask(letter);
@@ -326,6 +339,7 @@ static void udb_reconcile_record_inf(Client *peer, unsigned long round_id, char 
 	{
 		udb_reconcile.divergent_blocks |= mask;
 		udb_reconcile.completed_blocks &= ~mask;
+		udb_sync_mark_degraded(peer, "inventory checksum mismatch");
 	}
 	else
 	{
@@ -343,6 +357,7 @@ static void udb_reconcile_record_res(Client *peer, unsigned long round_id, char 
 		return;
 	udb_reconcile.divergent_blocks |= mask;
 	udb_reconcile.completed_blocks &= ~mask;
+	udb_sync_mark_degraded(peer, "block recovery required");
 	udb_reconcile.last_activity = time(NULL);
 	udb_reconcile.deadline =
 		udb_reconcile.last_activity +

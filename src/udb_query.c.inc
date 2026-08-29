@@ -81,6 +81,8 @@ static void udb_query_send_status(Client *client)
 	sendto_one(client, NULL, ":%s 339 %s :Database readiness: %s", me.name, client->name,
 			   udb_ready ? "READY" : "BOOTSTRAPPING");
 	sendto_one(client, NULL, ":%s 339 %s :UDB synchronization: %s", me.name, client->name, sync_status_str);
+	sendto_one(client, NULL, ":%s 339 %s :Recovery: %s", me.name, client->name,
+			   (udb_reconcile.active || udb_reconcile.next_retry_at) ? "ACTIVE" : "IDLE");
 	sendto_one(client, NULL, ":%s 339 %s :Selected propagator: %s", me.name, client->name, selected_str);
 	sendto_one(client, NULL, ":%s 339 %s :Selected direct source: %s", me.name, client->name, selected_str);
 	sendto_one(client, NULL, ":%s 339 %s :Advertised state: HEL 4 %s", me.name, client->name, advertised_str);

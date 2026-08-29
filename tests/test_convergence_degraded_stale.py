@@ -525,6 +525,85 @@ def test_suite():
         observer.close()
         stop(procD2)
 
+        print("\n=== Running Test K: divergence latch until durable convergence ===")
+        nodeK = tmpdir / "nodeK"
+        portsK = free_ports(3)
+        linksK = [("prop.test", 0, False)]
+        dbdirK = nodeK / "db"
+        dbdirK.mkdir(parents=True, exist_ok=True)
+        (nodeK / "modules" / "third").mkdir(parents=True, exist_ok=True)
+        shutil.copy(module_src, nodeK / "modules" / "third" / "udb.so")
+        confK = nodeK / "unrealircd.conf"
+        write_config(confK, "hubK.test", "00K", portsK, linksK, dbdirK, propagator="prop.test")
+
+        procK = subprocess.Popen(bwrap_command(nodeK, ircd_bin, confK))
+        wait_for_daemon(procK, "127.0.0.1", portsK[0])
+
+        record = "alice::vhost alice.net"
+        crc_record = zlib.crc32((record + "\n").encode("ascii")) & 0xFFFFFFFF
+
+        # Bootstrap the empty node to READY + OK
+        prop_k1 = MockPeer("prop.test", "001", "127.0.0.1", portsK[1], "00K", propagator_advertised="prop.test")
+        time.sleep(0.5)
+        client_k = MockClient("127.0.0.1", portsK[0], "oper_k")
+        client_k.wait_for(lambda l: " 001 " in l, timeout=5)
+        client_k.send("OPER testoper operpass")
+        client_k.wait_for(lambda l: " 381 " in l, timeout=3)
+        client_k.send("UDB STATUS")
+        client_k.wait_for(lambda l: " 339 " in l and "UDB synchronization: OK" in l, timeout=3)
+        prop_k1.close()
+
+        # Reconnect with a divergent N inventory: node must latch DEGRADED
+        prop_k2 = MockPeer("prop.test", "001", "127.0.0.1", portsK[1], "00K",
+                           propagator_advertised="prop.test", autostart_hel=False)
+        prop_k2.send("DB 00K HEL 4 prop.test")
+        prop_k2.wait_for(lambda l: " DB " in l and " HEL 4 " in l, "HEL response for divergent round")
+        prop_k2.send("DB 00K HEL 4 ACK")
+        prop_k2.send(f"DB 00K INF 1 N {crc_record:08x} 0")
+        for b in ('C', 'I', 'S', 'L', 'K'):
+            prop_k2.send(f"DB 00K INF 1 {b} 00000000 0")
+        prop_k2.wait_for(lambda l: " DB " in l and " RES 1 N" in l, "RES for divergent block")
+        time.sleep(0.5)
+
+        client_k.send("UDB STATUS")
+        client_k.wait_for(lambda l: " 339 " in l and "UDB synchronization: DEGRADED" in l, timeout=3)
+        client_k.wait_for(lambda l: " 339 " in l and "Recovery: ACTIVE" in l, timeout=3)
+        client_k.wait_for(lambda l: " 339 " in l and "New local clients: ALLOWED" in l, timeout=3)
+        print("PASS: Test K: Confirmed divergence latched DEGRADED while clients stay allowed")
+
+        # Authority disappears mid-recovery: DEGRADED must persist (no latch reset)
+        prop_k2.close()
+        time.sleep(1.0)
+        client_k.send("UDB STATUS")
+        client_k.wait_for(lambda l: " 339 " in l and "UDB synchronization: DEGRADED" in l, timeout=3)
+        print("PASS: Test K: DEGRADED persisted across authority disconnect")
+
+        # A new round with the same divergence, this time completed with a
+        # staged snapshot: only durable convergence returns the node to OK
+        prop_k3 = MockPeer("prop.test", "001", "127.0.0.1", portsK[1], "00K",
+                           propagator_advertised="prop.test", autostart_hel=False)
+        prop_k3.send("DB 00K HEL 4 prop.test")
+        prop_k3.wait_for(lambda l: " DB " in l and " HEL 4 " in l, "HEL response for recovery round")
+        prop_k3.send("DB 00K HEL 4 ACK")
+        prop_k3.send(f"DB 00K INF 2 N {crc_record:08x} 0")
+        for b in ('C', 'I', 'S', 'L', 'K'):
+            prop_k3.send(f"DB 00K INF 2 {b} 00000000 0")
+        prop_k3.wait_for(lambda l: " DB " in l and " RES 2 N" in l, "RES for recovery block")
+        prop_k3.send("DB 00K BEGIN 2 N tx_k 00000000")
+        prop_k3.send(f"DB 00K PUT 2 N tx_k {record}")
+        prop_k3.send(f"DB 00K END 2 N tx_k {crc_record:08x}")
+        prop_k3.wait_for(lambda l: " ACK 2 N tx_k " in l, "ACK for staged recovery commit")
+        time.sleep(0.5)
+
+        client_k.send("UDB STATUS")
+        client_k.wait_for(lambda l: " 339 " in l and "UDB synchronization: OK" in l, timeout=3)
+        client_k.wait_for(lambda l: " 339 " in l and "Recovery: IDLE" in l, timeout=3)
+        print("PASS: Test K: Durable staged convergence returned the node to OK")
+
+        client_k.close()
+        prop_k3.close()
+        stop(procK)
+
         print("\n=== Running Tests G, H: Obsolete S policy, Advertised '-', Administrative REHASH Recovery ===")
         nodeG = tmpdir / "nodeG"
         portsG = free_ports(3)
