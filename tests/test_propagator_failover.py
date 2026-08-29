@@ -12,6 +12,8 @@ import sys
 import tempfile
 import time
 
+from udb_state_seed import seed_block, seed_ready_state
+
 ROOT = pathlib.Path(__file__).resolve().parents[5]
 RUNTIME_ROOT = pathlib.Path(os.environ.get("UDB_TEST_IRCD_ROOT", pathlib.Path.home() / "unrealircd"))
 DEFAULT_IRCD = RUNTIME_ROOT / "bin/unrealircd"
@@ -176,18 +178,18 @@ def main():
         assert len(offline_prefix) > 550, f"Prefix too short: {len(offline_prefix)}"
 
         s_file_a = node_a / "data/udb_S.db"
-        s_file_a.write_text(f"; UDB Block S\n; Saved: 1787720000\n; Records: 2\npropagator {long_propagator_setting}\nflood 5:30\n", encoding="ascii")
+        seed_block(s_file_a, "S",
+                   f"propagator {long_propagator_setting}\nflood 5:30\n")
 
         # Seed one complete six-block database. Auto-bootstrap must use a
         # genuinely READY source rather than a partial fixture.
         for letter in ("N", "C", "I", "L", "K"):
-            (node_a / f"data/udb_{letter}.db").write_text(
-                f"; UDB Block {letter}\n; Saved: 1787720000\n; Records: 0\n", encoding="ascii")
+            seed_block(node_a / f"data/udb_{letter}.db", letter)
 
         # Seed Node A with an N record
         n_file_a = node_a / "data/udb_N.db"
-        n_file_a.write_text("; UDB Block N\n; Saved: 1787720000\n; Records: 1\ndavidlig::vhost root.admin.net\n", encoding="ascii")
-        (node_a / "data/.udb_state").write_text("STATE=READY\nLAST_SYNC=1787720000\n", encoding="ascii")
+        seed_block(n_file_a, "N", "davidlig::vhost root.admin.net\n")
+        seed_ready_state(node_a / "data")
 
         all_ports = free_ports(6)
         ports_a = tuple(all_ports[0:3])

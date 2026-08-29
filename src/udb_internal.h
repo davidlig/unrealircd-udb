@@ -237,7 +237,6 @@ typedef enum UdbStatePersistResult
 typedef enum UdbStartupState
 {
 	UDB_STARTUP_FRESH = 0,
-	UDB_STARTUP_LEGACY_VALID,
 	UDB_STARTUP_PERSISTED_READY_VALID,
 	UDB_STARTUP_PERSISTED_BOOTSTRAPPING,
 	UDB_STARTUP_PERSISTED_INVALID,
@@ -247,7 +246,6 @@ typedef enum UdbStartupState
 typedef enum UdbPersistenceOrigin
 {
 	UDB_ORIGIN_FRESH = 0,
-	UDB_ORIGIN_LEGACY,
 	UDB_ORIGIN_RECOVERY
 } UdbPersistenceOrigin;
 
@@ -285,7 +283,7 @@ static int udb_policy_notify_deferred = 0;
 static int udb_policy_notify_pending = 0;
 
 static int udb_persistence_load_state(UdbPersistentState *state_out, UdbPersistenceOrigin *origin_out,
-									  unsigned long *generation_out, time_t *last_sync_out, int *legacy_format_out);
+									  unsigned long *generation_out, time_t *last_sync_out);
 static UdbStatePersistResult udb_persistence_set_state(UdbPersistentState state, UdbPersistenceOrigin origin,
 													   unsigned long generation, time_t last_sync);
 static void udb_mark_durability_uncertain(UdbContext *ctx, UdbBlock *block, const char *operation);
@@ -371,7 +369,6 @@ static void udb_persistence_mark_ready(void);
 static int udb_has_active_sessions(UdbContext *ctx);
 static int udb_transition_to_ready(UdbContext *ctx, time_t sync_time);
 static int udb_persistence_has_state_file(void);
-static int udb_persistence_migrate_legacy(UdbContext *ctx, time_t *last_sync_out);
 static void udb_block_clear_pending(UdbBlock *block);
 static int udb_has_pending_requests(UdbContext *ctx);
 static void udb_reconcile_reset(void);

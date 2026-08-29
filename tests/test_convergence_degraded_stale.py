@@ -25,6 +25,8 @@ import sys
 import tempfile
 import time
 
+from udb_state_seed import seed_block, seed_bootstrapping_state, seed_ready_state
+
 ROOT = pathlib.Path(__file__).resolve().parents[5]
 RUNTIME_ROOT = pathlib.Path(os.environ.get("UDB_TEST_IRCD_ROOT", pathlib.Path.home() / "unrealircd"))
 DEFAULT_IRCD = RUNTIME_ROOT / "bin/unrealircd"
@@ -479,9 +481,9 @@ def test_suite():
 
         # Seed valid 6-block snapshots on disk with S.db propagator = old-a.test,old-b.test
         for letter in ('N', 'C', 'I', 'S', 'L', 'K'):
-            (dbdirG / f"udb_{letter}.db").write_text(f"; UDB Block {letter} - Version 1\n", encoding="ascii")
-        (dbdirG / "udb_S.db").write_text("; UDB Block S - Version 1\npropagator old-a.test,old-b.test\n", encoding="ascii")
-        (dbdirG / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787800000\n", encoding="ascii")
+            seed_block(dbdirG / f"udb_{letter}.db", letter)
+        seed_block(dbdirG / "udb_S.db", "S", "propagator old-a.test,old-b.test\n")
+        seed_ready_state(dbdirG)
 
         confG = nodeG / "unrealircd.conf"
         # No local propagator override in config, stale timeout 2s
@@ -591,7 +593,7 @@ def test_suite():
         shutil.copy(module_src, nodeI2 / "modules" / "third" / "udb.so")
         confI2 = nodeI2 / "unrealircd.conf"
         write_config(confI2, "hubI2.test", "00J", portsI2, linksI, dbdirI2)
-        (dbdirI2 / ".udb_state").write_text("STATE=BOOTSTRAPPING\nLAST_SYNC=0\n", encoding="ascii")
+        seed_bootstrapping_state(dbdirI2)
 
         procI2 = subprocess.Popen(bwrap_command(nodeI2, ircd_bin, confI2))
         wait_for_daemon(procI2, "127.0.0.1", portsI2[0])

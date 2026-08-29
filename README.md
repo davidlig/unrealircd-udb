@@ -108,7 +108,7 @@ timeout, automatically aborting the link (`SQUIT`) if UDB capability is missing.
 `database-directory` accepts a local absolute path or a path relative to
 UnrealIRCd's permanent data directory. UDB creates the final directory if it
 does not exist and stores every block file directly beneath it. If omitted, UDB
-keeps the legacy default of storing block files in UnrealIRCd's permanent data
+keeps the historical default of storing block files in UnrealIRCd's permanent data
 directory.
 
 `max-staged-records` sets the maximum number of records allowed per block during
@@ -240,7 +240,9 @@ Detailed technical documentation is available in the `doc/` directory:
 - `READY` means that all six required snapshots (`N`, `C`, `I`, `S`, `L`, and
   `K`) belong to one durable generation. A genuinely fresh local authority may
   initialize an empty database, but a missing snapshot, malformed state marker,
-  partial legacy database, or generation mismatch stays fail-closed in recovery.
+  orphaned snapshot set without a valid `.udb_state`, or generation mismatch
+  stays fail-closed in recovery. There is no storage migration: obsolete state
+  formats require an authorized re-bootstrap.
 - Reconciliation is an explicit HEL-driven state machine. HEL request and ACK
   ordering is idempotent; each inventory and staged frame carries a wire round
   ID; `BEGIN` is accepted only after the matching `RES`; and timeout, `ERR`,

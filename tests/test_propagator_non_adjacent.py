@@ -28,6 +28,8 @@ import sys
 import tempfile
 import time
 
+from udb_state_seed import seed_block, seed_ready_state
+
 ROOT = pathlib.Path(__file__).resolve().parents[5]
 RUNTIME_ROOT = pathlib.Path(os.environ.get("UDB_TEST_IRCD_ROOT", pathlib.Path.home() / "unrealircd"))
 DEFAULT_IRCD = RUNTIME_ROOT / "bin/unrealircd"
@@ -180,28 +182,22 @@ def main():
         # Initialize all 6 blocks with S block on nodes A, B, C
         for n in (node_a, node_b, node_c):
             for letter in ('N', 'C', 'I', 'S', 'L', 'K'):
-                (n / f"data/udb_{letter}.db").write_text(f"; UDB Block {letter} - Version 1\n", encoding="ascii")
-            (n / "data/udb_S.db").write_text(
-                f"; UDB Block S\n; Saved: 1787720000\n; Records: 2\npropagator {propagator_list}\nflood 5:30\n",
-                encoding="ascii"
-            )
-            (n / "data/.udb_state").write_text("STATE=READY\nLAST_SYNC=1787720000\n", encoding="ascii")
+                seed_block(n / f"data/udb_{letter}.db", letter)
+            seed_block(n / "data/udb_S.db", "S",
+                       f"propagator {propagator_list}\nflood 5:30\n")
+            seed_ready_state(n / "data")
 
         # Seed Node A (Root Propagator) with latest N block
-        (node_a / "data/udb_N.db").write_text(
-            "; UDB Block N\n; Saved: 1787720000\n; Records: 2\nalice::vhost official.alice.net\nbob::vhost official.bob.net\n",
-            encoding="ascii"
-        )
+        seed_block(node_a / "data/udb_N.db", "N",
+                   "alice::vhost official.alice.net\nbob::vhost official.bob.net\n")
         new_time = time.time() + 60
         os.utime(node_a / "data/udb_N.db", (new_time, new_time))
         os.utime(node_a / "data/.udb_state", (new_time, new_time))
 
         # Seed Node C (Leaf) with older, outdated N.db
-        (node_c / "data/udb_N.db").write_text(
-            "; UDB Block N\n; Saved: 1787710000\n; Records: 1\nolduser::vhost outdated.vhost.net\n",
-            encoding="ascii"
-        )
-        (node_c / "data/.udb_state").write_text("STATE=READY\nLAST_SYNC=1787710000\n", encoding="ascii")
+        seed_block(node_c / "data/udb_N.db", "N",
+                   "olduser::vhost outdated.vhost.net\n")
+        seed_ready_state(node_c / "data", last_sync=1787710000)
         old_time = time.time() - 120
         os.utime(node_c / "data/udb_N.db", (old_time, old_time))
         os.utime(node_c / "data/.udb_state", (old_time, old_time))

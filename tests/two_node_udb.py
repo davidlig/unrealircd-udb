@@ -15,6 +15,8 @@ import sys
 import tempfile
 import time
 
+from udb_state_seed import seed_block, seed_bootstrapping_state, seed_ready_state
+
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 RUNTIME_ROOT = pathlib.Path(os.environ.get("UDB_TEST_IRCD_ROOT", pathlib.Path.home() / "unrealircd"))
@@ -463,21 +465,21 @@ def main():
         b_db = b / "data" / "udb_N.db"
         a_k_db = a / "data" / "udb_K.db"
         b_k_db = b / "data" / "udb_K.db"
-        a_db.write_text("harness-a::vhost winner.test\n", encoding="ascii")
-        b_db.write_text("harness-b::vhost loser.test\n", encoding="ascii")
-        a_k_db.write_text(K_STAGED_RECORD + "\n", encoding="ascii")
-        b_k_db.write_text("G::*@udb-loser.test::reason loser\n", encoding="ascii")
+        seed_block(a_db, "N", "harness-a::vhost winner.test\n")
+        seed_block(b_db, "N", "harness-b::vhost loser.test\n")
+        seed_block(a_k_db, "K", K_STAGED_RECORD + "\n")
+        seed_block(b_k_db, "K", "G::*@udb-loser.test::reason loser\n")
         for n in (a, b):
             for letter in ('C', 'I', 'S', 'L'):
-                (n / "data" / f"udb_{letter}.db").write_text(f"; UDB Block {letter} - Version 1\n", encoding="ascii")
-        (a / "data" / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787720000\n", encoding="ascii")
+                seed_block(n / "data" / f"udb_{letter}.db", letter)
+        seed_ready_state(a / "data")
         # The state-fsync failure mode needs node B to attempt a READY
         # transition during the run, so it starts NOT_READY.  The six-block
         # set-rename failure mode exercises the same transition path.
         if args.state_directory_fsync_failure or args.snapshot_set_rename_failure:
-            (b / "data" / ".udb_state").write_text("STATE=BOOTSTRAPPING\nLAST_SYNC=0\n", encoding="ascii")
+            seed_bootstrapping_state(b / "data")
         else:
-            (b / "data" / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787720000\n", encoding="ascii")
+            seed_ready_state(b / "data")
         a_baseline = a_db.read_bytes()
         b_baseline = b_db.read_bytes()
         set_baselines = {letter: (b / "data" / f"udb_{letter}.db").read_bytes()

@@ -14,6 +14,8 @@ import sys
 import tempfile
 import time
 
+from udb_state_seed import seed_block, seed_ready_state
+
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 RUNTIME_ROOT = pathlib.Path(os.environ.get("UDB_TEST_IRCD_ROOT", pathlib.Path.home() / "unrealircd"))
@@ -310,17 +312,17 @@ def main():
             shutil.copy2(MUTATOR_MODULE, node / "modules" / "third" / "udb_test_mutator.so")
         a_db, b_db, c_db = (node / "data" / "udb_N.db" for node in (a, b, c))
         # Only A has a record. Empty, old placeholders make B and C request A's block.
-        a_db.write_text(N_MARKER, encoding="ascii")
+        seed_block(a_db, "N", N_MARKER)
         for n in (a, b, c):
             for letter in ('C', 'I', 'S', 'L', 'K'):
-                (n / "data" / f"udb_{letter}.db").write_text(f"; UDB Block {letter} - Version 1\n", encoding="ascii")
-        (a / "data" / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787720000\n", encoding="ascii")
+                seed_block(n / "data" / f"udb_{letter}.db", letter)
+        seed_ready_state(a / "data")
         for db in (b_db, c_db):
-            db.touch()
+            seed_block(db, "N")
             old_time = time.time() - 60
             os.utime(db, (old_time, old_time))
-        (b / "data" / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787710000\n", encoding="ascii")
-        (c / "data" / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787710000\n", encoding="ascii")
+        seed_ready_state(b / "data", last_sync=1787710000)
+        seed_ready_state(c / "data", last_sync=1787710000)
 
         raw_ports = free_ports(9)
         ports = [tuple(raw_ports[i * 3:(i + 1) * 3]) for i in range(3)]

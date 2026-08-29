@@ -13,6 +13,8 @@ import sys
 import tempfile
 import time
 
+from udb_state_seed import seed_block, seed_ready_state
+
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 RUNTIME_ROOT = pathlib.Path(os.environ.get("UDB_TEST_IRCD_ROOT", pathlib.Path.home() / "unrealircd"))
@@ -202,26 +204,22 @@ def test_node(ircd, module, enable_debug):
         shutil.copy2(module, node / "modules" / "third" / "udb.so")
 
         # Configure Nick and Channel blocks
-        (node / "data" / "udb_N.db").write_text(
-            f"alice::pass sha256:{sha256('secret')}\n"
-            "alice::oper netadmin\n",
-            encoding="ascii")
-        (node / "data" / "udb_C.db").write_text(
-            "#test::founder alice\n"
-            f"#test::pass sha256:{sha256('chansecret')}\n",
-            encoding="ascii")
+        seed_block(node / "data" / "udb_N.db", "N",
+                   f"alice::pass sha256:{sha256('secret')}\n"
+                   "alice::oper netadmin\n")
+        seed_block(node / "data" / "udb_C.db", "C",
+                   "#test::founder alice\n"
+                   f"#test::pass sha256:{sha256('chansecret')}\n")
 
         if enable_debug:
-            (node / "data" / "udb_L.db").write_text(
-                f"{server_name}::options *1\n",
-                encoding="ascii")
+            seed_block(node / "data" / "udb_L.db", "L",
+                       f"{server_name}::options *1\n")
         else:
-            (node / "data" / "udb_L.db").write_text(
-                f"{server_name}::options *0\n",
-                encoding="ascii")
+            seed_block(node / "data" / "udb_L.db", "L",
+                       f"{server_name}::options *0\n")
         for letter in ('I', 'S', 'K'):
-            (node / "data" / f"udb_{letter}.db").write_text(f"; UDB Block {letter} - Version 1\n", encoding="ascii")
-        (node / "data" / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787720000\n", encoding="ascii")
+            seed_block(node / "data" / f"udb_{letter}.db", letter)
+        seed_ready_state(node / "data")
 
         client_port, server_port, tls_port = free_port(), free_port(), free_port()
         config = node / "unrealircd.conf"

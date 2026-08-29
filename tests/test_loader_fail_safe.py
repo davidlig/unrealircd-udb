@@ -13,6 +13,8 @@ import sys
 import tempfile
 import time
 
+from udb_state_seed import seed_block, seed_ready_state
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[5]
 RUNTIME_ROOT = pathlib.Path(os.environ.get("UDB_TEST_IRCD_ROOT", pathlib.Path.home() / "unrealircd"))
@@ -348,10 +350,10 @@ def run_tests(ircd_bin, keep=False):
             expected_records[f"{chan}::topic"] = payload
 
         for letter in ('N', 'I', 'S', 'L', 'K'):
-            (data_dir4 / f"udb_{letter}.db").write_text(f"; UDB Block {letter} - Version 1\n", encoding="ascii")
+            seed_block(data_dir4 / f"udb_{letter}.db", letter)
         large_records_db = data_dir4 / "udb_C.db"
-        large_records_db.write_text("".join(lines), encoding="ascii")
-        (data_dir4 / ".udb_state").write_text(f"STATE=READY\nLAST_SYNC={int(time.time())}\n", encoding="ascii")
+        seed_block(large_records_db, "C", "".join(lines))
+        seed_ready_state(data_dir4, last_sync=int(time.time()))
 
         client_port4, server_port4, tls_port4 = free_port(), free_port(), free_port()
         config4 = node4 / "unrealircd.conf"

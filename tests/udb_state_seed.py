@@ -1,0 +1,37 @@
+"""Shared .udb_state seeding helpers for UDB runtime tests.
+
+State files must use the full versioned format. Minimal (STATE=/LAST_SYNC=
+only) files and ORIGIN=LEGACY files are rejected by the module.
+
+A READY seeding must pair the state file with six block files whose
+"; Generation: " headers match the seeded GENERATION.
+"""
+
+UDB_STATE_FORMAT = 1
+DEFAULT_SEED_GENERATION = 1
+
+
+def block_header(letter, generation=DEFAULT_SEED_GENERATION):
+    """Leading comment lines required in a seeded block snapshot file."""
+    return f"; UDB Block {letter} - Version 1\n; Generation: {generation}\n"
+
+
+def seed_block(path, letter, body="", generation=DEFAULT_SEED_GENERATION):
+    """Write a block snapshot file with the required generation header."""
+    path.write_text(block_header(letter, generation) + body, encoding="ascii")
+
+
+def seed_ready_state(data_dir, generation=DEFAULT_SEED_GENERATION, last_sync=1787720000):
+    """Write a versioned READY .udb_state (block files must share generation)."""
+    (data_dir / ".udb_state").write_text(
+        f"FORMAT={UDB_STATE_FORMAT}\nSTATE=READY\nORIGIN=FRESH\nGENERATION={generation}\nLAST_SYNC={last_sync}\n",
+        encoding="ascii",
+    )
+
+
+def seed_bootstrapping_state(data_dir, generation=0):
+    """Write a versioned BOOTSTRAPPING .udb_state."""
+    (data_dir / ".udb_state").write_text(
+        f"FORMAT={UDB_STATE_FORMAT}\nSTATE=BOOTSTRAPPING\nORIGIN=FRESH\nGENERATION={generation}\nLAST_SYNC=0\n",
+        encoding="ascii",
+    )

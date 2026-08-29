@@ -12,6 +12,8 @@ import sys
 import tempfile
 import time
 
+from udb_state_seed import seed_block, seed_ready_state
+
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 RUNTIME_ROOT = pathlib.Path(os.environ.get("UDB_TEST_IRCD_ROOT", pathlib.Path.home() / "unrealircd"))
@@ -210,15 +212,10 @@ def test_clone_limit(ircd, module):
 
         # Configure global clone limit = 3 and custom quit message
         custom_quit = "Demasiadas conexiones simultaneas (limite global)"
-        (node / "data" / "udb_S.db").write_text(
-            f"clones *3\n"
-            f"quit_clones {custom_quit}\n",
-            encoding="ascii"
-        )
+        seed_block(node / "data" / "udb_S.db", "S", f"clones *3\nquit_clones {custom_quit}\n")
         for letter in ("N", "C", "I", "L", "K"):
-            (node / "data" / f"udb_{letter}.db").write_text(
-                f"; UDB Block {letter} - Version 1\n", encoding="ascii")
-        (node / "data" / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787720000\n", encoding="ascii")
+            seed_block(node / "data" / f"udb_{letter}.db", letter)
+        seed_ready_state(node / "data")
 
         client_port, server_port, tls_port = free_port(), free_port(), free_port()
         config = node / "unrealircd.conf"

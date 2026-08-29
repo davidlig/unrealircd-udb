@@ -19,6 +19,8 @@ import sys
 import tempfile
 import time
 
+from udb_state_seed import seed_block, seed_ready_state
+
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 RUNTIME_ROOT = pathlib.Path(os.environ.get("UDB_TEST_IRCD_ROOT", pathlib.Path.home() / "unrealircd"))
@@ -509,32 +511,29 @@ def main():
         third_modules = node / "modules" / "third"
         third_modules.mkdir(parents=True)
         shutil.copy2(args.module, third_modules / "udb.so")
-        (data / "udb_C.db").write_text(
-            f"{CHANNEL}::founder alice\n"
-            f"{CHANNEL}::pass sha256:{sha256('chansecret')}\n"
-            f"{CHANNEL}::challenge sha256\n"
-            f"{CHANNEL}::modes +ntM\n"
-            f"{CHANNEL}::topic Persistent topic\n",
-            encoding="ascii")
-        (data / "udb_N.db").write_text(
-            f"alice::pass sha256:{sha256('secret')}\n"
-            "alice::challenge sha256\n"
-            "alice::access 127.0.0.0/8\n"
-            "alice::vhost alice.test\n"
-            f"locked::pass sha256:{sha256('secret')}\n"
-            "locked::challenge sha256\n",
-            encoding="ascii")
-        (data / "udb_S.db").write_text(
-            "nickserv NickServ!services@services.test\n"
-            "chanserv ChanServ!services@services.test\n"
-            "ipserv IpServ!services@services.test\n"
-            "flood 2:60\n"
-            "encryption_key " + ("a1" * 32) + "\n"
-            "suffix .derived.test\n",
-            encoding="ascii")
+        seed_block(data / "udb_C.db", "C",
+                   f"{CHANNEL}::founder alice\n"
+                   f"{CHANNEL}::pass sha256:{sha256('chansecret')}\n"
+                   f"{CHANNEL}::challenge sha256\n"
+                   f"{CHANNEL}::modes +ntM\n"
+                   f"{CHANNEL}::topic Persistent topic\n")
+        seed_block(data / "udb_N.db", "N",
+                   f"alice::pass sha256:{sha256('secret')}\n"
+                   "alice::challenge sha256\n"
+                   "alice::access 127.0.0.0/8\n"
+                   "alice::vhost alice.test\n"
+                   f"locked::pass sha256:{sha256('secret')}\n"
+                   "locked::challenge sha256\n")
+        seed_block(data / "udb_S.db", "S",
+                   "nickserv NickServ!services@services.test\n"
+                   "chanserv ChanServ!services@services.test\n"
+                   "ipserv IpServ!services@services.test\n"
+                   "flood 2:60\n"
+                   "encryption_key " + ("a1" * 32) + "\n"
+                   "suffix .derived.test\n")
         for letter in ('I', 'L', 'K'):
-            (data / f"udb_{letter}.db").write_text(f"; UDB Block {letter} - Version 1\n", encoding="ascii")
-        (data / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787720000\n", encoding="ascii")
+            seed_block(data / f"udb_{letter}.db", letter)
+        seed_ready_state(data)
         residual_snapshot = data / "udb_C.db.tmp"
         residual_snapshot.write_text(
             "; UDB Block C - Version 1\n"

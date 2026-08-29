@@ -13,6 +13,8 @@ import sys
 import tempfile
 import time
 
+from udb_state_seed import seed_block, seed_ready_state
+
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 RUNTIME_ROOT = pathlib.Path(os.environ.get("UDB_TEST_IRCD_ROOT", pathlib.Path.home() / "unrealircd"))
@@ -493,19 +495,17 @@ def main():
             f"nickserv {NICKSERV_MASK}\n"
             f"chanserv {CHANSERV_MASK}\n",
             encoding="ascii")
-        (data / "udb_N.db").write_text(
-            f"davidlig::pass sha256:{sha256('secret')}\n"
-            "davidlig::challenge sha256\n"
-            "davidlig::access 127.0.0.0/8\n",
-            encoding="ascii")
-        (data / "udb_C.db").write_text(
-            f"{CHANNEL}::founder davidlig\n"
-            f"{CHANNEL}::modes +ntM\n"
-            f"{CHANNEL}::options *6\n",
-            encoding="ascii")
+        seed_block(data / "udb_N.db", "N",
+                   f"davidlig::pass sha256:{sha256('secret')}\n"
+                   "davidlig::challenge sha256\n"
+                   "davidlig::access 127.0.0.0/8\n")
+        seed_block(data / "udb_C.db", "C",
+                   f"{CHANNEL}::founder davidlig\n"
+                   f"{CHANNEL}::modes +ntM\n"
+                   f"{CHANNEL}::options *6\n")
         for letter in ('I', 'L', 'K'):
-            (data / f"udb_{letter}.db").write_text(f"; UDB Block {letter} - Version 1\n", encoding="ascii")
-        (data / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787720000\n", encoding="ascii")
+            seed_block(data / f"udb_{letter}.db", letter)
+        seed_ready_state(data)
 
         client_port, server_port, tls_port = free_port(), free_port(), free_port()
         config = node / "unrealircd.conf"

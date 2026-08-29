@@ -14,6 +14,8 @@ import sys
 import tempfile
 import time
 
+from udb_state_seed import seed_block, seed_ready_state
+
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 RUNTIME_ROOT = pathlib.Path(os.environ.get("UDB_TEST_IRCD_ROOT", pathlib.Path.home() / "unrealircd"))
@@ -286,17 +288,17 @@ def main():
         # B starts with an active UDB oper; A's newer snapshot deliberately omits it.
         b_n = b / "data" / "udb_N.db"
         a_n = a / "data" / "udb_N.db"
-        b_n.write_text(f"alice::pass sha256:{sha256('secret')}\nalice::oper netadmin\n", encoding="ascii")
-        a_n.write_text(f"alice::pass sha256:{sha256('secret')}\n", encoding="ascii")
-        (b / "data" / "udb_K.db").touch()
-        (a / "data" / "udb_K.db").write_text(
-            "G::*@127.0.0.1::reason staged loopback ban\n"
-            "Q::banned::reason staged fresh-client rejection\n", encoding="ascii")
+        seed_block(b_n, "N", f"alice::pass sha256:{sha256('secret')}\nalice::oper netadmin\n")
+        seed_block(a_n, "N", f"alice::pass sha256:{sha256('secret')}\n")
+        seed_block(b / "data" / "udb_K.db", "K")
+        seed_block(a / "data" / "udb_K.db", "K",
+                   "G::*@127.0.0.1::reason staged loopback ban\n"
+                   "Q::banned::reason staged fresh-client rejection\n")
         for n in (a, b):
             for letter in ('C', 'I', 'S', 'L'):
-                (n / "data" / f"udb_{letter}.db").write_text(f"; UDB Block {letter} - Version 1\n", encoding="ascii")
-        (a / "data" / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787720000\n", encoding="ascii")
-        (b / "data" / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787710000\n", encoding="ascii")
+                seed_block(n / "data" / f"udb_{letter}.db", letter)
+        seed_ready_state(a / "data")
+        seed_ready_state(b / "data", last_sync=1787710000)
         old_time = time.time() - 120
         for db in (b_n, b / "data" / "udb_K.db", b / "data" / ".udb_state"):
             os.utime(db, (old_time, old_time))

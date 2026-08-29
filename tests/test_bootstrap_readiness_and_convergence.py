@@ -33,6 +33,8 @@ import tempfile
 import time
 import zlib
 
+from udb_state_seed import seed_block, seed_bootstrapping_state, seed_ready_state
+
 ROOT = pathlib.Path(__file__).resolve().parents[5]
 RUNTIME_ROOT = pathlib.Path(os.environ.get("UDB_TEST_IRCD_ROOT", pathlib.Path.home() / "unrealircd"))
 DEFAULT_IRCD = RUNTIME_ROOT / "bin/unrealircd"
@@ -465,6 +467,114 @@ def test_suite():
             stop(p4)
 
         # -----------------------------------------------------------------
+        # TEST 4B: Orphaned snapshots (six valid blocks, no .udb_state)
+        # Snapshots must never auto-migrate to READY; nothing may be deleted.
+        # -----------------------------------------------------------------
+        print("\n=== Running Test 4B: Orphaned snapshots without .udb_state ===")
+        p4b_ports = free_ports(3)
+        p4b, n4b, dbdir4b, cfg4b = setup_node(
+            tmpdir, "hub4b.test", "00B", p4b_ports,
+            [("peer-a.test", 0, False)]
+        )
+        try:
+            stop(p4b)
+            for letter in ('N', 'C', 'I', 'S', 'L', 'K'):
+                seed_block(dbdir4b / f"udb_{letter}.db", letter)
+            # No .udb_state on purpose.
+
+            p4b = subprocess.Popen(bwrap_command(n4b, ircd_bin, cfg4b))
+            wait_for_daemon(p4b, "127.0.0.1", p4b_ports[0])
+            wait_for_daemon(p4b, "127.0.0.1", p4b_ports[1])
+
+            c4b = MockClient("127.0.0.1", p4b_ports[0], "user4b")
+            assert c4b.is_denied(), "Client allowed with orphaned snapshots and no .udb_state!"
+            c4b.close()
+            state_file4b = dbdir4b / ".udb_state"
+            assert not state_file4b.exists() or "STATE=READY" not in state_file4b.read_text(), \
+                "Orphaned snapshots must not produce a persisted READY state"
+            for letter in ('N', 'C', 'I', 'S', 'L', 'K'):
+                assert (dbdir4b / f"udb_{letter}.db").exists(), f"Snapshot udb_{letter}.db must not be deleted"
+            print("PASS: Test 4B: Orphaned snapshots stayed fail-closed without migration")
+        finally:
+            stop(p4b)
+
+        # -----------------------------------------------------------------
+        # TEST 4C: Minimal legacy state file (STATE=/LAST_SYNC= only)
+        # -----------------------------------------------------------------
+        print("\n=== Running Test 4C: Minimal legacy state file is invalid ===")
+        p4c_ports = free_ports(3)
+        p4c, n4c, dbdir4c, cfg4c = setup_node(
+            tmpdir, "hub4c.test", "00C", p4c_ports,
+            [("peer-a.test", 0, False)]
+        )
+        try:
+            stop(p4c)
+            (dbdir4c / ".udb_state").write_text("STATE=READY\nLAST_SYNC=1787720000\n", encoding="ascii")
+
+            p4c = subprocess.Popen(bwrap_command(n4c, ircd_bin, cfg4c))
+            wait_for_daemon(p4c, "127.0.0.1", p4c_ports[0])
+            wait_for_daemon(p4c, "127.0.0.1", p4c_ports[1])
+
+            c4c = MockClient("127.0.0.1", p4c_ports[0], "user4c")
+            assert c4c.is_denied(), "Client allowed with minimal legacy .udb_state!"
+            c4c.close()
+            print("PASS: Test 4C: Minimal legacy state file rejected fail-closed")
+        finally:
+            stop(p4c)
+
+        # -----------------------------------------------------------------
+        # TEST 4D: Versioned state with ORIGIN=LEGACY is invalid
+        # -----------------------------------------------------------------
+        print("\n=== Running Test 4D: ORIGIN=LEGACY versioned state is invalid ===")
+        p4d_ports = free_ports(3)
+        p4d, n4d, dbdir4d, cfg4d = setup_node(
+            tmpdir, "hub4d.test", "00D", p4d_ports,
+            [("peer-a.test", 0, False)]
+        )
+        try:
+            stop(p4d)
+            (dbdir4d / ".udb_state").write_text(
+                "FORMAT=1\nSTATE=READY\nORIGIN=LEGACY\nGENERATION=1787720000\nLAST_SYNC=1787720000\n",
+                encoding="ascii")
+
+            p4d = subprocess.Popen(bwrap_command(n4d, ircd_bin, cfg4d))
+            wait_for_daemon(p4d, "127.0.0.1", p4d_ports[0])
+            wait_for_daemon(p4d, "127.0.0.1", p4d_ports[1])
+
+            c4d = MockClient("127.0.0.1", p4d_ports[0], "user4d")
+            assert c4d.is_denied(), "Client allowed with ORIGIN=LEGACY .udb_state!"
+            c4d.close()
+            print("PASS: Test 4D: ORIGIN=LEGACY versioned state rejected fail-closed")
+        finally:
+            stop(p4d)
+
+        # -----------------------------------------------------------------
+        # TEST 4E: Persisted READY generation must match snapshot generations
+        # -----------------------------------------------------------------
+        print("\n=== Running Test 4E: Generation mismatch refuses READY ===")
+        p4e_ports = free_ports(3)
+        p4e, n4e, dbdir4e, cfg4e = setup_node(
+            tmpdir, "hub4e.test", "00E", p4e_ports,
+            [("peer-a.test", 0, False)]
+        )
+        try:
+            stop(p4e)
+            for letter in ('N', 'C', 'I', 'S', 'L', 'K'):
+                seed_block(dbdir4e / f"udb_{letter}.db", letter, generation=1)
+            seed_ready_state(dbdir4e, generation=2)
+
+            p4e = subprocess.Popen(bwrap_command(n4e, ircd_bin, cfg4e))
+            wait_for_daemon(p4e, "127.0.0.1", p4e_ports[0])
+            wait_for_daemon(p4e, "127.0.0.1", p4e_ports[1])
+
+            c4e = MockClient("127.0.0.1", p4e_ports[0], "user4e")
+            assert c4e.is_denied(), "Client allowed despite READY generation mismatch!"
+            c4e.close()
+            print("PASS: Test 4E: Generation mismatch stayed fail-closed")
+        finally:
+            stop(p4e)
+
+        # -----------------------------------------------------------------
         # TEST 5: State file write failure simulation
         # (the read-only directory must be in place before the daemon starts:
         # a node that already went standalone READY on a writable directory
@@ -546,7 +656,7 @@ def test_suite():
             stop(p7)
             (dbdir7 / "udb_S.db").write_text(
                 "; UDB Block S\npropagator prop-a.test,prop-b.test\n", encoding="ascii")
-            (dbdir7 / ".udb_state").write_text("STATE=BOOTSTRAPPING\nLAST_SYNC=0\n", encoding="ascii")
+            seed_bootstrapping_state(dbdir7)
             p7 = subprocess.Popen(bwrap_command(n7, ircd_bin, cfg7))
             wait_for_daemon(p7, "127.0.0.1", p7_ports[0])
             wait_for_daemon(p7, "127.0.0.1", p7_ports[1])
@@ -592,7 +702,7 @@ def test_suite():
             stop(p8)
             (dbdir8 / "udb_S.db").write_text(
                 "; UDB Block S\npropagator peer-a.test,peer-b.test\n", encoding="ascii")
-            (dbdir8 / ".udb_state").write_text("STATE=BOOTSTRAPPING\nLAST_SYNC=0\n", encoding="ascii")
+            seed_bootstrapping_state(dbdir8)
             p8 = subprocess.Popen(bwrap_command(n8, ircd_bin, cfg8))
             wait_for_daemon(p8, "127.0.0.1", p8_ports[0])
             wait_for_daemon(p8, "127.0.0.1", p8_ports[1])
@@ -650,7 +760,7 @@ def test_suite():
             stop(p10)
             for artifact in dbdir10.iterdir():
                 artifact.unlink()
-            (dbdir10 / ".udb_state").write_text("STATE=BOOTSTRAPPING\nLAST_SYNC=0\n", encoding="ascii")
+            seed_bootstrapping_state(dbdir10)
             p10 = subprocess.Popen(bwrap_command(n10, ircd_bin, cfg10))
             wait_for_daemon(p10, "127.0.0.1", p10_ports[0])
             wait_for_daemon(p10, "127.0.0.1", p10_ports[1])
@@ -800,7 +910,7 @@ def test_suite():
             peer14b.send("DB 014 INF N 00000000 0")
             time.sleep(0.2)
             assert not any(" ERR INF " in line for line in peer14b.lines), \
-                "INF without a valid round ID produced a legacy uncorrelated ERR"
+                "INF without a valid round ID produced an uncorrelated ERR"
             peer14b.close()
             print("PASS: Test 14: HEL event order converged and INF without a round ID was rejected")
         finally:
@@ -848,7 +958,7 @@ def test_suite():
         finally:
             stop(p15)
 
-    print("\nALL 15 READINESS & CONVERGENCE TESTS PASSED SUCCESSFULLY!")
+    print("\nALL READINESS & CONVERGENCE TESTS PASSED SUCCESSFULLY!")
 
 
 if __name__ == "__main__":
