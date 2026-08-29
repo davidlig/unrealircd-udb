@@ -1,16 +1,25 @@
 #!/usr/bin/env python3
 """
-UDB Bundle Script
-Combines modular UDB sources (udb.c, udb.h, udb_internal.h, and ordered
-udb_*.c.inc implementation units, including lifecycle coordination) into a
-single, self-contained files/udb.c and generates modules.list for UnrealIRCd
-Module Manager.
+UDB Bundle Script — deterministic amalgamation of modular UDB sources.
+
+Reads the canonical sources under src/ strictly read-only, inlines the public
+header, the internal header, and the ordered udb_*.c.inc implementation units
+referenced from src/udb.c, and produces dist/udb.c plus modules.list.
+
+The generator never mutates its inputs and never invokes a code formatter.
+Formatting is a separate, explicit step (scripts/format-sources) so that the
+bundle output depends only on repository bytes.
+
+Usage:
+    python3 scripts/bundle.py          regenerate dist/udb.c and modules.list
+    python3 scripts/bundle.py --check  read-only verification; exit 1 on drift
 """
 
+import argparse
+import hashlib
 import os
 import re
-import hashlib
-import subprocess
+import sys
 
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC_DIR = os.path.join(REPO_DIR, "src")
@@ -50,78 +59,83 @@ module
 */
 """
 
-def format_sources():
-    src_files = []
-    for root, _, files in os.walk(SRC_DIR):
-        for file in files:
-            if file.endswith((".c", ".h", ".inc")):
-                src_files.append(os.path.join(root, file))
-    if src_files:
-        subprocess.run(["clang-format", "-i"] + sorted(src_files), check=True)
-        print(f"[+] Formatted {len(src_files)} source files in {SRC_DIR}")
 
-def bundle_sources():
-    format_sources()
-    os.makedirs(DIST_DIR, exist_ok=True)
-    
-    # Read public and implementation-only headers.
-    with open(os.path.join(SRC_DIR, "udb.h"), "r", encoding="utf-8") as f:
-        udb_h_content = f.read()
-    with open(os.path.join(SRC_DIR, "udb_internal.h"), "r", encoding="utf-8") as f:
-        udb_internal_h_content = f.read()
+def fail(message):
+    print(f"ERROR: {message}", file=sys.stderr)
+    raise SystemExit(1)
 
-    # Read udb.c
-    with open(os.path.join(SRC_DIR, "udb.c"), "r", encoding="utf-8") as f:
-        udb_c_content = f.read()
 
-    # Remove initial multi-line comment from udb.c if any
-    clean_udb_c = re.sub(r'/\*.*?\*/', '', udb_c_content, count=1, flags=re.DOTALL).strip()
+def read_source(path):
+    with open(path, "r", encoding="utf-8") as handle:
+        text = handle.read()
+    if "\r" in text:
+        fail(f"{path}: carriage returns are not allowed in canonical sources")
+    return text
 
-    # Inline the public header into the internal header, then inline that
-    # complete implementation interface into the one-file distribution.
-    udb_internal_h_content = re.sub(
-        r'#include\s+"udb\.h"', udb_h_content, udb_internal_h_content
+
+def replace_include(text, pattern, replacement, source):
+    """Line-anchored include replacement; unmatched occurrences fail closed."""
+    inline_regex = re.compile(rf'^([ \t]*)#include\s+{pattern}[ \t]*$', re.MULTILINE)
+    matches = inline_regex.findall(text)
+    if not matches:
+        fail(f"{source}: expected include {pattern} was not found")
+    return inline_regex.sub(lambda m: replacement, text)
+
+
+def inline_unit(filename, stack, included):
+    path = os.path.join(SRC_DIR, filename)
+    if not os.path.isfile(path):
+        fail(f"included unit not found: {filename}")
+    if filename in stack:
+        fail(f"cyclic include detected: {' -> '.join(stack + [filename])}")
+    if filename in included:
+        fail(f"unit included more than once: {filename}")
+    included.add(filename)
+    text = read_source(path)
+    text = re.sub(r'^[ \t]*#include\s+"udb\.h"[ \t]*$', '', text, flags=re.MULTILINE)
+    text = re.sub(
+        r'^[ \t]*#include\s+"([^"]+\.c\.inc)"[ \t]*$',
+        lambda m: f"/* Inlined: {m.group(1)} */\n" + inline_unit(m.group(1), stack + [filename], included) +
+                  f"\n/* End of {m.group(1)} */",
+        text,
+        flags=re.MULTILINE,
     )
+    return text
+
+
+def build_bundle():
+    udb_h = read_source(os.path.join(SRC_DIR, "udb.h"))
+    udb_internal_h = read_source(os.path.join(SRC_DIR, "udb_internal.h"))
+    udb_c = read_source(os.path.join(SRC_DIR, "udb.c"))
+
+    # The bundle carries its own manager header; drop the entry banner of udb.c.
+    clean_udb_c = re.sub(r'/\*.*?\*/', '', udb_c, count=1, flags=re.DOTALL).strip()
+
+    udb_internal_h = replace_include(udb_internal_h, r'"udb\.h"', udb_h, "udb_internal.h")
+    clean_udb_c = replace_include(clean_udb_c, r'"udb_internal\.h"', udb_internal_h, "udb.c")
+
+    included = set()
     clean_udb_c = re.sub(
-        r'#include\s+"udb_internal\.h"', udb_internal_h_content, clean_udb_c
+        r'^[ \t]*#include\s+"([^"]+\.c\.inc)"[ \t]*$',
+        lambda m: f"/* Inlined: {m.group(1)} */\n" + inline_unit(m.group(1), ["udb.c"], included) +
+                  f"\n/* End of {m.group(1)} */",
+        clean_udb_c,
+        flags=re.MULTILINE,
     )
 
-    # Recursively inline implementation includes while preserving their order.
-    def replace_inc(match):
-        filename = match.group(1)
-        inc_path = os.path.join(SRC_DIR, filename)
-        if os.path.exists(inc_path):
-            with open(inc_path, "r", encoding="utf-8") as inc_file:
-                inc_text = inc_file.read()
-                inc_text = re.sub(r'#include\s+"udb\.h"', '', inc_text)
-                inc_text = re.sub(r'#include\s+"([^\"]+\.c\.inc)"', replace_inc, inc_text)
-                return f"/* Inlined: {filename} */\n" + inc_text + f"\n/* End of {filename} */"
-        else:
-            raise FileNotFoundError(f"Included file not found: {inc_path}")
+    # Every implementation unit present in src/ must be referenced exactly once.
+    on_disk = sorted(name for name in os.listdir(SRC_DIR) if name.endswith(".c.inc"))
+    orphans = [name for name in on_disk if name not in included]
+    if orphans:
+        fail(f"unreferenced implementation units: {', '.join(orphans)}")
 
-    bundled_code = re.sub(r'#include\s+"([^"]+\.c\.inc)"', replace_inc, clean_udb_c)
+    bundled = MODULE_MANAGER_HEADER + "\n" + clean_udb_c + "\n"
+    return bundled.encode("utf-8")
 
-    full_output = MODULE_MANAGER_HEADER + "\n" + bundled_code
 
-    with open(OUT_C_FILE, "w", encoding="utf-8") as f:
-        f.write(full_output)
-
-    subprocess.run(["clang-format", "-i", OUT_C_FILE], check=True)
-
-    with open(OUT_C_FILE, "r", encoding="utf-8") as f:
-        content = f.read()
-    if not content.endswith("\n"):
-        with open(OUT_C_FILE, "a", encoding="utf-8") as f:
-            f.write("\n")
-
-    print(f"[+] Successfully bundled standalone C file -> {OUT_C_FILE}")
-    return OUT_C_FILE
-
-def generate_modules_list(c_file_path):
-    with open(c_file_path, "rb") as f:
-        sha256 = hashlib.sha256(f.read()).hexdigest()
-
-    modules_list_content = f"""/* Autogenerated UDB Module Repository Index for UnrealIRCd 6 */
+def build_modules_list(dist_bytes):
+    sha256 = hashlib.sha256(dist_bytes).hexdigest()
+    content = f"""/* Autogenerated UDB Module Repository Index for UnrealIRCd 6 */
 module "third/udb"
 {{
 	description "UDB 4 (Unreal DataBase) distributed nick/channel/IP management & sync";
@@ -145,11 +159,53 @@ module "third/udb"
 	}}
 }}
 """
-    with open(MODULES_LIST_FILE, "w", encoding="utf-8") as f:
-        f.write(modules_list_content)
+    return content.encode("utf-8")
 
-    print(f"[+] Generated repository index -> {MODULES_LIST_FILE} (SHA256: {sha256})")
+
+def atomic_write(path, payload):
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "wb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp_path, path)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Deterministic UDB bundle generator")
+    parser.add_argument("--check", action="store_true",
+                        help="verify dist/udb.c and modules.list match the canonical sources; write nothing")
+    args = parser.parse_args()
+
+    dist_bytes = build_bundle()
+    modules_bytes = build_modules_list(dist_bytes)
+
+    if args.check:
+        ok = True
+        for path, expected in ((OUT_C_FILE, dist_bytes), (MODULES_LIST_FILE, modules_bytes)):
+            try:
+                with open(path, "rb") as handle:
+                    current = handle.read()
+            except FileNotFoundError:
+                print(f"MISSING: {os.path.relpath(path, REPO_DIR)}")
+                ok = False
+                continue
+            if current != expected:
+                print(f"OUTDATED: {os.path.relpath(path, REPO_DIR)}")
+                ok = False
+        if not ok:
+            print("Bundle drift detected; run: python3 scripts/bundle.py")
+            return 1
+        print(f"Bundle is up to date (sha256 {hashlib.sha256(dist_bytes).hexdigest()}).")
+        return 0
+
+    os.makedirs(DIST_DIR, exist_ok=True)
+    atomic_write(OUT_C_FILE, dist_bytes)
+    atomic_write(MODULES_LIST_FILE, modules_bytes)
+    print(f"[+] Successfully bundled standalone C file -> {OUT_C_FILE}")
+    print(f"[+] Generated repository index -> {MODULES_LIST_FILE} (SHA256: {hashlib.sha256(dist_bytes).hexdigest()})")
+    return 0
+
 
 if __name__ == "__main__":
-    c_path = bundle_sources()
-    generate_modules_list(c_path)
+    raise SystemExit(main())

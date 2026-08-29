@@ -20,6 +20,11 @@ python3 scripts/bundle.py
 git diff --check
 ```
 
+`scripts/bundle.py` is a deterministic, read-only amalgamator: it never formats
+and never mutates `src/`. Formatting is an explicit separate step
+(`scripts/format-sources`) and must be followed by regenerating the bundle.
+Verify without writing anything with `python3 scripts/bundle.py --check`.
+
 Inspect the generated diff and ensure it reflects only intended canonical changes.
 
 ## Documentation

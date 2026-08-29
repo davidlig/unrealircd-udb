@@ -15,6 +15,15 @@ description: Selects and runs the smallest relevant UDB build and Python test co
 - Never rerun an unchanged passing test without a reason.
 - Do not begin with the full CI suite unless explicitly required.
 
+## Bundle determinism
+
+- `tests/test_bundle_determinism.py` verifies reproducibility and that the
+  generator never mutates `src/`.
+- ASan/UBSan coverage comes from the CI `asan` matrix profile; locally, build
+  UnrealIRCd with `SANITIZER=asan` in a temporary tree and run the harnesses
+  with `ASAN_OPTIONS=detect_leaks=0:abort_on_error=1` and
+  `UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1`.
+
 ## Module build
 
 From the UnrealIRCd source root where this repository is available as `src/modules/third/udb`, prefer:

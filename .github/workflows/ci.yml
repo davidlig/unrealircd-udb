@@ -126,8 +126,8 @@ jobs:
       - name: Verify Bundle Integrity
         if: matrix.profile == 'normal'
         run: |
-          python3 scripts/bundle.py
-          git diff --exit-code -- dist/udb.c modules.list
+          python3 scripts/bundle.py --check
+          git diff --exit-code
 
       - name: Run Core Test Suites
         run: |

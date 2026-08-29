@@ -190,9 +190,10 @@ For every C change consider:
 When canonical source changes affect the distribution:
 
 1. edit canonical files under `src/`;
-2. run `python3 scripts/bundle.py` synchronously;
-3. inspect the resulting diff;
-4. run `git diff --check`.
+2. run `scripts/format-sources` only if formatting is intended (the bundle never formats);
+3. run `python3 scripts/bundle.py` synchronously (it is read-only over `src/`);
+4. inspect the resulting diff;
+5. run `python3 scripts/bundle.py --check && git diff --check`.
 
 Never manually edit `dist/udb.c` to make generated output or CI pass.
 
