@@ -412,6 +412,9 @@ typedef struct UdbReconcileState
 	unsigned int completed_blocks;
 	unsigned int retry_count;
 	time_t next_retry_at;
+	time_t started_at;
+	time_t last_activity;
+	time_t deadline;
 } UdbReconcileState;
 
 static UdbReconcileState udb_reconcile = {0};
@@ -3885,6 +3888,8 @@ struct UdbHelloPeer
 
 static UdbHelloPeer *udb_hello_peers = NULL;
 static UdbHelloPeer *udb_hello_peer(Client *server, int create);
+static int udb_has_active_sessions(UdbContext *ctx);
+static int udb_has_pending_requests(UdbContext *ctx);
 
 static void udb_hello_cleanup_all(void)
 {
@@ -3899,10 +3904,19 @@ static void udb_hello_cleanup_all(void)
 static void udb_maybe_start_reconciliation(Client *server, int force_offer)
 {
 	UdbHelloPeer *peer = udb_hello_peer(server, 0);
+	UdbPropagatorSelection selected;
 
 	if (!peer || !udb_has_hello(server) || !IsServer(server) || !MyConnect(server))
 		return;
-	if (peer->authorizes_us && udb_ready && (force_offer || !peer->reconciliation_offered))
+	/* The selected propagator is the sole authority.  A peer authorizing us
+	 * identifies this side as its upstream; it does not authorize a reverse
+	 * pull.  In particular, never start a second offer while another
+	 * authority/round is active: that was the source of bilateral RES churn. */
+	if (!peer->authorizes_us || !udb_ready || !udb_select_propagator(udb_ctx, 1, &selected) || !selected.is_local)
+		return;
+	if (udb_reconcile.active || udb_has_active_sessions(udb_ctx) || udb_has_pending_requests(udb_ctx))
+		return;
+	if (force_offer || !peer->reconciliation_offered)
 	{
 		if (udb_sync_to_server(server))
 			peer->reconciliation_offered = 1;
@@ -4065,14 +4079,14 @@ static void udb_reconcile_reset(void)
 	udb_reconcile.divergent_blocks = 0;
 	udb_reconcile.completed_blocks = 0;
 	udb_reconcile.generation = 0;
+	udb_reconcile.started_at = 0;
+	udb_reconcile.last_activity = 0;
+	udb_reconcile.deadline = 0;
 }
 
 static void udb_reconcile_abort(UdbContext *ctx, const char *reason, int schedule_retry)
 {
 	UdbBlock *block;
-	if (!udb_reconcile.active && !udb_reconcile.authority_peer)
-		return;
-
 	udb_log(ULOG_WARNING, "UDB_RECONCILE_ABORT", udb_reconcile.authority_peer,
 			"Reconciliation round $round aborted: $reason", log_data_integer("round", (int)udb_reconcile.round_id),
 			log_data_string("reason", reason ? reason : "unspecified"));
@@ -4100,6 +4114,13 @@ static void udb_reconcile_abort(UdbContext *ctx, const char *reason, int schedul
 	udb_reconcile_reset();
 }
 
+static void udb_sync_round_failure(UdbBlock *block, Client *peer, unsigned long round_id, const char *reason)
+{
+	if (block && peer && udb_reconcile.active && udb_reconcile.authority_peer == peer &&
+		udb_reconcile.round_id == round_id)
+		udb_reconcile_abort(udb_ctx, reason, 1);
+}
+
 static void udb_reconcile_begin(Client *authority, unsigned long round_id)
 {
 	unsigned int retry_count = udb_reconcile.retry_count;
@@ -4112,6 +4133,11 @@ static void udb_reconcile_begin(Client *authority, unsigned long round_id)
 	udb_reconcile.completed_blocks = 0;
 	udb_reconcile.retry_count = retry_count;
 	udb_reconcile.next_retry_at = 0;
+	udb_reconcile.started_at = time(NULL);
+	udb_reconcile.last_activity = udb_reconcile.started_at;
+	udb_reconcile.deadline =
+		udb_reconcile.started_at +
+		((udb_cfg && udb_cfg->sync_inactivity_timeout > 0) ? udb_cfg->sync_inactivity_timeout : UDB_SYNC_TIMEOUT);
 	udb_log(ULOG_INFO, "UDB_RECONCILE_ROUND_START", authority,
 			"Started reconciliation round $round with authority peer $peer",
 			log_data_integer("round", (int)udb_reconcile.round_id), log_data_client("peer", authority));
@@ -4138,6 +4164,10 @@ static void udb_reconcile_record_inf(Client *peer, unsigned long round_id, char 
 	if (udb_reconcile.active && udb_reconcile.authority_peer == peer && round_id < udb_reconcile.round_id)
 		return;
 	udb_reconcile_start(peer, round_id);
+	udb_reconcile.last_activity = time(NULL);
+	udb_reconcile.deadline =
+		udb_reconcile.last_activity +
+		((udb_cfg && udb_cfg->sync_inactivity_timeout > 0) ? udb_cfg->sync_inactivity_timeout : UDB_SYNC_TIMEOUT);
 	udb_reconcile.compared_blocks |= mask;
 
 	if (remote_crc != block->checksum)
@@ -4161,6 +4191,10 @@ static void udb_reconcile_record_res(Client *peer, unsigned long round_id, char 
 		return;
 	udb_reconcile.divergent_blocks |= mask;
 	udb_reconcile.completed_blocks &= ~mask;
+	udb_reconcile.last_activity = time(NULL);
+	udb_reconcile.deadline =
+		udb_reconcile.last_activity +
+		((udb_cfg && udb_cfg->sync_inactivity_timeout > 0) ? udb_cfg->sync_inactivity_timeout : UDB_SYNC_TIMEOUT);
 }
 
 static void udb_reconcile_record_end(Client *peer, char letter, unsigned long round_id)
@@ -4181,6 +4215,10 @@ static void udb_reconcile_record_end(Client *peer, char letter, unsigned long ro
 	udb_reconcile.compared_blocks |= mask;
 	udb_reconcile.completed_blocks |= mask;
 	udb_reconcile.divergent_blocks &= ~mask;
+	udb_reconcile.last_activity = time(NULL);
+	udb_reconcile.deadline =
+		udb_reconcile.last_activity +
+		((udb_cfg && udb_cfg->sync_inactivity_timeout > 0) ? udb_cfg->sync_inactivity_timeout : UDB_SYNC_TIMEOUT);
 }
 
 static int udb_reconcile_check(UdbContext *ctx)
@@ -4382,6 +4420,7 @@ static void udb_sync_abort(UdbBlock *block, const char *reason)
 				log_data_string("block", (char[]){block->letter, '\0'}), log_data_string("reason", reason));
 		udb_sync_session_free(block);
 	}
+	block->syncing_from = NULL;
 	if (block->pending_from)
 	{
 		block->pending_from = NULL;
@@ -4398,19 +4437,13 @@ static void udb_propagator_policy_changed(UdbContext *ctx)
 
 	if (!ctx)
 		return;
-	if (!udb_propagator_policy_present(ctx))
-	{
-		udb_sync_hello_refresh_all();
-		udb_sync_status_refresh();
-		return;
-	}
-	if (udb_select_propagator(ctx, 1, &selected) && !selected.is_local)
+	if (udb_propagator_policy_present(ctx) && udb_select_propagator(ctx, 1, &selected) && !selected.is_local)
 		peer = selected.peer;
 
 	if (udb_bootstrap_peer && udb_bootstrap_peer != peer)
 		udb_bootstrap_peer = NULL;
 	if (udb_reconcile.authority_peer && udb_reconcile.authority_peer != peer)
-		udb_reconcile_abort(ctx, "propagator policy changed", 0);
+		udb_reconcile_abort(ctx, "propagator policy changed", 1);
 
 	for (block = ctx->block_list; block; block = block->next)
 	{
@@ -4506,22 +4539,28 @@ static int udb_sync_put(UdbBlock *block, Client *peer, unsigned long round_id, c
 	if (!session || session->peer != peer || session->round_id != round_id || strcmp(session->txid, txid))
 	{
 		if (session && session->peer == peer)
+		{
 			udb_sync_abort(block, "invalid PUT sequence");
+			udb_reconcile_abort(udb_ctx, "invalid PUT sequence", 1);
+		}
 		return UDB_ERR_NO_SYNC;
 	}
 	if (now >= session->deadline)
 	{
 		udb_sync_abort(block, "inactivity sync timeout exceeded");
+		udb_sync_round_failure(block, peer, round_id, "staged sync inactivity timeout");
 		return UDB_ERR_PARAMS;
 	}
 	if (now >= session->absolute_deadline)
 	{
 		udb_sync_abort(block, "absolute sync timeout exceeded");
+		udb_sync_round_failure(block, peer, round_id, "staged sync absolute timeout");
 		return UDB_ERR_PARAMS;
 	}
 	if (!udb_record_fits_limits(path, data))
 	{
 		udb_sync_abort(block, "PUT record exceeds limits");
+		udb_sync_round_failure(block, peer, round_id, "staged PUT limit exceeded");
 		return UDB_ERR_PARAMS;
 	}
 	session->received_puts++;
@@ -4538,6 +4577,7 @@ static int udb_sync_put(UdbBlock *block, Client *peer, unsigned long round_id, c
 	{
 		safe_free(line);
 		udb_sync_abort(block, "invalid PUT payload");
+		udb_sync_round_failure(block, peer, round_id, "invalid staged PUT payload");
 		return UDB_ERR_PARAMS;
 	}
 	parse_ok = udb_stage_parse_line(block, session, line);
@@ -4550,6 +4590,7 @@ static int udb_sync_put(UdbBlock *block, Client *peer, unsigned long round_id, c
 	if (session->record_count > max_records)
 	{
 		udb_sync_abort(block, "staged record count limit exceeded");
+		udb_sync_round_failure(block, peer, round_id, "staged record limit exceeded");
 		return UDB_ERR_PARAMS;
 	}
 	session->last_activity = now;
@@ -4567,24 +4608,30 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, unsigned
 	if (!session || session->peer != peer || session->round_id != round_id || strcmp(session->txid, txid))
 	{
 		if (session && session->peer == peer)
+		{
 			udb_sync_abort(block, "invalid END sequence");
+			udb_reconcile_abort(udb_ctx, "invalid END sequence", 1);
+		}
 		return UDB_ERR_NO_SYNC;
 	}
 	time_t now = time(NULL);
 	if (now >= session->deadline)
 	{
 		udb_sync_abort(block, "inactivity sync timeout exceeded");
+		udb_sync_round_failure(block, peer, round_id, "staged END inactivity timeout");
 		return UDB_ERR_PARAMS;
 	}
 	if (now >= session->absolute_deadline)
 	{
 		udb_sync_abort(block, "absolute sync timeout exceeded");
+		udb_sync_round_failure(block, peer, round_id, "staged END absolute timeout");
 		return UDB_ERR_PARAMS;
 	}
 	session->record_count = udb_record_count_tree(session->tree);
 	if (!udb_compute_tree_checksum(session->tree, digest))
 	{
 		udb_sync_abort(block, "digest calculation failure");
+		udb_sync_round_failure(block, peer, round_id, "staged digest calculation failure");
 		return UDB_ERR_FATAL;
 	}
 	if (!udb_checksum_parse(checksum, &received_digest) || *digest != received_digest)
@@ -4768,6 +4815,8 @@ EVENT(udb_sync_timeout_event)
 			abort_reason = "RES timeout";
 		}
 	}
+	if (udb_reconcile.active && udb_reconcile.deadline <= now)
+		abort_reason = "reconciliation inventory timeout";
 	if (abort_reason)
 		udb_reconcile_abort(udb_ctx, abort_reason, 1);
 	for (peer = udb_hello_peers; peer; peer = next)
@@ -4843,7 +4892,7 @@ static void udb_sync_server_quit(Client *client)
 		udb_log(ULOG_INFO, "UDB_AUTHORITY_FAILOVER", client,
 				"Authority peer $client disconnected; resetting reconciliation round",
 				log_data_client("client", client));
-		udb_reconcile_abort(udb_ctx, "authority disconnected", 0);
+		udb_reconcile_abort(udb_ctx, "authority disconnected", 1);
 	}
 
 	udb_propagator_policy_changed(udb_ctx);
@@ -5730,6 +5779,7 @@ CMD_FUNC(cmd_db)
 				udb_protocol_round_error(client, "INF", UDB_ERR_PARAMS, round_id, letter);
 				return;
 			}
+			(void)remote_ts;
 
 			if (client == direct_peer && is_for_me && udb_is_authorized_sync_source(ctx, direct_peer))
 			{
@@ -5738,32 +5788,22 @@ CMD_FUNC(cmd_db)
 					return;
 				if (crc32 != block->checksum)
 				{
-					int should_request = 0;
-					if (remote_ts > block->modified_at)
-						should_request = 1;
-					else if (remote_ts == block->modified_at &&
-							 (!udb_peer_authorizes_us(client) || udb_remote_wins_equal_timestamp(client)))
-						should_request = 1;
-
-					if (should_request)
+					if (udb_send_db_to_one(client, ":%s DB %s RES %lu %c", me.id, client->id, round_id, letter))
 					{
-						if (udb_send_db_to_one(client, ":%s DB %s RES %lu %c", me.id, client->id, round_id, letter))
-						{
-							udb_reconcile_record_res(direct_peer, round_id, letter);
-							block->pending_from = direct_peer;
-							block->pending_deadline = time(NULL) + ((udb_cfg && udb_cfg->sync_inactivity_timeout > 0)
-																		? udb_cfg->sync_inactivity_timeout
-																		: UDB_SYNC_TIMEOUT);
-							block->pending_round_id = udb_reconcile.round_id;
-						}
+						udb_reconcile_record_res(direct_peer, round_id, letter);
+						block->pending_from = direct_peer;
+						block->pending_deadline = time(NULL) + ((udb_cfg && udb_cfg->sync_inactivity_timeout > 0)
+																	? udb_cfg->sync_inactivity_timeout
+																	: UDB_SYNC_TIMEOUT);
+						block->pending_round_id = udb_reconcile.round_id;
 					}
 				}
-				udb_reconcile_check(ctx);
-				if (!is_broadcast)
-					return;
 			}
-			/* Reconciliation inventory is hop-by-hop and is never forwarded. */
+			udb_reconcile_check(ctx);
+			if (!is_broadcast)
+				return;
 		}
+		/* Reconciliation inventory is hop-by-hop and is never forwarded. */
 		else if (!strcasecmp(subcmd, "INS"))
 		{
 			if (parc < 5)
@@ -9049,13 +9089,65 @@ static int udb_blocks_load_all(UdbContext *ctx)
 	return success;
 }
 
+static int udb_fsync_parent_directory(const char *path)
+{
+	char dir_path[UDB_BLOCK_PATH_MAX];
+	char *slash;
+	int dir_fd;
+	int result;
+
+	if (!path || !*path || snprintf(dir_path, sizeof(dir_path), "%s", path) >= (int)sizeof(dir_path))
+		return 0;
+	slash = strrchr(dir_path, '/');
+	if (!slash)
+		strlcpy(dir_path, ".", sizeof(dir_path));
+	else if (slash == dir_path)
+		slash[1] = '\0';
+	else
+		*slash = '\0';
+	dir_fd = open(dir_path, O_RDONLY
+#ifdef O_DIRECTORY
+								| O_DIRECTORY
+#endif
+	);
+	if (dir_fd < 0)
+		return 0;
+	result = fsync(dir_fd) == 0;
+	if (close(dir_fd) != 0)
+		result = 0;
+	return result;
+}
+
 static int udb_blocks_save_all(UdbContext *ctx)
 {
 	UdbBlock *b;
+	UdbBlock *saved_blocks[UDB_NUM_BLOCKS];
+	unsigned int saved_count = 0;
+	unsigned int i;
 	int success = 1;
+	int cleanup_ok = 1;
+	char backup_path[UDB_BLOCK_PATH_MAX];
+	struct stat st;
 
 	if (!ctx)
 		return 0;
+	/* A READY generation is a set, not six independent files.  Keep the
+	 * previous set physically available until every member has committed; a
+	 * failure after any rename must therefore restore the complete old set. */
+	for (b = ctx->block_list; b; b = b->next)
+	{
+		if (saved_count >= UDB_NUM_BLOCKS || !b->filepath ||
+			snprintf(backup_path, sizeof(backup_path), "%s.udb_previous", b->filepath) >= (int)sizeof(backup_path))
+			return 0;
+		if (lstat(b->filepath, &st) == 0)
+		{
+			if (!S_ISREG(st.st_mode) || rename(b->filepath, backup_path) != 0)
+				goto rollback;
+		}
+		else if (errno != ENOENT)
+			goto rollback;
+		saved_blocks[saved_count++] = b;
+	}
 	for (b = ctx->block_list; b; b = b->next)
 	{
 		if (b->load_state != UDB_LOAD_SUCCESS && b->load_state != UDB_LOAD_EMPTY)
@@ -9069,7 +9161,43 @@ static int udb_blocks_save_all(UdbContext *ctx)
 		if (!udb_file_save_block(ctx, b))
 			success = 0;
 	}
+	if (!success)
+		goto rollback;
+	for (i = 0; i < saved_count; i++)
+	{
+		if (snprintf(backup_path, sizeof(backup_path), "%s.udb_previous", saved_blocks[i]->filepath) >=
+			(int)sizeof(backup_path))
+			return 0;
+		if (unlink(backup_path) != 0 && errno != ENOENT)
+			cleanup_ok = 0;
+	}
+	if (!cleanup_ok || (saved_count && !udb_fsync_parent_directory(saved_blocks[0]->filepath)))
+	{
+		udb_log(ULOG_ERROR, "UDB_BACKUP_CLEANUP_FAILED", NULL,
+				"Cannot durably clean previous UDB snapshots; refusing READY");
+		return 0;
+	}
 	return success;
+
+rollback:
+	/* Restore in reverse order.  The active files are disposable because the
+	 * caller remains NOT_READY until the state file is committed. */
+	for (i = saved_count; i > 0; i--)
+	{
+		b = saved_blocks[i - 1];
+		if (snprintf(backup_path, sizeof(backup_path), "%s.udb_previous", b->filepath) >= (int)sizeof(backup_path))
+			continue;
+		if (unlink(b->filepath) != 0 && errno != ENOENT)
+			success = 0;
+		if (rename(backup_path, b->filepath) != 0)
+			success = 0;
+	}
+	if (saved_count && !udb_fsync_parent_directory(saved_blocks[0]->filepath))
+		success = 0;
+	if (!success)
+		udb_log(ULOG_ERROR, "UDB_BACKUP_RESTORE_FAILED", NULL,
+				"Cannot durably restore the previous UDB snapshot set; refusing READY");
+	return 0;
 }
 
 static UdbBlock *udb_block_by_letter(UdbContext *ctx, char letter)
@@ -9470,6 +9598,9 @@ static int udb_persistence_migrate_legacy(UdbContext *ctx, time_t *last_sync_out
 static int udb_transition_to_ready(UdbContext *ctx, time_t sync_time)
 {
 	UdbBlock *b;
+	UdbBlock *saved_blocks[UDB_NUM_BLOCKS];
+	unsigned long saved_generations[UDB_NUM_BLOCKS];
+	unsigned int saved_count = 0;
 	unsigned long generation;
 
 	if (!ctx)
@@ -9490,10 +9621,22 @@ static int udb_transition_to_ready(UdbContext *ctx, time_t sync_time)
 	if (!generation)
 		generation = 1;
 	for (b = ctx->block_list; b; b = b->next)
+	{
+		if (saved_count < UDB_NUM_BLOCKS)
+		{
+			saved_blocks[saved_count] = b;
+			saved_generations[saved_count++] = b->generation;
+		}
 		b->generation = generation;
+	}
 
 	if (!udb_blocks_save_all(ctx))
 	{
+		for (unsigned int i = 0; i < saved_count; i++)
+			saved_blocks[i]->generation = saved_generations[i];
+		udb_ready = 0;
+		udb_last_successful_sync = 0;
+		(void)udb_persistence_set_state(UDB_PERSIST_BOOTSTRAPPING, UDB_ORIGIN_RECOVERY, generation, 0);
 		udb_log(ULOG_ERROR, "UDB_READY_SAVE_FAILED", NULL,
 				"Cannot enter READY: failed to save block snapshots to disk");
 		return 0;
@@ -9504,6 +9647,9 @@ static int udb_transition_to_ready(UdbContext *ctx, time_t sync_time)
 		udb_log(ULOG_ERROR, "UDB_STATE_PERSIST_FAILED", NULL,
 				"Failed to persist READY state to disk; database remains NOT_READY");
 		udb_ready = 0;
+		/* Snapshot publication succeeded, but READY did not.  The only safe
+		 * durable interpretation after restart is explicitly BOOTSTRAPPING. */
+		(void)udb_persistence_set_state(UDB_PERSIST_BOOTSTRAPPING, UDB_ORIGIN_RECOVERY, generation, 0);
 		return 0;
 	}
 
@@ -9569,17 +9715,31 @@ static int udb_engine_init(void)
 	UdbStartupState startup_state = UDB_STARTUP_FRESH;
 	int all_present_valid = 1;
 	int all_missing = 1;
+	int backup_present = 0;
 	UdbBlock *startup_block;
 
 	for (startup_block = udb_ctx->block_list; startup_block; startup_block = startup_block->next)
 	{
+		char backup_path[UDB_BLOCK_PATH_MAX];
+		struct stat backup_st;
+		if (snprintf(backup_path, sizeof(backup_path), "%s.udb_previous", startup_block->filepath) >=
+			(int)sizeof(backup_path))
+			backup_present = 1;
+		else if (lstat(backup_path, &backup_st) == 0 || errno != ENOENT)
+			backup_present = 1;
 		if (startup_block->load_state != UDB_LOAD_SUCCESS)
 			all_present_valid = 0;
 		if (startup_block->load_state != UDB_LOAD_EMPTY)
 			all_missing = 0;
 	}
 
-	if (udb_persistence_has_state_file())
+	if (backup_present)
+	{
+		startup_state = UDB_STARTUP_PERSISTED_INVALID;
+		udb_log(ULOG_ERROR, "UDB_BACKUP_PRESENT", NULL,
+				"Found an unfinished UDB snapshot backup; refusing automatic READY");
+	}
+	else if (udb_persistence_has_state_file())
 	{
 		if (!udb_persistence_load_state(&persisted_state, &persisted_origin, &persisted_generation,
 										&persisted_last_sync, &legacy_state_format))
@@ -9627,7 +9787,10 @@ static int udb_engine_init(void)
 	int has_propagator = udb_select_propagator(udb_ctx, 0, &selected);
 	int is_primary_local = (has_propagator && selected.is_local);
 
-	if (is_primary_local && startup_state == UDB_STARTUP_FRESH)
+	/* With no propagator policy this process is the standalone authority.  It
+	 * must not remain permanently BOOTSTRAPPING merely because no upstream was
+	 * selected. */
+	if ((is_primary_local || !policy_present) && startup_state == UDB_STARTUP_FRESH)
 	{
 		if (udb_transition_to_ready(udb_ctx, time(NULL)))
 		{

@@ -270,6 +270,9 @@ typedef struct UdbReconcileState
 	unsigned int completed_blocks;
 	unsigned int retry_count;
 	time_t next_retry_at;
+	time_t started_at;
+	time_t last_activity;
+	time_t deadline;
 } UdbReconcileState;
 
 static UdbReconcileState udb_reconcile = {0};

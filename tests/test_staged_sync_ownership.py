@@ -398,6 +398,27 @@ def run_tests(ircd_bin, keep=False):
                         "ACK for Peer A after foreign END attempt", start=start_a)
         print("PASS: TEST F2 - Owning Peer A successfully completed and committed transaction after foreign END attempt")
 
+        # -------------------------------------------------------------
+        # TEST G: staged PUT schema validation and END digest validation
+        # -------------------------------------------------------------
+        start_a = len(peer_a.lines)
+        peer_a.send_begin("C", "tx-schema-digest")
+        peer_a.send_put("C", "tx-schema-digest", "#chan_schema::not_a_schema_key", "must not commit")
+        peer_a.wait_for(lambda l: " DB " in l and " ERR PUT " in l,
+                        "rejection of schema-invalid staged PUT", start=start_a)
+        print("PASS: TEST G1 - Schema-invalid staged PUT was rejected before commit")
+
+        start_a = len(peer_a.lines)
+        peer_a.send_begin("C", "tx-wrong-digest")
+        peer_a.send_put("C", "tx-wrong-digest", "#chan_digest::topic", "digest-protected topic")
+        peer_a.send_end("C", "tx-wrong-digest", "deadbeef")
+        peer_a.wait_for(lambda l: " DB " in l and " ERR END " in l,
+                        "rejection of staged END with incorrect digest", start=start_a)
+        db_c = (data_dir / "udb_C.db").read_text(encoding="ascii")
+        if "#chan_schema" in db_c or "#chan_digest" in db_c:
+            raise AssertionError(f"Rejected staged data was committed:\n{db_c}")
+        print("PASS: TEST G2 - Incorrect END digest rejected without publishing staged data")
+
         peer_a.close()
         peer_b.close()
         stop(proc)

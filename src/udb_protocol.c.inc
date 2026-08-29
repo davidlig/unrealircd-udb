@@ -483,6 +483,7 @@ CMD_FUNC(cmd_db)
 				udb_protocol_round_error(client, "INF", UDB_ERR_PARAMS, round_id, letter);
 				return;
 			}
+			(void)remote_ts;
 
 			if (client == direct_peer && is_for_me && udb_is_authorized_sync_source(ctx, direct_peer))
 			{
@@ -491,32 +492,22 @@ CMD_FUNC(cmd_db)
 					return;
 				if (crc32 != block->checksum)
 				{
-					int should_request = 0;
-					if (remote_ts > block->modified_at)
-						should_request = 1;
-					else if (remote_ts == block->modified_at &&
-							 (!udb_peer_authorizes_us(client) || udb_remote_wins_equal_timestamp(client)))
-						should_request = 1;
-
-					if (should_request)
+					if (udb_send_db_to_one(client, ":%s DB %s RES %lu %c", me.id, client->id, round_id, letter))
 					{
-						if (udb_send_db_to_one(client, ":%s DB %s RES %lu %c", me.id, client->id, round_id, letter))
-						{
-							udb_reconcile_record_res(direct_peer, round_id, letter);
-							block->pending_from = direct_peer;
-							block->pending_deadline = time(NULL) + ((udb_cfg && udb_cfg->sync_inactivity_timeout > 0)
-																		? udb_cfg->sync_inactivity_timeout
-																		: UDB_SYNC_TIMEOUT);
-							block->pending_round_id = udb_reconcile.round_id;
-						}
+						udb_reconcile_record_res(direct_peer, round_id, letter);
+						block->pending_from = direct_peer;
+						block->pending_deadline = time(NULL) + ((udb_cfg && udb_cfg->sync_inactivity_timeout > 0)
+																	? udb_cfg->sync_inactivity_timeout
+																	: UDB_SYNC_TIMEOUT);
+						block->pending_round_id = udb_reconcile.round_id;
 					}
 				}
-				udb_reconcile_check(ctx);
-				if (!is_broadcast)
-					return;
 			}
-			/* Reconciliation inventory is hop-by-hop and is never forwarded. */
+			udb_reconcile_check(ctx);
+			if (!is_broadcast)
+				return;
 		}
+		/* Reconciliation inventory is hop-by-hop and is never forwarded. */
 		else if (!strcasecmp(subcmd, "INS"))
 		{
 			if (parc < 5)

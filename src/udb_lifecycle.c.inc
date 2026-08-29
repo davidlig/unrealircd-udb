@@ -146,13 +146,65 @@ static int udb_blocks_load_all(UdbContext *ctx)
 	return success;
 }
 
+static int udb_fsync_parent_directory(const char *path)
+{
+	char dir_path[UDB_BLOCK_PATH_MAX];
+	char *slash;
+	int dir_fd;
+	int result;
+
+	if (!path || !*path || snprintf(dir_path, sizeof(dir_path), "%s", path) >= (int)sizeof(dir_path))
+		return 0;
+	slash = strrchr(dir_path, '/');
+	if (!slash)
+		strlcpy(dir_path, ".", sizeof(dir_path));
+	else if (slash == dir_path)
+		slash[1] = '\0';
+	else
+		*slash = '\0';
+	dir_fd = open(dir_path, O_RDONLY
+#ifdef O_DIRECTORY
+								| O_DIRECTORY
+#endif
+	);
+	if (dir_fd < 0)
+		return 0;
+	result = fsync(dir_fd) == 0;
+	if (close(dir_fd) != 0)
+		result = 0;
+	return result;
+}
+
 static int udb_blocks_save_all(UdbContext *ctx)
 {
 	UdbBlock *b;
+	UdbBlock *saved_blocks[UDB_NUM_BLOCKS];
+	unsigned int saved_count = 0;
+	unsigned int i;
 	int success = 1;
+	int cleanup_ok = 1;
+	char backup_path[UDB_BLOCK_PATH_MAX];
+	struct stat st;
 
 	if (!ctx)
 		return 0;
+	/* A READY generation is a set, not six independent files.  Keep the
+	 * previous set physically available until every member has committed; a
+	 * failure after any rename must therefore restore the complete old set. */
+	for (b = ctx->block_list; b; b = b->next)
+	{
+		if (saved_count >= UDB_NUM_BLOCKS || !b->filepath ||
+			snprintf(backup_path, sizeof(backup_path), "%s.udb_previous", b->filepath) >= (int)sizeof(backup_path))
+			return 0;
+		if (lstat(b->filepath, &st) == 0)
+		{
+			if (!S_ISREG(st.st_mode) || rename(b->filepath, backup_path) != 0)
+				goto rollback;
+		}
+		else if (errno != ENOENT)
+			goto rollback;
+		saved_blocks[saved_count++] = b;
+	}
 	for (b = ctx->block_list; b; b = b->next)
 	{
 		if (b->load_state != UDB_LOAD_SUCCESS && b->load_state != UDB_LOAD_EMPTY)
@@ -166,7 +218,43 @@ static int udb_blocks_save_all(UdbContext *ctx)
 		if (!udb_file_save_block(ctx, b))
 			success = 0;
 	}
+	if (!success)
+		goto rollback;
+	for (i = 0; i < saved_count; i++)
+	{
+		if (snprintf(backup_path, sizeof(backup_path), "%s.udb_previous", saved_blocks[i]->filepath) >=
+			(int)sizeof(backup_path))
+			return 0;
+		if (unlink(backup_path) != 0 && errno != ENOENT)
+			cleanup_ok = 0;
+	}
+	if (!cleanup_ok || (saved_count && !udb_fsync_parent_directory(saved_blocks[0]->filepath)))
+	{
+		udb_log(ULOG_ERROR, "UDB_BACKUP_CLEANUP_FAILED", NULL,
+				"Cannot durably clean previous UDB snapshots; refusing READY");
+		return 0;
+	}
 	return success;
+
+rollback:
+	/* Restore in reverse order.  The active files are disposable because the
+	 * caller remains NOT_READY until the state file is committed. */
+	for (i = saved_count; i > 0; i--)
+	{
+		b = saved_blocks[i - 1];
+		if (snprintf(backup_path, sizeof(backup_path), "%s.udb_previous", b->filepath) >= (int)sizeof(backup_path))
+			continue;
+		if (unlink(b->filepath) != 0 && errno != ENOENT)
+			success = 0;
+		if (rename(backup_path, b->filepath) != 0)
+			success = 0;
+	}
+	if (saved_count && !udb_fsync_parent_directory(saved_blocks[0]->filepath))
+		success = 0;
+	if (!success)
+		udb_log(ULOG_ERROR, "UDB_BACKUP_RESTORE_FAILED", NULL,
+				"Cannot durably restore the previous UDB snapshot set; refusing READY");
+	return 0;
 }
 
 static UdbBlock *udb_block_by_letter(UdbContext *ctx, char letter)
@@ -567,6 +655,9 @@ static int udb_persistence_migrate_legacy(UdbContext *ctx, time_t *last_sync_out
 static int udb_transition_to_ready(UdbContext *ctx, time_t sync_time)
 {
 	UdbBlock *b;
+	UdbBlock *saved_blocks[UDB_NUM_BLOCKS];
+	unsigned long saved_generations[UDB_NUM_BLOCKS];
+	unsigned int saved_count = 0;
 	unsigned long generation;
 
 	if (!ctx)
@@ -587,10 +678,22 @@ static int udb_transition_to_ready(UdbContext *ctx, time_t sync_time)
 	if (!generation)
 		generation = 1;
 	for (b = ctx->block_list; b; b = b->next)
+	{
+		if (saved_count < UDB_NUM_BLOCKS)
+		{
+			saved_blocks[saved_count] = b;
+			saved_generations[saved_count++] = b->generation;
+		}
 		b->generation = generation;
+	}
 
 	if (!udb_blocks_save_all(ctx))
 	{
+		for (unsigned int i = 0; i < saved_count; i++)
+			saved_blocks[i]->generation = saved_generations[i];
+		udb_ready = 0;
+		udb_last_successful_sync = 0;
+		(void)udb_persistence_set_state(UDB_PERSIST_BOOTSTRAPPING, UDB_ORIGIN_RECOVERY, generation, 0);
 		udb_log(ULOG_ERROR, "UDB_READY_SAVE_FAILED", NULL,
 				"Cannot enter READY: failed to save block snapshots to disk");
 		return 0;
@@ -601,6 +704,9 @@ static int udb_transition_to_ready(UdbContext *ctx, time_t sync_time)
 		udb_log(ULOG_ERROR, "UDB_STATE_PERSIST_FAILED", NULL,
 				"Failed to persist READY state to disk; database remains NOT_READY");
 		udb_ready = 0;
+		/* Snapshot publication succeeded, but READY did not.  The only safe
+		 * durable interpretation after restart is explicitly BOOTSTRAPPING. */
+		(void)udb_persistence_set_state(UDB_PERSIST_BOOTSTRAPPING, UDB_ORIGIN_RECOVERY, generation, 0);
 		return 0;
 	}
 
@@ -666,17 +772,31 @@ static int udb_engine_init(void)
 	UdbStartupState startup_state = UDB_STARTUP_FRESH;
 	int all_present_valid = 1;
 	int all_missing = 1;
+	int backup_present = 0;
 	UdbBlock *startup_block;
 
 	for (startup_block = udb_ctx->block_list; startup_block; startup_block = startup_block->next)
 	{
+		char backup_path[UDB_BLOCK_PATH_MAX];
+		struct stat backup_st;
+		if (snprintf(backup_path, sizeof(backup_path), "%s.udb_previous", startup_block->filepath) >=
+			(int)sizeof(backup_path))
+			backup_present = 1;
+		else if (lstat(backup_path, &backup_st) == 0 || errno != ENOENT)
+			backup_present = 1;
 		if (startup_block->load_state != UDB_LOAD_SUCCESS)
 			all_present_valid = 0;
 		if (startup_block->load_state != UDB_LOAD_EMPTY)
 			all_missing = 0;
 	}
 
-	if (udb_persistence_has_state_file())
+	if (backup_present)
+	{
+		startup_state = UDB_STARTUP_PERSISTED_INVALID;
+		udb_log(ULOG_ERROR, "UDB_BACKUP_PRESENT", NULL,
+				"Found an unfinished UDB snapshot backup; refusing automatic READY");
+	}
+	else if (udb_persistence_has_state_file())
 	{
 		if (!udb_persistence_load_state(&persisted_state, &persisted_origin, &persisted_generation,
 										&persisted_last_sync, &legacy_state_format))
@@ -724,7 +844,10 @@ static int udb_engine_init(void)
 	int has_propagator = udb_select_propagator(udb_ctx, 0, &selected);
 	int is_primary_local = (has_propagator && selected.is_local);
 
-	if (is_primary_local && startup_state == UDB_STARTUP_FRESH)
+	/* With no propagator policy this process is the standalone authority.  It
+	 * must not remain permanently BOOTSTRAPPING merely because no upstream was
+	 * selected. */
+	if ((is_primary_local || !policy_present) && startup_state == UDB_STARTUP_FRESH)
 	{
 		if (udb_transition_to_ready(udb_ctx, time(NULL)))
 		{

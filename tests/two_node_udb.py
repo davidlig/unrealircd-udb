@@ -274,6 +274,13 @@ def db_contains(db, record):
     return record in db.read_text(errors="replace")
 
 
+def db_text_if_present(db):
+    try:
+        return db.read_text(errors="replace")
+    except FileNotFoundError:
+        return None
+
+
 def snapshot_is_private(db):
     return stat.S_IMODE(db.stat().st_mode) == 0o600
 
@@ -535,13 +542,17 @@ def main():
             print("PASS: post-rename .udb_state directory fsync failure replaced visible READY with BOOTSTRAPPING")
             return 0
         while time.monotonic() < deadline:
-            if ("harness-b::vhost winner.test" in a_db.read_text(errors="replace") and
-                    K_STAGED_RECORD in a_k_db.read_text(errors="replace") and
+            a_db_text = db_text_if_present(a_db)
+            a_k_db_text = db_text_if_present(a_k_db)
+            if (a_db_text is not None and "harness-b::vhost winner.test" in a_db_text and
+                    a_k_db_text is not None and K_STAGED_RECORD in a_k_db_text and
                     equal_timestamp_winner_observed(logs[0], logs[1])):
                 break
             time.sleep(0.25)
-        if ("harness-b::vhost winner.test" not in a_db.read_text(errors="replace") or
-                K_STAGED_RECORD not in a_k_db.read_text(errors="replace") or
+        a_db_text = db_text_if_present(a_db)
+        a_k_db_text = db_text_if_present(a_k_db)
+        if (a_db_text is None or "harness-b::vhost winner.test" not in a_db_text or
+                a_k_db_text is None or K_STAGED_RECORD not in a_k_db_text or
                 not equal_timestamp_winner_observed(logs[0], logs[1])):
             print_diagnostics(logs, a_db)
             return skip("S2S linked, but deterministic equal-timestamp staged transfer was not observed; this is not a PASS")

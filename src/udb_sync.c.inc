@@ -31,6 +31,8 @@ struct UdbHelloPeer
 
 static UdbHelloPeer *udb_hello_peers = NULL;
 static UdbHelloPeer *udb_hello_peer(Client *server, int create);
+static int udb_has_active_sessions(UdbContext *ctx);
+static int udb_has_pending_requests(UdbContext *ctx);
 
 static void udb_hello_cleanup_all(void)
 {
@@ -45,10 +47,19 @@ static void udb_hello_cleanup_all(void)
 static void udb_maybe_start_reconciliation(Client *server, int force_offer)
 {
 	UdbHelloPeer *peer = udb_hello_peer(server, 0);
+	UdbPropagatorSelection selected;
 
 	if (!peer || !udb_has_hello(server) || !IsServer(server) || !MyConnect(server))
 		return;
-	if (peer->authorizes_us && udb_ready && (force_offer || !peer->reconciliation_offered))
+	/* The selected propagator is the sole authority.  A peer authorizing us
+	 * identifies this side as its upstream; it does not authorize a reverse
+	 * pull.  In particular, never start a second offer while another
+	 * authority/round is active: that was the source of bilateral RES churn. */
+	if (!peer->authorizes_us || !udb_ready || !udb_select_propagator(udb_ctx, 1, &selected) || !selected.is_local)
+		return;
+	if (udb_reconcile.active || udb_has_active_sessions(udb_ctx) || udb_has_pending_requests(udb_ctx))
+		return;
+	if (force_offer || !peer->reconciliation_offered)
 	{
 		if (udb_sync_to_server(server))
 			peer->reconciliation_offered = 1;
@@ -211,14 +222,14 @@ static void udb_reconcile_reset(void)
 	udb_reconcile.divergent_blocks = 0;
 	udb_reconcile.completed_blocks = 0;
 	udb_reconcile.generation = 0;
+	udb_reconcile.started_at = 0;
+	udb_reconcile.last_activity = 0;
+	udb_reconcile.deadline = 0;
 }
 
 static void udb_reconcile_abort(UdbContext *ctx, const char *reason, int schedule_retry)
 {
 	UdbBlock *block;
-	if (!udb_reconcile.active && !udb_reconcile.authority_peer)
-		return;
-
 	udb_log(ULOG_WARNING, "UDB_RECONCILE_ABORT", udb_reconcile.authority_peer,
 			"Reconciliation round $round aborted: $reason", log_data_integer("round", (int)udb_reconcile.round_id),
 			log_data_string("reason", reason ? reason : "unspecified"));
@@ -246,6 +257,13 @@ static void udb_reconcile_abort(UdbContext *ctx, const char *reason, int schedul
 	udb_reconcile_reset();
 }
 
+static void udb_sync_round_failure(UdbBlock *block, Client *peer, unsigned long round_id, const char *reason)
+{
+	if (block && peer && udb_reconcile.active && udb_reconcile.authority_peer == peer &&
+		udb_reconcile.round_id == round_id)
+		udb_reconcile_abort(udb_ctx, reason, 1);
+}
+
 static void udb_reconcile_begin(Client *authority, unsigned long round_id)
 {
 	unsigned int retry_count = udb_reconcile.retry_count;
@@ -258,6 +276,11 @@ static void udb_reconcile_begin(Client *authority, unsigned long round_id)
 	udb_reconcile.completed_blocks = 0;
 	udb_reconcile.retry_count = retry_count;
 	udb_reconcile.next_retry_at = 0;
+	udb_reconcile.started_at = time(NULL);
+	udb_reconcile.last_activity = udb_reconcile.started_at;
+	udb_reconcile.deadline =
+		udb_reconcile.started_at +
+		((udb_cfg && udb_cfg->sync_inactivity_timeout > 0) ? udb_cfg->sync_inactivity_timeout : UDB_SYNC_TIMEOUT);
 	udb_log(ULOG_INFO, "UDB_RECONCILE_ROUND_START", authority,
 			"Started reconciliation round $round with authority peer $peer",
 			log_data_integer("round", (int)udb_reconcile.round_id), log_data_client("peer", authority));
@@ -284,6 +307,10 @@ static void udb_reconcile_record_inf(Client *peer, unsigned long round_id, char 
 	if (udb_reconcile.active && udb_reconcile.authority_peer == peer && round_id < udb_reconcile.round_id)
 		return;
 	udb_reconcile_start(peer, round_id);
+	udb_reconcile.last_activity = time(NULL);
+	udb_reconcile.deadline =
+		udb_reconcile.last_activity +
+		((udb_cfg && udb_cfg->sync_inactivity_timeout > 0) ? udb_cfg->sync_inactivity_timeout : UDB_SYNC_TIMEOUT);
 	udb_reconcile.compared_blocks |= mask;
 
 	if (remote_crc != block->checksum)
@@ -307,6 +334,10 @@ static void udb_reconcile_record_res(Client *peer, unsigned long round_id, char 
 		return;
 	udb_reconcile.divergent_blocks |= mask;
 	udb_reconcile.completed_blocks &= ~mask;
+	udb_reconcile.last_activity = time(NULL);
+	udb_reconcile.deadline =
+		udb_reconcile.last_activity +
+		((udb_cfg && udb_cfg->sync_inactivity_timeout > 0) ? udb_cfg->sync_inactivity_timeout : UDB_SYNC_TIMEOUT);
 }
 
 static void udb_reconcile_record_end(Client *peer, char letter, unsigned long round_id)
@@ -327,6 +358,10 @@ static void udb_reconcile_record_end(Client *peer, char letter, unsigned long ro
 	udb_reconcile.compared_blocks |= mask;
 	udb_reconcile.completed_blocks |= mask;
 	udb_reconcile.divergent_blocks &= ~mask;
+	udb_reconcile.last_activity = time(NULL);
+	udb_reconcile.deadline =
+		udb_reconcile.last_activity +
+		((udb_cfg && udb_cfg->sync_inactivity_timeout > 0) ? udb_cfg->sync_inactivity_timeout : UDB_SYNC_TIMEOUT);
 }
 
 static int udb_reconcile_check(UdbContext *ctx)
@@ -528,6 +563,7 @@ static void udb_sync_abort(UdbBlock *block, const char *reason)
 				log_data_string("block", (char[]){block->letter, '\0'}), log_data_string("reason", reason));
 		udb_sync_session_free(block);
 	}
+	block->syncing_from = NULL;
 	if (block->pending_from)
 	{
 		block->pending_from = NULL;
@@ -544,19 +580,13 @@ static void udb_propagator_policy_changed(UdbContext *ctx)
 
 	if (!ctx)
 		return;
-	if (!udb_propagator_policy_present(ctx))
-	{
-		udb_sync_hello_refresh_all();
-		udb_sync_status_refresh();
-		return;
-	}
-	if (udb_select_propagator(ctx, 1, &selected) && !selected.is_local)
+	if (udb_propagator_policy_present(ctx) && udb_select_propagator(ctx, 1, &selected) && !selected.is_local)
 		peer = selected.peer;
 
 	if (udb_bootstrap_peer && udb_bootstrap_peer != peer)
 		udb_bootstrap_peer = NULL;
 	if (udb_reconcile.authority_peer && udb_reconcile.authority_peer != peer)
-		udb_reconcile_abort(ctx, "propagator policy changed", 0);
+		udb_reconcile_abort(ctx, "propagator policy changed", 1);
 
 	for (block = ctx->block_list; block; block = block->next)
 	{
@@ -652,22 +682,28 @@ static int udb_sync_put(UdbBlock *block, Client *peer, unsigned long round_id, c
 	if (!session || session->peer != peer || session->round_id != round_id || strcmp(session->txid, txid))
 	{
 		if (session && session->peer == peer)
+		{
 			udb_sync_abort(block, "invalid PUT sequence");
+			udb_reconcile_abort(udb_ctx, "invalid PUT sequence", 1);
+		}
 		return UDB_ERR_NO_SYNC;
 	}
 	if (now >= session->deadline)
 	{
 		udb_sync_abort(block, "inactivity sync timeout exceeded");
+		udb_sync_round_failure(block, peer, round_id, "staged sync inactivity timeout");
 		return UDB_ERR_PARAMS;
 	}
 	if (now >= session->absolute_deadline)
 	{
 		udb_sync_abort(block, "absolute sync timeout exceeded");
+		udb_sync_round_failure(block, peer, round_id, "staged sync absolute timeout");
 		return UDB_ERR_PARAMS;
 	}
 	if (!udb_record_fits_limits(path, data))
 	{
 		udb_sync_abort(block, "PUT record exceeds limits");
+		udb_sync_round_failure(block, peer, round_id, "staged PUT limit exceeded");
 		return UDB_ERR_PARAMS;
 	}
 	session->received_puts++;
@@ -684,6 +720,7 @@ static int udb_sync_put(UdbBlock *block, Client *peer, unsigned long round_id, c
 	{
 		safe_free(line);
 		udb_sync_abort(block, "invalid PUT payload");
+		udb_sync_round_failure(block, peer, round_id, "invalid staged PUT payload");
 		return UDB_ERR_PARAMS;
 	}
 	parse_ok = udb_stage_parse_line(block, session, line);
@@ -696,6 +733,7 @@ static int udb_sync_put(UdbBlock *block, Client *peer, unsigned long round_id, c
 	if (session->record_count > max_records)
 	{
 		udb_sync_abort(block, "staged record count limit exceeded");
+		udb_sync_round_failure(block, peer, round_id, "staged record limit exceeded");
 		return UDB_ERR_PARAMS;
 	}
 	session->last_activity = now;
@@ -713,24 +751,30 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, unsigned
 	if (!session || session->peer != peer || session->round_id != round_id || strcmp(session->txid, txid))
 	{
 		if (session && session->peer == peer)
+		{
 			udb_sync_abort(block, "invalid END sequence");
+			udb_reconcile_abort(udb_ctx, "invalid END sequence", 1);
+		}
 		return UDB_ERR_NO_SYNC;
 	}
 	time_t now = time(NULL);
 	if (now >= session->deadline)
 	{
 		udb_sync_abort(block, "inactivity sync timeout exceeded");
+		udb_sync_round_failure(block, peer, round_id, "staged END inactivity timeout");
 		return UDB_ERR_PARAMS;
 	}
 	if (now >= session->absolute_deadline)
 	{
 		udb_sync_abort(block, "absolute sync timeout exceeded");
+		udb_sync_round_failure(block, peer, round_id, "staged END absolute timeout");
 		return UDB_ERR_PARAMS;
 	}
 	session->record_count = udb_record_count_tree(session->tree);
 	if (!udb_compute_tree_checksum(session->tree, digest))
 	{
 		udb_sync_abort(block, "digest calculation failure");
+		udb_sync_round_failure(block, peer, round_id, "staged digest calculation failure");
 		return UDB_ERR_FATAL;
 	}
 	if (!udb_checksum_parse(checksum, &received_digest) || *digest != received_digest)
@@ -914,6 +958,8 @@ EVENT(udb_sync_timeout_event)
 			abort_reason = "RES timeout";
 		}
 	}
+	if (udb_reconcile.active && udb_reconcile.deadline <= now)
+		abort_reason = "reconciliation inventory timeout";
 	if (abort_reason)
 		udb_reconcile_abort(udb_ctx, abort_reason, 1);
 	for (peer = udb_hello_peers; peer; peer = next)
@@ -989,7 +1035,7 @@ static void udb_sync_server_quit(Client *client)
 		udb_log(ULOG_INFO, "UDB_AUTHORITY_FAILOVER", client,
 				"Authority peer $client disconnected; resetting reconciliation round",
 				log_data_client("client", client));
-		udb_reconcile_abort(udb_ctx, "authority disconnected", 0);
+		udb_reconcile_abort(udb_ctx, "authority disconnected", 1);
 	}
 
 	udb_propagator_policy_changed(udb_ctx);
