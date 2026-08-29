@@ -651,7 +651,97 @@ def test_suite():
         finally:
             stop(p8)
 
-    print("\nALL 8 HUB & MULTIHOP REGRESSION TESTS PASSED SUCCESSFULLY!")
+        # -----------------------------------------------------------------
+        # TEST HUB 9: Multi-hop recovery A -> B -> C with divergence latch
+        # -----------------------------------------------------------------
+        print("\n=== Running Test HUB 9: Multi-hop A -> B -> C recovery ===")
+        p9_hub_ports = free_ports(3)
+        p9_leaf_ports = free_ports(3)
+
+        p9_hub, n9_hub, db9_hub, cfg9_hub = setup_node(
+            tmpdir, "hub9.test", "009", p9_hub_ports,
+            [("services.test", 0, False), ("leaf9.test", 0, False)], propagator="services.test"
+        )
+        p9_leaf, n9_leaf, db9_leaf, cfg9_leaf = setup_node(
+            tmpdir, "leaf9.test", "069", p9_leaf_ports,
+            [("hub9.test", p9_hub_ports[1], True)], propagator="hub9.test"
+        )
+        try:
+            # A bootstraps B with a nick record
+            services9 = MockPeer("services.test", "00S", "127.0.0.1", p9_hub_ports[1], "009",
+                                 propagator_advertised="services.test")
+            crc_alice = zlib.crc32(b"alice::vhost alice.hub\n") & 0xFFFFFFFF
+            services9.send_snapshot("N", "tx_init", [("alice::vhost", "alice.hub")], f"{crc_alice:08x}")
+            services9.wait_for(lambda l: f" ACK {services9.round_id} N tx_init " in l, "ACK N init from Hub")
+            services9.send_inventory({"N": (f"{crc_alice:08x}", int(time.time()))})
+            time.sleep(0.5)
+
+            oper9_hub = MockClient("127.0.0.1", p9_hub_ports[0], "oper9_hub")
+            oper9_hub.send("OPER testoper operpass")
+            oper9_hub.wait_for(lambda l: " 381 " in l, timeout=3.0)
+            oper9_hub.send("UDB STATUS")
+            oper9_hub.wait_for(lambda l: "Database readiness: READY" in l, timeout=3.0)
+            oper9_hub.wait_for(lambda l: "UDB synchronization: OK" in l, timeout=3.0)
+
+            # C joins behind B and reconciles from it
+            oper9_leaf = MockClient("127.0.0.1", p9_leaf_ports[0], "oper9_leaf")
+            oper9_leaf.send("OPER testoper operpass")
+            oper9_leaf.wait_for(lambda l: " 381 " in l, timeout=5.0)
+            oper9_leaf.send("UDB STATUS")
+            oper9_leaf.wait_for(lambda l: "Database readiness: READY" in l, timeout=5.0)
+            oper9_leaf.wait_for(lambda l: "Selected direct source: hub9.test" in l, timeout=3.0)
+            oper9_leaf.send("DBQ N::alice::vhost")
+            oper9_leaf.wait_for(lambda l: "alice.hub" in l, timeout=3.0)
+            print("PASS: Test HUB 9: Converged A -> B -> C topology")
+
+            # A-B breaks: B must stay READY + OK while its propagator is offline
+            services9.close()
+            time.sleep(1.5)
+            oper9_hub.send("UDB STATUS")
+            oper9_hub.wait_for(lambda l: "UDB synchronization: OK" in l, timeout=3.0)
+            oper9_hub.wait_for(lambda l: "Database readiness: READY" in l, timeout=3.0)
+            print("PASS: Test HUB 9: Hub stayed READY + OK with services offline")
+
+            # A returns changed: B latches DEGRADED, then converges back to OK
+            crc_bob = zlib.crc32(b"bob::vhost bob.org\n") & 0xFFFFFFFF
+            services9b = MockPeer("services.test", "00S", "127.0.0.1", p9_hub_ports[1], "009",
+                                  propagator_advertised="services.test", autostart_hel=False)
+            services9b.send("DB 009 HEL 4 services.test")
+            services9b.wait_for(lambda l: " DB " in l and " HEL 4 " in l, "HEL response from Hub")
+            services9b.send("DB 009 HEL 4 ACK")
+            services9b.send(f"DB 009 INF 1 N {crc_bob:08x} 0")
+            for b in ('C', 'I', 'S', 'L', 'K'):
+                services9b.send(f"DB 009 INF 1 {b} 00000000 0")
+            services9b.wait_for(lambda l: " DB " in l and " RES 1 N" in l, "RES for changed block")
+            oper9_hub.send("UDB STATUS")
+            oper9_hub.wait_for(lambda l: "UDB synchronization: DEGRADED" in l, timeout=3.0)
+            services9b.send("DB 009 BEGIN 1 N tx9 00000000")
+            services9b.send("DB 009 PUT 1 N tx9 bob::vhost bob.org")
+            services9b.send(f"DB 009 END 1 N tx9 {crc_bob:08x}")
+            services9b.wait_for(lambda l: " ACK 1 N tx9 " in l, "ACK for staged recovery commit")
+            oper9_hub.send("UDB STATUS")
+            oper9_hub.wait_for(lambda l: "UDB synchronization: OK" in l, timeout=3.0)
+            print("PASS: Test HUB 9: Hub latched DEGRADED and converged back to OK")
+
+            # C must reconcile the change from B afterwards: A == B == C
+            bob_seen = None
+            deadline = time.time() + 12
+            while time.time() < deadline and bob_seen is None:
+                oper9_leaf.send("DBQ N::bob::vhost")
+                bob_seen = oper9_leaf.wait_for(lambda l: "bob.org" in l, timeout=2.0)
+            assert bob_seen is not None, "Leaf must converge the changed record from its hub"
+            oper9_leaf.send("UDB STATUS")
+            oper9_leaf.wait_for(lambda l: "Database readiness: READY" in l, timeout=3.0)
+            print("PASS: Test HUB 9: Leaf converged the change from its hub: A == B == C")
+
+            oper9_hub.close()
+            oper9_leaf.close()
+            services9b.close()
+        finally:
+            stop(p9_leaf)
+            stop(p9_hub)
+
+    print("\nALL 9 HUB & MULTIHOP REGRESSION TESTS PASSED SUCCESSFULLY!")
 
 
 if __name__ == "__main__":

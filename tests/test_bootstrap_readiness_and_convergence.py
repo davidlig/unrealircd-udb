@@ -957,6 +957,92 @@ def test_suite():
         finally:
             stop(p15)
 
+        # -----------------------------------------------------------------
+        # TEST 16: Restart from READY + DEGRADED (health latch is runtime-only)
+        # -----------------------------------------------------------------
+        print("\n=== Running Test 16: Restart from READY + DEGRADED ===")
+        p16_ports = free_ports(3)
+        p16, n16, dbdir16, cfg16 = setup_node(
+            tmpdir, "hub16.test", "016", p16_ports,
+            [("prop-a.test", 0, False)], propagator="prop-a.test", stale_timeout=2
+        )
+        try:
+            # Bootstrap the empty node to READY + OK
+            prop16a = MockPeer("prop-a.test", "00P", "127.0.0.1", p16_ports[1], "016",
+                               propagator_advertised="prop-a.test")
+            for b in ('N', 'C', 'I', 'S', 'L', 'K'):
+                prop16a.send(f"DB 016 INF 1 {b} 00000000 0")
+            time.sleep(0.5)
+            c16 = None
+            retry_deadline = time.time() + 12
+            while time.time() < retry_deadline and c16 is None:
+                candidate = MockClient("127.0.0.1", p16_ports[0], "oper16")
+                try:
+                    candidate.wait_for(lambda l: " 001 " in l, timeout=2)
+                    c16 = candidate
+                except TimeoutError:
+                    candidate.close()
+                    time.sleep(0.3)
+            assert c16 is not None, "Node must become READY and admit clients after bootstrap"
+            c16.send("OPER testoper operpass")
+            c16.wait_for(lambda l: " 381 " in l, timeout=3)
+            c16.send("UDB STATUS")
+            c16.wait_for(lambda l: "UDB synchronization: OK" in l, timeout=3)
+
+            # Confirm divergence (N differs) but never answer the RES request,
+            # so the node is left READY + DEGRADED with a pending recovery.
+            prop16a.send("DB 016 INF 2 N deadbeef 0")
+            for b in ('C', 'I', 'S', 'L', 'K'):
+                prop16a.send(f"DB 016 INF 2 {b} 00000000 0")
+            prop16a.wait_for(lambda l: " DB " in l and " RES 2 N" in l, "RES for divergent block")
+            prop16a.close()
+            time.sleep(0.5)
+            c16.send("UDB STATUS")
+            c16.wait_for(lambda l: "UDB synchronization: DEGRADED" in l, timeout=3)
+            print("PASS: Test 16: Node reached READY + DEGRADED with pending recovery")
+
+            # Restart with the propagator offline: the persisted durable READY
+            # restores READY + OK; the DEGRADED knowledge was runtime-only.
+            stop(p16)
+            p16 = subprocess.Popen(bwrap_command(n16, ircd_bin, cfg16))
+            wait_for_daemon(p16, "127.0.0.1", p16_ports[0])
+            c16b = MockClient("127.0.0.1", p16_ports[0], "oper16b")
+            c16b.wait_for(lambda l: " 001 " in l, timeout=5)
+            c16b.send("OPER testoper operpass")
+            c16b.wait_for(lambda l: " 381 " in l, timeout=3)
+            c16b.send("UDB STATUS")
+            c16b.wait_for(lambda l: "Database readiness: READY" in l, timeout=3)
+            c16b.wait_for(lambda l: "UDB synchronization: OK" in l, timeout=3)
+            print("PASS: Test 16: Restart restored READY + OK without persisted health")
+
+            # The returning authority re-detects the divergence and this time
+            # completes recovery: DEGRADED -> OK via durable convergence.
+            bob_rec = "bob::vhost bob.net"
+            bob_crc = zlib.crc32((bob_rec + "\n").encode("utf-8")) & 0xFFFFFFFF
+            prop16b = MockPeer("prop-a.test", "00P", "127.0.0.1", p16_ports[1], "016",
+                               propagator_advertised="prop-a.test", autostart_hel=False)
+            prop16b.send("DB 016 HEL 4 prop-a.test")
+            prop16b.wait_for(lambda l: " DB " in l and " HEL 4 " in l, "HEL response after restart")
+            prop16b.send("DB 016 HEL 4 ACK")
+            prop16b.send("DB 016 INF 1 N deadbeef 0")
+            for b in ('C', 'I', 'S', 'L', 'K'):
+                prop16b.send(f"DB 016 INF 1 {b} 00000000 0")
+            prop16b.wait_for(lambda l: " DB " in l and " RES 1 N" in l, "RES after restart")
+            c16b.send("UDB STATUS")
+            c16b.wait_for(lambda l: "UDB synchronization: DEGRADED" in l, timeout=3)
+            prop16b.send("DB 016 BEGIN 1 N tx16 00000000")
+            prop16b.send(f"DB 016 PUT 1 N tx16 {bob_rec}")
+            prop16b.send(f"DB 016 END 1 N tx16 {bob_crc:08x}")
+            prop16b.wait_for(lambda l: " ACK 1 N tx16 " in l, "ACK for staged recovery")
+            c16b.send("UDB STATUS")
+            c16b.wait_for(lambda l: "UDB synchronization: OK" in l, timeout=3)
+            print("PASS: Test 16: Returning authority re-detected divergence and converged to OK")
+
+            c16b.close()
+            prop16b.close()
+        finally:
+            stop(p16)
+
     print("\nALL READINESS & CONVERGENCE TESTS PASSED SUCCESSFULLY!")
 
 
