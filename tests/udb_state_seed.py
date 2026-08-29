@@ -31,6 +31,20 @@ def wait_for_state(state_path, needle, timeout=10.0, poll=0.2):
     return False
 
 
+def read_text_lenient(path):
+    """Read a file that may transiently not exist during snapshot rotation.
+
+    udb_blocks_save_all() renames each current snapshot to .udb_previous
+    before installing the new set, so a concurrent reader can observe ENOENT
+    for a block file mid-transition; polling callers must treat that as "not
+    there yet" instead of failing.
+    """
+    try:
+        return path.read_text(errors="replace")
+    except FileNotFoundError:
+        return ""
+
+
 def block_header(letter, generation=DEFAULT_SEED_GENERATION):
     """Leading comment lines required in a seeded block snapshot file."""
     return f"; UDB Block {letter} - Version 1\n; Generation: {generation}\n"

@@ -15,7 +15,7 @@ import sys
 import tempfile
 import time
 
-from udb_state_seed import seed_block, seed_bootstrapping_state, seed_ready_state
+from udb_state_seed import read_text_lenient, seed_block, seed_bootstrapping_state, seed_ready_state
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -294,7 +294,7 @@ def snapshot_set_rename_failure_observed(b_log, state_file, data_dir, baselines,
 
 
 def db_contains(db, record):
-    return record in db.read_text(errors="replace")
+    return record in read_text_lenient(db)
 
 
 def db_text_if_present(db):
@@ -382,7 +382,7 @@ def print_diagnostics(logs, b_db=None):
         print("\n".join(evidence) or "(none)", file=sys.stderr)
     if b_db:
         print(f"--- node B database ({b_db}) ---", file=sys.stderr)
-        print(b_db.read_text(errors="replace") if b_db.exists() else "(missing)", file=sys.stderr)
+        print(read_text_lenient(b_db) or "(missing)", file=sys.stderr)
 
 
 def stop(processes):

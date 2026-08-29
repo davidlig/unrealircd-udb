@@ -14,7 +14,7 @@ import sys
 import tempfile
 import time
 
-from udb_state_seed import seed_block, seed_ready_state
+from udb_state_seed import read_text_lenient, seed_block, seed_ready_state
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -209,14 +209,14 @@ def staged_snapshot_observed(receiver_log):
 def wait_for_snapshot(db, receiver_log, timeout):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if N_MARKER in db.read_text(errors="replace") and staged_snapshot_observed(receiver_log):
+        if N_MARKER in read_text_lenient(db) and staged_snapshot_observed(receiver_log):
             return True
         time.sleep(0.25)
     return False
 
 
 def db_contains(db, record):
-    return record in db.read_text(errors="replace")
+    return record in read_text_lenient(db)
 
 
 def db_loaded_from(log, db):
@@ -265,7 +265,7 @@ def print_diagnostics(stage, logs, dbs=()):
         print("\n".join(evidence) or "(none)", file=sys.stderr)
     for label, db in dbs:
         print(f"--- {label} database ({db}) ---", file=sys.stderr)
-        print(db.read_text(errors="replace") if db.exists() else "(missing)", file=sys.stderr)
+        print(read_text_lenient(db) or "(missing)", file=sys.stderr)
 
 
 def stop(processes):
