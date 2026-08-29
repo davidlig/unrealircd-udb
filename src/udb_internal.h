@@ -167,12 +167,6 @@ typedef enum UdbSyncStatus
 	UDB_SYNC_STALE
 } UdbSyncStatus;
 
-typedef enum UdbStaleAction
-{
-	UDB_STALE_ACTION_DENY_NEW_CLIENTS = 0,
-	UDB_STALE_ACTION_WARN
-} UdbStaleAction;
-
 typedef struct UdbConfig
 {
 	char *db_directory;
@@ -187,7 +181,6 @@ typedef struct UdbConfig
 	int sync_inactivity_timeout;
 	int sync_absolute_timeout;
 	int stale_timeout;
-	UdbStaleAction stale_action;
 } UdbConfig;
 
 typedef struct UdbContext
@@ -401,7 +394,7 @@ static void udb_propagator_policy_changed(UdbContext *ctx);
 static void udb_propagator_policy_flush(UdbContext *ctx);
 static void udb_sync_hello_refresh_all(void);
 static void udb_sync_status_refresh(void);
-static int udb_hook_stale_pre_connect(Client *client);
+static int udb_hook_readiness_pre_connect(Client *client);
 static void udb_query_send_status(Client *client);
 static int udb_send_db_to_confirmed_servers(Client *except, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static int udb_sendto_confirmed_servers(Client *except, const char *fmt, ...) __attribute__((format(printf, 2, 3)));

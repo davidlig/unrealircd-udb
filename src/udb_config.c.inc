@@ -134,15 +134,6 @@ static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
 				errors++;
 			}
 		}
-		else if (!strcmp(cep->name, "stale-action"))
-		{
-			if (!cep->value || (strcmp(cep->value, "warn") && strcmp(cep->value, "deny-new-clients")))
-			{
-				config_error("%s:%i: udb::stale-action must be 'warn' or 'deny-new-clients'", cep->file->filename,
-							 cep->line_number);
-				errors++;
-			}
-		}
 		else
 		{
 			config_error("%s:%i: unknown directive udb::%s", cep->file->filename, cep->line_number, cep->name);
@@ -237,13 +228,6 @@ static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
 			unsigned int val = 0;
 			if (udb_parse_uint_strict(cep->value, &val, 1, 604800))
 				udb_cfg->stale_timeout = (int)val;
-		}
-		else if (!strcmp(cep->name, "stale-action"))
-		{
-			if (!strcmp(cep->value, "warn"))
-				udb_cfg->stale_action = UDB_STALE_ACTION_WARN;
-			else if (!strcmp(cep->value, "deny-new-clients"))
-				udb_cfg->stale_action = UDB_STALE_ACTION_DENY_NEW_CLIENTS;
 		}
 		else if (!strcmp(cep->name, "password-flood"))
 		{

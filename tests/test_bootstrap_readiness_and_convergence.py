@@ -55,7 +55,7 @@ def free_ports(count):
     return ports
 
 
-def write_config(path, name, sid, ports, links, dbdir, propagator=None, stale_timeout=None, stale_action=None,
+def write_config(path, name, sid, ports, links, dbdir, propagator=None, stale_timeout=None,
                  sync_timeout=None):
     link_text = ""
     for peer, peer_port, autoconnect in links:
@@ -69,11 +69,10 @@ def write_config(path, name, sid, ports, links, dbdir, propagator=None, stale_ti
 '''
     udb_prop = f'    propagator "{propagator}";\n' if propagator is not None else ""
     udb_stale_to = f'    stale-timeout {stale_timeout};\n' if stale_timeout is not None else ""
-    udb_stale_act = f'    stale-action {stale_action};\n' if stale_action is not None else ""
     udb_sync_timeout = f'    sync-inactivity-timeout {sync_timeout};\n' if sync_timeout is not None else ""
     udb_block = f'''udb {{
     database-directory "{dbdir}";
-{udb_prop}{udb_stale_to}{udb_stale_act}{udb_sync_timeout}}}'''
+{udb_prop}{udb_stale_to}{udb_sync_timeout}}}'''
 
     path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
 include "{RUNTIME_ROOT}/conf/snomasks.default.conf";
@@ -292,7 +291,7 @@ class MockClient:
             pass
 
 
-def setup_node(tempdir, name, sid, ports, links, propagator=None, stale_timeout=None, stale_action=None,
+def setup_node(tempdir, name, sid, ports, links, propagator=None, stale_timeout=None,
                sync_timeout=None):
     node_dir = pathlib.Path(tempdir) / name
     node_dir.mkdir(parents=True, exist_ok=True)
@@ -304,7 +303,7 @@ def setup_node(tempdir, name, sid, ports, links, propagator=None, stale_timeout=
     if src_mod.exists():
         shutil.copy(src_mod, moddir / "udb.so")
     cfg = node_dir / "unrealircd.conf"
-    write_config(cfg, name, sid, ports, links, dbdir, propagator, stale_timeout, stale_action, sync_timeout)
+    write_config(cfg, name, sid, ports, links, dbdir, propagator, stale_timeout, sync_timeout)
     cmd = bwrap_command(node_dir, DEFAULT_IRCD, cfg)
     p = subprocess.Popen(cmd)
     wait_for_daemon(p, "127.0.0.1", ports[0])

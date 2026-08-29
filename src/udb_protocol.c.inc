@@ -593,7 +593,7 @@ static int udb_protocol_init(ModuleInfo *modinfo)
 	HookAdd(modinfo->handle, HOOKTYPE_POSTCONF, 0, udb_config_postconf);
 	HookAdd(modinfo->handle, HOOKTYPE_REHASH_COMPLETE, 0, udb_config_postconf);
 	HookAdd(modinfo->handle, HOOKTYPE_SERVER_QUIT, 0, udb_hook_server_quit);
-	HookAdd(modinfo->handle, HOOKTYPE_PRE_LOCAL_CONNECT, -100, udb_hook_stale_pre_connect);
+	HookAdd(modinfo->handle, HOOKTYPE_PRE_LOCAL_CONNECT, -100, udb_hook_readiness_pre_connect);
 	EventAdd(modinfo->handle, "udb_sync_timeout", udb_sync_timeout_event, NULL, 1000, 0);
 
 	return 0;

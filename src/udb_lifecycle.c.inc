@@ -785,10 +785,7 @@ static int udb_engine_init(void)
 	{
 		udb_ready = 1;
 		udb_last_successful_sync = persisted_last_sync;
-		if (!policy_present)
-			udb_sync_status = UDB_SYNC_OK;
-		else
-			udb_sync_status_refresh();
+		udb_sync_status = UDB_SYNC_OK;
 	}
 	else
 	{

@@ -442,85 +442,48 @@ static int udb_is_authorized_sync_source(UdbContext *ctx, Client *direct_peer)
 static void udb_sync_status_refresh(void)
 {
 	UdbContext *ctx = udb_ctx;
-	int policy_present = udb_propagator_policy_present(ctx);
-	UdbPropagatorSelection selected;
-	int has_selected = ctx ? udb_select_propagator(ctx, 1, &selected) : 0;
 	time_t now = time(NULL);
 	int timeout = (udb_cfg && udb_cfg->stale_timeout > 0) ? udb_cfg->stale_timeout : 300;
-	UdbStaleAction action = udb_cfg ? udb_cfg->stale_action : UDB_STALE_ACTION_DENY_NEW_CLIENTS;
 
-	if (!policy_present)
+	if (udb_ready)
 	{
-		if (udb_ready)
-		{
-			if (udb_sync_status != UDB_SYNC_OK)
-			{
-				udb_log(ULOG_INFO, "UDB_SYNC_RECOVERED", NULL,
-						"UDB synchronization recovered. Selected propagator: none");
-				udb_sync_status = UDB_SYNC_OK;
-			}
-			udb_degraded_since = 0;
-		}
+		udb_degraded_since = 0;
+		/* READY health is latched by reconciliation (only udb_reconcile_check()
+		 * may return DEGRADED to OK); STALE is invalid while READY. */
+		if (udb_sync_status == UDB_SYNC_STALE)
+			udb_sync_status = UDB_SYNC_OK;
 		return;
 	}
 
-	if (has_selected)
-	{
-		if (udb_sync_status == UDB_SYNC_OK && udb_ready)
-		{
-			udb_degraded_since = 0;
-			return;
-		}
-
-		if (udb_degraded_since > 0)
-		{
-			time_t elapsed = (now >= udb_degraded_since) ? (now - udb_degraded_since) : 0;
-			if (elapsed >= timeout && udb_sync_status != UDB_SYNC_STALE)
-			{
-				const char *action_str = (action == UDB_STALE_ACTION_WARN) ? "warn" : "deny-new-clients";
-				udb_log(ULOG_ERROR, "UDB_SYNC_STALE", NULL,
-						"UDB synchronization is stale ($seconds seconds without eligible propagator). Stale action: "
-						"$action",
-						log_data_integer("seconds", (int)elapsed), log_data_string("action", action_str));
-				udb_sync_status = UDB_SYNC_STALE;
-			}
-		}
-		return;
-	}
-
-	/* Policy is present, but no propagator is eligible (HEL 4 -) */
+	/* Bootstrap-pending nodes age toward STALE regardless of propagator
+	 * availability: the clock measures time without a READY database. */
 	if (udb_degraded_since == 0)
 		udb_degraded_since = now;
 
 	time_t elapsed = (now >= udb_degraded_since) ? (now - udb_degraded_since) : 0;
 
-	if (elapsed < timeout)
-	{
-		if (udb_sync_status != UDB_SYNC_DEGRADED && udb_sync_status != UDB_SYNC_STALE)
-		{
-			const char *source = (udb_cfg && udb_cfg->propagator && *udb_cfg->propagator) ? "local" : "S";
-			const char *policy = udb_propagator_policy(ctx);
-			udb_log(ULOG_WARNING, "UDB_SYNC_DEGRADED", NULL,
-					"No eligible propagator. Database may become stale. Policy source: $source, Policy: $policy",
-					log_data_string("source", source), log_data_string("policy", policy ? policy : "none"));
-			udb_sync_status = UDB_SYNC_DEGRADED;
-		}
-	}
-	else
+	if (elapsed >= timeout)
 	{
 		if (udb_sync_status != UDB_SYNC_STALE)
 		{
-			const char *action_str = (action == UDB_STALE_ACTION_WARN) ? "warn" : "deny-new-clients";
-			udb_log(
-				ULOG_ERROR, "UDB_SYNC_STALE", NULL,
-				"UDB synchronization is stale ($seconds seconds without eligible propagator). Stale action: $action",
-				log_data_integer("seconds", (int)elapsed), log_data_string("action", action_str));
+			udb_log(ULOG_ERROR, "UDB_SYNC_STALE", NULL,
+					"UDB bootstrap is stale ($seconds seconds without a READY database); new local clients remain "
+					"denied until bootstrap completes",
+					log_data_integer("seconds", (int)elapsed));
 			udb_sync_status = UDB_SYNC_STALE;
 		}
 	}
+	else if (udb_sync_status != UDB_SYNC_DEGRADED && udb_sync_status != UDB_SYNC_STALE)
+	{
+		const char *policy = udb_propagator_policy(ctx);
+		udb_log(ULOG_WARNING, "UDB_SYNC_DEGRADED", NULL,
+				"UDB bootstrap pending; no READY database yet. Policy: $policy",
+				log_data_string("policy", policy ? policy : "none"));
+		udb_sync_status = UDB_SYNC_DEGRADED;
+	}
 }
 
-static int udb_hook_stale_pre_connect(Client *client)
+static int udb_hook_readiness_pre_connect(Client *client)
 {
 	if (!client || !MyConnect(client) || IsServer(client))
 		return HOOK_CONTINUE;
@@ -529,15 +492,6 @@ static int udb_hook_stale_pre_connect(Client *client)
 	{
 		udb_log(ULOG_WARNING, "UDB_NOT_READY_DENY_CLIENT", client,
 				"Rejecting new local client connection: UDB initialization pending");
-		exit_client(client, NULL,
-					"UDB synchronization unavailable; this server is temporarily not accepting new connections");
-		return HOOK_DENY;
-	}
-
-	if (udb_sync_status == UDB_SYNC_STALE && udb_cfg && udb_cfg->stale_action == UDB_STALE_ACTION_DENY_NEW_CLIENTS)
-	{
-		udb_log(ULOG_WARNING, "UDB_STALE_DENY_CLIENT", client,
-				"Rejecting new local client connection due to stale UDB synchronization");
 		exit_client(client, NULL,
 					"UDB synchronization unavailable; this server is temporarily not accepting new connections");
 		return HOOK_DENY;

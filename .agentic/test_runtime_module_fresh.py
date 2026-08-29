@@ -49,6 +49,19 @@ class RuntimeModuleFreshnessTest(unittest.TestCase):
         if not installed.is_file():
             self.skipTest(f"No installed module at {installed}; runtime tests would SKIP anyway")
 
+        newest_source = max(
+            (path.stat().st_mtime for path in (ROOT / "src").rglob("*") if path.suffix in (".c", ".h", ".inc")),
+            default=0.0,
+        )
+        self.assertLessEqual(
+            newest_source,
+            expected.stat().st_mtime,
+            f"Stale build: {expected} is older than the newest source file.\n"
+            f"Rebuild from the UnrealIRCd source root, then refresh the installed copy:\n"
+            f"  make custommodule MODULEFILE=udb/src/udb\n"
+            f"  cp {expected} {installed}",
+        )
+
         built_hash = sha256(expected)
         installed_hash = sha256(installed)
         self.assertEqual(

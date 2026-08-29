@@ -6,9 +6,10 @@ Covers:
   Test A - Propagator switch on HEL ACK with active staged session
   Test B - REHASH between already confirmed peers (authorizes_us false -> true)
   Test C - Malformed HEL 4 frame rejection
-  Test D - Temporary DEGRADED state (grace period, new clients allowed)
-  Test E - Transition to STALE state (deny-new-clients enforcement)
-  Test F - Automatic recovery from STALE state upon propagator return
+  Test D - READY node keeps accepting clients with the propagator offline
+  Test E - /UDB STATUS stays OK/ALLOWED without a propagator
+  Test F - Propagator return: inventory converges, node remains OK
+  Test D2 - Bootstrap-pending node: DEGRADED -> STALE, denial, recovery via bootstrap
   Test G - Obsolete Block S policy retains '-' and never falls back to '?'
   Test H - Administrative recovery via local config override + REHASH
   Test I - Clean node announces '?' (bootstrap preserved)
@@ -47,7 +48,7 @@ def free_ports(count):
     return ports
 
 
-def write_config(path, name, sid, ports, links, dbdir, propagator=None, stale_timeout=None, stale_action=None):
+def write_config(path, name, sid, ports, links, dbdir, propagator=None, stale_timeout=None):
     link_text = ""
     for peer, peer_port, autoconnect in links:
         outgoing = (f'    outgoing {{ bind-ip "127.0.0.1"; hostname "127.0.0.1"; port {peer_port}; '
@@ -60,10 +61,9 @@ def write_config(path, name, sid, ports, links, dbdir, propagator=None, stale_ti
 '''
     udb_prop = f'    propagator "{propagator}";\n' if propagator is not None else ""
     udb_stale_to = f'    stale-timeout {stale_timeout};\n' if stale_timeout is not None else ""
-    udb_stale_act = f'    stale-action {stale_action};\n' if stale_action is not None else ""
     udb_block = f'''udb {{
     database-directory "{dbdir}";
-{udb_prop}{udb_stale_to}{udb_stale_act}}}'''
+{udb_prop}{udb_stale_to}}}'''
 
     path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
 include "{RUNTIME_ROOT}/conf/snomasks.default.conf";
@@ -386,7 +386,7 @@ def test_suite():
         peerC.close()
         stop(procC)
 
-        print("\n=== Running Tests D, E, F: DEGRADED grace period, STALE timeout, deny-new-clients & recovery ===")
+        print("\n=== Running Tests D, E, F: READY node survives propagator loss ===")
         nodeD = tmpdir / "nodeD"
         portsD = free_ports(3)
         linksD = [("prop.test", 0, False)]
@@ -395,8 +395,8 @@ def test_suite():
         (nodeD / "modules" / "third").mkdir(parents=True, exist_ok=True)
         shutil.copy(module_src, nodeD / "modules" / "third" / "udb.so")
         confD = nodeD / "unrealircd.conf"
-        # Stale timeout of 3 seconds with deny-new-clients
-        write_config(confD, "hubD.test", "00D", portsD, linksD, dbdirD, propagator="prop.test", stale_timeout=3, stale_action="deny-new-clients")
+        # Stale timeout kept short to prove a READY node never reaches STALE
+        write_config(confD, "hubD.test", "00D", portsD, linksD, dbdirD, propagator="prop.test", stale_timeout=2)
 
         procD = subprocess.Popen(bwrap_command(nodeD, ircd_bin, confD))
         wait_for_daemon(procD, "127.0.0.1", portsD[0])
@@ -410,65 +410,120 @@ def test_suite():
         client1.wait_for(lambda l: " 001 " in l, timeout=3)
         print("PASS: Initial client connected while OK")
 
-        # Now disconnect propagator -> triggers DEGRADED state
+        # Disconnect propagator: a READY node stays OK and keeps serving clients
         propD.close()
-        time.sleep(0.5)
+        time.sleep(3.0)
 
-        # Test D: During grace period (< 3s), new client is still allowed!
-        client_grace = MockClient("127.0.0.1", portsD[0], "user_grace")
-        welcome = client_grace.wait_for(lambda l: " 001 " in l, timeout=2)
-        assert welcome is not None, "Client should be allowed during DEGRADED grace period"
-        print("PASS: Test D: New client connected during DEGRADED grace period")
-        client_grace.close()
+        client_noprop = MockClient("127.0.0.1", portsD[0], "user_noprop")
+        welcome = client_noprop.wait_for(lambda l: " 001 " in l, timeout=2)
+        assert welcome is not None, "READY node must keep accepting clients without a propagator"
+        client_noprop.close()
 
-        # Test E: Wait for stale timeout (3s) to expire -> state becomes STALE
-        time.sleep(3.2)
-
-        # In STALE with deny-new-clients, new connection must be rejected before registration
-        client_stale = MockClient("127.0.0.1", portsD[0], "user_stale")
-        client_stale.receive(timeout=1.5)
-        denied_line = None
-        for l in client_stale.lines:
-            if "UDB synchronization unavailable" in l or "ERROR" in l:
-                denied_line = l
-                break
-        assert denied_line is not None, f"Expected denial message in STALE state, got: {client_stale.lines}"
-        print(f"PASS: Test E: New client was rejected in STALE mode: {denied_line}")
-        client_stale.close()
-
-        # Existing client1 should still be alive
-        client1.send("PING :test")
-        pong = client1.wait_for(lambda l: "PONG" in l, timeout=2)
-        assert pong is not None, "Existing client should remain connected during STALE"
-        print("PASS: Existing client remained connected during STALE state")
-
-        # Test Oper /UDB STATUS command
         client1.send("OPER testoper operpass")
         client1.wait_for(lambda l: " 381 " in l, timeout=2)
         client1.send("UDB STATUS")
-        client1.wait_for(lambda l: " 339 " in l and "UDB synchronization: STALE" in l, timeout=2)
-        print("PASS: /UDB STATUS correctly reported UDB synchronization: STALE")
+        client1.wait_for(lambda l: " 339 " in l and "UDB synchronization: OK" in l, timeout=2)
+        client1.wait_for(lambda l: " 339 " in l and "New local clients: ALLOWED" in l, timeout=2)
+        print("PASS: Tests D/E: READY node stayed OK and kept accepting clients past the stale timeout")
 
-        # Test F: Recovery from STALE
+        # Test F: propagator returns; inventory converges and the node remains OK
         propD2 = MockPeer("prop.test", "001", "127.0.0.1", portsD[1], "00D", propagator_advertised="prop.test")
         time.sleep(0.5)
 
-        # Check /UDB STATUS is now OK
         client1.lines.clear()
         client1.send("UDB STATUS")
-        client1.wait_for(lambda l: " 339 " in l and "UDB synchronization: OK" in l, timeout=2)
-        print("PASS: Test F: /UDB STATUS returned to OK after propagator reconnected")
+        client1.wait_for(lambda l: " 339 " in l and "UDB synchronization: OK" in l, timeout=3)
+        print("PASS: Test F: /UDB STATUS remained OK after the propagator reconnected")
 
-        # New client connects again without issues
         client_recovered = MockClient("127.0.0.1", portsD[0], "user_recov")
         welcome = client_recovered.wait_for(lambda l: " 001 " in l, timeout=2)
-        assert welcome is not None, "New client should be accepted after recovery to OK"
-        print("PASS: Test F: New client successfully connected after recovery to OK")
+        assert welcome is not None, "New client should be accepted after the propagator returns"
+        print("PASS: Test F: New client successfully connected after propagator return")
 
         client_recovered.close()
         client1.close()
         propD2.close()
         stop(procD)
+
+        print("\n=== Running Test D2: bootstrap-pending DEGRADED to STALE with recovery ===")
+        nodeD2 = tmpdir / "nodeD2"
+        portsD2 = free_ports(4)
+        # observer.test has a link block so it can link and query STATUS, but it
+        # is not in the propagator policy, so the node stays bootstrap-pending.
+        linksD2 = [("prop.test", 0, False), ("observer.test", 0, False)]
+        dbdirD2 = nodeD2 / "db"
+        dbdirD2.mkdir(parents=True, exist_ok=True)
+        (nodeD2 / "modules" / "third").mkdir(parents=True, exist_ok=True)
+        shutil.copy(module_src, nodeD2 / "modules" / "third" / "udb.so")
+        confD2 = nodeD2 / "unrealircd.conf"
+        write_config(confD2, "hubD2.test", "00P", portsD2, linksD2, dbdirD2, propagator="prop.test", stale_timeout=2)
+
+        procD2 = subprocess.Popen(bwrap_command(nodeD2, ircd_bin, confD2))
+        wait_for_daemon(procD2, "127.0.0.1", portsD2[0])
+
+        # A server peer outside the propagator policy keeps the link alive
+        # without ever becoming an eligible propagator, so the node stays
+        # bootstrap-pending and can still be queried via /UDB STATUS.
+        observer = MockPeer("observer.test", "002", "127.0.0.1", portsD2[1], "00P",
+                            propagator_advertised="observer.test", send_inf=False)
+        time.sleep(0.5)
+
+        denied_early = MockClient("127.0.0.1", portsD2[0], "user_pending")
+        denied_early.receive(timeout=1.5)
+        assert any("ERROR" in l or "Closing Link" in l for l in denied_early.lines), \
+            f"Bootstrap-pending node must deny new local clients, got: {denied_early.lines}"
+        denied_early.close()
+
+        observer.send("UDB STATUS")
+        observer.wait_for(lambda l: " 339 " in l and "Database readiness: BOOTSTRAPPING" in l,
+                          "BOOTSTRAPPING readiness", timeout=3)
+        observer.wait_for(lambda l: " 339 " in l and "UDB synchronization: DEGRADED" in l,
+                          "DEGRADED while bootstrap pending", timeout=3)
+        observer.wait_for(lambda l: " 339 " in l and "New local clients: DENIED" in l,
+                          "clients denied while bootstrap pending", timeout=3)
+        print("PASS: Test D2: Bootstrap-pending node reported BOOTSTRAPPING/DEGRADED and denied clients")
+
+        time.sleep(2.2)
+        observer.send("UDB STATUS")
+        observer.wait_for(lambda l: " 339 " in l and "UDB synchronization: STALE" in l,
+                          "STALE after bootstrap stale-timeout", timeout=3)
+        print("PASS: Test D2: Bootstrap pending past stale-timeout transitioned to STALE")
+
+        denied_late = MockClient("127.0.0.1", portsD2[0], "user_stale")
+        denied_late.receive(timeout=1.5)
+        assert any("ERROR" in l or "Closing Link" in l for l in denied_late.lines), \
+            f"STALE bootstrap-pending node must still deny new local clients, got: {denied_late.lines}"
+        denied_late.close()
+
+        # The real propagator arrives: its zero-checksum inventory matches the
+        # empty node, bootstrap converges -> READY + OK
+        propD2 = MockPeer("prop.test", "001", "127.0.0.1", portsD2[1], "00P", propagator_advertised="prop.test")
+
+        # Bootstrap completion is polled by the sync EVENT; retry client
+        # connections until the node is READY and admits them.
+        allowed = None
+        retry_deadline = time.time() + 12
+        while time.time() < retry_deadline:
+            candidate = MockClient("127.0.0.1", portsD2[0], "user_ready")
+            welcome = candidate.wait_for(lambda l: " 001 " in l, timeout=2)
+            if welcome is not None:
+                allowed = candidate
+                break
+            candidate.close()
+            time.sleep(0.3)
+        assert allowed is not None, "Node must serve clients once bootstrap completes"
+        allowed.close()
+
+        observer.send("UDB STATUS")
+        observer.wait_for(lambda l: " 339 " in l and "Database readiness: READY" in l,
+                          "READY after bootstrap", timeout=8)
+        observer.wait_for(lambda l: " 339 " in l and "UDB synchronization: OK" in l,
+                          "OK after bootstrap", timeout=3)
+        print("PASS: Test D2: Bootstrap completed to READY/OK and clients were accepted")
+
+        propD2.close()
+        observer.close()
+        stop(procD2)
 
         print("\n=== Running Tests G, H: Obsolete S policy, Advertised '-', Administrative REHASH Recovery ===")
         nodeG = tmpdir / "nodeG"
@@ -487,7 +542,7 @@ def test_suite():
 
         confG = nodeG / "unrealircd.conf"
         # No local propagator override in config, stale timeout 2s
-        write_config(confG, "hubG.test", "00G", portsG, linksG, dbdirG, stale_timeout=2, stale_action="deny-new-clients")
+        write_config(confG, "hubG.test", "00G", portsG, linksG, dbdirG, stale_timeout=2)
 
         procG = subprocess.Popen(bwrap_command(nodeG, ircd_bin, confG))
         wait_for_daemon(procG, "127.0.0.1", portsG[0])
@@ -522,7 +577,7 @@ def test_suite():
         print("PASS: Test J: Advertised state remained '-' and did not fall back to '?' after stale timeout")
 
         # Test H: Administrative recovery via local config override + REHASH
-        write_config(confG, "hubG.test", "00G", portsG, linksG, dbdirG, propagator="new-a.test", stale_timeout=2, stale_action="deny-new-clients")
+        write_config(confG, "hubG.test", "00G", portsG, linksG, dbdirG, propagator="new-a.test", stale_timeout=2)
         oper_g.send("REHASH")
         time.sleep(0.5)
 

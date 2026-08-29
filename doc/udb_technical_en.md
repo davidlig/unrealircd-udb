@@ -40,8 +40,7 @@ davidlig::oper netadmin
     Allowed range: `1` to `10000000` (default `500000`).
 *   `max-global-clones <number>;`: Global limit of connections/clones per IP.
 *   `password-flood <attempts>:<seconds>;`: Password brute-force flood protection (default `5:60`).
-*   `stale-timeout <seconds>;`: Grace period before transitioning from `DEGRADED` to `STALE` when a policy is configured or present from block S but no eligible propagator candidate is available. Allowed range: `1` to `604800` seconds (default `300`).
-*   `stale-action <warn | deny-new-clients>;`: Operational mitigation policy applied upon entering `STALE` status. `deny-new-clients` (default) cleanly rejects new local user connections before registration (`HOOKTYPE_PRE_LOCAL_CONNECT`) while leaving existing clients and S2S links fully operational; `warn` emits diagnostic warning logs without restricting new client connections.
+*   `stale-timeout <seconds>;`: Grace period a node may remain without a `READY` database during bootstrap before transitioning from `DEGRADED` to `STALE`. It does not measure propagator availability and never affects client admission beyond the `udb_ready` gate. Allowed range: `1` to `604800` seconds (default `300`).
 
 **Transactional Loader:** During startup, UDB reads each block file into a staging
 candidate tree. The active in-memory database is swapped atomically only after the
@@ -429,15 +428,19 @@ UDB enforces deterministic invariants for database readiness, durable persistenc
 10. **Crash Consistency:** Atomically renames `.udb_state.tmp` to `.udb_state` and invokes `fsync` on the containing directory descriptor before closing.
 
 ### 2.5 Operational Health State Machine (OK / DEGRADED / STALE)
-UDB features a deterministic health state machine to manage node reliability:
-*   **`OK`**: An eligible upstream propagator candidate is directly connected and `HEL 4`-confirmed (or the local node itself is the designated authoritative propagator, or no policy is configured). Full database synchronization and client operations proceed normally.
-*   **`DEGRADED`**: A propagator policy is present (via local config or block `S`), but no eligible candidate is currently usable. The node operates within the configurable grace period (`stale-timeout`, default 300s). Live hop-by-hop mutations (`INS`/`DEL`/`DRP`/`OPT`) continue to propagate normally, existing clients remain connected, and new local clients are accepted.
-*   **`STALE`**: The grace period has expired without an eligible propagator. If `stale-action deny-new-clients` is active (default), new incoming local client connections are cleanly rejected with a fatal error notice before registration (`HOOKTYPE_PRE_LOCAL_CONNECT`). Existing clients and S2S links are strictly never disconnected.
+UDB features a deterministic health state machine to manage node reliability. Client admission is gated exclusively by database readiness (`udb_ready`): a READY node always accepts new local clients regardless of synchronization health, and a node without READY always denies them.
+
+*   **`OK`**: No known divergence with the authority is pending resolution. This does NOT require the propagator to be online: a READY node whose propagator is offline (e.g. services under maintenance) remains `OK` and fully operational. New local clients are accepted.
+*   **`DEGRADED`**:
+    *   Without `READY`: bootstrap is still pending. The node ages through the configurable grace period (`stale-timeout`, default 300s) toward `STALE`. New local clients are denied (`udb_ready == 0`).
+    *   With `READY`: confirmed divergence with the authority is being recovered (reconciliation active or retries pending). The node keeps serving its last complete database; new local clients are accepted.
+*   **`STALE`**: Only reachable without `READY`: the bootstrap grace period has expired. New local clients remain denied (`udb_ready == 0`). `READY + STALE` is an invalid state.
 
 **Key Invariants:**
-1.  **Strict Trust Invariant:** Elapsed time *never* converts advertised `HEL 4 -` into `HEL 4 ?` or relaxes trust rules. An isolated node with an obsolete policy will never automatically accept staged snapshots from unauthorized neighbors.
-2.  **Automatic Recovery:** As soon as an eligible propagator links and confirms `HEL 4`, the node immediately transitions back to `OK`, emits log notice `UDB_SYNC_RECOVERED`, and permits new client connections without requiring an IRCd restart.
-3.  **Administrative Override:** Administrators can recover a stale node by updating `propagator "<new-server>";` in `unrealircd.conf` and issuing `/REHASH`. The local config override takes precedence over obsolete database policies.
+1.  **Sole Admission Gate:** Only `udb_ready` decides client admission. Synchronization health (`OK`/`DEGRADED`/`STALE`) never restricts clients, and existing clients and S2S links are strictly never disconnected by health transitions.
+2.  **Strict Trust Invariant:** Elapsed time *never* converts advertised `HEL 4 -` into `HEL 4 ?` or relaxes trust rules. An isolated node with an obsolete policy will never automatically accept staged snapshots from unauthorized neighbors.
+3.  **Automatic Recovery:** As soon as an eligible propagator links and confirms `HEL 4`, a bootstrap-pending node converges to `READY` + `OK`, emits log notice `UDB_SYNC_RECOVERED`, and permits new client connections without requiring an IRCd restart.
+4.  **Administrative Override:** Administrators can recover a bootstrap-pending node by updating `propagator "<new-server>";` in `unrealircd.conf` and issuing `/REHASH`. The local config override takes precedence over obsolete database policies.
 
 ### 2.6 Diagnostic & Oper Status Commands
 Operators can query live synchronization health in real time via `/UDB STATUS` or `/DBQ STATUS` (oper only):

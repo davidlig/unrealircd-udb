@@ -40,8 +40,7 @@ davidlig::oper netadmin
     memoria (OOM). Rango permitido: `1` a `10000000` (por defecto `500000`).
 *   `max-global-clones <número>;`: Límite global de conexiones/clones por IP.
 *   `password-flood <intentos>:<segundos>;`: Protección de fuerza bruta en contraseñas (por defecto `5:60`).
-*   `stale-timeout <segundos>;`: Periodo de gracia antes de transicionar de `DEGRADED` a `STALE` cuando existe una política configurada o presente en el bloque S pero no hay ningún candidato a propagador elegible disponible. Rango permitido: `1` a `604800` segundos (por defecto `300`).
-*   `stale-action <warn | deny-new-clients>;`: Política de mitigación operativa aplicada al entrar en estado `STALE`. `deny-new-clients` (por defecto) rechaza limpiamente las nuevas conexiones de clientes locales antes del registro (`HOOKTYPE_PRE_LOCAL_CONNECT`) manteniendo plenamente operativos los clientes existentes y los enlaces S2S; `warn` emite advertencias en el registro sin restringir las conexiones de nuevos clientes.
+*   `stale-timeout <segundos>;`: Periodo de gracia que un nodo puede permanecer sin base de datos `READY` durante el bootstrap antes de transicionar de `DEGRADED` a `STALE`. No mide la disponibilidad del propagador y nunca afecta la admisión de clientes más allá del gate `udb_ready`. Rango permitido: `1` a `604800` segundos (por defecto `300`).
 
 **Loader Transaccional:** Durante el arranque, UDB lee cada archivo en un árbol
 candidato temporal. Solo si el archivo se lee y valida completamente sin errores
@@ -429,15 +428,19 @@ persistencia durable, reconciliación aislada por rondas y topología salto a sa
 10. **Consistencia ante Fallos:** `.udb_state.tmp` se renombra atómicamente a `.udb_state` y se ejecuta `fsync` sobre el descriptor del directorio contenedor antes de cerrarlo. Si falla el `fsync` posterior a un rename visible, el estado operativo permanece `BOOTSTRAPPING`; nunca se promueve `READY` con durabilidad incierta.
 
 ### 2.5 Máquina de Estados de Salud Operativa (OK / DEGRADED / STALE)
-UDB implementa una máquina de estados determinista para gestionar la fiabilidad operativa del nodo:
-*   **`OK`**: Hay un candidato a propagador upstream directamente conectado y confirmado con `HEL 4` (o el propio nodo local es el propagador autorizado, o no hay política definida). La sincronización completa de base de datos y la operativa de clientes se desarrollan con normalidad.
-*   **`DEGRADED`**: Existe una política de propagador (vía configuración local o bloque `S`), pero actualmente no hay ningún candidato elegible utilizable. El nodo opera dentro del periodo de gracia configurable (`stale-timeout`, por defecto 300s). Las mutaciones salto a salto (`INS`/`DEL`/`DRP`/`OPT`) continúan propagándose con normalidad, los clientes existentes permanecen conectados y se admiten nuevos clientes locales.
-*   **`STALE`**: El periodo de gracia ha expirado sin encontrar un propagador elegible. Si `stale-action deny-new-clients` está activo (por defecto), se rechazan limpiamente las nuevas conexiones de clientes locales con un aviso fatal antes del registro (`HOOKTYPE_PRE_LOCAL_CONNECT`). Los clientes existentes y los enlaces S2S nunca se desconectan.
+UDB implementa una máquina de estados determinista para gestionar la fiabilidad operativa del nodo. La admisión de clientes depende exclusivamente de la disponibilidad de la base de datos (`udb_ready`): un nodo READY siempre acepta nuevos clientes locales sin importar la salud de sincronización, y un nodo sin READY siempre los deniega.
+
+*   **`OK`**: No existe divergencia conocida con la autoridad pendiente de resolver. Esto NO requiere que el propagador esté online: un nodo READY cuyo propagador está caído (p. ej. services en mantenimiento) permanece `OK` y plenamente operativo. Se aceptan nuevos clientes locales.
+*   **`DEGRADED`**:
+    *   Sin `READY`: el bootstrap sigue pendiente. El nodo envejece dentro del periodo de gracia configurable (`stale-timeout`, por defecto 300s) hacia `STALE`. Los nuevos clientes locales son denegados (`udb_ready == 0`).
+    *   Con `READY`: hay divergencia confirmada con la autoridad en recuperación (reconciliación activa o reintentos pendientes). El nodo sigue sirviendo su última base completa; se aceptan nuevos clientes locales.
+*   **`STALE`**: Solo alcanzable sin `READY`: el periodo de gracia del bootstrap expiró. Los nuevos clientes locales siguen denegados (`udb_ready == 0`). `READY + STALE` es un estado inválido.
 
 **Invariantes Fundamentales:**
-1.  **Invariante Estricta de Confianza:** El tiempo transcurrido *nunca* convierte el estado anunciado `HEL 4 -` en `HEL 4 ?` ni relaja las reglas de confianza. Un nodo aislado con política obsoleta jamás aceptará automáticamente snapshots por etapas de vecinos no autorizados.
-2.  **Recuperación Automática:** En cuanto un propagador elegible se conecta y confirma `HEL 4`, el nodo transiciona de inmediato a `OK`, emite el evento `UDB_SYNC_RECOVERED` y reanuda la admisión de nuevos clientes sin requerir reinicio del IRCd.
-3.  **Override Administrativo:** Los administradores pueden recuperar un nodo en estado stale actualizando `propagator "<nuevo-servidor>";` en `unrealircd.conf` y ejecutando `/REHASH`. El override local tiene precedencia sobre políticas obsoletas en base de datos.
+1.  **Gate Único de Admisión:** Solo `udb_ready` decide la admisión de clientes. La salud de sincronización (`OK`/`DEGRADED`/`STALE`) nunca restringe clientes, y los clientes existentes y los enlaces S2S jamás se desconectan por transiciones de salud.
+2.  **Invariante Estricta de Confianza:** El tiempo transcurrido *nunca* convierte el estado anunciado `HEL 4 -` en `HEL 4 ?` ni relaja las reglas de confianza. Un nodo aislado con política obsoleta jamás aceptará automáticamente snapshots por etapas de vecinos no autorizados.
+3.  **Recuperación Automática:** En cuanto un propagador elegible se conecta y confirma `HEL 4`, un nodo con bootstrap pendiente converge a `READY` + `OK`, emite el evento `UDB_SYNC_RECOVERED` y reanuda la admisión de nuevos clientes sin requerir reinicio del IRCd.
+4.  **Override Administrativo:** Los administradores pueden recuperar un nodo con bootstrap pendiente actualizando `propagator "<nuevo-servidor>";` en `unrealircd.conf` y ejecutando `/REHASH`. El override local tiene precedencia sobre políticas obsoletas en base de datos.
 
 ### 2.6 Comandos de Diagnóstico y Estado para Operadores
 Los operadores pueden consultar en tiempo real el estado de sincronización mediante `/UDB STATUS` o `/DBQ STATUS` (solo opers):

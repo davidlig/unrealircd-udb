@@ -4,11 +4,12 @@ readiness/health orthogonality, stale snapshot serving downstream, and
 restart persistence while upstream services are offline.
 
 Covers:
-  Test HUB 1: Propagator disconnects after READY -> Hub transitions OK -> DEGRADED -> STALE
-              while udb_ready stays 1. Local clients allowed with stale-action warn.
-  Test HUB 2: Restart of Hub with Services offline -> Hub starts immediately with udb_ready = 1,
-              sync_status = DEGRADED/STALE, accepting local clients.
-  Test HUB 3: Hub serves downstream while STALE -> Leaf reconciles from Hub while Services is offline.
+  Test HUB 1: Propagator disconnects after READY -> Hub stays OK while udb_ready
+              stays 1. Local clients keep being accepted.
+  Test HUB 2: Restart of Hub with Services offline -> Hub starts immediately with
+              udb_ready = 1, sync_status = OK, accepting local clients.
+  Test HUB 3: Hub serves downstream without a propagator -> Leaf reconciles from
+              Hub while Services is offline.
   Test HUB 4: Partial Hub (in BOOTSTRAPPING) rejects downstream RES requests.
   Test HUB 5: Services returns -> Hub receives updated snapshots, reconciles to OK, uninterrupted access.
   Test HUB 6: 3-node multi-hop A -> B -> C (Services -> Hub -> Leaf) mutation propagation.
@@ -47,7 +48,7 @@ def free_ports(count):
     return ports
 
 
-def write_config(path, name, sid, ports, links, dbdir, propagator=None, stale_timeout=None, stale_action=None):
+def write_config(path, name, sid, ports, links, dbdir, propagator=None, stale_timeout=None):
     link_text = ""
     for peer, peer_port, autoconnect in links:
         outgoing = (f'    outgoing {{ bind-ip "127.0.0.1"; hostname "127.0.0.1"; port {peer_port}; '
@@ -60,10 +61,9 @@ def write_config(path, name, sid, ports, links, dbdir, propagator=None, stale_ti
 '''
     udb_prop = f'    propagator "{propagator}";\n' if propagator is not None else ""
     udb_stale_to = f'    stale-timeout {stale_timeout};\n' if stale_timeout is not None else ""
-    udb_stale_act = f'    stale-action {stale_action};\n' if stale_action is not None else ""
     udb_block = f'''udb {{
     database-directory "{dbdir}";
-{udb_prop}{udb_stale_to}{udb_stale_act}}}'''
+{udb_prop}{udb_stale_to}}}'''
 
     path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
 include "{RUNTIME_ROOT}/conf/snomasks.default.conf";
@@ -303,7 +303,7 @@ class MockClient:
             pass
 
 
-def setup_node(tempdir, name, sid, ports, links, propagator=None, stale_timeout=None, stale_action=None):
+def setup_node(tempdir, name, sid, ports, links, propagator=None, stale_timeout=None):
     node_dir = pathlib.Path(tempdir) / name
     node_dir.mkdir(parents=True, exist_ok=True)
     dbdir = node_dir / "db"
@@ -314,7 +314,7 @@ def setup_node(tempdir, name, sid, ports, links, propagator=None, stale_timeout=
     if src_mod.exists():
         shutil.copy(src_mod, moddir / "udb.so")
     cfg = node_dir / "unrealircd.conf"
-    write_config(cfg, name, sid, ports, links, dbdir, propagator, stale_timeout, stale_action)
+    write_config(cfg, name, sid, ports, links, dbdir, propagator, stale_timeout)
     cmd = bwrap_command(node_dir, DEFAULT_IRCD, cfg)
     p = subprocess.Popen(cmd)
     wait_for_daemon(p, "127.0.0.1", ports[0])
@@ -334,14 +334,14 @@ def test_suite():
 
         # -----------------------------------------------------------------
         # TEST HUB 1: Propagator disconnects after READY -> OK -> DEGRADED -> STALE
-        # udb_ready stays 1, local clients allowed with stale-action warn
+        # udb_ready stays 1, local clients keep being accepted
         # -----------------------------------------------------------------
-        print("\n=== Running Test HUB 1: Propagator disconnect after READY (warn mode) ===")
+        print("\n=== Running Test HUB 1: Propagator disconnect after READY ===")
         p1_ports = free_ports(3)
         p1, n1, dbdir1, cfg1 = setup_node(
             tmpdir, "hub1.test", "001", p1_ports,
             [("services.test", 0, False)], propagator="services.test",
-            stale_timeout=2, stale_action="warn"
+            stale_timeout=2
         )
         try:
             # Services connects and initializes all 6 blocks
@@ -358,7 +358,8 @@ def test_suite():
             assert welcome is not None, "Client should be allowed when OK"
             c1.close()
 
-            # Services disconnects -> triggers DEGRADED, then STALE after 2s
+            # Services disconnects -> READY node must stay OK well past any
+            # legacy stale timeout
             services.close()
             time.sleep(2.5)
 
@@ -367,17 +368,17 @@ def test_suite():
             oper1.send("OPER testoper operpass")
             oper1.wait_for(lambda l: " 381 " in l, timeout=3.0)
             oper1.send("UDB STATUS")
-            oper1.wait_for(lambda l: "UDB synchronization: STALE" in l, timeout=3.0)
+            oper1.wait_for(lambda l: "UDB synchronization: OK" in l, timeout=3.0)
             oper1.wait_for(lambda l: "Database readiness: READY" in l, timeout=3.0)
             oper1.wait_for(lambda l: "Serving downstream: YES" in l, timeout=3.0)
             oper1.close()
 
-            # Local client STILL allowed because stale-action is warn and udb_ready is 1
-            c1_stale = MockClient("127.0.0.1", p1_ports[0], "user_stale_warn")
+            # Local client STILL allowed: sync health never gates clients
+            c1_stale = MockClient("127.0.0.1", p1_ports[0], "user_no_prop")
             welcome_stale = c1_stale.wait_for(lambda l: " 001 " in l, timeout=3.0)
-            assert welcome_stale is not None, "Client should be allowed in STALE when stale-action is warn"
+            assert welcome_stale is not None, "Client should be allowed while the propagator is offline"
             c1_stale.close()
-            print("PASS: Test HUB 1: Propagator disconnect transitions to STALE while udb_ready stays 1 (warn mode)")
+            print("PASS: Test HUB 1: Propagator disconnect kept the hub OK while udb_ready stays 1")
         finally:
             stop(p1)
 
@@ -401,22 +402,23 @@ def test_suite():
             oper2.send("OPER testoper operpass")
             oper2.wait_for(lambda l: " 381 " in l, timeout=3.0)
             oper2.send("UDB STATUS")
+            oper2.wait_for(lambda l: "UDB synchronization: OK" in l, timeout=3.0)
             oper2.wait_for(lambda l: "Database readiness: READY" in l, timeout=3.0)
             oper2.wait_for(lambda l: "Serving downstream: YES" in l, timeout=3.0)
             oper2.close()
-            print("PASS: Test HUB 2: Hub restarted offline immediately ready and accepting clients")
+            print("PASS: Test HUB 2: Hub restarted offline immediately READY, OK and accepting clients")
         finally:
             stop(p2)
 
         # -----------------------------------------------------------------
-        # TEST HUB 3: Hub serves downstream while STALE
+        # TEST HUB 3: Hub serves downstream without a propagator
         # -----------------------------------------------------------------
-        print("\n=== Running Test HUB 3: Hub serves downstream while STALE ===")
+        print("\n=== Running Test HUB 3: Hub serves downstream without a propagator ===")
         p3_ports = free_ports(3)
         p3, n3, dbdir3, cfg3 = setup_node(
             tmpdir, "hub3.test", "003", p3_ports,
             [("services.test", 0, False), ("leaf.test", 0, False)],
-            propagator="services.test", stale_timeout=2, stale_action="warn"
+            propagator="services.test", stale_timeout=2
         )
         try:
             # Services synchronizes a nick record to Hub3, then disconnects
@@ -428,7 +430,7 @@ def test_suite():
             time.sleep(0.3)
             services3.close()
 
-            # Wait for Hub3 to become STALE
+            # The hub remains READY (and therefore OK) without its propagator
             time.sleep(2.5)
 
             # Downstream leaf connects to Hub3 (Services is dead!)
@@ -439,12 +441,12 @@ def test_suite():
 
             # Leaf asks for snapshot of N from Hub3 via RES
             leaf.send("DB 003 RES 1 N")
-            # Hub3 must serve snapshot even while STALE
+            # Hub3 must serve its committed snapshot even without a propagator
             leaf.wait_for(lambda l: " DB " in l and " BEGIN 1 N " in l, "BEGIN N from Hub3")
             leaf.wait_for(lambda l: "alice::vhost" in l and "alice.hub" in l, "PUT alice from Hub3")
             leaf.wait_for(lambda l: " DB " in l and " END 1 N " in l, "END N from Hub3")
             leaf.close()
-            print("PASS: Test HUB 3: STALE Hub successfully served committed snapshots downstream")
+            print("PASS: Test HUB 3: Propagator-less hub successfully served committed snapshots downstream")
         finally:
             stop(p3)
 
@@ -479,7 +481,7 @@ def test_suite():
         p5, n5, dbdir5, cfg5 = setup_node(
             tmpdir, "hub5.test", "005", p5_ports,
             [("services.test", 0, False)], propagator="services.test",
-            stale_timeout=2, stale_action="warn"
+            stale_timeout=2
         )
         try:
             services5 = MockPeer("services.test", "00S", "127.0.0.1", p5_ports[1], "005", propagator_advertised="services.test")
@@ -625,7 +627,7 @@ def test_suite():
         p8, n8, dbdir8, cfg8 = setup_node(
             tmpdir, "hub8.test", "008", p8_ports,
             [("services.test", 0, False)], propagator="services.test",
-            stale_timeout=15, stale_action="deny-new-clients"
+            stale_timeout=15
         )
         try:
             services8 = MockPeer("services.test", "00S", "127.0.0.1", p8_ports[1], "008", propagator_advertised="services.test")
