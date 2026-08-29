@@ -48,7 +48,8 @@ def free_ports(count):
     return ports
 
 
-def write_config(path, name, sid, ports, links, dbdir, propagator=None, stale_timeout=None):
+def write_config(path, name, sid, ports, links, dbdir, propagator=None, stale_timeout=None,
+                 sync_timeout=None, sync_absolute_timeout=None):
     link_text = ""
     for peer, peer_port, autoconnect in links:
         outgoing = (f'    outgoing {{ bind-ip "127.0.0.1"; hostname "127.0.0.1"; port {peer_port}; '
@@ -61,9 +62,11 @@ def write_config(path, name, sid, ports, links, dbdir, propagator=None, stale_ti
 '''
     udb_prop = f'    propagator "{propagator}";\n' if propagator is not None else ""
     udb_stale_to = f'    stale-timeout {stale_timeout};\n' if stale_timeout is not None else ""
+    udb_sync_to = f'    sync-inactivity-timeout {sync_timeout};\n' if sync_timeout is not None else ""
+    udb_sync_abs = f'    sync-absolute-timeout {sync_absolute_timeout};\n' if sync_absolute_timeout is not None else ""
     udb_block = f'''udb {{
     database-directory "{dbdir}";
-{udb_prop}{udb_stale_to}}}'''
+{udb_prop}{udb_stale_to}{udb_sync_to}{udb_sync_abs}}}'''
 
     path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
 include "{RUNTIME_ROOT}/conf/snomasks.default.conf";
@@ -613,6 +616,49 @@ def test_suite():
         client_k.close()
         prop_k3.close()
         stop(procK)
+
+        print("\n=== Running Test L: absolute reconciliation deadline bounds drip-fed rounds ===")
+        nodeL = tmpdir / "nodeL"
+        portsL = free_ports(3)
+        linksL = [("prop.test", 0, False)]
+        dbdirL = nodeL / "db"
+        dbdirL.mkdir(parents=True, exist_ok=True)
+        (nodeL / "modules" / "third").mkdir(parents=True, exist_ok=True)
+        shutil.copy(module_src, nodeL / "modules" / "third" / "udb.so")
+        confL = nodeL / "unrealircd.conf"
+        # The inactivity deadline refreshes with every frame; the absolute
+        # deadline does not: a round drip-fed with valid frames must still be
+        # bounded instead of staying active indefinitely.
+        write_config(confL, "hubL.test", "00L", portsL, linksL, dbdirL, propagator="prop.test",
+                     sync_timeout=10, sync_absolute_timeout=2)
+
+        procL = subprocess.Popen(bwrap_command(nodeL, ircd_bin, confL))
+        wait_for_daemon(procL, "127.0.0.1", portsL[0])
+
+        def node_log_contains(node_dir, needle, timeout):
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                for log_path in node_dir.rglob("ircd.log"):
+                    try:
+                        if needle in log_path.read_text(errors="replace"):
+                            return True
+                    except OSError:
+                        pass
+                time.sleep(0.2)
+            return False
+
+        prop_l = MockPeer("prop.test", "001", "127.0.0.1", portsL[1], "00L", propagator_advertised="prop.test")
+        time.sleep(1.0)
+        drip_deadline = time.time() + 5
+        while time.time() < drip_deadline:
+            prop_l.send("DB 00L INF 1 N 00000000 0")
+            time.sleep(0.8)
+        assert node_log_contains(nodeL, "reconciliation absolute timeout", 8), \
+            "A drip-fed reconciliation round must be bounded by the absolute deadline"
+        print("PASS: Test L: Absolute deadline aborted a reconciliation round drip-fed with valid frames")
+
+        prop_l.close()
+        stop(procL)
 
         print("\n=== Running Tests G, H: Obsolete S policy, Advertised '-', Administrative REHASH Recovery ===")
         nodeG = tmpdir / "nodeG"

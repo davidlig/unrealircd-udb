@@ -408,6 +408,7 @@ typedef struct UdbReconcileState
 	time_t started_at;
 	time_t last_activity;
 	time_t deadline;
+	time_t absolute_deadline;
 } UdbReconcileState;
 
 static UdbReconcileState udb_reconcile = {0};
@@ -4083,6 +4084,7 @@ static void udb_reconcile_reset(void)
 	udb_reconcile.started_at = 0;
 	udb_reconcile.last_activity = 0;
 	udb_reconcile.deadline = 0;
+	udb_reconcile.absolute_deadline = 0;
 }
 
 static void udb_reconcile_abort(UdbContext *ctx, const char *reason, int schedule_retry)
@@ -4139,6 +4141,11 @@ static void udb_reconcile_begin(Client *authority, unsigned long round_id)
 	udb_reconcile.deadline =
 		udb_reconcile.started_at +
 		((udb_cfg && udb_cfg->sync_inactivity_timeout > 0) ? udb_cfg->sync_inactivity_timeout : UDB_SYNC_TIMEOUT);
+	/* The absolute deadline is never refreshed by traffic: a broken authority
+	 * drip-feeding valid frames cannot keep a round alive indefinitely. */
+	udb_reconcile.absolute_deadline =
+		udb_reconcile.started_at +
+		((udb_cfg && udb_cfg->sync_absolute_timeout > 0) ? udb_cfg->sync_absolute_timeout : UDB_SYNC_ABSOLUTE_TIMEOUT);
 	udb_log(ULOG_INFO, "UDB_RECONCILE_ROUND_START", authority,
 			"Started reconciliation round $round with authority peer $peer",
 			log_data_integer("round", (int)udb_reconcile.round_id), log_data_client("peer", authority));
@@ -4826,8 +4833,13 @@ EVENT(udb_sync_timeout_event)
 			abort_reason = "RES timeout";
 		}
 	}
-	if (udb_reconcile.active && udb_reconcile.deadline <= now)
-		abort_reason = "reconciliation inventory timeout";
+	if (udb_reconcile.active)
+	{
+		if (udb_reconcile.deadline <= now)
+			abort_reason = "reconciliation inventory timeout";
+		else if (udb_reconcile.absolute_deadline <= now)
+			abort_reason = "reconciliation absolute timeout";
+	}
 	if (abort_reason)
 		udb_reconcile_abort(udb_ctx, abort_reason, 1);
 	for (peer = udb_hello_peers; peer; peer = next)

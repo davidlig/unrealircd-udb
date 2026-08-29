@@ -265,6 +265,7 @@ typedef struct UdbReconcileState
 	time_t started_at;
 	time_t last_activity;
 	time_t deadline;
+	time_t absolute_deadline;
 } UdbReconcileState;
 
 static UdbReconcileState udb_reconcile = {0};
