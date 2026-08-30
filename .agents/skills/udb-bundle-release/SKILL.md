@@ -1,51 +1,22 @@
 ---
 name: udb-bundle-release
-description: Keeps UDB canonical source, generated dist/udb.c, modules.list, documentation, formatting, and release-facing artifacts synchronized after changes.
+description: Keeps canonical UDB source, generated dist/udb.c, formatting, metadata, and public docs synchronized after relevant source changes.
 ---
 
 # UDB Bundle and Release Hygiene
 
-## Canonical source
+`src/` is canonical; `dist/udb.c` is generated and must never be edited manually.
 
-`src/` is canonical.
-
-`dist/udb.c` is generated. Never manually edit it to fix bundle output or CI.
-
-## After canonical source changes
-
-When bundle output is affected, run synchronously:
+When canonical source changes affect the distribution:
 
 ```bash
 python3 scripts/bundle.py
+python3 scripts/bundle.py --check
 git diff --check
 ```
 
-`scripts/bundle.py` is a deterministic, read-only amalgamator: it never formats
-and never mutates `src/`. Formatting is an explicit separate step
-(`scripts/format-sources`) and must be followed by regenerating the bundle.
-Verify without writing anything with `python3 scripts/bundle.py --check`.
+Formatting is separate (`scripts/format-sources`) and should run only when formatting is intended; regenerate afterward.
 
-Inspect the generated diff and ensure it reflects only intended canonical changes.
+Update `README.md`, `doc/`, or `modules.list` only when the change affects their documented surface: configuration, protocol/operator semantics, auth/privileges, limits, install/build, persistence/sync guarantees, or distribution metadata.
 
-## Documentation
-
-Update `README.md` and/or `doc/` when behavior changes:
-- configuration;
-- protocol/operator-visible semantics;
-- authentication/privileges;
-- supported settings/options;
-- limits;
-- installation/build procedure;
-- persistence/synchronization guarantees.
-
-Avoid documentation churn for purely internal behavior with no documented impact.
-
-## Completion check
-
-Verify:
-- source and generated bundle agree;
-- `modules.list` is synchronized when relevant;
-- unrelated formatting did not change;
-- temporary artifacts are absent;
-- `git diff --check` passes;
-- targeted tests are reported.
+Inspect the generated diff and reject unrelated churn or temporary artifacts.

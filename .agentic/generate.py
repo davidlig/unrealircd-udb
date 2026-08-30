@@ -3,19 +3,23 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import json
 import re
 from pathlib import Path
+
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 ROLES_FILE = ROOT / ".agentic" / "roles.yml"
 AG_ROOT = ROOT / ".agents" / "agents"
 OC_ROOT = ROOT / ".opencode" / "agents"
+OPENCODE_CONFIG = ROOT / "opencode.json"
+CODEX_CONFIG = ROOT / ".codex" / "config.toml"
 
 GENERATED_NOTICE = """# AUTO-GENERATED FILE. DO NOT EDIT DIRECTLY.
 # Edit .agentic/roles.yml and run:
 #     python3 .agentic/generate.py
-# To verify generated files are current:
+# Verify with:
 #     python3 .agentic/generate.py --check
 """
 
@@ -26,7 +30,7 @@ AG_CAP_TO_TOOL = {
     "shell": "run_command",
 }
 
-SUPPORTED_VERSION = 1
+SUPPORTED_VERSION = 2
 NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
 VALID_MODELS = {"inherit", "flash", "pro"}
 VALID_COMMAND_POLICIES = {"off", "auto", "eager", "sandbox"}
@@ -68,14 +72,14 @@ UniqueKeyLoader.add_constructor(
 )
 
 
-def load_yaml(text, source):
+def load_yaml(text: str, source):
     try:
         return yaml.load(text, Loader=UniqueKeyLoader)
     except yaml.YAMLError as exc:
         raise SystemExit(f"Invalid YAML in {source}: {exc}") from exc
 
 
-def parse_frontmatter(content, source):
+def parse_frontmatter(content: str, source):
     lines = content.splitlines()
     if not lines or lines[0] != "---":
         raise SystemExit(f"{source}: YAML frontmatter must start on line 1")
@@ -88,6 +92,7 @@ def parse_frontmatter(content, source):
         raise SystemExit(f"{source}: YAML frontmatter must be a mapping")
     return data
 
+
 def load_config():
     try:
         cfg = load_yaml(ROLES_FILE.read_text(encoding="utf-8"), ROLES_FILE.relative_to(ROOT))
@@ -98,7 +103,7 @@ def load_config():
     return cfg
 
 
-def render_agent(frontmatter, heading, prompt):
+def render_agent(frontmatter, heading: str, prompt: str) -> str:
     return (
         "---\n"
         + GENERATED_NOTICE
@@ -108,18 +113,18 @@ def render_agent(frontmatter, heading, prompt):
         + "\n"
     )
 
+
 def antigravity_content(name, role, defaults):
     capabilities = role.get("capabilities", [])
-    tools = [AG_CAP_TO_TOOL[c] for c in capabilities if c in AG_CAP_TO_TOOL]
+    tools = [AG_CAP_TO_TOOL[c] for c in capabilities]
     skills = [f"skills/{s}" for s in role.get("skills", [])]
-
     fm = {
         "name": name,
         "description": role["description"],
         "tools": tools,
         "mainAgent": True,
-        "subagent": bool(role.get("allow_subagents", defaults.get("allow_subagents", False))),
-        "model": role.get("model", defaults.get("model", "inherit")),
+        "subagent": False,
+        "model": role.get("model", defaults.get("model", "flash")),
         "commandExecutionPolicy": role.get(
             "command_execution_policy",
             defaults.get("command_execution_policy", "sandbox"),
@@ -127,8 +132,8 @@ def antigravity_content(name, role, defaults):
     }
     if skills:
         fm["skills"] = skills
-
     return render_agent(fm, "System Prompt", role["prompt"])
+
 
 def opencode_permissions(role):
     capabilities = set(role.get("capabilities", []))
@@ -146,7 +151,7 @@ def opencode_permissions(role):
         permissions["glob"] = "deny"
         permissions["grep"] = "deny"
         permissions["lsp"] = "deny"
-    if role.get("read_only", False) or "edit" not in role.get("capabilities", []):
+    if role.get("read_only", False) or "edit" not in capabilities:
         permissions["edit"] = "deny"
     if role.get("read_only", False) or "shell" not in capabilities:
         permissions["bash"] = "deny"
@@ -161,53 +166,103 @@ def opencode_permissions(role):
         }
     return permissions
 
+
 def opencode_content(name, role, defaults):
+    # Model is deliberately session-controlled: the user's OpenAI/GLM provider IDs
+    # are installation-specific. Project config only enforces orchestration safety.
     fm = {
         "description": role["description"],
         "mode": "primary",
         "permission": opencode_permissions(role),
     }
-
-    # OpenCode model remains session-controlled by default.
-    # This intentionally does not translate Antigravity's "pro"/"inherit"
-    # because OpenCode provider/model IDs are installation-specific.
     return render_agent(fm, "Role", role["prompt"])
+
+
+def render_opencode_config(runtime):
+    cfg = {
+        "$schema": "https://opencode.ai/config.json",
+        "default_agent": runtime["default_agent"],
+        "subagent_depth": runtime["subagent_depth"],
+    }
+    return json.dumps(cfg, indent=2, ensure_ascii=False) + "\n"
+
+
+def render_codex_config(runtime):
+    multi_agent = "true" if runtime["multi_agent"] else "false"
+    return (
+        GENERATED_NOTICE
+        + f'model = "{runtime["model"]}"\n'
+        + f'model_reasoning_effort = "{runtime["reasoning_effort"]}"\n'
+        + f'model_verbosity = "{runtime["verbosity"]}"\n\n'
+        + "[features]\n"
+        + f"multi_agent = {multi_agent}\n"
+    )
+
 
 def expected_files(cfg):
     defaults = cfg.get("defaults", {})
+    runtime = cfg["runtime"]
     out = {}
     for name, role in cfg["roles"].items():
         out[AG_ROOT / name / "agent.md"] = antigravity_content(name, role, defaults)
         out[OC_ROOT / f"{name}.md"] = opencode_content(name, role, defaults)
+    out[OPENCODE_CONFIG] = render_opencode_config(runtime["opencode"])
+    out[CODEX_CONFIG] = render_codex_config(runtime["codex"])
     return out
 
+
+def _require_mapping(value, label):
+    if not isinstance(value, dict):
+        raise SystemExit(f"{label} must be a mapping")
+    return value
+
+
 def validate(cfg):
-    if set(cfg) - {"version", "defaults", "roles"}:
-        unknown = ", ".join(sorted(set(cfg) - {"version", "defaults", "roles"}))
-        raise SystemExit(f"Unsupported top-level key(s): {unknown}")
+    allowed_top = {"version", "defaults", "runtime", "roles"}
+    unknown = set(cfg) - allowed_top
+    if unknown:
+        raise SystemExit(f"Unsupported top-level key(s): {', '.join(sorted(unknown))}")
     if type(cfg.get("version")) is not int or cfg["version"] != SUPPORTED_VERSION:
         raise SystemExit(f"Unsupported roles.yml version: {cfg.get('version')!r}")
 
-    defaults = cfg.get("defaults", {})
-    if not isinstance(defaults, dict):
-        raise SystemExit("defaults must be a mapping")
-    unknown_defaults = set(defaults) - {"allow_subagents", "command_execution_policy", "model"}
+    defaults = _require_mapping(cfg.get("defaults", {}), "defaults")
+    allowed_defaults = {"allow_subagents", "command_execution_policy", "model"}
+    unknown_defaults = set(defaults) - allowed_defaults
     if unknown_defaults:
         raise SystemExit(f"Unsupported defaults key(s): {', '.join(sorted(unknown_defaults))}")
-    if "allow_subagents" in defaults and not isinstance(defaults["allow_subagents"], bool):
-        raise SystemExit("defaults.allow_subagents must be a boolean")
-    if defaults.get("allow_subagents", False):
+    if defaults.get("allow_subagents", False) is not False:
         raise SystemExit("defaults.allow_subagents must remain false")
-    if defaults.get("model", "inherit") not in VALID_MODELS:
+    if defaults.get("model", "flash") not in VALID_MODELS:
         raise SystemExit(f"Unsupported default model: {defaults.get('model')!r}")
     if defaults.get("command_execution_policy", "sandbox") not in VALID_COMMAND_POLICIES:
-        raise SystemExit(
-            f"Unsupported default command_execution_policy: {defaults.get('command_execution_policy')!r}"
-        )
+        raise SystemExit("Unsupported default command_execution_policy")
 
-    roles = cfg.get("roles")
-    if not isinstance(roles, dict) or not roles:
-        raise SystemExit("roles must be a non-empty mapping")
+    runtime = _require_mapping(cfg.get("runtime"), "runtime")
+    if set(runtime) != {"opencode", "codex"}:
+        raise SystemExit("runtime must contain exactly opencode and codex")
+    oc_runtime = _require_mapping(runtime["opencode"], "runtime.opencode")
+    if set(oc_runtime) != {"default_agent", "subagent_depth"}:
+        raise SystemExit("runtime.opencode must contain default_agent and subagent_depth")
+    if oc_runtime["subagent_depth"] != 0:
+        raise SystemExit("runtime.opencode.subagent_depth must remain 0")
+
+    codex = _require_mapping(runtime["codex"], "runtime.codex")
+    if set(codex) != {"model", "reasoning_effort", "verbosity", "multi_agent"}:
+        raise SystemExit("runtime.codex has unsupported/missing keys")
+    if not isinstance(codex["model"], str) or not codex["model"].strip():
+        raise SystemExit("runtime.codex.model must be a string")
+    if codex["reasoning_effort"] not in {"minimal", "low", "medium", "high", "xhigh"}:
+        raise SystemExit("runtime.codex.reasoning_effort is invalid")
+    if codex["verbosity"] not in {"low", "medium", "high"}:
+        raise SystemExit("runtime.codex.verbosity is invalid")
+    if codex["multi_agent"] is not False:
+        raise SystemExit("runtime.codex.multi_agent must remain false")
+
+    roles = _require_mapping(cfg.get("roles"), "roles")
+    if not roles:
+        raise SystemExit("roles must be non-empty")
+    if oc_runtime["default_agent"] not in roles:
+        raise SystemExit("runtime.opencode.default_agent must name a configured role")
 
     skills_dir = ROOT / ".agents" / "skills"
     validated_skills = set()
@@ -221,76 +276,71 @@ def validate(cfg):
             raise SystemExit(f"{name}: unsupported key(s): {', '.join(sorted(unknown_role_keys))}")
         if not isinstance(role.get("description"), str) or not role["description"].strip():
             raise SystemExit(f"{name}: missing description")
+        if len(role["description"]) > 180:
+            raise SystemExit(f"{name}: description exceeds 180 chars (token budget)")
         if not isinstance(role.get("prompt"), str) or not role["prompt"].strip():
             raise SystemExit(f"{name}: missing prompt")
+        if len(role["prompt"]) > 700:
+            raise SystemExit(f"{name}: prompt exceeds 700 chars (token budget)")
+
         capabilities = role.get("capabilities", [])
-        if not isinstance(capabilities, list) or not all(isinstance(item, str) for item in capabilities):
-            raise SystemExit(f"{name}: capabilities must be a list of strings")
-        if len(capabilities) != len(set(capabilities)):
-            raise SystemExit(f"{name}: duplicate capability")
+        if not isinstance(capabilities, list) or len(capabilities) != len(set(capabilities)):
+            raise SystemExit(f"{name}: capabilities must be a unique list")
         for capability in capabilities:
             if capability not in AG_CAP_TO_TOOL:
                 raise SystemExit(f"{name}: unsupported capability {capability!r}")
+
         skills = role.get("skills", [])
-        if not isinstance(skills, list) or not all(isinstance(item, str) for item in skills):
-            raise SystemExit(f"{name}: skills must be a list of strings")
-        if len(skills) != len(set(skills)):
-            raise SystemExit(f"{name}: duplicate skill")
-        if "read_only" in role and not isinstance(role["read_only"], bool):
-            raise SystemExit(f"{name}: read_only must be a boolean")
-        if "allow_subagents" in role and not isinstance(role["allow_subagents"], bool):
-            raise SystemExit(f"{name}: allow_subagents must be a boolean")
+        if not isinstance(skills, list) or len(skills) != len(set(skills)):
+            raise SystemExit(f"{name}: skills must be a unique list")
+        if role.get("read_only", False) and ({"edit", "shell"} & set(capabilities)):
+            raise SystemExit(f"{name}: read_only roles cannot edit or shell")
         if role.get("allow_subagents", defaults.get("allow_subagents", False)):
             raise SystemExit(f"{name}: allow_subagents must remain false")
-        if role.get("read_only", False) and ({"edit", "shell"} & set(capabilities)):
-            raise SystemExit(f"{name}: read_only roles cannot have edit or shell capabilities")
-        if role.get("model", defaults.get("model", "inherit")) not in VALID_MODELS:
-            raise SystemExit(f"{name}: unsupported model {role.get('model')!r}")
-        policy = role.get(
-            "command_execution_policy",
-            defaults.get("command_execution_policy", "sandbox"),
-        )
+        if role.get("model", defaults.get("model", "flash")) not in VALID_MODELS:
+            raise SystemExit(f"{name}: unsupported model")
+        policy = role.get("command_execution_policy", defaults.get("command_execution_policy", "sandbox"))
         if policy not in VALID_COMMAND_POLICIES:
-            raise SystemExit(f"{name}: unsupported command_execution_policy {policy!r}")
+            raise SystemExit(f"{name}: unsupported command_execution_policy")
 
         for skill in skills:
-            if not NAME_RE.fullmatch(skill):
-                raise SystemExit(f"{name}: invalid skill name {skill!r}")
+            if not isinstance(skill, str) or not NAME_RE.fullmatch(skill):
+                raise SystemExit(f"{name}: invalid skill {skill!r}")
             target = skills_dir / skill / "SKILL.md"
             if not target.exists():
                 raise SystemExit(f"{name}: missing skill {skill}: {target}")
             if skill in validated_skills:
                 continue
-            skill_frontmatter = parse_frontmatter(target.read_text(encoding="utf-8"), target.relative_to(ROOT))
-            if skill_frontmatter.get("name") != skill:
+            fm = parse_frontmatter(target.read_text(encoding="utf-8"), target.relative_to(ROOT))
+            if fm.get("name") != skill:
                 raise SystemExit(f"{target.relative_to(ROOT)}: name must be {skill!r}")
-            description = skill_frontmatter.get("description")
+            description = fm.get("description")
             if not isinstance(description, str) or not description.strip():
                 raise SystemExit(f"{target.relative_to(ROOT)}: missing description")
+            if len(description) > 200:
+                raise SystemExit(f"{target.relative_to(ROOT)}: description exceeds 200 chars")
             validated_skills.add(skill)
 
 
 def validate_generated(expected):
+    forbidden_ag = {"invoke_subagent", "define_subagent", "manage_task", "ManageTask"}
     for path, content in expected.items():
-        frontmatter = parse_frontmatter(content, path.relative_to(ROOT))
         if path.parent == OC_ROOT:
-            if frontmatter.get("mode") != "primary":
-                raise SystemExit(f"{path.relative_to(ROOT)}: OpenCode agent must use mode: primary")
-            if "permissions" in frontmatter:
-                raise SystemExit(f"{path.relative_to(ROOT)}: use permission, not permissions")
-            permission = frontmatter.get("permission")
+            fm = parse_frontmatter(content, path.relative_to(ROOT))
+            if fm.get("mode") != "primary":
+                raise SystemExit(f"{path.relative_to(ROOT)}: OpenCode agent must be primary")
+            permission = fm.get("permission")
             if not isinstance(permission, dict) or permission.get("task") != "deny":
-                raise SystemExit(f"{path.relative_to(ROOT)}: OpenCode task permission must be denied")
-        else:
-            if frontmatter.get("mainAgent") is not True or frontmatter.get("subagent") is not False:
+                raise SystemExit(f"{path.relative_to(ROOT)}: task permission must be denied")
+        elif path.name == "agent.md" and AG_ROOT in path.parents:
+            fm = parse_frontmatter(content, path.relative_to(ROOT))
+            if fm.get("mainAgent") is not True or fm.get("subagent") is not False:
                 raise SystemExit(f"{path.relative_to(ROOT)}: invalid Antigravity main/subagent policy")
-            tools = frontmatter.get("tools", [])
-            forbidden = {"invoke_subagent", "define_subagent", "manage_task", "ManageTask"}
-            if forbidden & set(tools):
+            if forbidden_ag & set(fm.get("tools", [])):
                 raise SystemExit(f"{path.relative_to(ROOT)}: forbidden delegation tool")
 
 
-def generated_files(ag_root=AG_ROOT, oc_root=OC_ROOT):
+def generated_agent_files(ag_root=AG_ROOT, oc_root=OC_ROOT):
     paths = set()
     if ag_root.exists():
         paths.update(ag_root.glob("*/agent.md"))
@@ -299,17 +349,20 @@ def generated_files(ag_root=AG_ROOT, oc_root=OC_ROOT):
     return paths
 
 
-def unexpected_files(expected, ag_root=AG_ROOT, oc_root=OC_ROOT):
-    return generated_files(ag_root, oc_root) - set(expected)
+def unexpected_agent_files(expected, ag_root=AG_ROOT, oc_root=OC_ROOT):
+    expected_agents = {p for p in expected if (p.parent == oc_root or ag_root in p.parents)}
+    return generated_agent_files(ag_root, oc_root) - expected_agents
+
 
 def clean_stale(expected):
-    for path in sorted(unexpected_files(expected)):
+    for path in sorted(unexpected_agent_files(expected)):
         path.unlink()
         if path.parent not in {AG_ROOT, OC_ROOT}:
             try:
                 path.parent.rmdir()
             except OSError:
                 pass
+
 
 def check(expected):
     ok = True
@@ -322,22 +375,20 @@ def check(expected):
         if current != content:
             print(f"OUTDATED: {path.relative_to(ROOT)}")
             diff = difflib.unified_diff(
-                current.splitlines(),
-                content.splitlines(),
-                fromfile=str(path.relative_to(ROOT)),
-                tofile="expected",
-                lineterm="",
+                current.splitlines(), content.splitlines(),
+                fromfile=str(path.relative_to(ROOT)), tofile="expected", lineterm="",
             )
             for line in list(diff)[:40]:
                 print(line)
             ok = False
-    for path in sorted(unexpected_files(expected)):
+    for path in sorted(unexpected_agent_files(expected)):
         print(f"UNEXPECTED: {path.relative_to(ROOT)}")
         ok = False
-    if not ok:
-        return 1
-    print("Generated agent wrappers are up to date.")
-    return 0
+    if ok:
+        print("Generated agentic files are up to date.")
+        return 0
+    return 1
+
 
 def generate(expected):
     for path, content in expected.items():
@@ -347,19 +398,18 @@ def generate(expected):
     clean_stale(expected)
     return 0
 
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--check", action="store_true", help="verify wrappers match roles.yml")
+    parser.add_argument("--check", action="store_true", help="verify generated agentic files")
     args = parser.parse_args()
 
     cfg = load_config()
     validate(cfg)
     expected = expected_files(cfg)
     validate_generated(expected)
+    return check(expected) if args.check else generate(expected)
 
-    if args.check:
-        return check(expected)
-    return generate(expected)
 
 if __name__ == "__main__":
     raise SystemExit(main())

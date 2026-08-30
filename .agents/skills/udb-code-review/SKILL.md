@@ -1,45 +1,23 @@
 ---
 name: udb-code-review
-description: Reviews UDB commits and diffs for concrete correctness, security, protocol, convergence, memory-lifetime, persistence, and regression issues.
+description: Reviews a UDB diff for concrete correctness, security, protocol, convergence, lifetime, persistence, and regression defects. Use for commit/PR review.
 ---
 
 # UDB Code Review
 
-## Procedure
-
-1. Inspect the diff or patch supplied in the conversation first.
+1. Start from the supplied diff/patch.
 2. Enumerate changed functions and affected invariants.
-3. Read only nearby code needed to understand the behavior.
-4. Inspect directly relevant tests.
-5. Check generated bundle/documentation consistency.
-6. Specify targeted validation for a shell-capable role; do not run commands from the read-only reviewer.
-7. Report findings ordered by severity.
+3. Read only nearby code needed to establish reachability/ownership/state.
+4. Inspect directly relevant tests and generated/doc consistency.
+5. Report findings by severity; style comes last.
 
-## Priority
-
-Highest priority:
-- memory corruption/use-after-free;
-- authentication/authorization bypass;
-- remote crash or unsafe parser behavior;
-- cross-node database corruption/desynchronization;
-- partial active-state mutation after failed validation;
-- privilege escalation.
-
-Then:
-- state-machine errors;
-- readiness/convergence mistakes;
-- persistence/lifecycle bugs;
-- realistic malformed-input rejection gaps.
-
-Style-only observations come last.
-
-## Finding quality
-
-Each finding must state:
+A finding is valid only when it states:
 - exact location;
-- trigger;
-- incorrect behavior;
-- why current checks/tests do not prevent it;
+- reachable trigger;
+- incorrect behavior/impact;
+- why existing checks/tests do not prevent it;
 - concise remediation direction.
 
-Do not invent findings. If no material issue is found, say so and state residual untested risk.
+Prioritize memory corruption/UAF, auth bypass, remote crash/parser safety, cross-node corruption/desync, partial active-state mutation, privilege escalation, then state/readiness/persistence/lifecycle regressions.
+
+If no material issue is proved, say so and state only concrete residual untested risk. Do not manufacture findings or broaden into unrelated audit work.

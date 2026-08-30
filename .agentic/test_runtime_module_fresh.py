@@ -6,13 +6,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-
-# Must mirror tests/ module resolution: UDB_MODULE_PATH overrides, then the
-# freshly built module, then the bundled one.
-MODULE_CANDIDATES = (
-    ROOT / "src" / "udb.so",
-    ROOT / "dist" / "udb.so",
-)
+MODULE_CANDIDATES = (ROOT / "src" / "udb.so", ROOT / "dist" / "udb.so")
 
 
 def runtime_root() -> Path:
@@ -36,18 +30,14 @@ def sha256(path: Path) -> str:
 
 
 class RuntimeModuleFreshnessTest(unittest.TestCase):
-    """Runtime/integration tests load the module installed under the test
-    UnrealIRCd tree, not the freshly built one. A stale installed .so makes
-    tests validate old behavior, so the installed copy must match the build."""
-
     def test_installed_module_matches_build(self):
         expected = next((path for path in MODULE_CANDIDATES if path.is_file()), None)
         if expected is None:
-            self.skipTest("No built module found (src/udb.so); build with: make custommodule MODULEFILE=udb/src/udb")
+            self.skipTest("No built module found; build with make custommodule MODULEFILE=udb/src/udb")
 
         installed = installed_module()
         if not installed.is_file():
-            self.skipTest(f"No installed module at {installed}; runtime tests would SKIP anyway")
+            self.skipTest(f"No installed module at {installed}; runtime tests would skip")
 
         newest_source = max(
             (path.stat().st_mtime for path in (ROOT / "src").rglob("*") if path.suffix in (".c", ".h", ".inc")),
@@ -56,22 +46,12 @@ class RuntimeModuleFreshnessTest(unittest.TestCase):
         self.assertLessEqual(
             newest_source,
             expected.stat().st_mtime,
-            f"Stale build: {expected} is older than the newest source file.\n"
-            f"Rebuild from the UnrealIRCd source root, then refresh the installed copy:\n"
-            f"  make custommodule MODULEFILE=udb/src/udb\n"
-            f"  cp {expected} {installed}",
+            f"Stale build: {expected} is older than source. Rebuild then copy it to {installed}",
         )
-
-        built_hash = sha256(expected)
-        installed_hash = sha256(installed)
         self.assertEqual(
-            built_hash,
-            installed_hash,
-            f"Stale installed module: {installed} differs from {expected}.\n"
-            f"Refresh it and re-run the tests:\n"
-            f"  cp {expected} {installed}\n"
-            f"Or point the tests at the fresh build:\n"
-            f"  UDB_MODULE_PATH={expected}",
+            sha256(expected),
+            sha256(installed),
+            f"Stale installed module: copy {expected} to {installed} or set UDB_MODULE_PATH={expected}",
         )
 
 

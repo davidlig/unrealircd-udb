@@ -1,0 +1,11 @@
+# AUTO-GENERATED FILE. DO NOT EDIT DIRECTLY.
+# Edit .agentic/roles.yml and run:
+#     python3 .agentic/generate.py
+# Verify with:
+#     python3 .agentic/generate.py --check
+model = "gpt-5.6-terra"
+model_reasoning_effort = "medium"
+model_verbosity = "low"
+
+[features]
+multi_agent = false
