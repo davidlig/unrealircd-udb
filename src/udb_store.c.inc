@@ -304,6 +304,10 @@ static int udb_path_decode_component(const char *encoded, char *buf, size_t bufs
 			unsigned char val = (unsigned char)((high << 4) | low);
 			if (val == 0) /* Embedded null byte is rejected */
 				return 0;
+			/* Canonicality check: reject non-canonical percent-encoding when
+			 * udb_path_encode_component() would have emitted the byte literally */
+			if (val != ':' && val != '%' && val > 32 && val < 127)
+				return 0;
 			if (out_len + 1 >= bufsz)
 				return 0;
 			buf[out_len++] = (char)val;

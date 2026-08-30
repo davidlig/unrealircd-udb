@@ -270,8 +270,8 @@ static void udb_reconcile_abort(UdbContext *ctx, const char *reason, int schedul
 /* One recovery boundary for every operation whose persistence outcome is not
  * trustworthy.  It intentionally reuses authority selection and retry bounds;
  * it does not alter HEL negotiation or hop-by-hop routing. */
-static void udb_handle_persistence_failure(UdbContext *ctx, Client *peer, UdbBlock *block,
-											const char *operation, int commit_uncertain)
+static void udb_handle_persistence_failure(UdbContext *ctx, Client *peer, UdbBlock *block, const char *operation,
+										   int commit_uncertain)
 {
 	if (commit_uncertain)
 		udb_mark_durability_uncertain(ctx, block, operation);
@@ -759,6 +759,7 @@ static int udb_sync_put(UdbBlock *block, Client *peer, unsigned long round_id, c
 	if (session->received_bytes > max_bytes)
 	{
 		udb_sync_abort(block, "staged byte limit exceeded");
+		udb_sync_round_failure(block, peer, round_id, "staged byte limit exceeded");
 		return UDB_ERR_PARAMS;
 	}
 	line = safe_alloc(UDB_RECORD_LINE_MAX + 2);
@@ -775,6 +776,7 @@ static int udb_sync_put(UdbBlock *block, Client *peer, unsigned long round_id, c
 	if (!parse_ok)
 	{
 		udb_sync_abort(block, "invalid PUT payload");
+		udb_sync_round_failure(block, peer, round_id, "invalid staged PUT payload");
 		return UDB_ERR_PARAMS;
 	}
 	if (session->record_count > max_records)
@@ -827,6 +829,7 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, unsigned
 	if (!udb_checksum_parse(checksum, &received_digest) || *digest != received_digest)
 	{
 		udb_sync_abort(block, "digest validation failure");
+		udb_sync_round_failure(block, peer, round_id, "staged digest validation failure");
 		return UDB_ERR_FATAL;
 	}
 

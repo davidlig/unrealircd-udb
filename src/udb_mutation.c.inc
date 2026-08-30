@@ -112,18 +112,25 @@ static UdbBlock *udb_mutation_path_block(UdbContext *ctx, const char *path)
 static int udb_mutation_value_is_secret(const char *path)
 {
 	const char *key;
+	char decoded[UDB_COMPONENT_RAW_MAX + 1];
 
 	if (!path)
 		return 0;
-	if (!strcasecmp(path, "S::encryption_key"))
-		return 1;
+	if (!strncasecmp(path, "S::", 3) && path[3])
+	{
+		if (!udb_path_decode_component(path + 3, decoded, sizeof(decoded)))
+			return 0;
+		return !strcasecmp(decoded, SKEY_CRYPT_KEY);
+	}
 	key = strrchr(path, ':');
 	if (!key || key == path || key[-1] != ':')
 		return 0;
+	if (!udb_path_decode_component(key + 1, decoded, sizeof(decoded)))
+		return 0;
 	if (!strncasecmp(path, "N::", 3))
-		return !strcasecmp(key + 1, NKEY_PASS);
+		return !strcasecmp(decoded, NKEY_PASS);
 	if (!strncasecmp(path, "C::", 3))
-		return !strcasecmp(key + 1, CKEY_PASS) || !strcasecmp(key + 1, CKEY_CHALLENGE);
+		return !strcasecmp(decoded, CKEY_PASS) || !strcasecmp(decoded, CKEY_CHALLENGE);
 	return 0;
 }
 

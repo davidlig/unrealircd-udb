@@ -291,6 +291,51 @@ def run_tests(ircd_bin, keep=False):
         print("PASS: Active database remained invariant after byte cap abort")
 
         # -------------------------------------------------------------
+        # Test 2b: byte-limit abort cancels reconciliation round immediately
+        # -------------------------------------------------------------
+        services.send_begin("C", "tx-byte-round", "00000000")
+        services.send_put("C", "tx-byte-round", "#brc1::topic", "B" * 590)
+        time.sleep(0.1)
+        services.send_put("C", "tx-byte-round", "#brc2::topic", "B" * 590)
+        time.sleep(0.1)
+        services.send_put("C", "tx-byte-round", "#brc3::topic", "C")
+        services.wait_for(lambda l: " DB " in l and " ERR " in l and " PUT " in l,
+                          "byte-cap ERR for round-failure test")
+        services.send_begin("C", "tx-after-byte", "00000000")
+        services.send_end("C", "tx-after-byte", "00000000")
+        services.wait_for(lambda l: " DB " in l and " ACK " in l and " C " in l,
+                          "ACK after byte-cap round failure proves round was cancelled")
+        print("PASS: byte-limit abort cancels reconciliation round (immediate re-round succeeds)")
+
+        # -------------------------------------------------------------
+        # Test 2c: invalid PUT payload abort cancels reconciliation round immediately
+        # -------------------------------------------------------------
+        services.send_begin("N", "tx-parse-rnd", "00000000")
+        services.send_put("N", "tx-parse-rnd", "user1::unknownbadkey", "value")
+        services.wait_for(lambda l: " DB " in l and " ERR " in l and " PUT " in l,
+                          "parse-failure ERR for round-failure test")
+        services.send_begin("N", "tx-after-parse", "00000000")
+        services.send_end("N", "tx-after-parse", "00000000")
+        services.wait_for(lambda l: " DB " in l and " ACK " in l and " N " in l,
+                          "ACK after parse-failure round proves round was cancelled")
+        print("PASS: invalid PUT parse failure cancels reconciliation round (immediate re-round succeeds)")
+
+        # -------------------------------------------------------------
+        # Test 2d: digest mismatch in END cancels reconciliation round immediately
+        # -------------------------------------------------------------
+        services.send_begin("N", "tx-dgst-rnd", "00000000")
+        services.send_put("N", "tx-dgst-rnd", "dgstuser::vhost", "test.host")
+        time.sleep(0.1)
+        services.send_end("N", "tx-dgst-rnd", "DEADBEEF")
+        services.wait_for(lambda l: " DB " in l and " ERR " in l and " END " in l,
+                          "digest-mismatch ERR for round-failure test")
+        services.send_begin("N", "tx-after-dgst", "00000000")
+        services.send_end("N", "tx-after-dgst", "00000000")
+        services.wait_for(lambda l: " DB " in l and " ACK " in l and " N " in l,
+                          "ACK after digest-mismatch round proves round was cancelled")
+        print("PASS: digest mismatch cancels reconciliation round (immediate re-round succeeds)")
+
+        # -------------------------------------------------------------
         # Test 3: sync-inactivity-timeout (configured as 2 seconds)
         # -------------------------------------------------------------
         services.send_begin("N", "tx-inact-to", "00000000")

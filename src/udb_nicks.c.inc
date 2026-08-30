@@ -170,7 +170,8 @@ static void udb_nick_revoke_oper(Client *client)
 {
 	long old_umodes;
 
-	if (!client || !IsOper(client) || !udb_nick_oper_owned_md || !moddata_local_client(client, udb_nick_oper_owned_md).i)
+	if (!client || !IsOper(client) || !udb_nick_oper_owned_md ||
+		!moddata_local_client(client, udb_nick_oper_owned_md).i)
 		return;
 
 	old_umodes = client->umodes & ALL_UMODES;
@@ -272,8 +273,8 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync)
 	{
 		/* A full-N replacement must not evict the account that already owns
 		 * this profile; +r alone is insufficient without the matching account. */
-		int matching_account = client->user && has_user_mode(client, 'r') &&
-			strcmp(client->user->account, "*") && !strcasecmp(client->user->account, nick_rec->key);
+		int matching_account = client->user && has_user_mode(client, 'r') && strcmp(client->user->account, "*") &&
+							   !strcasecmp(client->user->account, nick_rec->key);
 		if (!matching_account)
 		{
 			UdbRecord *pass_rec = udb_record_find(udb_ctx, NKEY_PASS, nick_rec);

@@ -320,6 +320,38 @@ def test_secret_mutation_log_redaction(services, process):
     print("PASS: mutation diagnostics retain paths while redacting every secret value")
 
 
+def test_secret_mutation_log_redaction_encoded(services, process, data_dir):
+    secret_key = "c3" * 32
+    secret_hash = "sha256:" + ("d4" * 32)
+    encoded_mutations = (
+        ("S::encryption%5Fkey", secret_key),
+        ("N::encodedtest::%70ass", secret_hash),
+        ("N::encodedtest2::p%61ss", secret_hash),
+        ("C::#encodedtest::%70ass", secret_hash),
+        ("C::#encodedtest::ch%61llenge", "sha256"),
+    )
+    for path, value in encoded_mutations:
+        start = len(services.lines)
+        services.send_ins(path, value)
+        services.wait_for(lambda line: " DB " in line and " ERR " in line and " INS " in line,
+                          f"rejection of non-canonical %XX path {path}", start=start)
+
+    time.sleep(0.3)
+    output = ""
+    while select.select([process.stdout], [], [], 0)[0]:
+        output += os.read(process.stdout.fileno(), 65536).decode(errors="replace")
+    for secret in (secret_key, secret_hash, "c3" * 16, "d4" * 16):
+        require(secret not in output, "secret value from rejected non-canonical path appeared in daemon diagnostics")
+
+    for db_name in ("udb_S.db", "udb_N.db", "udb_C.db"):
+        db_path = data_dir / db_name
+        if db_path.exists():
+            content = db_path.read_text(encoding="ascii", errors="replace")
+            for secret in (secret_key, secret_hash):
+                require(secret not in content, f"secret value was persisted to {db_name} despite rejection")
+    print("PASS: non-canonical %XX-encoded paths are strictly rejected with ERR INS without persisting or leaking secrets")
+
+
 def test_line_mask_component_and_native_boundaries(services, data_dir):
     user = "u" * 127
     host = "h" * 127
@@ -488,6 +520,7 @@ def run_tests(ircd_bin, keep=False):
 
         test_clone_limits_int_max_and_one_over(services, data_dir)
         test_secret_mutation_log_redaction(services, proc)
+        test_secret_mutation_log_redaction_encoded(services, proc, data_dir)
         test_line_mask_component_and_native_boundaries(services, data_dir)
         test_channel_mode_parameter_capacity_atomic(services, data_dir)
 

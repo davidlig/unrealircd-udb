@@ -441,8 +441,8 @@ static int udb_persistence_load_state(UdbPersistentState *state_out, UdbPersiste
 static UdbStatePersistResult udb_persistence_set_state(UdbPersistentState state, UdbPersistenceOrigin origin,
 													   unsigned long generation, time_t last_sync);
 static void udb_mark_durability_uncertain(UdbContext *ctx, UdbBlock *block, const char *operation);
-static void udb_handle_persistence_failure(UdbContext *ctx, Client *peer, UdbBlock *block,
-											const char *operation, int commit_uncertain);
+static void udb_handle_persistence_failure(UdbContext *ctx, Client *peer, UdbBlock *block, const char *operation,
+										   int commit_uncertain);
 
 static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs);
 static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type);
@@ -963,6 +963,10 @@ static int udb_path_decode_component(const char *encoded, char *buf, size_t bufs
 
 			unsigned char val = (unsigned char)((high << 4) | low);
 			if (val == 0) /* Embedded null byte is rejected */
+				return 0;
+			/* Canonicality check: reject non-canonical percent-encoding when
+			 * udb_path_encode_component() would have emitted the byte literally */
+			if (val != ':' && val != '%' && val > 32 && val < 127)
 				return 0;
 			if (out_len + 1 >= bufsz)
 				return 0;
@@ -4199,8 +4203,8 @@ static void udb_reconcile_abort(UdbContext *ctx, const char *reason, int schedul
 /* One recovery boundary for every operation whose persistence outcome is not
  * trustworthy.  It intentionally reuses authority selection and retry bounds;
  * it does not alter HEL negotiation or hop-by-hop routing. */
-static void udb_handle_persistence_failure(UdbContext *ctx, Client *peer, UdbBlock *block,
-											const char *operation, int commit_uncertain)
+static void udb_handle_persistence_failure(UdbContext *ctx, Client *peer, UdbBlock *block, const char *operation,
+										   int commit_uncertain)
 {
 	if (commit_uncertain)
 		udb_mark_durability_uncertain(ctx, block, operation);
@@ -4688,6 +4692,7 @@ static int udb_sync_put(UdbBlock *block, Client *peer, unsigned long round_id, c
 	if (session->received_bytes > max_bytes)
 	{
 		udb_sync_abort(block, "staged byte limit exceeded");
+		udb_sync_round_failure(block, peer, round_id, "staged byte limit exceeded");
 		return UDB_ERR_PARAMS;
 	}
 	line = safe_alloc(UDB_RECORD_LINE_MAX + 2);
@@ -4704,6 +4709,7 @@ static int udb_sync_put(UdbBlock *block, Client *peer, unsigned long round_id, c
 	if (!parse_ok)
 	{
 		udb_sync_abort(block, "invalid PUT payload");
+		udb_sync_round_failure(block, peer, round_id, "invalid staged PUT payload");
 		return UDB_ERR_PARAMS;
 	}
 	if (session->record_count > max_records)
@@ -4756,6 +4762,7 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, unsigned
 	if (!udb_checksum_parse(checksum, &received_digest) || *digest != received_digest)
 	{
 		udb_sync_abort(block, "digest validation failure");
+		udb_sync_round_failure(block, peer, round_id, "staged digest validation failure");
 		return UDB_ERR_FATAL;
 	}
 
@@ -5141,18 +5148,25 @@ static UdbBlock *udb_mutation_path_block(UdbContext *ctx, const char *path)
 static int udb_mutation_value_is_secret(const char *path)
 {
 	const char *key;
+	char decoded[UDB_COMPONENT_RAW_MAX + 1];
 
 	if (!path)
 		return 0;
-	if (!strcasecmp(path, "S::encryption_key"))
-		return 1;
+	if (!strncasecmp(path, "S::", 3) && path[3])
+	{
+		if (!udb_path_decode_component(path + 3, decoded, sizeof(decoded)))
+			return 0;
+		return !strcasecmp(decoded, SKEY_CRYPT_KEY);
+	}
 	key = strrchr(path, ':');
 	if (!key || key == path || key[-1] != ':')
 		return 0;
+	if (!udb_path_decode_component(key + 1, decoded, sizeof(decoded)))
+		return 0;
 	if (!strncasecmp(path, "N::", 3))
-		return !strcasecmp(key + 1, NKEY_PASS);
+		return !strcasecmp(decoded, NKEY_PASS);
 	if (!strncasecmp(path, "C::", 3))
-		return !strcasecmp(key + 1, CKEY_PASS) || !strcasecmp(key + 1, CKEY_CHALLENGE);
+		return !strcasecmp(decoded, CKEY_PASS) || !strcasecmp(decoded, CKEY_CHALLENGE);
 	return 0;
 }
 
@@ -6226,7 +6240,8 @@ static void udb_nick_revoke_oper(Client *client)
 {
 	long old_umodes;
 
-	if (!client || !IsOper(client) || !udb_nick_oper_owned_md || !moddata_local_client(client, udb_nick_oper_owned_md).i)
+	if (!client || !IsOper(client) || !udb_nick_oper_owned_md ||
+		!moddata_local_client(client, udb_nick_oper_owned_md).i)
 		return;
 
 	old_umodes = client->umodes & ALL_UMODES;
@@ -6328,8 +6343,8 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync)
 	{
 		/* A full-N replacement must not evict the account that already owns
 		 * this profile; +r alone is insufficient without the matching account. */
-		int matching_account = client->user && has_user_mode(client, 'r') &&
-			strcmp(client->user->account, "*") && !strcasecmp(client->user->account, nick_rec->key);
+		int matching_account = client->user && has_user_mode(client, 'r') && strcmp(client->user->account, "*") &&
+							   !strcasecmp(client->user->account, nick_rec->key);
 		if (!matching_account)
 		{
 			UdbRecord *pass_rec = udb_record_find(udb_ctx, NKEY_PASS, nick_rec);
@@ -9734,7 +9749,7 @@ static int udb_persistence_load_state(UdbPersistentState *state_out, UdbPersiste
 	if (ferror(fp))
 		goto invalid;
 	if (seen != (UDB_STATE_SEEN_FORMAT | UDB_STATE_SEEN_STATE | UDB_STATE_SEEN_ORIGIN | UDB_STATE_SEEN_GENERATION |
-				  UDB_STATE_SEEN_LAST_SYNC))
+				 UDB_STATE_SEEN_LAST_SYNC))
 		goto invalid;
 	if (state == UDB_PERSIST_READY && generation == 0)
 		goto invalid;

@@ -622,7 +622,7 @@ static int udb_persistence_load_state(UdbPersistentState *state_out, UdbPersiste
 	if (ferror(fp))
 		goto invalid;
 	if (seen != (UDB_STATE_SEEN_FORMAT | UDB_STATE_SEEN_STATE | UDB_STATE_SEEN_ORIGIN | UDB_STATE_SEEN_GENERATION |
-				  UDB_STATE_SEEN_LAST_SYNC))
+				 UDB_STATE_SEEN_LAST_SYNC))
 		goto invalid;
 	if (state == UDB_PERSIST_READY && generation == 0)
 		goto invalid;
