@@ -234,9 +234,17 @@ Detailed technical documentation is available in the `doc/` directory:
   database. A directory-sync failure is reported after the rename has occurred,
    so the replacement is visible but not confirmed crash-durable.
 - UDB uses strict **fail-closed transactional loading**: any persisted record with
-  an invalid path, missing key, overlong field, or malformed/truncated line immediately
-  aborts block loading, rolls back candidate changes, and leaves the database uncorrupted.
-  No malformed or overlong records are tolerated or skipped.
+   an invalid path, missing key, overlong field, or malformed/truncated line immediately
+   aborts block loading, rolls back candidate changes, and leaves the database uncorrupted.
+   No malformed or overlong records are tolerated or skipped.
+- Mutation diagnostics redact values for `S::encryption_key`, `N::<nick>::pass`, and
+  `C::<channel>::pass` / `challenge`, while retaining the record path and safe reason.
+- Clone limits accept values through `INT_MAX`; larger values are rejected before runtime
+  policy or snapshots change. Server-ban masks reject user or host components over 127 bytes
+  instead of truncating them.
+- `C::<channel>::modes` accepts at most UnrealIRCd's `MAXMODEPARAMS` (12) parameters.
+  A 13th parameter rejects the complete record. Removing a `modes` record intentionally
+  preserves active channel modes; UDB does not reverse or reconcile them.
 - `READY` means that all six required snapshots (`N`, `C`, `I`, `S`, `L`, and
   `K`) belong to one durable generation. A genuinely fresh local authority may
   initialize an empty database, but a missing snapshot, malformed state marker,

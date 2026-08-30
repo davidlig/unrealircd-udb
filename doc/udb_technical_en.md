@@ -67,7 +67,7 @@ Stores configurations for registered users.
 
 #### Block C (Channels)
 *   **founder**: Nickname of the original channel founder (granted +q automatically).
-*   **modes**: Channel modes managed by UDB. Parameters follow the mode string. Mode letters and parameter counts are strictly validated (e.g. `+ntMl` without parameters is rejected, requiring `+ntMl 50`). Deleting via `DEL` does not revert live channel modes.
+*   **modes**: Channel modes managed by UDB. Parameters follow the mode string. Mode letters and parameter counts are strictly validated (e.g. `+ntMl` without parameters is rejected, requiring `+ntMl 50`). The native `MAXMODEPARAMS` limit is 12: requests with 13 parameters are rejected before persistence or effects, rather than partially applied. Deleting via `DEL` intentionally does not revert or reconcile live channel modes.
 *   **topic**: The persistent channel topic.
 *   **access**: Child records keyed by the identified nicknames allowed to join.
 *   **forbid**: Channel prohibition reason.
@@ -338,6 +338,15 @@ invalid hierarchy nesting (such as composite paths in Block S), or incompatible 
 immediately rejected with `ERR INS 2 <correlation_id> <block>` or `ERR PUT 2 <round_id> <block>` (`UDB_ERR_PARAMS`),
 and cause local `.db` file parsing to abort fail-closed (discarding candidate changes and leaving
 the database uncorrupted).
+
+Mutation and audit diagnostics retain the path and safe failure context but redact values for
+`S::encryption_key`, `N::<nick>::pass`, and `C::<channel>::pass` / `challenge`. Clone limits
+must be representable as native `int` values (`0` through `INT_MAX`), and server-ban user and
+host components must each fit UDB's 127-byte native boundary. Values outside these limits are
+rejected before a snapshot, runtime effect, or partial truncation can occur. The same record
+validation applies during startup, so a persisted over-capacity `C::<channel>::modes` policy
+rejects the complete candidate set, keeps source snapshots byte-preserved, and leaves the node
+non-READY until authoritative recovery supplies a valid six-block generation.
 
 ### 2.2 Numeric Limits & Mathematical Hierarchy
 

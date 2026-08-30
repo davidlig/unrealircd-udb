@@ -136,7 +136,7 @@ static void udb_channel_do_mode(Channel *channel, MessageTag *mtags, const char 
 	char *p, *param;
 	int myparc = 1;
 	int i;
-	char *myparv[512];
+	char *myparv[MAXMODEPARAMS + 2];
 	Client *source;
 
 	if (!channel || !modes || !*modes || !do_mode)
@@ -148,9 +148,16 @@ static void udb_channel_do_mode(Channel *channel, MessageTag *mtags, const char 
 	memset(myparv, 0, sizeof(myparv));
 	myparv[0] = raw_strdup(modes);
 	strlcpy(buf, parameters ? parameters : "", sizeof(buf));
-	for (param = strtoken(&p, buf, " "); param && myparc < (int)(sizeof(myparv) / sizeof(myparv[0])) - 1;
-		 param = strtoken(&p, NULL, " "))
+	for (param = strtoken(&p, buf, " "); param; param = strtoken(&p, NULL, " "))
+	{
+		if (myparc > MAXMODEPARAMS)
+		{
+			for (i = 0; i < myparc; i++)
+				safe_free(myparv[i]);
+			return;
+		}
 		myparv[myparc++] = raw_strdup(param);
+	}
 	myparv[myparc] = NULL;
 
 	do_mode(channel, source, mtags, myparc, (const char **)myparv, 0, 1);

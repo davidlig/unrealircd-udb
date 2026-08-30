@@ -187,6 +187,7 @@ module
 #define UDB_HASH_SIZE 2048
 #define UDB_HASH_MASK (UDB_HASH_SIZE - 1)
 #define UDB_PASSWORD_FAILURE_SLOTS 256
+#define UDB_TKL_MASK_COMPONENT_MAX 127
 
 typedef struct UdbRecord UdbRecord;
 typedef struct UdbBlock UdbBlock;
@@ -2145,6 +2146,30 @@ static int udb_numeric_record_valid(const char *value)
 	return udb_strtoul_strict(value + 1, &val);
 }
 
+static int udb_clone_limit_valid(const char *value)
+{
+	unsigned long val;
+
+	return udb_numeric_record_valid(value) && udb_strtoul_strict(value + 1, &val) && val <= INT_MAX;
+}
+
+static int udb_line_mask_valid(const char *mask)
+{
+	const char *at;
+	size_t userlen;
+	size_t hostlen;
+
+	if (!mask || !*mask)
+		return 0;
+	at = strchr(mask, '@');
+	if (!at)
+		return strlen(mask) <= UDB_TKL_MASK_COMPONENT_MAX;
+	userlen = (size_t)(at - mask);
+	hostlen = strlen(at + 1);
+	return userlen > 0 && userlen <= UDB_TKL_MASK_COMPONENT_MAX && hostlen > 0 &&
+		   hostlen <= UDB_TKL_MASK_COMPONENT_MAX && !strchr(at + 1, '@');
+}
+
 static int udb_options_record_valid(const char *value)
 {
 	return udb_numeric_record_valid(value);
@@ -2213,7 +2238,7 @@ static int udb_channel_modes_record_valid(const char *value)
 		actual_params++;
 	}
 
-	return expected_params == actual_params;
+	return expected_params <= MAXMODEPARAMS && expected_params == actual_params;
 }
 
 static int udb_user_mode_letter_valid(char c)
@@ -2475,12 +2500,12 @@ static const UdbKeyDescriptor udb_schema_c_subkeys[] = {
 	{CKEY_OPTIONS, UDB_VAL_NUMERIC, udb_options_record_valid, 0, NULL}};
 
 static const UdbKeyDescriptor udb_schema_i_subkeys[] = {
-	{IKEY_CLONES, UDB_VAL_NUMERIC, udb_numeric_record_valid, 0, NULL},
+	{IKEY_CLONES, UDB_VAL_NUMERIC, udb_clone_limit_valid, 0, NULL},
 	{IKEY_NOLINES, UDB_VAL_STRING, udb_nolines_record_valid, 0, NULL},
 	{IKEY_HOST, UDB_VAL_STRING, udb_vhost_valid, 0, NULL}};
 
 static const UdbKeyDescriptor udb_schema_s_subkeys[] = {
-	{SKEY_CLONES, UDB_VAL_NUMERIC, udb_numeric_record_valid, 0, NULL},
+	{SKEY_CLONES, UDB_VAL_NUMERIC, udb_clone_limit_valid, 0, NULL},
 	{SKEY_QUIT_IPS, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL},
 	{SKEY_QUIT_CLONES, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL},
 	{SKEY_FLOOD, UDB_VAL_STRING, udb_flood_setting_valid, 0, NULL},
@@ -2600,7 +2625,9 @@ static int udb_record_validate(UdbBlock *block, const char *path, const char *va
 	if (block->letter == UDB_BLOCK_LINES)
 	{
 		const char *type = parts[0];
-		if (!udb_tkl_type_valid(type))
+		if (depth < 2 || !udb_tkl_type_valid(type))
+			goto done;
+		if (type[0] != 'F' && type[0] != 'Q' && !udb_line_mask_valid(parts[1]))
 			goto done;
 
 		if (type[0] == 'F') /* Spamfilter */
@@ -5017,7 +5044,8 @@ static const char *udb_propagator_policy(UdbContext *ctx)
 		return udb_cfg->propagator;
 	if (ctx && ctx->propagator_setting && *ctx->propagator_setting)
 		return ctx->propagator_setting;
-	return ctx && ctx->startup_propagator_setting && *ctx->startup_propagator_setting ? ctx->startup_propagator_setting : NULL;
+	return ctx && ctx->startup_propagator_setting && *ctx->startup_propagator_setting ? ctx->startup_propagator_setting
+																					  : NULL;
 }
 
 static int udb_propagator_policy_present(UdbContext *ctx)
@@ -5108,6 +5136,29 @@ static UdbBlock *udb_mutation_path_block(UdbContext *ctx, const char *path)
 		return NULL;
 
 	return block;
+}
+
+static int udb_mutation_value_is_secret(const char *path)
+{
+	const char *key;
+
+	if (!path)
+		return 0;
+	if (!strcasecmp(path, "S::encryption_key"))
+		return 1;
+	key = strrchr(path, ':');
+	if (!key || key == path || key[-1] != ':')
+		return 0;
+	if (!strncasecmp(path, "N::", 3))
+		return !strcasecmp(key + 1, NKEY_PASS);
+	if (!strncasecmp(path, "C::", 3))
+		return !strcasecmp(key + 1, CKEY_PASS) || !strcasecmp(key + 1, CKEY_CHALLENGE);
+	return 0;
+}
+
+static const char *udb_mutation_safe_value(const char *path, const char *value)
+{
+	return udb_mutation_value_is_secret(path) ? "<redacted>" : (value ? value : "");
 }
 
 static int udb_mutation_forward_ins(Client *source, Client *except, const char *target, const char *path,
@@ -5225,7 +5276,8 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 			return;
 		}
 		char logbuf[512];
-		snprintf(logbuf, sizeof(logbuf), "Inserted record via S2S: %s -> %s", path, data);
+		snprintf(logbuf, sizeof(logbuf), "Inserted record via S2S: %s -> %s", path,
+				 udb_mutation_safe_value(path, data));
 		udb_log(ULOG_INFO, "UDB_INS_RECEIVED", client, "$msg", log_data_string("msg", logbuf));
 		if (!is_broadcast)
 			return;
@@ -7064,7 +7116,7 @@ static void udb_channel_do_mode(Channel *channel, MessageTag *mtags, const char 
 	char *p, *param;
 	int myparc = 1;
 	int i;
-	char *myparv[512];
+	char *myparv[MAXMODEPARAMS + 2];
 	Client *source;
 
 	if (!channel || !modes || !*modes || !do_mode)
@@ -7076,9 +7128,16 @@ static void udb_channel_do_mode(Channel *channel, MessageTag *mtags, const char 
 	memset(myparv, 0, sizeof(myparv));
 	myparv[0] = raw_strdup(modes);
 	strlcpy(buf, parameters ? parameters : "", sizeof(buf));
-	for (param = strtoken(&p, buf, " "); param && myparc < (int)(sizeof(myparv) / sizeof(myparv[0])) - 1;
-		 param = strtoken(&p, NULL, " "))
+	for (param = strtoken(&p, buf, " "); param; param = strtoken(&p, NULL, " "))
+	{
+		if (myparc > MAXMODEPARAMS)
+		{
+			for (i = 0; i < myparc; i++)
+				safe_free(myparv[i]);
+			return;
+		}
 		myparv[myparc++] = raw_strdup(param);
+	}
 	myparv[myparc] = NULL;
 
 	do_mode(channel, source, mtags, myparc, (const char **)myparv, 0, 1);

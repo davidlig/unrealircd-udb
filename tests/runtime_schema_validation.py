@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import os
 import pathlib
+import select
 import shutil
 import signal
 import socket
@@ -42,6 +43,11 @@ CHANNEL = "#schematest"
 
 class EnvironmentUnavailable(Exception):
     pass
+
+
+def require(condition, message):
+    if not condition:
+        raise AssertionError(message)
 
 
 def skip(message):
@@ -253,7 +259,7 @@ class FakeServicesServer:
         return uid
 
     def send_ins(self, path, data):
-        self.send(f"DB * INS {path} {data}")
+        self.send(f"DB * INS {path} :{data}")
 
     def send_del(self, path):
         self.send(f"DB * DEL {path}")
@@ -265,6 +271,91 @@ class FakeServicesServer:
             pass
         finally:
             self.sock.close()
+
+
+def test_clone_limits_int_max_and_one_over(services, data_dir):
+    accepted = "2147483647"
+    rejected = "2147483648"
+    paths = ("S::clones", "I::127.0.0.1::clones")
+
+    for path in paths:
+        services.send_ins(path, "*" + accepted)
+    time.sleep(0.2)
+    for path in paths:
+        db = data_dir / ("udb_S.db" if path.startswith("S::") else "udb_I.db")
+        require(f"{path[3:]} *{accepted}" in db.read_text(encoding="ascii"),
+                f"{path} at INT_MAX was not persisted exactly")
+
+    for path in paths:
+        start = len(services.lines)
+        services.send_ins(path, "*" + rejected)
+        services.wait_for(lambda line: " DB " in line and " ERR INS " in line,
+                          f"rejection of {path} above INT_MAX", start=start)
+        db = data_dir / ("udb_S.db" if path.startswith("S::") else "udb_I.db")
+        require(rejected not in db.read_text(encoding="ascii"),
+                f"{path} above INT_MAX changed the persisted policy")
+    print("PASS: clone limits accept INT_MAX and reject INT_MAX + 1 without replacement")
+
+
+def test_secret_mutation_log_redaction(services, process):
+    secret_key = "a1" * 32
+    secret_hash = "sha256:" + ("b2" * 32)
+    mutations = (
+        ("S::encryption_key", secret_key),
+        ("N::secretlogger::pass", secret_hash),
+        ("C::#secretlogger::pass", secret_hash),
+        ("C::#secretlogger::challenge", "sha256"),
+    )
+    for path, value in mutations:
+        services.send_ins(path, value)
+    time.sleep(0.5)
+    output = ""
+    while select.select([process.stdout], [], [], 0)[0]:
+        output += os.read(process.stdout.fileno(), 65536).decode(errors="replace")
+    require(output, "secret mutation test did not capture daemon diagnostics")
+    for secret in (secret_key, secret_hash):
+        require(secret not in output, "secret mutation value appeared in daemon diagnostics")
+    require("S::encryption_key" in output and "N::secretlogger::pass" in output,
+            "redacted mutation diagnostics lost their paths")
+    print("PASS: mutation diagnostics retain paths while redacting every secret value")
+
+
+def test_line_mask_component_and_native_boundaries(services, data_dir):
+    user = "u" * 127
+    host = "h" * 127
+    valid_path = f"K::G::{user}@{host}"
+    services.send_ins(valid_path, "boundary mask")
+    time.sleep(0.2)
+    db = data_dir / "udb_K.db"
+    require(valid_path[3:] in db.read_text(encoding="ascii"), "exact native mask boundary was not persisted")
+
+    for invalid_mask in (("u" * 128) + "@host.test", "user@" + ("h" * 128)):
+        start = len(services.lines)
+        services.send_ins(f"K::G::{invalid_mask}", "must reject")
+        services.wait_for(lambda line: " DB " in line and " ERR INS " in line,
+                          "rejection of over-capacity line-mask component", start=start)
+        require(invalid_mask not in db.read_text(encoding="ascii"),
+                "over-capacity line mask was persisted after rejection")
+    print("PASS: line masks preserve exact native boundaries and reject one-over components")
+
+
+def test_channel_mode_parameter_capacity_atomic(services, data_dir):
+    params12 = [str(index + 10) for index in range(12)]
+    value12 = " ".join(["+" + ("l" * len(params12)), *params12])
+    services.send_ins(f"C::{CHANNEL}::modes", value12)
+    time.sleep(0.2)
+    db = data_dir / "udb_C.db"
+    require(value12 in db.read_text(encoding="ascii"), "12 mode parameters were not persisted as one record")
+
+    params13 = [str(index + 10) for index in range(13)]
+    value13 = " ".join(["+" + ("l" * len(params13)), *params13])
+    start = len(services.lines)
+    services.send_ins(f"C::{CHANNEL}::modes", value13)
+    services.wait_for(lambda line: " DB " in line and " ERR INS " in line,
+                      "atomic rejection of 13 channel mode parameters", start=start)
+    require(value13 not in db.read_text(encoding="ascii"),
+            "13 mode parameters were partially persisted instead of rejected atomically")
+    print("PASS: channel modes accept 12 parameters and atomically reject 13")
 
 
 def run_tests(ircd_bin, keep=False):
@@ -394,6 +485,11 @@ def run_tests(ircd_bin, keep=False):
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " K" in l,
                           "rejection of unknown subkey in Block K")
         print("PASS: INS of unknown subkey in Block K was rejected with correlated ERR INS 2")
+
+        test_clone_limits_int_max_and_one_over(services, data_dir)
+        test_secret_mutation_log_redaction(services, proc)
+        test_line_mask_component_and_native_boundaries(services, data_dir)
+        test_channel_mode_parameter_capacity_atomic(services, data_dir)
 
         # -------------------------------------------------------------
         # Test 6b: Spamfilter regex pattern length limits (3071, 3072, 3073 bytes)

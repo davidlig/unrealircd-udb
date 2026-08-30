@@ -44,6 +44,7 @@
 #define UDB_HASH_SIZE 2048
 #define UDB_HASH_MASK (UDB_HASH_SIZE - 1)
 #define UDB_PASSWORD_FAILURE_SLOTS 256
+#define UDB_TKL_MASK_COMPONENT_MAX 127
 
 typedef struct UdbRecord UdbRecord;
 typedef struct UdbBlock UdbBlock;

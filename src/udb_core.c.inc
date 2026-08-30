@@ -161,6 +161,30 @@ static int udb_numeric_record_valid(const char *value)
 	return udb_strtoul_strict(value + 1, &val);
 }
 
+static int udb_clone_limit_valid(const char *value)
+{
+	unsigned long val;
+
+	return udb_numeric_record_valid(value) && udb_strtoul_strict(value + 1, &val) && val <= INT_MAX;
+}
+
+static int udb_line_mask_valid(const char *mask)
+{
+	const char *at;
+	size_t userlen;
+	size_t hostlen;
+
+	if (!mask || !*mask)
+		return 0;
+	at = strchr(mask, '@');
+	if (!at)
+		return strlen(mask) <= UDB_TKL_MASK_COMPONENT_MAX;
+	userlen = (size_t)(at - mask);
+	hostlen = strlen(at + 1);
+	return userlen > 0 && userlen <= UDB_TKL_MASK_COMPONENT_MAX && hostlen > 0 &&
+		   hostlen <= UDB_TKL_MASK_COMPONENT_MAX && !strchr(at + 1, '@');
+}
+
 static int udb_options_record_valid(const char *value)
 {
 	return udb_numeric_record_valid(value);
@@ -229,7 +253,7 @@ static int udb_channel_modes_record_valid(const char *value)
 		actual_params++;
 	}
 
-	return expected_params == actual_params;
+	return expected_params <= MAXMODEPARAMS && expected_params == actual_params;
 }
 
 static int udb_user_mode_letter_valid(char c)
@@ -491,12 +515,12 @@ static const UdbKeyDescriptor udb_schema_c_subkeys[] = {
 	{CKEY_OPTIONS, UDB_VAL_NUMERIC, udb_options_record_valid, 0, NULL}};
 
 static const UdbKeyDescriptor udb_schema_i_subkeys[] = {
-	{IKEY_CLONES, UDB_VAL_NUMERIC, udb_numeric_record_valid, 0, NULL},
+	{IKEY_CLONES, UDB_VAL_NUMERIC, udb_clone_limit_valid, 0, NULL},
 	{IKEY_NOLINES, UDB_VAL_STRING, udb_nolines_record_valid, 0, NULL},
 	{IKEY_HOST, UDB_VAL_STRING, udb_vhost_valid, 0, NULL}};
 
 static const UdbKeyDescriptor udb_schema_s_subkeys[] = {
-	{SKEY_CLONES, UDB_VAL_NUMERIC, udb_numeric_record_valid, 0, NULL},
+	{SKEY_CLONES, UDB_VAL_NUMERIC, udb_clone_limit_valid, 0, NULL},
 	{SKEY_QUIT_IPS, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL},
 	{SKEY_QUIT_CLONES, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL},
 	{SKEY_FLOOD, UDB_VAL_STRING, udb_flood_setting_valid, 0, NULL},
@@ -616,7 +640,9 @@ static int udb_record_validate(UdbBlock *block, const char *path, const char *va
 	if (block->letter == UDB_BLOCK_LINES)
 	{
 		const char *type = parts[0];
-		if (!udb_tkl_type_valid(type))
+		if (depth < 2 || !udb_tkl_type_valid(type))
+			goto done;
+		if (type[0] != 'F' && type[0] != 'Q' && !udb_line_mask_valid(parts[1]))
 			goto done;
 
 		if (type[0] == 'F') /* Spamfilter */

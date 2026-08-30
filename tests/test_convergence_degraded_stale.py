@@ -469,7 +469,7 @@ def test_suite():
         (nodeD2 / "modules" / "third").mkdir(parents=True, exist_ok=True)
         shutil.copy(module_src, nodeD2 / "modules" / "third" / "udb.so")
         confD2 = nodeD2 / "unrealircd.conf"
-        write_config(confD2, "hubD2.test", "00P", portsD2, linksD2, dbdirD2, propagator="prop.test", stale_timeout=2)
+        write_config(confD2, "hubD2.test", "00P", portsD2, linksD2, dbdirD2, propagator="prop.test", stale_timeout=4)
 
         procD2 = subprocess.Popen(bwrap_command(nodeD2, ircd_bin, confD2))
         wait_for_daemon(procD2, "127.0.0.1", portsD2[0])
@@ -496,7 +496,7 @@ def test_suite():
                           "clients denied while bootstrap pending", timeout=3)
         print("PASS: Test D2: Bootstrap-pending node reported BOOTSTRAPPING/DEGRADED and denied clients")
 
-        time.sleep(2.2)
+        time.sleep(4.2)
         observer.send("UDB STATUS")
         observer.wait_for(lambda l: " 339 " in l and "UDB synchronization: STALE" in l,
                           "STALE after bootstrap stale-timeout", timeout=3)

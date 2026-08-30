@@ -68,7 +68,7 @@ Almacena configuraciones para usuarios registrados.
 
 #### Bloque C (Canales)
 *   **founder**: Nick del fundador original del canal (se le otorga +q automáticamente).
-*   **modes**: Modos de canal gestionados por UDB. Los parámetros siguen a la cadena de modos. Se validan estrictamente las letras de modo y la cantidad de parámetros requeridos (por ejemplo, `+ntMl` sin parámetro se rechaza, requiriéndose `+ntMl 50`). Al borrarse mediante `DEL`, no se revierten en caliente en el canal.
+*   **modes**: Modos de canal gestionados por UDB. Los parámetros siguen a la cadena de modos. Se validan estrictamente las letras de modo y la cantidad de parámetros requeridos (por ejemplo, `+ntMl` sin parámetro se rechaza, requiriéndose `+ntMl 50`). El límite nativo `MAXMODEPARAMS` es 12: una solicitud con 13 parámetros rechaza el registro completo antes de persistir o aplicar efectos, sin cambios parciales. Al borrar el registro mediante `DEL`, los modos activos se conservan intencionadamente; UDB no los revierte ni reconcilia.
 *   **topic**: El tema (topic) persistente del canal.
 *   **access**: Subregistros con los nicks identificados que pueden entrar.
 *   **forbid**: Motivo de prohibición del canal.
@@ -334,6 +334,20 @@ compuestas en Bloque S), líneas sobrelongitud o tipos incompatibles son rechaza
 `ERR INS 2 <id_correlacion> <bloque>` o `ERR PUT 2 <id_ronda> <bloque>` (`UDB_ERR_PARAMS`), y provocan que la
 carga de archivos `.db` aborte de manera estricta y transaccional (**fail-closed**), descartando cualquier
 cambio candidato y preservando intacta la base de datos previa.
+
+Los diagnósticos de mutaciones y auditoría conservan la ruta y el contexto seguro
+del fallo, pero redactan los valores de `S::encryption_key`, `N::<nick>::pass` y
+`C::<channel>::pass` / `challenge`. Los límites de clones deben poder representarse
+en el tipo nativo `int` (`0` a `INT_MAX`): `INT_MAX` se acepta sin alteración y
+un valor inmediatamente superior se rechaza sin cambiar el límite activo. Los
+componentes de usuario y host de las máscaras de sanción deben caber cada uno en
+el límite nativo de 127 caracteres; los valores que lo exceden se rechazan antes
+de persistirse, aplicarse o truncarse. Esta validación también se aplica durante
+el arranque: una máscara sobredimensionada o una política persistida de
+`C::<channel>::modes` con más de 12 parámetros rechaza el conjunto candidato por
+completo, conserva los snapshots de origen byte a byte, no aplica efectos y deja
+el nodo fuera de `READY` hasta que la autoridad proporcione una generación válida
+de los seis bloques.
 
 ### 2.2 Jerarquía de Límites Numéricos e Invariantes Matemáticos
 

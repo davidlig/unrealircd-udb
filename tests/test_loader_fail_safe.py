@@ -519,9 +519,74 @@ def run_tests(ircd_bin, keep=False):
             stop(proc7)
             print(f"PASS: {name} candidate set exported no K records before complete READY validation")
 
+        test_persisted_over_capacity_modes_fail_closed(tmpdir, ircd_bin, module_path)
+        test_persisted_over_capacity_line_mask_fail_closed(tmpdir, ircd_bin, module_path)
+
     finally:
         if not keep:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_persisted_over_capacity_modes_fail_closed(tmpdir, ircd_bin, module_path):
+    node = tmpdir / "node-over-capacity-modes"
+    data_dir = node / "data"
+    data_dir.mkdir(parents=True)
+    for subdir in ("runtime-data", "tmp", "modules/third"):
+        (node / subdir).mkdir(parents=True, exist_ok=True)
+    shutil.copy2(module_path, node / "modules" / "third" / "udb.so")
+
+    params = " ".join(str(index + 10) for index in range(13))
+    c_db = data_dir / "udb_C.db"
+    for letter in ("N", "I", "S", "L", "K"):
+        seed_block(data_dir / f"udb_{letter}.db", letter, generation=1)
+    seed_block(c_db, "C", f"#overcapacity::modes +{'l' * 13} {params}\n", generation=1)
+    seed_ready_state(data_dir)
+    original = c_db.read_bytes()
+
+    client_port, server_port, tls_port = free_port(), free_port(), free_port()
+    config = node / "unrealircd.conf"
+    write_config(config, "udb-over-capacity.test", "0C1", client_port, server_port, tls_port, module_path, data_dir)
+    proc = subprocess.Popen(bwrap_command(node, ircd_bin, config), stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True)
+    time.sleep(1.0)
+    stop(proc)
+    output, _ = proc.communicate()
+    if "Malformed persisted record in block C" not in output and "Failed to initialize database engine" not in output:
+        raise AssertionError(f"over-capacity C::modes candidate was accepted:\n{output}")
+    if c_db.read_bytes() != original:
+        raise AssertionError("over-capacity C::modes snapshot was rewritten during failed load")
+    print("PASS: persisted 13-parameter modes remain byte-preserved and fail closed")
+
+
+def test_persisted_over_capacity_line_mask_fail_closed(tmpdir, ircd_bin, module_path):
+    node = tmpdir / "node-over-capacity-line-mask"
+    data_dir = node / "data"
+    data_dir.mkdir(parents=True)
+    for subdir in ("runtime-data", "tmp", "modules/third"):
+        (node / subdir).mkdir(parents=True, exist_ok=True)
+    shutil.copy2(module_path, node / "modules" / "third" / "udb.so")
+
+    over_capacity_mask = ("u" * 128) + "@host.test"
+    k_db = data_dir / "udb_K.db"
+    for letter in ("N", "C", "I", "S", "L"):
+        seed_block(data_dir / f"udb_{letter}.db", letter, generation=1)
+    seed_block(k_db, "K", f"G::{over_capacity_mask} persisted mask must not activate\n", generation=1)
+    seed_ready_state(data_dir)
+    original = k_db.read_bytes()
+
+    client_port, server_port, tls_port = free_port(), free_port(), free_port()
+    config = node / "unrealircd.conf"
+    write_config(config, "udb-over-capacity-mask.test", "0C2", client_port, server_port, tls_port, module_path, data_dir)
+    proc = subprocess.Popen(bwrap_command(node, ircd_bin, config), stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True)
+    time.sleep(1.0)
+    stop(proc)
+    output, _ = proc.communicate()
+    if "Malformed persisted record in block K" not in output and "Failed to initialize database engine" not in output:
+        raise AssertionError(f"over-capacity K-line mask candidate was accepted:\n{output}")
+    if k_db.read_bytes() != original:
+        raise AssertionError("over-capacity K-line mask snapshot was rewritten during failed load")
+    print("PASS: persisted over-capacity line mask remains byte-preserved and fails closed without activation")
 
 
 if __name__ == "__main__":

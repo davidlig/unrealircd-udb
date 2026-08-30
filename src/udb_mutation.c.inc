@@ -15,7 +15,8 @@ static const char *udb_propagator_policy(UdbContext *ctx)
 		return udb_cfg->propagator;
 	if (ctx && ctx->propagator_setting && *ctx->propagator_setting)
 		return ctx->propagator_setting;
-	return ctx && ctx->startup_propagator_setting && *ctx->startup_propagator_setting ? ctx->startup_propagator_setting : NULL;
+	return ctx && ctx->startup_propagator_setting && *ctx->startup_propagator_setting ? ctx->startup_propagator_setting
+																					  : NULL;
 }
 
 static int udb_propagator_policy_present(UdbContext *ctx)
@@ -106,6 +107,29 @@ static UdbBlock *udb_mutation_path_block(UdbContext *ctx, const char *path)
 		return NULL;
 
 	return block;
+}
+
+static int udb_mutation_value_is_secret(const char *path)
+{
+	const char *key;
+
+	if (!path)
+		return 0;
+	if (!strcasecmp(path, "S::encryption_key"))
+		return 1;
+	key = strrchr(path, ':');
+	if (!key || key == path || key[-1] != ':')
+		return 0;
+	if (!strncasecmp(path, "N::", 3))
+		return !strcasecmp(key + 1, NKEY_PASS);
+	if (!strncasecmp(path, "C::", 3))
+		return !strcasecmp(key + 1, CKEY_PASS) || !strcasecmp(key + 1, CKEY_CHALLENGE);
+	return 0;
+}
+
+static const char *udb_mutation_safe_value(const char *path, const char *value)
+{
+	return udb_mutation_value_is_secret(path) ? "<redacted>" : (value ? value : "");
 }
 
 static int udb_mutation_forward_ins(Client *source, Client *except, const char *target, const char *path,
@@ -223,7 +247,8 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 			return;
 		}
 		char logbuf[512];
-		snprintf(logbuf, sizeof(logbuf), "Inserted record via S2S: %s -> %s", path, data);
+		snprintf(logbuf, sizeof(logbuf), "Inserted record via S2S: %s -> %s", path,
+				 udb_mutation_safe_value(path, data));
 		udb_log(ULOG_INFO, "UDB_INS_RECEIVED", client, "$msg", log_data_string("msg", logbuf));
 		if (!is_broadcast)
 			return;
