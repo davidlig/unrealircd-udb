@@ -4,6 +4,7 @@
 import argparse
 import os
 import pathlib
+import select
 import shutil
 import signal
 import socket
@@ -187,6 +188,64 @@ class MockServices:
         self.sock.close()
 
 
+class DaemonLogReader:
+    def __init__(self, proc):
+        self.proc = proc
+        self.output = ""
+        self.lines = []
+        self.buffer = ""
+
+    def read_available(self):
+        if not self.proc or not self.proc.stdout:
+            return
+        while True:
+            readable, _, _ = select.select([self.proc.stdout], [], [], 0)
+            if not readable:
+                break
+            try:
+                chunk = os.read(self.proc.stdout.fileno(), 65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            text = chunk.decode("utf-8", errors="replace")
+            self.output += text
+            self.buffer += text
+            while "\n" in self.buffer:
+                line, self.buffer = self.buffer.split("\n", 1)
+                self.lines.append(line.rstrip("\r"))
+
+    def wait_for(self, predicate, description, timeout=5.0, start=None):
+        if start is None:
+            start = 0
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.read_available()
+            for l in self.lines[start:]:
+                if predicate(l):
+                    return l
+            if self.proc.poll() is not None:
+                self.read_available()
+                for l in self.lines[start:]:
+                    if predicate(l):
+                        return l
+                raise AssertionError(
+                    f"Daemon process exited (code {self.proc.returncode}) while waiting for log: {description}\n"
+                    f"Captured logs:\n{self.output}"
+                )
+            time.sleep(0.02)
+        raise AssertionError(f"Timeout waiting for daemon log: {description}\nCaptured logs:\n{self.output}")
+
+    def wait_for_reconcile_abort(self, round_id, reason, timeout=5.0, start=None):
+        expected = f"Reconciliation round {round_id} aborted: {reason}"
+        return self.wait_for(
+            lambda line: expected in line,
+            expected,
+            timeout=timeout,
+            start=start,
+        )
+
+
 def find_module_path():
     env_path = os.environ.get("UDB_MODULE_PATH")
     if env_path and os.path.isfile(env_path):
@@ -226,11 +285,12 @@ def run_tests(ircd_bin, keep=False):
                      max_records=4, max_bytes=1200, inact_timeout=2, abs_timeout=4)
 
         proc = subprocess.Popen(bwrap_command(node, ircd_bin, config),
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        daemon_logs = DaemonLogReader(proc)
         time.sleep(1.0)
         if proc.poll() is not None:
-            stdout, _ = proc.communicate()
-            raise RuntimeError(f"ircd failed to start:\n{stdout}")
+            daemon_logs.read_available()
+            raise RuntimeError(f"ircd failed to start:\n{daemon_logs.output}")
 
         services = MockServices("127.0.0.1", server_port)
 
@@ -293,7 +353,10 @@ def run_tests(ircd_bin, keep=False):
         # -------------------------------------------------------------
         # Test 2b: byte-limit abort cancels reconciliation round immediately
         # -------------------------------------------------------------
+        daemon_logs.read_available()
+        log_start = len(daemon_logs.lines)
         services.send_begin("C", "tx-byte-round", "00000000")
+        current_round = services.round_id
         services.send_put("C", "tx-byte-round", "#brc1::topic", "B" * 590)
         time.sleep(0.1)
         services.send_put("C", "tx-byte-round", "#brc2::topic", "B" * 590)
@@ -301,39 +364,48 @@ def run_tests(ircd_bin, keep=False):
         services.send_put("C", "tx-byte-round", "#brc3::topic", "C")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " PUT " in l,
                           "byte-cap ERR for round-failure test")
+        daemon_logs.wait_for_reconcile_abort(current_round, "staged byte limit exceeded", start=log_start)
         services.send_begin("C", "tx-after-byte", "00000000")
         services.send_end("C", "tx-after-byte", "00000000")
         services.wait_for(lambda l: " DB " in l and " ACK " in l and " C " in l,
-                          "ACK after byte-cap round failure proves round was cancelled")
-        print("PASS: byte-limit abort cancels reconciliation round (immediate re-round succeeds)")
+                          "ACK after byte-cap round failure proves recovery")
+        print("PASS: byte-limit abort cancels reconciliation round immediately and recovers cleanly")
 
         # -------------------------------------------------------------
         # Test 2c: invalid PUT payload abort cancels reconciliation round immediately
         # -------------------------------------------------------------
+        daemon_logs.read_available()
+        log_start = len(daemon_logs.lines)
         services.send_begin("N", "tx-parse-rnd", "00000000")
+        current_round = services.round_id
         services.send_put("N", "tx-parse-rnd", "user1::unknownbadkey", "value")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " PUT " in l,
                           "parse-failure ERR for round-failure test")
+        daemon_logs.wait_for_reconcile_abort(current_round, "invalid staged PUT payload", start=log_start)
         services.send_begin("N", "tx-after-parse", "00000000")
         services.send_end("N", "tx-after-parse", "00000000")
         services.wait_for(lambda l: " DB " in l and " ACK " in l and " N " in l,
-                          "ACK after parse-failure round proves round was cancelled")
-        print("PASS: invalid PUT parse failure cancels reconciliation round (immediate re-round succeeds)")
+                          "ACK after parse-failure round proves recovery")
+        print("PASS: invalid PUT parse failure cancels reconciliation round immediately and recovers cleanly")
 
         # -------------------------------------------------------------
         # Test 2d: digest mismatch in END cancels reconciliation round immediately
         # -------------------------------------------------------------
+        daemon_logs.read_available()
+        log_start = len(daemon_logs.lines)
         services.send_begin("N", "tx-dgst-rnd", "00000000")
+        current_round = services.round_id
         services.send_put("N", "tx-dgst-rnd", "dgstuser::vhost", "test.host")
         time.sleep(0.1)
         services.send_end("N", "tx-dgst-rnd", "DEADBEEF")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " END " in l,
                           "digest-mismatch ERR for round-failure test")
+        daemon_logs.wait_for_reconcile_abort(current_round, "staged digest validation failure", start=log_start)
         services.send_begin("N", "tx-after-dgst", "00000000")
         services.send_end("N", "tx-after-dgst", "00000000")
         services.wait_for(lambda l: " DB " in l and " ACK " in l and " N " in l,
-                          "ACK after digest-mismatch round proves round was cancelled")
-        print("PASS: digest mismatch cancels reconciliation round (immediate re-round succeeds)")
+                          "ACK after digest-mismatch round proves recovery")
+        print("PASS: digest mismatch cancels reconciliation round immediately and recovers cleanly")
 
         # -------------------------------------------------------------
         # Test 3: sync-inactivity-timeout (configured as 2 seconds)
