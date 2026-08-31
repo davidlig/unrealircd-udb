@@ -175,6 +175,16 @@ static int udb_hook_server_sync(Client *client)
 	return 0;
 }
 
+static int udb_hook_server_connect(Client *client)
+{
+	if (!client || !IsServer(client))
+		return 0;
+	/* The OCL participant set follows the full server list, including servers
+	 * that arrive remotely during a netburst. */
+	udb_ocl_membership_changed();
+	return 0;
+}
+
 int udb_hook_server_quit(Client *client, MessageTag *mtags)
 {
 	udb_sync_server_quit(client);
@@ -205,44 +215,66 @@ CMD_FUNC(cmd_db)
 			return;
 		snprintf(logbuf, sizeof(logbuf), "[UDB] S2S DB received: parc=%d target=%s subcmd=%s", parc, target, subcmd);
 		unreal_log(ULOG_INFO, "udb", "UDB_CMD_DB", client, "$msg", log_data_string("msg", logbuf));
-		if (parc == 5 && !strcasecmp(parv[4], "ACK"))
+		if (parc == 6 && !strcasecmp(parv[4], "ACK") && !strcasecmp(parv[5], "OCL"))
 		{
 			udb_sync_hello_ack(client);
 			return;
 		}
-		if (parc < 5 || !parv[4] || !*parv[4])
+		/* OCL is part of the mandatory HEL 4 contract: a request without the
+		 * OCL token belongs to a legacy peer that can never be confirmed. */
+		if (parc == 5 || (parc >= 6 && strcasecmp(parv[5], "OCL")))
+		{
+			udb_log(ULOG_ERROR, "UDB_HEL_OCL_REQUIRED", client,
+					"Link aborted: HEL 4 request without the mandatory OCL capability token");
+			exit_client_fmt(client, NULL, "Link aborted: server does not support UDB OCL capability");
 			return;
-		const char *prop = parv[4];
-		int new_auth = 0;
-		if (!strcmp(prop, "?"))
-		{
-			new_auth = 1;
 		}
-		else if (!strcmp(prop, "-"))
-		{
-			new_auth = 0;
-		}
-		else if (udb_server_name_valid(prop))
-		{
-			new_auth = !strcasecmp(prop, me.name);
-		}
-		else
+		if (parc > 7 || (parc == 7 && strcasecmp(parv[6], "OCLG")))
 			return;
+		if (parc < 6 || !parv[4] || !*parv[4])
+			return;
+		{
+			const char *prop = parv[4];
+			int oclg_subscribe = (parc == 7 && !strcasecmp(parv[6], "OCLG"));
+			int new_auth = 0;
+			UdbHelloPeer *hello_peer;
 
-		UdbHelloPeer *hello_peer = udb_hello_peer(client, 1);
-		hello_peer->authorizes_us = new_auth;
-		hello_peer->auth_received = 1;
+			if (!strcmp(prop, "?"))
+			{
+				new_auth = 1;
+			}
+			else if (!strcmp(prop, "-"))
+			{
+				new_auth = 0;
+			}
+			else if (udb_server_name_valid(prop))
+			{
+				new_auth = !strcasecmp(prop, me.name);
+			}
+			else
+				return;
 
-		udb_log(ULOG_INFO, "UDB_HEL_AUTHORIZATION", client,
-				"Direct peer selected $propagator as its staged-sync source (authorizes_us=$auth)",
-				log_data_string("propagator", prop), log_data_integer("auth", new_auth));
+			hello_peer = udb_hello_peer(client, 1);
+			hello_peer->authorizes_us = new_auth;
+			hello_peer->auth_received = 1;
+			hello_peer->ocl_capable = 1;
+			hello_peer->oclg_subscribed = oclg_subscribe;
 
-		/* Each side sends its own request, so only an ACK confirms outbound data. */
-		if (!udb_has_hello(client))
-			udb_sync_hello_start(client);
-		udb_send_db_to_one(client, ":%s DB %s HEL 4 ACK", me.id, client->id);
-		/* A repeated authorized selection is also the explicit retry trigger. */
-		udb_maybe_start_reconciliation(client, new_auth);
+			udb_log(ULOG_INFO, "UDB_HEL_AUTHORIZATION", client,
+					"Direct peer selected $propagator as its staged-sync source (authorizes_us=$auth, oclg=$oclg)",
+					log_data_string("propagator", prop), log_data_integer("auth", new_auth),
+					log_data_integer("oclg", oclg_subscribe));
+
+			/* Each side sends its own request, so only an ACK confirms outbound data. */
+			if (!udb_has_hello(client))
+				udb_sync_hello_start(client);
+			udb_send_db_to_one(client, ":%s DB %s HEL 4 ACK OCL", me.id, client->id);
+			udb_ocl_maybe_replay_to_peer(client);
+			if (oclg_subscribe && udb_has_hello(client))
+				udb_oclg_push(client);
+			/* A repeated authorized selection is also the explicit retry trigger. */
+			udb_maybe_start_reconciliation(client, new_auth);
+		}
 		return;
 	}
 
@@ -581,6 +613,14 @@ CMD_FUNC(cmd_db)
 			udb_mutation_opt(ctx, client, direct_peer, target, *parv[3], parc >= 5 ? parv[4] : NULL, is_for_me,
 							 is_broadcast);
 		}
+		else if (!strcasecmp(subcmd, "OCL"))
+		{
+			udb_ocl_handle(client, direct_peer, parc, parv, is_broadcast);
+		}
+		else if (!strcasecmp(subcmd, "OCLG"))
+		{
+			udb_oclg_handle(client, is_for_me);
+		}
 		break;
 	}
 }
@@ -589,6 +629,7 @@ static int udb_protocol_init(ModuleInfo *modinfo)
 {
 	CommandAdd(modinfo->handle, "DB", cmd_db, MAXPARA, CMD_SERVER | CMD_BIGLINES);
 	HookAdd(modinfo->handle, HOOKTYPE_SERVER_SYNC, 0, udb_hook_server_sync);
+	HookAdd(modinfo->handle, HOOKTYPE_SERVER_CONNECT, 0, udb_hook_server_connect);
 	HookAdd(modinfo->handle, HOOKTYPE_REHASH, 0, udb_config_rehash);
 	HookAdd(modinfo->handle, HOOKTYPE_POSTCONF, 0, udb_config_postconf);
 	HookAdd(modinfo->handle, HOOKTYPE_REHASH_COMPLETE, 0, udb_config_postconf);

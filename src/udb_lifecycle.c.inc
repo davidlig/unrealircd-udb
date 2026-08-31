@@ -355,6 +355,7 @@ static void udb_engine_cleanup(UdbContext *ctx)
 		udb_remove_tree_effects(ctx, b);
 	udb_ips_shutdown();
 	udb_hello_cleanup_all();
+	udb_ocl_shutdown();
 	for (b = ctx->block_list; b;)
 	{
 		UdbBlock *next = b->next;
@@ -1049,6 +1050,7 @@ static int udb_module_load(ModuleInfo *modinfo)
 		return MOD_FAILED;
 	}
 	udb_sync_snomask_filter();
+	udb_ocl_local_rebuild();
 	udb_nicks_load(modinfo);
 	udb_channels_load(modinfo);
 	udb_log(ULOG_INFO, "UDB_LOADED", NULL, "Unreal Database System v" UDB_VERSION " loaded successfully");

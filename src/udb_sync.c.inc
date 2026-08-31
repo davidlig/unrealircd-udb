@@ -22,6 +22,9 @@ struct UdbHelloPeer
 	int auth_received;
 	int local_selection_sent;
 	int reconciliation_offered;
+	int ocl_capable;	 /* Peer advertised the mandatory OCL token. */
+	int oclg_subscribed; /* Peer requested the OCLG consumer view. */
+	int ocl_replayed;	 /* Inventories already replayed to this peer. */
 	UdbHelloPeer *next;
 };
 
@@ -145,7 +148,7 @@ static int udb_sync_hello_start(Client *server)
 	{
 		propagator = "-";
 	}
-	ok = udb_send_db_to_one(server, ":%s DB %s HEL 4 %s", me.id, server->id, propagator);
+	ok = udb_send_db_to_one(server, ":%s DB %s HEL 4 %s OCL", me.id, server->id, propagator);
 	if (!ok)
 	{
 		peer->state = 0;
@@ -173,6 +176,7 @@ static void udb_sync_hello_ack(Client *server)
 		udb_log(ULOG_INFO, "UDB_HEL_CONFIRMED", server, "UDB HEL 4 capability confirmed for directly linked server");
 		udb_propagator_policy_changed(udb_ctx);
 		udb_maybe_start_reconciliation(server, 0);
+		udb_ocl_maybe_replay_to_peer(server);
 	}
 }
 
@@ -576,7 +580,7 @@ static void udb_sync_hello_refresh_all(void)
 		if (IsServer(server) && MyConnect(server) && udb_has_hello(server))
 		{
 			UdbHelloPeer *hello = udb_hello_peer(server, 0);
-			if (udb_send_db_to_one(server, ":%s DB %s HEL 4 %s", me.id, server->id, propagator) && hello)
+			if (udb_send_db_to_one(server, ":%s DB %s HEL 4 %s OCL", me.id, server->id, propagator) && hello)
 				hello->local_selection_sent = 1;
 		}
 	}
@@ -1017,6 +1021,7 @@ EVENT(udb_sync_timeout_event)
 	}
 	if (abort_reason)
 		udb_reconcile_abort(udb_ctx, abort_reason, 1);
+	udb_ocl_stage_timeout_check(now);
 	for (peer = udb_hello_peers; peer; peer = next)
 	{
 		next = peer->next;
@@ -1093,6 +1098,7 @@ static void udb_sync_server_quit(Client *client)
 				log_data_client("client", client));
 		udb_reconcile_abort(udb_ctx, "authority disconnected", 1);
 	}
+	udb_ocl_origin_quit(client);
 
 	udb_propagator_policy_changed(udb_ctx);
 }

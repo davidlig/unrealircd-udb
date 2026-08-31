@@ -162,9 +162,9 @@ class MockPeer:
         self.send("EOS")
         if autostart_hel:
             prop = propagator_advertised if propagator_advertised is not None else "?"
-            self.send(f"DB {self.target_sid} HEL 4 {prop}")
+            self.send(f"DB {self.target_sid} HEL 4 {prop} OCL")
             self.wait_for(lambda line: " DB " in line and " HEL 4 " in line, f"{self.name} HEL response")
-            self.send(f"DB {self.target_sid} HEL 4 ACK")
+            self.send(f"DB {self.target_sid} HEL 4 ACK OCL")
             if send_inf:
                 for b in ('N', 'C', 'I', 'S', 'L', 'K'):
                     self.send(f"DB {self.target_sid} INF 1 {b} 00000000 0")
@@ -291,10 +291,10 @@ def test_suite():
 
         # Connect P1 with autostart_hel=False so we control handshake
         p1 = MockPeer("p1.test", "001", "127.0.0.1", portsA[1], "00A", autostart_hel=False)
-        p1.send("DB 00A HEL 4 p1.test")
+        p1.send("DB 00A HEL 4 p1.test OCL")
         p1.wait_for(lambda l: " DB " in l and " HEL 4 " in l, "HEL from hubA")
         # Now P1 sends ACK -> this triggers HEL_CONFIRMED for P1
-        p1.send("DB 00A HEL 4 ACK")
+        p1.send("DB 00A HEL 4 ACK OCL")
         time.sleep(0.3)
 
         # Now P2 tries to send PUT on its old session -> should be rejected!
@@ -355,7 +355,7 @@ def test_suite():
 
         # HubB initiates HEL refresh; P2 acknowledges, HubB selects P2 and advertises HEL 4 p2.test
         p2.wait_for(lambda l: " DB " in l and " HEL 4 " in l, "HEL 4 on REHASH")
-        p2.send("DB 00B HEL 4 ACK")
+        p2.send("DB 00B HEL 4 ACK OCL")
         p2.wait_for(lambda l: " DB " in l and " HEL 4 p2.test" in l, "HEL 4 p2.test announced to P2")
         print("PASS: HubB announced HEL 4 p2.test after REHASH")
 
@@ -569,9 +569,9 @@ def test_suite():
         # Reconnect with a divergent N inventory: node must latch DEGRADED
         prop_k2 = MockPeer("prop.test", "001", "127.0.0.1", portsK[1], "00K",
                            propagator_advertised="prop.test", autostart_hel=False)
-        prop_k2.send("DB 00K HEL 4 prop.test")
+        prop_k2.send("DB 00K HEL 4 prop.test OCL")
         prop_k2.wait_for(lambda l: " DB " in l and " HEL 4 " in l, "HEL response for divergent round")
-        prop_k2.send("DB 00K HEL 4 ACK")
+        prop_k2.send("DB 00K HEL 4 ACK OCL")
         prop_k2.send(f"DB 00K INF 1 N {crc_record:08x} 0")
         for b in ('C', 'I', 'S', 'L', 'K'):
             prop_k2.send(f"DB 00K INF 1 {b} 00000000 0")
@@ -595,9 +595,9 @@ def test_suite():
         # staged snapshot: only durable convergence returns the node to OK
         prop_k3 = MockPeer("prop.test", "001", "127.0.0.1", portsK[1], "00K",
                            propagator_advertised="prop.test", autostart_hel=False)
-        prop_k3.send("DB 00K HEL 4 prop.test")
+        prop_k3.send("DB 00K HEL 4 prop.test OCL")
         prop_k3.wait_for(lambda l: " DB " in l and " HEL 4 " in l, "HEL response for recovery round")
-        prop_k3.send("DB 00K HEL 4 ACK")
+        prop_k3.send("DB 00K HEL 4 ACK OCL")
         prop_k3.send(f"DB 00K INF 2 N {crc_record:08x} 0")
         for b in ('C', 'I', 'S', 'L', 'K'):
             prop_k3.send(f"DB 00K INF 2 {b} 00000000 0")
@@ -690,11 +690,11 @@ def test_suite():
 
         # Test G: New neighbor new-a.test connects (not in policy old-a, old-b)
         new_a = MockPeer("new-a.test", "00A", "127.0.0.1", portsG[1], "00G", autostart_hel=False)
-        new_a.send("DB 00G HEL 4 new-a.test")
+        new_a.send("DB 00G HEL 4 new-a.test OCL")
         # HubG should advertise HEL 4 - (because policy is present from S.db, but neither old-a nor old-b is eligible)
         hel_resp = new_a.wait_for(lambda l: " DB " in l and " HEL 4 -" in l, "HEL 4 - advertised")
         assert " HEL 4 -" in hel_resp, f"Expected HEL 4 -, got: {hel_resp}"
-        new_a.send("DB 00G HEL 4 ACK")
+        new_a.send("DB 00G HEL 4 ACK OCL")
         time.sleep(0.3)
         print("PASS: Test G: HubG advertised HEL 4 - with obsolete S::propagator")
 
@@ -718,7 +718,7 @@ def test_suite():
 
         # HubG initiates HEL negotiation, new-a acknowledges, HubG selects new-a.test
         new_a.wait_for(lambda l: " DB " in l and " HEL 4 " in l, "HEL 4 on REHASH")
-        new_a.send("DB 00G HEL 4 ACK")
+        new_a.send("DB 00G HEL 4 ACK OCL")
         new_a.wait_for(lambda l: " DB " in l and " HEL 4 new-a.test" in l, "HEL 4 new-a.test after REHASH")
         print("PASS: Test H: HubG selected new-a.test as authority after local config override + REHASH")
 
@@ -765,7 +765,7 @@ def test_suite():
             raise AssertionError("Clean no-policy node did not become standalone READY")
 
         peerI = MockPeer("peer.test", "001", "127.0.0.1", portsI[1], "00I", autostart_hel=False)
-        peerI.send("DB 00I HEL 4 ?")
+        peerI.send("DB 00I HEL 4 ? OCL")
         hel_resp_I = peerI.wait_for(lambda l: " DB " in l and " HEL 4 " in l, "HEL 4 response")
         assert " HEL 4 hubI.test" in hel_resp_I, f"Expected standalone HEL 4 hubI.test, got: {hel_resp_I}"
         print("PASS: Test I1: Clean no-policy node is standalone READY and announces itself")
@@ -789,7 +789,7 @@ def test_suite():
         wait_for_daemon(procI2, "127.0.0.1", portsI2[0])
 
         peerI2 = MockPeer("peer.test", "001", "127.0.0.1", portsI2[1], "00J", autostart_hel=False)
-        peerI2.send("DB 00J HEL 4 ?")
+        peerI2.send("DB 00J HEL 4 ? OCL")
         hel_resp_I2 = peerI2.wait_for(lambda l: " DB " in l and " HEL 4 " in l, "HEL 4 response (bootstrap)")
         assert " HEL 4 ?" in hel_resp_I2, f"Expected bootstrap HEL 4 ?, got: {hel_resp_I2}"
         print("PASS: Test I2: Persisted BOOTSTRAPPING node announces HEL 4 ? (bootstrap)")

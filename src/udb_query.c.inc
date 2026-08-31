@@ -106,6 +106,113 @@ static void udb_query_send_status(Client *client)
 	}
 }
 
+static void udb_query_send_operclasses(Client *client, const char *filter)
+{
+	Client *acptr;
+	int shown = 0;
+
+	if (!udb_ctx)
+	{
+		sendto_one(client, NULL, ":%s 339 %s :Operclass registry: unavailable", me.name, client->name);
+		return;
+	}
+	sendto_one(client, NULL, ":%s 339 %s :Operclass registry: %s", me.name, client->name,
+			   udb_ocl_registry_complete() ? "READY" : "INCOMPLETE");
+	sendto_one(client, NULL, ":%s 339 %s :Local inventory: generation %lu epoch %s classes %u digest %s", me.name,
+			   client->name, udb_ocl_local ? udb_ocl_local->generation : 0, udb_ocl_local ? udb_ocl_local->epoch : "-",
+			   udb_ocl_local ? udb_ocl_local->count : 0, udb_ocl_local ? udb_ocl_local->inventory_digest : "-");
+	if (!filter || match_simple(filter, me.name))
+	{
+		shown++;
+		sendto_one(client, NULL, ":%s 339 %s :%s SID %s epoch %s gen %lu classes %u digest %s", me.name, client->name,
+				   me.name, me.id, udb_ocl_local ? udb_ocl_local->epoch : "-",
+				   udb_ocl_local ? udb_ocl_local->generation : 0, udb_ocl_local ? udb_ocl_local->count : 0,
+				   udb_ocl_local ? udb_ocl_local->inventory_digest : "-");
+	}
+	list_for_each_entry(acptr, &global_server_list, client_node)
+	{
+		UdbOclOrigin *origin;
+
+		if (!IsServer(acptr) || IsMe(acptr) || IsULine(acptr))
+			continue;
+		if (filter && !match_simple(filter, acptr->name))
+			continue;
+		shown++;
+		origin = udb_ocl_find_origin(acptr->id);
+		if (origin && origin->current)
+		{
+			sendto_one(client, NULL, ":%s 339 %s :%s SID %s epoch %s gen %lu classes %u digest %s", me.name,
+					   client->name, acptr->name, acptr->id, origin->current->epoch, origin->current->generation,
+					   origin->current->count, origin->current->inventory_digest);
+		}
+		else
+		{
+			sendto_one(client, NULL, ":%s 339 %s :%s SID %s MISSING inventory", me.name, client->name, acptr->name,
+					   acptr->id);
+		}
+	}
+	if (!shown)
+		sendto_one(client, NULL, ":%s 339 %s :No servers match '%s'", me.name, client->name, filter);
+}
+
+static void udb_query_send_operclass(Client *client, const char *name)
+{
+	Client *acptr;
+	UdbOclEntry *local_entry;
+	int mismatch;
+
+	if (!udb_ctx)
+	{
+		sendto_one(client, NULL, ":%s 339 %s :Operclass registry: unavailable", me.name, client->name);
+		return;
+	}
+	if (!valid_operclass_name(name))
+	{
+		sendto_one(client, NULL, ":%s 339 %s :Invalid operclass name '%s'", me.name, client->name, name);
+		return;
+	}
+	if (!udb_ocl_registry_complete())
+	{
+		sendto_one(client, NULL, ":%s 339 %s :Operclass registry: INCOMPLETE", me.name, client->name);
+		return;
+	}
+	local_entry = udb_ocl_local ? udb_ocl_find_entry(udb_ocl_local, name) : NULL;
+	if (!local_entry)
+	{
+		sendto_one(client, NULL, ":%s 339 %s :Operclass %s: NOT GLOBAL (missing locally)", me.name, client->name, name);
+		return;
+	}
+	mismatch = 0;
+	list_for_each_entry(acptr, &global_server_list, client_node)
+	{
+		UdbOclOrigin *origin;
+		UdbOclEntry *entry;
+
+		if (!IsServer(acptr) || IsMe(acptr) || IsULine(acptr))
+			continue;
+		origin = udb_ocl_find_origin(acptr->id);
+		entry = (origin && origin->current) ? udb_ocl_find_entry(origin->current, name) : NULL;
+		if (!entry)
+		{
+			sendto_one(client, NULL, ":%s 339 %s :%s SID %s MISSING", me.name, client->name, acptr->name, acptr->id);
+			mismatch = 1;
+		}
+		else if (strcmp(entry->digest, local_entry->digest))
+		{
+			sendto_one(client, NULL, ":%s 339 %s :%s SID %s MISMATCH %s", me.name, client->name, acptr->name, acptr->id,
+					   entry->digest);
+			mismatch = 1;
+		}
+		else
+		{
+			sendto_one(client, NULL, ":%s 339 %s :%s SID %s OK %s", me.name, client->name, acptr->name, acptr->id,
+					   entry->digest);
+		}
+	}
+	sendto_one(client, NULL, ":%s 339 %s :Operclass %s: %s %s", me.name, client->name, name,
+			   mismatch ? "NOT GLOBAL" : "GLOBAL", local_entry->digest);
+}
+
 CMD_FUNC(cmd_udb)
 {
 	if (!IsUser(client) && !IsServer(client))
@@ -123,7 +230,23 @@ CMD_FUNC(cmd_udb)
 		return;
 	}
 
-	sendto_one(client, NULL, ":%s 339 %s :Syntax: /UDB STATUS", me.name, client->name);
+	if (!strcasecmp(parv[1], "OPERCLASSES"))
+	{
+		udb_query_send_operclasses(client, parc >= 3 ? parv[2] : NULL);
+		return;
+	}
+
+	if (!strcasecmp(parv[1], "OPERCLASS"))
+	{
+		if (parc < 3)
+			sendto_one(client, NULL, ":%s 339 %s :Syntax: /UDB OPERCLASS <name>", me.name, client->name);
+		else
+			udb_query_send_operclass(client, parv[2]);
+		return;
+	}
+
+	sendto_one(client, NULL, ":%s 339 %s :Syntax: /UDB STATUS | /UDB OPERCLASSES [filter] | /UDB OPERCLASS <name>",
+			   me.name, client->name);
 }
 
 CMD_FUNC(cmd_dbq)

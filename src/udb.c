@@ -43,6 +43,9 @@ ModuleHeader MOD_HEADER = {"third/udb", "4.0.0", "UDB 4 - Unreal Database System
 /* Staged synchronization sessions: HEL capability and transfer state */
 #include "udb_sync.c.inc"
 
+/* Operclass registry: local inventory, OCL propagation and OCLG view */
+#include "udb_operclasses.c.inc"
+
 /* Authorized real-time mutations: validation, effects, persistence, forwarding */
 #include "udb_mutation.c.inc"
 

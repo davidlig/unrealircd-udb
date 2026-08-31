@@ -166,6 +166,9 @@ static int udb_config_postconf(void)
 		safe_free(udb_cfg->propagator);
 	if (udb_ctx)
 		udb_propagator_policy_changed(udb_ctx);
+	/* HOOKTYPE_REHASH_COMPLETE: the new configuration is active, so rebuild
+	 * the local operclass inventory and publish any changes. */
+	udb_ocl_local_rebuild();
 	return 0;
 }
 

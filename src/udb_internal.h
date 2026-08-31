@@ -17,6 +17,8 @@
 #include "unrealircd.h"
 #include <errno.h>
 #include <openssl/hmac.h>
+#include <openssl/rand.h>
+#include <openssl/sha.h>
 
 #define UDB_DEFAULT_DB_DIRECTORY PERMDATADIR
 #define UDB_BLOCK_PATH_MAX 1024
@@ -45,6 +47,15 @@
 #define UDB_HASH_MASK (UDB_HASH_SIZE - 1)
 #define UDB_PASSWORD_FAILURE_SLOTS 256
 #define UDB_TKL_MASK_COMPONENT_MAX 127
+/* Operclass registry (OCL / OCLG) limits */
+#define UDB_OCL_MAX_CLASSES 1024
+#define UDB_OCL_STAGE_TIMEOUT 30
+#define UDB_OCL_DIGEST_HEX_LEN 64
+#define UDB_OCL_EPOCH_LEN 16
+#define UDB_OCL_MAX_RETIRED_EPOCHS 8
+#define UDB_OCL_MAX_PARENT_DEPTH 16
+#define UDB_OCL_CANONICAL_MAX (256 * 1024)
+#define UDB_OCL_ACL_DEPTH_MAX 64
 
 typedef struct UdbRecord UdbRecord;
 typedef struct UdbBlock UdbBlock;
@@ -172,6 +183,35 @@ typedef struct UdbPasswordFailure
 	unsigned int attempts;
 	time_t since;
 } UdbPasswordFailure;
+
+/* Operclass registry (OCL): one inventory snapshot per origin server plus an
+ * optional staging area for an in-flight BEGIN/ITEM/END transaction. */
+typedef struct UdbOclEntry
+{
+	char name[OPERCLASSLEN + 1];
+	char digest[UDB_OCL_DIGEST_HEX_LEN + 1];
+} UdbOclEntry;
+
+typedef struct UdbOclInventory
+{
+	char epoch[UDB_OCL_EPOCH_LEN + 1];
+	unsigned long generation;
+	unsigned int count;
+	char inventory_digest[UDB_OCL_DIGEST_HEX_LEN + 1];
+	UdbOclEntry *entries; /* sorted by name */
+} UdbOclInventory;
+
+typedef struct UdbOclOrigin
+{
+	char sid[IDLEN + 1];
+	UdbOclInventory *current;
+	UdbOclInventory *staging;
+	char retired_epochs[UDB_OCL_MAX_RETIRED_EPOCHS][UDB_OCL_EPOCH_LEN + 1];
+	unsigned int retired_count;
+	time_t stage_deadline;
+	unsigned int stage_received;
+	struct UdbOclOrigin *next;
+} UdbOclOrigin;
 
 typedef enum UdbSyncStatus
 {
@@ -467,6 +507,18 @@ static void udb_remove_special_record(UdbContext *ctx, UdbBlock *block, UdbRecor
 static void udb_apply_tree_effects(UdbContext *ctx, UdbBlock *block);
 static void udb_remove_tree_effects(UdbContext *ctx, UdbBlock *block);
 static void udb_send_to_debugs(Client *source, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+
+/* Operclass registry (OCL) and global operclass view (OCLG) */
+static void udb_ocl_shutdown(void);
+static int udb_ocl_local_rebuild(void);
+static void udb_ocl_maybe_replay_to_peer(Client *server);
+static void udb_ocl_membership_changed(void);
+static void udb_ocl_origin_quit(Client *client);
+static void udb_ocl_stage_timeout_check(time_t now);
+static void udb_ocl_handle(Client *client, Client *direct_peer, int parc, const char *parv[], int is_broadcast);
+static void udb_oclg_handle(Client *client, int is_for_me);
+static int udb_ocl_registry_complete(void);
+static int udb_oclg_push(Client *to);
 
 static int udb_protocol_init(ModuleInfo *modinfo);
 int udb_nicks_init(ModuleInfo *modinfo);

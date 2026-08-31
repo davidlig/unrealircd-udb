@@ -230,15 +230,17 @@ Cuando un servidor se conecta a otro, se verifica el estado de los bloques con
 un CRC32 de los registros lógicos canónicos. El digest ordena los registros
 serializados `ruta valor`, por lo que los encabezados, timestamps de guardado y
 el orden de inserción no lo afectan. Tras `HOOKTYPE_SERVER_SYNC`, cada peer
-directamente enlazado recibe una petición `HEL 4 <propagador-seleccionado>`. Solo el `HEL 4 ACK` directo
-correspondiente confirma UDB V4 para ese enlace; antes no se envían `INF`, frames
-staged ni frames DB UDB reenviados. Si no llega el acuse en 60 segundos, el enlace
-se aborta automáticamente mediante `SQUIT` para proteger la red de desincronizaciones.
-`HEL` es el único frame DB
+directamente enlazado recibe una petición `HEL 4 <propagador-seleccionado> OCL`.
+Solo el `HEL 4 ACK OCL` directo correspondiente confirma UDB V4 para ese enlace;
+antes no se envían `INF`, frames staged ni frames DB UDB reenviados. Si no llega
+el acuse en 60 segundos, el enlace se aborta automáticamente mediante `SQUIT`
+para proteger la red de desincronizaciones. El token `OCL` es obligatorio: un
+`HEL 4` sin él pertenece a un peer legacy y el enlace se aborta sin completar la
+capacidad. `HEL` es el único frame DB
 aceptado antes de confirmar y nunca se reenvía fuera del enlace directo.
 
 **HEL (Negociación de capacidad y Auto-Bootstrap):**
-`:<sid> DB <sid-peer-directo> HEL 4 <propagador-seleccionado>`
+`:<sid> DB <sid-peer-directo> HEL 4 <propagador-seleccionado> OCL [OCLG]`
 
 El campo de propagador seleccionado es `?` solo cuando no existe ninguna fuente
 de propagator configurada y el nodo aún no está READY. Permite a ese nodo
@@ -246,11 +248,16 @@ descubrir la autoridad del clúster y
 autoriza al peer de bootstrap exclusivo a entregar el snapshot inicial. Un nodo
 READY sin política es una autoridad standalone y se anuncia con su propio nombre
 en lugar de `?`. Un servidor configurado
-pero no disponible se anuncia como `HEL 4 -`, no como `?`; `-` no concede
+pero no disponible se anuncia como `HEL 4 - OCL`, no como `?`; `-` no concede
 autorización staged y evita ampliar el acceso de forma silenciosa.
 
+El token opcional `OCLG` declara al peer como consumidor de la vista global de
+operclasses (ver sección 2.2). Ser ULine/Services no implica suscripción: solo
+un HEL con `OCLG` explícito recibe la proyección. La capability OCLG no convierte
+al consumidor en participante del consenso OCL.
+
 **Acuse HEL:**
-`:<sid> DB <sid-peer-directo> HEL 4 ACK`
+`:<sid> DB <sid-peer-directo> HEL 4 ACK OCL`
 
 **INF (Información del Bloque):**
 `:<sid> DB <destino> INF <id_ronda> <letra_bloque> <crc32_hex> <timestamp>`
@@ -307,6 +314,86 @@ incluso cuando un árbol staged vacío tiene digest cero.
 Mientras exista una transacción staged, `INS`, `DEL`, `DRP` y `OPT` se rechazan
 con `UDB_ERR_SYNC_ACTIVE`, incluso desde el propagador. Fuera de una transacción
 esas mutaciones siguen requiriendo el propagador configurado.
+
+### 2.2 Registro Distribuido de Operclasses (OCL / OCLG)
+
+OCL es la fuente de verdad distribuida sobre los operclasses que cada IRCd
+participante tiene cargados en `operclass {}`. OCLG es una proyección derivada
+(la intersección de todos los inventarios con el mismo digest efectivo) que se
+publica a los consumidores suscritos, típicamente Services. Ninguno de los dos
+se persiste en los bloques `udb_*.db`.
+
+**Participantes:** todo servidor IRCd visible que no sea ULine, incluido el
+servidor local. Cada originSID es la única autoridad de su inventario.
+
+**Fingerprint efectivo:** cada clase se canonicaliza desde la estructura
+runtime (nombre, parent, árbol ACL con ALLOW/DENY y variables, orden de
+evaluación) y se hashea con SHA-256 incorporando recursivamente el digest
+efectivo del parent. Clases con parent ausente, ciclo, profundidad excesiva o
+estructura no serializable se omiten junto con sus descendientes; el resto del
+inventario sigue siendo válido.
+
+**Inventario OCL (origin → todos los peers HEL confirmados):**
+
+```text
+:<sourceSID> DB * OCL BEGIN <originSID> <epoch16> <generation> <count> <inventory_digest>
+:<sourceSID> DB * OCL ITEM <originSID> <epoch16> <generation> <operclass> <effective_digest>
+:<sourceSID> DB * OCL END <originSID> <epoch16> <generation>
+```
+
+Semántica de recepción:
+
+- La recepción es atómica: `BEGIN` crea un stage aislado, los `ITEM` lo rellenan
+  y solo un `END` válido (count exacto, nombres válidos sin duplicados, digests
+  hexadecimales de 64 caracteres y `inventory_digest` coincidente) hace commit
+  atómico. Solo después del commit se reenvía el snapshot a otros peers.
+- `epoch16` identifica la instancia que emitió el inventario (nuevo en cada
+  carga del módulo); `generation` es monótona dentro del epoch. Un epoch nuevo
+  del mismo originSID invalida inmediatamente el inventario anterior y cualquier
+  frame posterior de un epoch sustituido se considera stale.
+- Aceptar un `BEGIN` más nuevo hace que el snapshot anterior deje de participar
+  en el cálculo GLOBAL de inmediato; si el nuevo stage aborta o expira
+  (`UDB_OCL_STAGE_TIMEOUT`, 30s), el origen permanece sin inventario actual
+  hasta recibir otro snapshot válido.
+- La misma epoch/generation con digest distinto es una violación de protocolo:
+  el frame se ignora sin reemplazar el estado.
+- Todo frame se acepta solo si originSID es un servidor participante visible y
+  el frame llegó por el enlace que lo alcanza (`origin->direction`).
+- Al desaparecer un servidor (SERVER_QUIT/SQUIT) se eliminan inmediatamente su
+  inventario, stage y epochs; la vista global se recalcula con la red visible.
+- Al completarse HEL, el peer recibe un replay del inventario local y de todos
+  los inventarios remotos ya comprometidos; no necesita consultar nodo por nodo.
+
+**Vista global OCLG (solo a peers que declararon `OCLG` en HEL):**
+
+```text
+:<sid> DB <consumerSID> OCLG BEGIN <epoch16> <generation> <READY|INCOMPLETE> <count> <view_digest>
+:<sid> DB <consumerSID> OCLG ITEM <epoch16> <generation> <operclass> <effective_digest>
+:<sid> DB <consumerSID> OCLG END <epoch16> <generation>
+```
+
+Un operclass es GLOBAL solo cuando el registry está completo (todos los
+participantes visibles tienen inventario actual) y el digest efectivo coincide
+en todos. Cada cambio efectivo se entrega como snapshot completo atómico; un
+snapshot INCOMPLETE tiene cero elementos, de modo que el consumidor puede hacer
+swap atómico y retirar toda disponibilidad previa sin ventanas parciales. La
+generation de OCLG es local al nodo emisor y solo se incrementa ante cambios
+efectivos; un nuevo suscriptor recibe el snapshot actual inmediatamente después
+del HEL.
+
+**Observabilidad para operadores:**
+
+```text
+/UDB OPERCLASSES [filtro]   Estado del registry e inventario por servidor
+/UDB OPERCLASS <nombre>     Disponibilidad GLOBAL y digest por participante
+```
+
+Eventos de log relevantes: `UDB_OCL_LOCAL_CHANGED`, `UDB_OCL_REMOTE_COMMITTED`,
+`UDB_OCL_STAGE_ABORT`, `UDB_OCL_REGISTRY_INCOMPLETE`, `UDB_OCL_REGISTRY_READY`,
+`UDB_OCL_GLOBAL_ADD`, `UDB_OCL_GLOBAL_DEL` y `UDB_OCL_PROTOCOL_VIOLATION`.
+Este registro es runtime y no afecta a `udb_ready` ni a la convergencia de los
+bloques UDB; una divergencia de operclasses jamás impide la convergencia de la
+base de datos distribuida.
 
 ### 2.2 Modificación de Datos en Tiempo Real
 Para inyectar o eliminar registros en caliente, se usan los siguientes comandos (generalmente con destino `*` para broadcast).

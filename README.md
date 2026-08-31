@@ -308,6 +308,9 @@ python3 src/modules/third/udb/tests/test_propagator_runtime_failover.py
 # Fail-safe transactional database loader and permission error protection:
 python3 src/modules/third/udb/tests/test_loader_fail_safe.py
 
+# Distributed operclass registry (OCL) and global operclass view (OCLG):
+python3 src/modules/third/udb/tests/test_ocl_registry.py
+
 # Isolated nick/channel runtime authentication and privilege harness (requires bwrap):
 python3 src/modules/third/udb/tests/runtime_channel_nick.py
 
