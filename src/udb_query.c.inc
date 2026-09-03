@@ -108,7 +108,7 @@ static void udb_query_send_status(Client *client)
 
 static void udb_query_send_operclasses(Client *client, const char *filter)
 {
-	Client *acptr;
+	UdbOclOrigin *origin;
 	int shown = 0;
 
 	if (!udb_ctx)
@@ -129,11 +129,11 @@ static void udb_query_send_operclasses(Client *client, const char *filter)
 				   udb_ocl_local ? udb_ocl_local->generation : 0, udb_ocl_local ? udb_ocl_local->count : 0,
 				   udb_ocl_local ? udb_ocl_local->inventory_digest : "-");
 	}
-	list_for_each_entry(acptr, &global_server_list, client_node)
+	for (origin = udb_ocl_origins; origin; origin = origin->next)
 	{
-		UdbOclOrigin *origin;
+		Client *acptr = udb_ocl_find_server(origin->sid);
 
-		if (!IsServer(acptr) || IsMe(acptr) || IsULine(acptr))
+		if (!origin->member || !udb_ocl_is_participant(acptr) || IsMe(acptr))
 			continue;
 		if (filter && !match_simple(filter, acptr->name))
 			continue;
@@ -157,7 +157,7 @@ static void udb_query_send_operclasses(Client *client, const char *filter)
 
 static void udb_query_send_operclass(Client *client, const char *name)
 {
-	Client *acptr;
+	UdbOclOrigin *origin;
 	UdbOclEntry *local_entry;
 	int mismatch;
 
@@ -183,14 +183,13 @@ static void udb_query_send_operclass(Client *client, const char *name)
 		return;
 	}
 	mismatch = 0;
-	list_for_each_entry(acptr, &global_server_list, client_node)
+	for (origin = udb_ocl_origins; origin; origin = origin->next)
 	{
-		UdbOclOrigin *origin;
+		Client *acptr = udb_ocl_find_server(origin->sid);
 		UdbOclEntry *entry;
 
-		if (!IsServer(acptr) || IsMe(acptr) || IsULine(acptr))
+		if (!origin->member || !udb_ocl_is_participant(acptr) || IsMe(acptr))
 			continue;
-		origin = udb_ocl_find_origin(acptr->id);
 		entry = (origin && origin->current) ? udb_ocl_find_entry(origin->current, name) : NULL;
 		if (!entry)
 		{

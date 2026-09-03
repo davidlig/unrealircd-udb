@@ -165,7 +165,8 @@ def run_configtest(node, ircd, config, module, mutator=None):
 
 
 def build_mutator():
-    if MUTATOR_MODULE.is_file():
+    if (MUTATOR_MODULE.is_file() and
+            MUTATOR_MODULE.stat().st_mtime >= MUTATOR_SOURCE.stat().st_mtime):
         return
     src_root = pathlib.Path(os.environ.get("UNREALIRCD_SRC_ROOT", REPO_ROOT.parents[3] if len(REPO_ROOT.parents) > 3 and (REPO_ROOT.parents[3] / "Makefile").is_file() else REPO_ROOT))
     result = subprocess.run(["make", "custommodule", "MODULEFILE=udb/tests/udb_test_mutator"], cwd=src_root,

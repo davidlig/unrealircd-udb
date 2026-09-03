@@ -204,8 +204,14 @@ typedef struct UdbOclInventory
 typedef struct UdbOclOrigin
 {
 	char sid[IDLEN + 1];
+	int member;
 	UdbOclInventory *current;
 	UdbOclInventory *staging;
+	int accepted_valid;
+	char accepted_epoch[UDB_OCL_EPOCH_LEN + 1];
+	unsigned long accepted_generation;
+	unsigned int accepted_count;
+	char accepted_digest[UDB_OCL_DIGEST_HEX_LEN + 1];
 	char retired_epochs[UDB_OCL_MAX_RETIRED_EPOCHS][UDB_OCL_EPOCH_LEN + 1];
 	unsigned int retired_count;
 	time_t stage_deadline;

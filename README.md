@@ -311,6 +311,9 @@ python3 src/modules/third/udb/tests/test_loader_fail_safe.py
 # Distributed operclass registry (OCL) and global operclass view (OCLG):
 python3 src/modules/third/udb/tests/test_ocl_registry.py
 
+# Real A-B-C/D topology: OCL membership and netsplit descendant cleanup:
+python3 src/modules/third/udb/tests/test_ocl_membership_multihop.py
+
 # Isolated nick/channel runtime authentication and privilege harness (requires bwrap):
 python3 src/modules/third/udb/tests/runtime_channel_nick.py
 

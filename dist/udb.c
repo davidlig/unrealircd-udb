@@ -347,8 +347,14 @@ typedef struct UdbOclInventory
 typedef struct UdbOclOrigin
 {
 	char sid[IDLEN + 1];
+	int member;
 	UdbOclInventory *current;
 	UdbOclInventory *staging;
+	int accepted_valid;
+	char accepted_epoch[UDB_OCL_EPOCH_LEN + 1];
+	unsigned long accepted_generation;
+	unsigned int accepted_count;
+	char accepted_digest[UDB_OCL_DIGEST_HEX_LEN + 1];
 	char retired_epochs[UDB_OCL_MAX_RETIRED_EPOCHS][UDB_OCL_EPOCH_LEN + 1];
 	unsigned int retired_count;
 	time_t stage_deadline;
@@ -5159,21 +5165,57 @@ static UdbOclOrigin *udb_ocl_get_origin(const char *sid)
 	return origin;
 }
 
-static void udb_ocl_remove_origin(const char *sid)
+static ConfigItem_operclass *udb_ocl_operclass_list(void)
+{
+	return conf_operclass;
+}
+
+static int udb_ocl_member_exists(const char *sid)
+{
+	UdbOclOrigin *origin = udb_ocl_find_origin(sid);
+
+	return origin && origin->member;
+}
+
+static int udb_ocl_member_add(const char *sid)
+{
+	UdbOclOrigin *origin;
+
+	if (!sid || !*sid || !strcmp(sid, me.id))
+		return 0;
+	origin = udb_ocl_get_origin(sid);
+	if (origin->member)
+		return 0;
+	origin->member = 1;
+	return 1;
+}
+
+static int udb_ocl_member_remove(const char *sid)
+{
+	UdbOclOrigin *origin = udb_ocl_find_origin(sid);
+
+	if (!origin || !origin->member)
+		return 0;
+	origin->member = 0;
+	return 1;
+}
+
+static void udb_ocl_purge_nonmembers(void)
 {
 	UdbOclOrigin **link, *old;
 
-	for (link = &udb_ocl_origins; *link; link = &(*link)->next)
+	for (link = &udb_ocl_origins; *link;)
 	{
-		if (!strcmp((*link)->sid, sid))
+		if ((*link)->member)
 		{
-			old = *link;
-			*link = old->next;
-			udb_ocl_free_inventory(old->current);
-			udb_ocl_free_inventory(old->staging);
-			safe_free(old);
-			return;
+			link = &(*link)->next;
+			continue;
 		}
+		old = *link;
+		*link = old->next;
+		udb_ocl_free_inventory(old->current);
+		udb_ocl_free_inventory(old->staging);
+		safe_free(old);
 	}
 }
 
@@ -5239,6 +5281,38 @@ static int udb_ocl_is_lower_hex(const char *s, size_t len)
 static int udb_ocl_is_participant(Client *server)
 {
 	return server && IsServer(server) && !IsULine(server);
+}
+
+/* Keep cached origins aligned with the visible topology. The quit hook runs
+ * after dependants have been removed, but before the quitting root leaves the
+ * global server list, so callers remove that root first when necessary. */
+static void udb_ocl_membership_prune_invisible(void)
+{
+	UdbOclOrigin *origin;
+	Client *server;
+
+	for (origin = udb_ocl_origins; origin; origin = origin->next)
+	{
+		if (!origin->member)
+			continue;
+		server = udb_ocl_find_server(origin->sid);
+		if (!udb_ocl_is_participant(server) || IsMe(server))
+			origin->member = 0;
+	}
+}
+
+static void udb_ocl_membership_rebuild(void)
+{
+	Client *server;
+	UdbOclOrigin *origin;
+
+	for (origin = udb_ocl_origins; origin; origin = origin->next)
+		origin->member = 0;
+	list_for_each_entry(server, &global_server_list, client_node)
+		if (udb_ocl_is_participant(server) && !IsMe(server))
+			udb_ocl_member_add(server->id);
+	udb_ocl_membership_prune_invisible();
+	udb_ocl_purge_nonmembers();
 }
 
 /* ---- Canonical serialization and digests ---- */
@@ -5574,7 +5648,7 @@ static UdbOclInventory *udb_ocl_build_local_inventory(void)
 	unsigned char raw[32];
 	int limited = 0;
 
-	for (oc = conf_operclass; oc; oc = oc->next)
+	for (oc = udb_ocl_operclass_list(); oc; oc = oc->next)
 	{
 		if (!oc->classStruct || !oc->classStruct->name || !*oc->classStruct->name)
 			continue;
@@ -5687,6 +5761,7 @@ static void udb_ocl_local_publish(void)
 	inv->generation = udb_ocl_local_generation;
 	udb_ocl_free_inventory(udb_ocl_local);
 	udb_ocl_local = inv;
+	udb_oclg_recompute();
 	udb_log(ULOG_INFO, "UDB_OCL_LOCAL_CHANGED", NULL,
 			"Local operclass inventory changed: generation $gen, $count classes, digest $digest",
 			log_data_integer("gen", (long long)inv->generation), log_data_integer("count", (long long)inv->count),
@@ -5752,6 +5827,7 @@ static UdbOclOrigin *udb_ocl_validate_frame(Client *direct_peer, const char *ori
 		return NULL;
 	origin_client = udb_ocl_find_server(origin_sid);
 	if (!origin_client || !udb_ocl_is_participant(origin_client) || IsMe(origin_client) ||
+		!udb_ocl_member_exists(origin_sid) ||
 		origin_client->direction != direct_peer)
 		return NULL;
 	return create ? udb_ocl_get_origin(origin_sid) : udb_ocl_find_origin(origin_sid);
@@ -5772,53 +5848,64 @@ static void udb_ocl_handle_begin(Client *direct_peer, const char *parv[])
 		!udb_ocl_is_lower_hex(epoch, UDB_OCL_EPOCH_LEN) || !udb_ocl_is_lower_hex(digest, UDB_OCL_DIGEST_HEX_LEN))
 		return;
 	origin = udb_ocl_validate_frame(direct_peer, origin_sid, 1);
-	if (!origin)
+	if (!origin || !udb_ocl_member_exists(origin_sid))
 		return;
 
 	if (udb_ocl_epoch_retired(origin, epoch))
 		return; /* frames from a superseded epoch are stale */
 
-	if (origin->staging)
+	if (origin->accepted_valid && !strcmp(origin->accepted_epoch, epoch))
 	{
-		UdbOclInventory *st = origin->staging;
-
-		if (!strcmp(st->epoch, epoch) && st->generation == generation)
-		{
-			if (st->count == count && !strcmp(st->inventory_digest, digest))
-				return; /* idempotent retransmission */
-			/* Same epoch+generation with different content: protocol violation. */
-			udb_log(ULOG_ERROR, "UDB_OCL_PROTOCOL_VIOLATION", direct_peer,
-					"Origin $origin re-advertised generation $gen with a different digest; frame ignored",
-					log_data_string("origin", origin->sid), log_data_integer("gen", (long long)generation));
-			return;
-		}
-		if (!strcmp(st->epoch, epoch) && st->generation > generation)
+		if (generation < origin->accepted_generation)
 			return; /* stale */
-		if (strcmp(st->epoch, epoch))
-			udb_ocl_retire_epoch(origin, st->epoch);
-		udb_ocl_stage_discard(origin);
+		if (generation == origin->accepted_generation)
+		{
+			if (origin->accepted_count != count || strcmp(origin->accepted_digest, digest))
+			{
+				/* The high-water descriptor remains immutable even after an abort. */
+				udb_log(ULOG_ERROR, "UDB_OCL_PROTOCOL_VIOLATION", direct_peer,
+						"Origin $origin re-advertised generation $gen with a different descriptor; frame ignored",
+						log_data_string("origin", origin->sid), log_data_integer("gen", (long long)generation));
+				return;
+			}
+			if (origin->current && !strcmp(origin->current->epoch, epoch) &&
+				origin->current->generation == generation)
+				return; /* already committed */
+			if (origin->staging && !strcmp(origin->staging->epoch, epoch) &&
+				origin->staging->generation == generation)
+				return; /* already staging */
+			/* The previous attempt was aborted; rebuild the same high-water snapshot. */
+		}
 	}
-	else if (origin->current)
+	else if (origin->accepted_valid && strcmp(origin->accepted_epoch, epoch))
 	{
-		UdbOclInventory *cur = origin->current;
-
-		if (!strcmp(cur->epoch, epoch) && cur->generation > generation)
-			return; /* stale */
-		if (!strcmp(cur->epoch, epoch) && cur->generation == generation)
-		{
-			if (cur->count == count && !strcmp(cur->inventory_digest, digest))
-				return; /* idempotent */
-			udb_log(ULOG_ERROR, "UDB_OCL_PROTOCOL_VIOLATION", direct_peer,
-					"Origin $origin re-advertised committed generation $gen with a different digest; frame ignored",
-					log_data_string("origin", origin->sid), log_data_integer("gen", (long long)generation));
+		udb_ocl_retire_epoch(origin, origin->accepted_epoch);
+	}
+	else if (!origin->accepted_valid && origin->current)
+	{
+		/* Defensive compatibility for an origin created before watermark state. */
+		if (!strcmp(origin->current->epoch, epoch) && origin->current->generation > generation)
 			return;
-		}
+	}
+
+	if (origin->staging)
+		udb_ocl_stage_discard(origin);
+	if (origin->current)
+	{
 		/* A newer snapshot was announced: the previous one stops participating
 		 * immediately, fail-closed, even if the new one never completes. */
-		if (strcmp(cur->epoch, epoch))
-			udb_ocl_retire_epoch(origin, cur->epoch);
-		udb_ocl_free_inventory(cur);
+		if (strcmp(origin->current->epoch, epoch))
+			udb_ocl_retire_epoch(origin, origin->current->epoch);
+		udb_ocl_free_inventory(origin->current);
 		origin->current = NULL;
+	}
+	if (!origin->accepted_valid || strcmp(origin->accepted_epoch, epoch) || generation > origin->accepted_generation)
+	{
+		strlcpy(origin->accepted_epoch, epoch, sizeof(origin->accepted_epoch));
+		origin->accepted_generation = generation;
+		origin->accepted_count = count;
+		strlcpy(origin->accepted_digest, digest, sizeof(origin->accepted_digest));
+		origin->accepted_valid = 1;
 	}
 	staging = safe_alloc(sizeof(*staging));
 	strlcpy(staging->epoch, epoch, sizeof(staging->epoch));
@@ -5847,7 +5934,7 @@ static void udb_ocl_handle_item(Client *direct_peer, const char *parv[])
 		!udb_ocl_is_lower_hex(digest, UDB_OCL_DIGEST_HEX_LEN) || !valid_operclass_name(name))
 		return;
 	origin = udb_ocl_validate_frame(direct_peer, origin_sid, 0);
-	if (!origin || !origin->staging)
+	if (!origin || !origin->member || !origin->staging)
 		return;
 	st = origin->staging;
 	if (strcmp(st->epoch, epoch) || st->generation != generation)
@@ -5883,11 +5970,18 @@ static void udb_ocl_handle_end(Client *direct_peer, const char *parv[])
 	if (!udb_strtoul_strict(parv[6], &generation) || !generation || !udb_ocl_is_lower_hex(epoch, UDB_OCL_EPOCH_LEN))
 		return;
 	origin = udb_ocl_validate_frame(direct_peer, origin_sid, 0);
-	if (!origin || !origin->staging)
+	if (!origin || !origin->member || !origin->staging)
 		return;
 	st = origin->staging;
 	if (strcmp(st->epoch, epoch) || st->generation != generation)
 		return; /* stale */
+	if (!origin->accepted_valid || strcmp(origin->accepted_epoch, st->epoch) ||
+		origin->accepted_generation != st->generation || origin->accepted_count != st->count ||
+		strcmp(origin->accepted_digest, st->inventory_digest))
+	{
+		udb_ocl_stage_abort(origin, "staging is no longer the high-water snapshot");
+		return;
+	}
 	if (origin->stage_received != st->count)
 	{
 		udb_ocl_stage_abort(origin, "item count mismatch");
@@ -5969,7 +6063,7 @@ static void udb_ocl_maybe_replay_to_peer(Client *server)
 		udb_ocl_send_inventory_to(server, me.id, udb_ocl_local);
 	for (origin = udb_ocl_origins; origin; origin = origin->next)
 	{
-		if (origin->current)
+		if (origin->member && origin->current)
 			udb_ocl_send_inventory_to(server, origin->sid, origin->current);
 	}
 	if (peer->oclg_subscribed)
@@ -5980,6 +6074,7 @@ static void udb_ocl_membership_changed(void)
 {
 	if (!udb_ctx)
 		return;
+	udb_ocl_membership_rebuild();
 	udb_oclg_recompute();
 }
 
@@ -5987,7 +6082,10 @@ static void udb_ocl_origin_quit(Client *client)
 {
 	if (!udb_ctx || !client || !*client->id)
 		return;
-	udb_ocl_remove_origin(client->id);
+	/* Descendants of a split may already be gone without receiving this hook. */
+	udb_ocl_member_remove(client->id);
+	udb_ocl_membership_prune_invisible();
+	udb_ocl_purge_nonmembers();
 	udb_oclg_recompute();
 }
 
@@ -6076,17 +6174,15 @@ static UdbOclEntry *udb_ocl_find_entry(UdbOclInventory *inv, const char *name)
 
 static int udb_ocl_registry_complete(void)
 {
-	Client *acptr;
 	UdbOclOrigin *origin;
 
 	if (!udb_ocl_local)
 		return 0;
-	list_for_each_entry(acptr, &global_server_list, client_node)
+	for (origin = udb_ocl_origins; origin; origin = origin->next)
 	{
-		if (!IsServer(acptr) || IsMe(acptr) || IsULine(acptr))
+		if (!origin->member)
 			continue;
-		origin = udb_ocl_find_origin(acptr->id);
-		if (!origin || !origin->current)
+		if (!origin->current)
 			return 0;
 	}
 	return 1;
@@ -6184,6 +6280,8 @@ static void udb_oclg_recompute(void)
 			{
 				UdbOclEntry *match;
 
+				if (!origin->member)
+					continue;
 				if (!origin->current)
 				{
 					ok = 0;
@@ -10205,7 +10303,7 @@ static void udb_query_send_status(Client *client)
 
 static void udb_query_send_operclasses(Client *client, const char *filter)
 {
-	Client *acptr;
+	UdbOclOrigin *origin;
 	int shown = 0;
 
 	if (!udb_ctx)
@@ -10226,11 +10324,11 @@ static void udb_query_send_operclasses(Client *client, const char *filter)
 				   udb_ocl_local ? udb_ocl_local->generation : 0, udb_ocl_local ? udb_ocl_local->count : 0,
 				   udb_ocl_local ? udb_ocl_local->inventory_digest : "-");
 	}
-	list_for_each_entry(acptr, &global_server_list, client_node)
+	for (origin = udb_ocl_origins; origin; origin = origin->next)
 	{
-		UdbOclOrigin *origin;
+		Client *acptr = udb_ocl_find_server(origin->sid);
 
-		if (!IsServer(acptr) || IsMe(acptr) || IsULine(acptr))
+		if (!origin->member || !udb_ocl_is_participant(acptr) || IsMe(acptr))
 			continue;
 		if (filter && !match_simple(filter, acptr->name))
 			continue;
@@ -10254,7 +10352,7 @@ static void udb_query_send_operclasses(Client *client, const char *filter)
 
 static void udb_query_send_operclass(Client *client, const char *name)
 {
-	Client *acptr;
+	UdbOclOrigin *origin;
 	UdbOclEntry *local_entry;
 	int mismatch;
 
@@ -10280,14 +10378,13 @@ static void udb_query_send_operclass(Client *client, const char *name)
 		return;
 	}
 	mismatch = 0;
-	list_for_each_entry(acptr, &global_server_list, client_node)
+	for (origin = udb_ocl_origins; origin; origin = origin->next)
 	{
-		UdbOclOrigin *origin;
+		Client *acptr = udb_ocl_find_server(origin->sid);
 		UdbOclEntry *entry;
 
-		if (!IsServer(acptr) || IsMe(acptr) || IsULine(acptr))
+		if (!origin->member || !udb_ocl_is_participant(acptr) || IsMe(acptr))
 			continue;
-		origin = udb_ocl_find_origin(acptr->id);
 		entry = (origin && origin->current) ? udb_ocl_find_entry(origin->current, name) : NULL;
 		if (!entry)
 		{
@@ -11536,6 +11633,7 @@ static int udb_module_load(ModuleInfo *modinfo)
 		return MOD_FAILED;
 	}
 	udb_sync_snomask_filter();
+	udb_ocl_membership_rebuild();
 	udb_ocl_local_rebuild();
 	udb_nicks_load(modinfo);
 	udb_channels_load(modinfo);

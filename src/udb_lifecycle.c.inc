@@ -1050,6 +1050,7 @@ static int udb_module_load(ModuleInfo *modinfo)
 		return MOD_FAILED;
 	}
 	udb_sync_snomask_filter();
+	udb_ocl_membership_rebuild();
 	udb_ocl_local_rebuild();
 	udb_nicks_load(modinfo);
 	udb_channels_load(modinfo);

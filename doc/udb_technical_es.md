@@ -323,8 +323,11 @@ participante tiene cargados en `operclass {}`. OCLG es una proyección derivada
 publica a los consumidores suscritos, típicamente Services. Ninguno de los dos
 se persiste en los bloques `udb_*.db`.
 
-**Participantes:** todo servidor IRCd visible que no sea ULine, incluido el
-servidor local. Cada originSID es la única autoridad de su inventario.
+**Participantes:** el servidor local y cada servidor IRCd visible que no sea
+ULine. La membership OCL se registra explícitamente en `SERVER_CONNECT`, se
+reconcilia al cargar el módulo y se elimina antes de recalcular la vista en
+`SERVER_QUIT`; los descendientes retirados durante un netsplit también se
+purgan. Cada originSID es la única autoridad de su inventario.
 
 **Fingerprint efectivo:** cada clase se canonicaliza desde la estructura
 runtime (nombre, parent, árbol ACL con ALLOW/DENY y variables, orden de
@@ -348,19 +351,30 @@ Semántica de recepción:
   hexadecimales de 64 caracteres y `inventory_digest` coincidente) hace commit
   atómico. Solo después del commit se reenvía el snapshot a otros peers.
 - `epoch16` identifica la instancia que emitió el inventario (nuevo en cada
-  carga del módulo); `generation` es monótona dentro del epoch. Un epoch nuevo
-  del mismo originSID invalida inmediatamente el inventario anterior y cualquier
-  frame posterior de un epoch sustituido se considera stale.
+  carga del módulo); `generation` es monótona dentro del epoch. Un high-water
+  independiente conserva epoch, generation, count y digest de la generation
+  máxima observada. Una generation inferior es stale incluso si el stage nuevo
+  abortó o expiró; no se conserva historial de descriptores inferiores.
+- Un epoch nuevo del mismo originSID invalida inmediatamente el inventario
+  anterior y cualquier frame posterior de un epoch sustituido se considera
+  stale. En un `/REHASH`, UDB se descarga y vuelve a cargar, por lo que comienza
+  una instancia OCL nueva y reconstruye el registry mediante HEL y replay.
 - Aceptar un `BEGIN` más nuevo hace que el snapshot anterior deje de participar
   en el cálculo GLOBAL de inmediato; si el nuevo stage aborta o expira
   (`UDB_OCL_STAGE_TIMEOUT`, 30s), el origen permanece sin inventario actual
   hasta recibir otro snapshot válido.
-- La misma epoch/generation con digest distinto es una violación de protocolo:
-  el frame se ignora sin reemplazar el estado.
+- La misma epoch/generation high-water con count o digest distinto es una
+  violación de protocolo, también después de abortar el stage; el frame se
+  ignora sin reemplazar el estado. El descriptor idéntico puede retransmitirse
+  si el intento anterior fue abortado.
 - Todo frame se acepta solo si originSID es un servidor participante visible y
   el frame llegó por el enlace que lo alcanza (`origin->direction`).
 - Al desaparecer un servidor (SERVER_QUIT/SQUIT) se eliminan inmediatamente su
-  inventario, stage y epochs; la vista global se recalcula con la red visible.
+  membership, inventario, stage, watermark y epochs; la vista global se recalcula
+  solo con los miembros actuales.
+- Cada cambio efectivo del inventario local reemplaza primero el estado local,
+  recalcula OCLG inmediatamente y después difunde el nuevo OCL. Un `/REHASH` sin
+  cambio efectivo no produce una nueva generation dentro de esa instancia.
 - Al completarse HEL, el peer recibe un replay del inventario local y de todos
   los inventarios remotos ya comprometidos; no necesita consultar nodo por nodo.
 
@@ -372,9 +386,9 @@ Semántica de recepción:
 :<sid> DB <consumerSID> OCLG END <epoch16> <generation>
 ```
 
-Un operclass es GLOBAL solo cuando el registry está completo (todos los
-participantes visibles tienen inventario actual) y el digest efectivo coincide
-en todos. Cada cambio efectivo se entrega como snapshot completo atómico; un
+Un operclass es GLOBAL solo cuando el registry está completo (todos los miembros
+OCL actuales tienen inventario actual) y el digest efectivo coincide en todos.
+Cada cambio efectivo se entrega como snapshot completo atómico; un
 snapshot INCOMPLETE tiene cero elementos, de modo que el consumidor puede hacer
 swap atómico y retirar toda disponibilidad previa sin ventanas parciales. La
 generation de OCLG es local al nodo emisor y solo se incrementa ante cambios
@@ -454,11 +468,11 @@ Para garantizar que ningún registro sufra truncado en ninguna etapa (memoria, s
 #### Validación Matemática de Codificación Spamfilter:
 - Expresión regular raw: $\le 3072$ bytes (`UDB_SPAMFILTER_PATTERN_MAX`).
 - Codificación Base64 RFC 4648: $\lceil 3072 / 3 \rceil \times 4 = 4096$ caracteres.
-- Componente raw con prefijo `b64:`: $4 + 4096 = 4100$ bytes ($\le \text{UDB\_COMPONENT\_RAW\_MAX } 4608$).
-- Componente percent-encoded (`b64%3A`): $4100 + 2 = 4102$ bytes ($\le \text{UDB\_COMPONENT\_ENCODED\_MAX } 4608$).
-- Ruta completa (`K::F::b64%3A...::reason`): $4116$ bytes ($\le \text{UDB\_RECORD\_PATH\_MAX } 8192$).
-- Línea serializada en disco: $4116 + 1 + 4096 + 1 = 8214$ bytes ($\le \text{UDB\_RECORD\_LINE\_MAX } 12320$).
-- Trama de red S2S: $8214 + 256 = 8470$ bytes ($\le \text{UDB\_S2S\_LINE\_MAX } 16384$).
+- Componente raw con prefijo `b64:`: $4 + 4096 = 4100$ bytes ($\le 4608$; `UDB_COMPONENT_RAW_MAX`).
+- Componente percent-encoded (`b64%3A`): $4100 + 2 = 4102$ bytes ($\le 4608$; `UDB_COMPONENT_ENCODED_MAX`).
+- Ruta completa (`K::F::b64%3A...::reason`): $4116$ bytes ($\le 8192$; `UDB_RECORD_PATH_MAX`).
+- Línea serializada en disco: $4116 + 1 + 4096 + 1 = 8214$ bytes ($\le 12320$; `UDB_RECORD_LINE_MAX`).
+- Trama de red S2S: $8214 + 256 = 8470$ bytes ($\le 16384$; `UDB_S2S_LINE_MAX`).
 
 Para `INS`, `DEL` y `DRP`, UDB primero clona el bloque activo y aplica el
 cambio al candidato privado. Solo después de escribir y renombrar atómicamente

@@ -33,6 +33,7 @@ IRCD_SID = "001"
 LINK_PASSWORD = "udb-ocl-link-password"
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 EPOCH16 = re.compile(r"^[0-9a-f]{16}$")
+UDB_OCL_STAGE_TIMEOUT = 30
 
 
 class EnvironmentUnavailable(Exception):
@@ -50,7 +51,8 @@ def free_port():
         return sock.getsockname()[1]
 
 
-def write_config(path, name, sid, client_port, server_port, tls_port, module, dbdir):
+def write_config(path, name, sid, client_port, server_port, tls_port, module, dbdir, changed=False):
+    udbtest_channel_permission = "operonly;" if changed else "oper { }"
     path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
 include "{RUNTIME_ROOT}/conf/snomasks.default.conf";
 blacklist-module "geoip_classic";
@@ -84,8 +86,9 @@ link {PEER_NAME} {{
 operclass udbtest {{
 	permissions {{
 		channel {{
-			oper {{ }}
+			{udbtest_channel_permission}
 		}}
+		server {{ rehash {{ local; }} }}
 	}}
 }}
 operclass udbtest-child {{
@@ -95,6 +98,12 @@ operclass udbtest-child {{
 			oper {{ }}
 		}}
 	}}
+}}
+oper udbtest-oper {{
+    mask "*@*";
+    password "udbtest-pass";
+    operclass "udbtest";
+    class clients;
 }}
 loadmodule "cloak_sha256";
 loadmodule "third/udb";
@@ -207,6 +216,10 @@ class MockPeer:
         deadline = time.monotonic() + seconds
         self.receive(deadline)
 
+    def clear(self):
+        self.lines.clear()
+        self.buffer = ""
+
     def collect_ocl_items(self):
         items = []
         for line in self.lines:
@@ -299,8 +312,72 @@ class DaemonLogReader:
         raise AssertionError(f"Timeout waiting for daemon log: {description}\nCaptured logs:\n{self.output}")
 
 
+class MockClient:
+    def __init__(self, host, port, nick="udb-ocl-client"):
+        self.sock = socket.create_connection((host, port), timeout=5)
+        self.sock.settimeout(0.25)
+        self.lines = []
+        self.buffer = ""
+        self.send(f"NICK {nick}")
+        self.send(f"USER {nick} 0 * :UDB OCL test client")
+
+    def send(self, command):
+        self.sock.sendall((command + "\r\n").encode("ascii"))
+
+    def receive(self, deadline):
+        while time.monotonic() < deadline:
+            try:
+                data = self.sock.recv(4096)
+            except socket.timeout:
+                return
+            if not data:
+                return
+            self.buffer += data.decode("utf-8", errors="replace")
+            while "\r\n" in self.buffer:
+                line, self.buffer = self.buffer.split("\r\n", 1)
+                if line:
+                    if line.startswith("PING "):
+                        self.send("PONG " + line.split(" ", 1)[1])
+                        continue
+                    self.lines.append(line)
+
+    def wait_for(self, predicate, description, timeout=5):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if any(predicate(line) for line in self.lines):
+                return
+            self.receive(deadline)
+        raise AssertionError(f"Timeout waiting for {description}: {self.lines}")
+
+    def close(self):
+        self.sock.close()
+
+
 def log_count_containing(logs, needle):
     return sum(1 for l in logs.lines if needle in l)
+
+
+def rehash_and_replay(config, module, dbdir, client_port, server_port, peer, logs, changed, remote_entries):
+    write_config(config, "udb-ocl.test", IRCD_SID, client_port, server_port, free_port(), module, dbdir,
+                 changed=changed)
+    client = MockClient("127.0.0.1", client_port, "rehash-client")
+    try:
+        client.wait_for(lambda l: " 001 " in l, "rehash client registration")
+        client.send("OPER udbtest-oper udbtest-pass")
+        client.wait_for(lambda l: " 381 " in l, "rehash operator login")
+        peer.clear()
+        client.send("REHASH")
+        client.wait_for(lambda l: " 219 " in l or "Rehashing" in l, "rehash response", timeout=10)
+        peer.negotiate(ocl=True)
+        peer.wait_for(lambda l: re.search(r" DB \* OCL BEGIN 001 [0-9a-f]{16} 1 ", l),
+                      "new local OCL generation")
+        peer.send_ocl_snapshot("ee" * 8, 4, remote_entries)
+        logs.wait_for(lambda l: "Committed operclass inventory for origin 002: generation 4" in l,
+                      "remote replay after rehash")
+        peer.drain()
+        return peer.collect_oclg_snapshots()
+    finally:
+        client.close()
 
 
 def find_module_path():
@@ -433,50 +510,105 @@ def run_tests(ircd_bin, keep=False):
 
         # ---------------------------------------------------------------
         STAGE_EPOCH = "dd" * 8
-        # Test 7: duplicate ITEM aborts the stage
+        # Test 7: aborting a newer generation cannot roll back to current
         # ---------------------------------------------------------------
         agg = ocl_inventory_digest(local_entries[:1])
         peer.send(f"DB * OCL BEGIN {PEER_SID} {STAGE_EPOCH} 3 1 {agg}")
         peer.send(f"DB * OCL ITEM {PEER_SID} {STAGE_EPOCH} 3 {local_entries[0][0]} {local_entries[0][1]}")
         peer.send(f"DB * OCL ITEM {PEER_SID} {STAGE_EPOCH} 3 {local_entries[0][0]} {local_entries[0][1]}")
         logs.wait_for(lambda l: "staging for origin" in l and "duplicate item" in l,
-                      "duplicate item stage abort")
-        print("PASS: duplicate ITEM aborted the stage")
+                      "newer stage abort")
+        commits_after_abort = log_count_containing(logs, "Committed operclass inventory")
+        peer.send_ocl_snapshot("bb" * 8, 2, local_entries)
+        time.sleep(0.5)
+        logs.read_available()
+        assert log_count_containing(logs, "Committed operclass inventory") == commits_after_abort, \
+            "an older generation was committed after a newer stage aborted"
+        print("PASS: aborted newer generation permanently prevented rollback")
 
         # ---------------------------------------------------------------
-        # Test 8: END with item count mismatch aborts the stage
+        # Test 8: same high-water generation with a different descriptor is rejected
         # ---------------------------------------------------------------
-        peer.send(f"DB * OCL BEGIN {PEER_SID} {STAGE_EPOCH} 4 1 {agg}")
-        peer.send(f"DB * OCL END {PEER_SID} {STAGE_EPOCH} 4")
-        logs.wait_for(lambda l: "item count mismatch" in l,
-                      "count mismatch stage abort")
-        print("PASS: END with wrong item count aborted the stage")
+        bad_agg = ("0" if agg[-1] != "0" else "1") + agg[1:]
+        peer.send(f"DB * OCL BEGIN {PEER_SID} {STAGE_EPOCH} 3 1 {bad_agg}")
+        logs.wait_for(lambda l: "different descriptor" in l,
+                      "post-abort protocol violation")
+        print("PASS: aborted high-water generation kept its descriptor immutable")
 
         # ---------------------------------------------------------------
-        # Test 9: wrong aggregate digest aborts the stage and is not forwarded
+        # Test 9: exact retransmission of an aborted generation is accepted
         # ---------------------------------------------------------------
-        wrong_agg = ("0" if agg[-1] != "0" else "1").join([agg[:-1], ""])
-        peer.send(f"DB * OCL BEGIN {PEER_SID} {STAGE_EPOCH} 5 1 {wrong_agg}")
-        peer.send(f"DB * OCL ITEM {PEER_SID} {STAGE_EPOCH} 5 {local_entries[0][0]} {local_entries[0][1]}")
-        peer.send(f"DB * OCL END {PEER_SID} {STAGE_EPOCH} 5")
-        logs.wait_for(lambda l: "inventory digest mismatch" in l,
-                      "digest mismatch stage abort")
-        print("PASS: END with incorrect inventory_digest aborted the stage")
+        peer.send_ocl_snapshot(STAGE_EPOCH, 3, local_entries[:1])
+        logs.wait_for(lambda l: "Committed operclass inventory for origin 002: generation 3" in l,
+                      "same high-water retransmission commit")
+        print("PASS: exact retransmission rebuilt and committed the aborted generation")
 
         # ---------------------------------------------------------------
-        # Test 10: recovery after aborts
+        # Test 10: timeout preserves the watermark and exact retry recovers
         # ---------------------------------------------------------------
-        peer.send_ocl_snapshot("ee" * 8, 6, local_entries)
-        logs.wait_for(lambda l: "Committed operclass inventory for origin 002: generation 6" in l,
-                      "recovery commit")
-        print("PASS: registry recovers with a fresh valid snapshot after aborts")
+        TIMEOUT_EPOCH = "ee" * 8
+        peer.send(f"DB * OCL BEGIN {PEER_SID} {TIMEOUT_EPOCH} 4 1 {agg}")
+        logs.wait_for(lambda l: "Operclass inventory staging for origin 002 timed out" in l,
+                      "stage timeout", timeout=UDB_OCL_STAGE_TIMEOUT + 5)
+        commits_before_stale = log_count_containing(logs, "Committed operclass inventory")
+        peer.send_ocl_snapshot(STAGE_EPOCH, 3, local_entries[:1])
+        time.sleep(0.5)
+        logs.read_available()
+        assert log_count_containing(logs, "Committed operclass inventory") == commits_before_stale, \
+            "an older generation was committed after timeout"
+        peer.send_ocl_snapshot(TIMEOUT_EPOCH, 4, local_entries[:1])
+        logs.wait_for(lambda l: "Committed operclass inventory for origin 002: generation 4" in l,
+                      "timeout retransmission commit")
+        print("PASS: timeout preserved freshness and exact retransmission recovered")
 
         # ---------------------------------------------------------------
-        # Test 11: origin quit -> registry INCOMPLETE and OCLG withdrawn
+        # Test 11: REHASH creates a new instance and converges after replay
+        # ---------------------------------------------------------------
+        changed_view = rehash_and_replay(config, module_path, data_dir, client_port, server_port, peer, logs, True,
+                                         local_entries[:1])
+        assert any(state == "READY" and not entries for _, state, entries in changed_view), \
+            f"expected empty READY OCLG after local class change: {changed_view}"
+        print("PASS: REHASH created a new OCL epoch and removed the changed class after remote replay")
+
+        # ---------------------------------------------------------------
+        # Test 12: restoring the local definition restores the intersection
+        # ---------------------------------------------------------------
+        restored_view = rehash_and_replay(config, module_path, data_dir, client_port, server_port, peer, logs, False,
+                                          local_entries[:1])
+        assert any(state == "READY" and any(name == "udbtest" for name, _ in entries)
+                   for _, state, entries in restored_view), \
+            f"expected udbtest in READY OCLG after restore: {restored_view}"
+        print("PASS: restoring operclass configuration restored the OCLG intersection")
+
+        # ---------------------------------------------------------------
+        # Test 13: unchanged rehash has one local publication in the new instance
+        # ---------------------------------------------------------------
+        unchanged_view = rehash_and_replay(config, module_path, data_dir, client_port, server_port, peer, logs, False,
+                                           local_entries[:1])
+        local_publications = sum(1 for line in peer.lines
+                                 if re.search(r" DB \* OCL BEGIN 001 [0-9a-f]{16} 1 ", line))
+        assert local_publications == 1, f"unchanged rehash caused OCL publication churn: {peer.lines}"
+        assert any(state == "READY" and any(name == "udbtest" for name, _ in entries)
+                   for _, state, entries in unchanged_view), unchanged_view
+        print("PASS: unchanged rehash avoided duplicate local OCL publication")
+
+        # ---------------------------------------------------------------
+        # Test 14: origin quit -> member removal keeps the local registry READY
         # ---------------------------------------------------------------
         peer.close()
-        logs.wait_for(lambda l: "Operclass registry incomplete" in l, "registry INCOMPLETE after origin quit")
-        print("PASS: origin quit withdrew the registry and OCLG availability")
+        time.sleep(0.5)
+        local_client = MockClient("127.0.0.1", client_port)
+        local_client.wait_for(lambda l: " 001 " in l, "local client registration")
+        local_client.send("OPER udbtest-oper udbtest-pass")
+        local_client.wait_for(lambda l: " 381 " in l, "local operator login")
+        local_client.send("UDB OPERCLASSES")
+        local_client.wait_for(lambda l: "Operclass registry: READY" in l,
+                              "registry READY after origin quit")
+        local_client.send("UDB OPERCLASS udbtest")
+        local_client.wait_for(lambda l: "Operclass udbtest: GLOBAL" in l,
+                              "local class GLOBAL after origin quit")
+        local_client.close()
+        print("PASS: origin quit removed membership and kept the local registry READY")
 
     finally:
         if proc:
