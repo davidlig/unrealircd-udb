@@ -176,9 +176,9 @@ class MockPeer:
         self.send("EOS")
         if autostart_hel:
             prop = propagator_advertised if propagator_advertised is not None else "?"
-            self.send(f"DB {self.target_sid} HEL 4 {prop} OCL")
+            self.send(f"DB {self.target_sid} HEL 4 {prop} 0000000000000001 OCL")
             self.wait_for(lambda line: " DB " in line and " HEL 4 " in line, f"{self.name} HEL response")
-            self.send(f"DB {self.target_sid} HEL 4 ACK OCL")
+            self.send(f"DB {self.target_sid} HEL 4 ACK {prop} 0000000000000001 OCL")
             if send_inf:
                 for b in ('N', 'C', 'I', 'S', 'L', 'K'):
                     self.send(f"DB {self.target_sid} INF 1 {b} 00000000 0")
@@ -789,7 +789,7 @@ def test_suite():
 
             peer_a = MockPeer("peer-a.test", "00A", "127.0.0.1", p10_ports[1], "010")
             peer_a.send("DB 010 INF 1 N 00000000 0")
-            peer_a.send("DB 010 HEL 4 ACK OCL")
+            peer_a.send("DB 010 HEL 4 ACK ? 0000000000000001 OCL")
 
             peer_b = MockPeer("peer-b.test", "00B", "127.0.0.1", p10_ports[1], "010")
             peer_b.send("DB 010 BEGIN 1 N tx_b 00000000")
@@ -918,15 +918,15 @@ def test_suite():
         )
         try:
             peer14a = MockPeer("peer14a.test", "04A", "127.0.0.1", p14_ports[1], "014", autostart_hel=False)
-            peer14a.send("DB 014 HEL 4 primary14.test OCL")
-            peer14a.send("DB 014 HEL 4 ACK OCL")
+            peer14a.send("DB 014 HEL 4 primary14.test 0000000000000001 OCL")
+            peer14a.send("DB 014 HEL 4 ACK primary14.test 0000000000000001 OCL")
             peer14a.wait_for(lambda line: " DB " in line and " INF " in line,
                              "inventory after selection-before-ACK")
             peer14a.close()
 
             peer14b = MockPeer("peer14b.test", "04B", "127.0.0.1", p14_ports[1], "014", autostart_hel=False)
-            peer14b.send("DB 014 HEL 4 ACK OCL")
-            peer14b.send("DB 014 HEL 4 primary14.test OCL")
+            peer14b.send("DB 014 HEL 4 ACK primary14.test 0000000000000001 OCL")
+            peer14b.send("DB 014 HEL 4 primary14.test 0000000000000001 OCL")
             peer14b.wait_for(lambda line: " DB " in line and " INF " in line,
                              "inventory after ACK-before-selection")
             peer14b.send("DB 014 INF N 00000000 0")
@@ -1044,9 +1044,9 @@ def test_suite():
             bob_crc = zlib.crc32((bob_rec + "\n").encode("utf-8")) & 0xFFFFFFFF
             prop16b = MockPeer("prop-a.test", "00P", "127.0.0.1", p16_ports[1], "016",
                                propagator_advertised="prop-a.test", autostart_hel=False)
-            prop16b.send("DB 016 HEL 4 prop-a.test OCL")
+            prop16b.send("DB 016 HEL 4 prop-a.test 0000000000000001 OCL")
             prop16b.wait_for(lambda l: " DB " in l and " HEL 4 " in l, "HEL response after restart")
-            prop16b.send("DB 016 HEL 4 ACK OCL")
+            prop16b.send("DB 016 HEL 4 ACK prop-a.test 0000000000000001 OCL")
             prop16b.send("DB 016 INF 1 N deadbeef 0")
             for b in ('C', 'I', 'S', 'L', 'K'):
                 prop16b.send(f"DB 016 INF 1 {b} 00000000 0")

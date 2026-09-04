@@ -230,8 +230,8 @@ Cuando un servidor se conecta a otro, se verifica el estado de los bloques con
 un CRC32 de los registros lógicos canónicos. El digest ordena los registros
 serializados `ruta valor`, por lo que los encabezados, timestamps de guardado y
 el orden de inserción no lo afectan. Tras `HOOKTYPE_SERVER_SYNC`, cada peer
-directamente enlazado recibe una petición `HEL 4 <propagador-seleccionado> OCL`.
-Solo el `HEL 4 ACK OCL` directo correspondiente confirma UDB V4 para ese enlace;
+directamente enlazado recibe una petición `HEL 4 <propagador-seleccionado> <epoch16> OCL`.
+Solo el `HEL 4 ACK <propagador-seleccionado> <epoch16> OCL` directo correspondiente confirma UDB V4 para ese enlace;
 antes no se envían `INF`, frames staged ni frames DB UDB reenviados. Si no llega
 el acuse en 60 segundos, el enlace se aborta automáticamente mediante `SQUIT`
 para proteger la red de desincronizaciones. El token `OCL` es obligatorio: un
@@ -240,7 +240,7 @@ capacidad. `HEL` es el único frame DB
 aceptado antes de confirmar y nunca se reenvía fuera del enlace directo.
 
 **HEL (Negociación de capacidad y Auto-Bootstrap):**
-`:<sid> DB <sid-peer-directo> HEL 4 <propagador-seleccionado> OCL [OCLG]`
+`:<sid> DB <sid-peer-directo> HEL 4 <propagador-seleccionado> <epoch16> OCL [OCLG]`
 
 El campo de propagador seleccionado es `?` solo cuando no existe ninguna fuente
 de propagator configurada y el nodo aún no está READY. Permite a ese nodo
@@ -248,7 +248,7 @@ descubrir la autoridad del clúster y
 autoriza al peer de bootstrap exclusivo a entregar el snapshot inicial. Un nodo
 READY sin política es una autoridad standalone y se anuncia con su propio nombre
 en lugar de `?`. Un servidor configurado
-pero no disponible se anuncia como `HEL 4 - OCL`, no como `?`; `-` no concede
+pero no disponible se anuncia como `HEL 4 - <epoch16> OCL`, no como `?`; `-` no concede
 autorización staged y evita ampliar el acceso de forma silenciosa.
 
 El token opcional `OCLG` declara al peer como consumidor de la vista global de
@@ -257,7 +257,14 @@ un HEL con `OCLG` explícito recibe la proyección. La capability OCLG no convie
 al consumidor en participante del consenso OCL.
 
 **Acuse HEL:**
-`:<sid> DB <sid-peer-directo> HEL 4 ACK OCL`
+`:<sid> DB <sid-peer-directo> HEL 4 ACK <propagador-seleccionado> <epoch16> OCL [OCLG]`
+
+`epoch16` identifica la instancia cargada del módulo UDB. Un anuncio repetido
+con el mismo epoch es idempotente. Un epoch distinto marca una recarga: el peer
+retira solo el inventario OCL de ese origen directo, reinicia los latches de
+replay/suscripción ligados a la instancia e intercambia HEL de nuevo sobre la
+conexión SERVER existente. El ACK contiene el anuncio completo para recuperar
+ambos sentidos sin polling ni reconexión.
 
 **INF (Información del Bloque):**
 `:<sid> DB <destino> INF <id_ronda> <letra_bloque> <crc32_hex> <timestamp>`
@@ -336,7 +343,7 @@ efectivo del parent. Clases con parent ausente, ciclo, profundidad excesiva o
 estructura no serializable se omiten junto con sus descendientes; el resto del
 inventario sigue siendo válido.
 
-**Inventario OCL (origin → todos los peers HEL confirmados):**
+**Inventario OCL (origin → todos los peers HEL confirmados que no sean ULine):**
 
 ```text
 :<sourceSID> DB * OCL BEGIN <originSID> <epoch16> <generation> <count> <inventory_digest>
@@ -375,7 +382,7 @@ Semántica de recepción:
 - Cada cambio efectivo del inventario local reemplaza primero el estado local,
   recalcula OCLG inmediatamente y después difunde el nuevo OCL. Un `/REHASH` sin
   cambio efectivo no produce una nueva generation dentro de esa instancia.
-- Al completarse HEL, el peer recibe un replay del inventario local y de todos
+- Al completarse HEL, un peer que no sea ULine recibe un replay del inventario local y de todos
   los inventarios remotos ya comprometidos; no necesita consultar nodo por nodo.
 
 **Vista global OCLG (solo a peers que declararon `OCLG` en HEL):**

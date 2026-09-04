@@ -77,7 +77,7 @@ EVENT(udb_test_mutator_event)
 			return;
 		}
 		/* Re-declare a different selected source so B treats C as non-propagating. */
-		sendto_one(mutator_peer, NULL, ":%s DB %s HEL 4 udb-a.test OCL", me.id, mutator_peer->id);
+		sendto_one(mutator_peer, NULL, ":%s DB %s HEL 4 udb-a.test 0000000000000001 OCL", me.id, mutator_peer->id);
 		sendto_one(mutator_peer, NULL, ":%s DB %s BEGIN 9000 N attack 00000000", me.id, mutator_peer->id);
 		sendto_one(mutator_peer, NULL, ":%s DB %s PUT 9000 N attack attack :unauthorized", me.id,
 		           mutator_peer->id);

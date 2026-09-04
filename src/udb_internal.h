@@ -424,6 +424,10 @@ static int udb_has_staged_sync(Client *server);
 static int udb_peer_authorizes_us(Client *server);
 static int udb_sync_hello_start(Client *server);
 static void udb_sync_hello_ack(Client *server);
+static int udb_hello_epoch_matches(Client *server, const char *epoch);
+static int udb_hello_peer_advertisement(Client *server, const char *propagator, const char *epoch,
+									int oclg_subscribed);
+static const char *udb_sync_hello_propagator(UdbPropagatorSelection *selected);
 static void udb_sync_abort(UdbBlock *block, const char *reason);
 static unsigned int udb_block_letter_to_mask(char letter);
 static int udb_is_database_initialized(UdbContext *ctx);
@@ -518,6 +522,8 @@ static void udb_send_to_debugs(Client *source, const char *fmt, ...) __attribute
 static void udb_ocl_shutdown(void);
 static int udb_ocl_local_rebuild(void);
 static void udb_ocl_maybe_replay_to_peer(Client *server);
+static void udb_ocl_peer_instance_changed(Client *server);
+static const char *udb_ocl_epoch_value(void);
 static void udb_ocl_membership_changed(void);
 static void udb_ocl_origin_quit(Client *client);
 static void udb_ocl_stage_timeout_check(time_t now);

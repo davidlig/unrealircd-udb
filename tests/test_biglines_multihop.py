@@ -140,9 +140,9 @@ class MockPropagator:
         self.wait_for(lambda line: " 001 " in line or " EOS" in line or "NETINFO" in line, "link handshake")
         self.send("EOS")
         prop = propagator_advertised if propagator_advertised is not None else self.name
-        self.send(f"DB {self.target_sid} HEL 4 {prop} OCL")
+        self.send(f"DB {self.target_sid} HEL 4 {prop} 0000000000000001 OCL")
         self.wait_for(lambda line: " DB " in line and " HEL 4 " in line, "UDB HEL response")
-        self.send(f"DB {self.target_sid} HEL 4 ACK OCL")
+        self.send(f"DB {self.target_sid} HEL 4 ACK {prop} 0000000000000001 OCL")
         if send_inventory:
             for letter in ("N", "C", "I", "S", "L", "K"):
                 self.send(f"DB {self.target_sid} INF 1 {letter} 00000000 0")

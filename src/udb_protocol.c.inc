@@ -215,50 +215,51 @@ CMD_FUNC(cmd_db)
 			return;
 		snprintf(logbuf, sizeof(logbuf), "[UDB] S2S DB received: parc=%d target=%s subcmd=%s", parc, target, subcmd);
 		unreal_log(ULOG_INFO, "udb", "UDB_CMD_DB", client, "$msg", log_data_string("msg", logbuf));
-		if (parc == 6 && !strcasecmp(parv[4], "ACK") && !strcasecmp(parv[5], "OCL"))
+		if (parc >= 5 && !strcasecmp(parv[4], "ACK"))
 		{
+			int oclg_subscribe;
+			if ((parc != 8 && parc != 9) || !parv[5] || !parv[6] || strcasecmp(parv[7], "OCL") ||
+				(parc == 9 && strcasecmp(parv[8], "OCLG")))
+				return;
+			oclg_subscribe = parc == 9;
+			if (!udb_hello_peer_advertisement(client, parv[5], parv[6], oclg_subscribe))
+				return;
 			udb_sync_hello_ack(client);
 			return;
 		}
 		/* OCL is part of the mandatory HEL 4 contract: a request without the
 		 * OCL token belongs to a legacy peer that can never be confirmed. */
-		if (parc == 5 || (parc >= 6 && strcasecmp(parv[5], "OCL")))
+		if (parc == 5 || (parc == 6 && !strcasecmp(parv[5], "OCL")) ||
+			(parc >= 7 && strcasecmp(parv[6], "OCL")))
 		{
-			udb_log(ULOG_ERROR, "UDB_HEL_OCL_REQUIRED", client,
-					"Link aborted: HEL 4 request without the mandatory OCL capability token");
-			exit_client_fmt(client, NULL, "Link aborted: server does not support UDB OCL capability");
+			if (parc == 5 || (parc >= 7 && strcasecmp(parv[6], "OCL")))
+			{
+				udb_log(ULOG_ERROR, "UDB_HEL_OCL_REQUIRED", client,
+						"Link aborted: HEL 4 request without the mandatory OCL capability token");
+				exit_client_fmt(client, NULL, "Link aborted: server does not support UDB OCL capability");
+			}
+			else
+				udb_log(ULOG_ERROR, "UDB_HEL_EPOCH_REQUIRED", client,
+						"HEL 4 request missing the mandatory instance epoch");
 			return;
 		}
-		if (parc > 7 || (parc == 7 && strcasecmp(parv[6], "OCLG")))
+		if (parc != 7 && parc != 8)
 			return;
-		if (parc < 6 || !parv[4] || !*parv[4])
+		if (parc == 8 && strcasecmp(parv[7], "OCLG"))
+			return;
+		if (!parv[4] || !*parv[4] || !parv[5] || !udb_hello_epoch_valid(parv[5]))
 			return;
 		{
 			const char *prop = parv[4];
-			int oclg_subscribe = (parc == 7 && !strcasecmp(parv[6], "OCLG"));
+			const char *epoch = parv[5];
+			int oclg_subscribe = (parc == 8);
 			int new_auth = 0;
-			UdbHelloPeer *hello_peer;
 
-			if (!strcmp(prop, "?"))
-			{
-				new_auth = 1;
-			}
-			else if (!strcmp(prop, "-"))
-			{
-				new_auth = 0;
-			}
-			else if (udb_server_name_valid(prop))
-			{
-				new_auth = !strcasecmp(prop, me.name);
-			}
-			else
+			if (!udb_hello_parse_propagator(prop, &new_auth))
 				return;
 
-			hello_peer = udb_hello_peer(client, 1);
-			hello_peer->authorizes_us = new_auth;
-			hello_peer->auth_received = 1;
-			hello_peer->ocl_capable = 1;
-			hello_peer->oclg_subscribed = oclg_subscribe;
+			if (!udb_hello_peer_advertisement(client, prop, epoch, oclg_subscribe))
+				return;
 
 			udb_log(ULOG_INFO, "UDB_HEL_AUTHORIZATION", client,
 					"Direct peer selected $propagator as its staged-sync source (authorizes_us=$auth, oclg=$oclg)",
@@ -268,10 +269,13 @@ CMD_FUNC(cmd_db)
 			/* Each side sends its own request, so only an ACK confirms outbound data. */
 			if (!udb_has_hello(client))
 				udb_sync_hello_start(client);
-			udb_send_db_to_one(client, ":%s DB %s HEL 4 ACK OCL", me.id, client->id);
+			{
+				UdbPropagatorSelection selected;
+				const char *local_prop = udb_sync_hello_propagator(&selected);
+				udb_send_db_to_one(client, ":%s DB %s HEL 4 ACK %s %s OCL", me.id, client->id, local_prop,
+							   udb_ocl_epoch_value());
+			}
 			udb_ocl_maybe_replay_to_peer(client);
-			if (oclg_subscribe && udb_has_hello(client))
-				udb_oclg_push(client);
 			/* A repeated authorized selection is also the explicit retry trigger. */
 			udb_maybe_start_reconciliation(client, new_auth);
 		}

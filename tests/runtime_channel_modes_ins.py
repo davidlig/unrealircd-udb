@@ -258,7 +258,7 @@ class FakeServices:
                       "server UDB HEL")
 
     def hel_ack(self):
-        self.send(f"DB {self.ircd_sid} HEL 4 ACK OCL")
+        self.send(f"DB {self.ircd_sid} HEL 4 ACK ? 0000000000000001 OCL")
 
     def send_ins(self, path, data):
         self.send(f"DB * INS {path} :{data}")

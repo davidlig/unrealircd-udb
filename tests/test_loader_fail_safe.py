@@ -126,9 +126,9 @@ class MockServices:
         self.send(f"SERVER {SERVICES_NAME} 1 :UDB test services")
         self.wait_for(lambda line: " 001 " in line or " EOS" in line or "NETINFO" in line, "link handshake")
         self.send("EOS")
-        self.send(f"DB {self.ircd_sid} HEL 4 ? OCL")
+        self.send(f"DB {self.ircd_sid} HEL 4 ? 0000000000000001 OCL")
         self.wait_for(lambda line: " DB " in line and " HEL 4 " in line, "UDB HEL response")
-        self.send(f"DB {self.ircd_sid} HEL 4 ACK OCL")
+        self.send(f"DB {self.ircd_sid} HEL 4 ACK ? 0000000000000001 OCL")
 
     def send(self, command):
         if not command.startswith(":"):

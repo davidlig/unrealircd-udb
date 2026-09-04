@@ -237,8 +237,8 @@ When a server connects to another, block states are verified using a CRC32 over
 the canonical logical records. The digest sorts serialized `path value` records,
 so save timestamps, comment headers, and sibling insertion order do not affect
 it. After `HOOKTYPE_SERVER_SYNC`, each directly linked peer receives one
-`HEL 4 <selected-propagator> OCL` request. Only the matching direct
-`HEL 4 ACK OCL` confirms UDB V4 for that link; no `INF`, staged frame, or
+`HEL 4 <selected-propagator> <epoch16> OCL` request. Only the matching direct
+`HEL 4 ACK <selected-propagator> <epoch16> OCL` confirms UDB V4 for that link; no `INF`, staged frame, or
 forwarded UDB DB frame is sent first. A missing acknowledgement times out after
 60 seconds and automatically aborts the link with `SQUIT`. The `OCL` token is
 mandatory: a bare `HEL 4` belongs to a legacy peer and the link is aborted
@@ -247,7 +247,7 @@ confirmation and is
 never routed beyond the direct link.
 
 **HEL (Capability Negotiation and Auto-Bootstrap):**
-`:<sid> DB <direct-peer-sid> HEL 4 <selected-propagator> OCL [OCLG]`
+`:<sid> DB <direct-peer-sid> HEL 4 <selected-propagator> <epoch16> OCL [OCLG]`
 
 The selected propagator field is `?` only when neither propagator source is
 configured and the node is not yet READY; it allows that node to discover
@@ -255,7 +255,7 @@ cluster authority and authorizes
 the single exclusive bootstrap peer to supply the initial staged snapshot. A node
 that is READY without any policy is a standalone authority and advertises its
 own name instead of `?`. A configured but
-unavailable policy is advertised as `HEL 4 - OCL`, not converted to `?`; `-` grants
+unavailable policy is advertised as `HEL 4 - <epoch16> OCL`, not converted to `?`; `-` grants
 no staged-sync authorization and therefore cannot silently broaden access.
 
 The optional `OCLG` token declares the peer as a consumer of the global
@@ -264,7 +264,14 @@ subscription: only a HEL carrying an explicit `OCLG` receives the projection.
 The OCLG capability does not make the consumer an OCL consensus participant.
 
 **HEL acknowledgement:**
-`:<sid> DB <direct-peer-sid> HEL 4 ACK OCL`
+`:<sid> DB <direct-peer-sid> HEL 4 ACK <selected-propagator> <epoch16> OCL [OCLG]`
+
+`epoch16` identifies the loaded UDB module instance. A repeated advertisement
+with the same epoch is idempotent. A changed epoch is a reload boundary: the
+peer withdraws only that direct origin's OCL inventory, resets instance-scoped
+replay/subscription latches, and exchanges HEL again over the surviving SERVER
+connection. The ACK carries the complete advertisement so both directions
+recover without polling or reconnecting.
 
 **INF (Block Information):**
 `:<sid> DB <target> INF <round_id> <block_letter> <crc32_hex> <timestamp>`
@@ -344,7 +351,7 @@ digest. Classes with a missing parent, a cycle, excessive depth, or an
 unserializable structure are omitted together with their descendants; the rest
 of the inventory remains valid.
 
-**OCL inventory (origin → all HEL-confirmed peers):**
+**OCL inventory (origin → all HEL-confirmed non-ULine peers):**
 
 ```text
 :<sourceSID> DB * OCL BEGIN <originSID> <epoch16> <generation> <count> <inventory_digest>
@@ -383,7 +390,7 @@ Reception semantics:
 - Each effective local inventory change replaces local state, recomputes OCLG
   immediately, and then broadcasts the new OCL. A rehash with no effective
   change does not create another generation within that instance.
-- After HEL completes, the peer receives a replay of the local inventory plus
+- After HEL completes, a non-ULine peer receives a replay of the local inventory plus
   every committed remote inventory; it never needs to poll node by node.
 
 **Global view OCLG (only to peers that declared `OCLG` in HEL):**

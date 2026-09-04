@@ -27,6 +27,12 @@ static int udb_oclg_ready = 0;
 static unsigned long udb_oclg_generation = 0;
 
 static void udb_ocl_ensure_epoch(void);
+
+static const char *udb_ocl_epoch_value(void)
+{
+	udb_ocl_ensure_epoch();
+	return udb_ocl_epoch;
+}
 static void udb_oclg_recompute(void);
 static void udb_oclg_push_subscribers(void);
 static void udb_ocl_stage_discard(UdbOclOrigin *origin);
@@ -613,7 +619,7 @@ static void udb_ocl_send_inventory_to(Client *to, const char *origin_sid, UdbOcl
 {
 	unsigned int i;
 
-	if (!to || !inv)
+	if (!to || !inv || !udb_ocl_is_participant(to))
 		return;
 	if (!udb_send_db_to_one(to, ":%s DB * OCL BEGIN %s %s %lu %u %s", me.id, origin_sid, inv->epoch, inv->generation,
 							inv->count, inv->inventory_digest))
@@ -629,16 +635,35 @@ static void udb_ocl_send_inventory_to(Client *to, const char *origin_sid, UdbOcl
 
 static void udb_ocl_send_inventory_broadcast(Client *except, const char *origin_sid, UdbOclInventory *inv)
 {
+	Client *server;
 	unsigned int i;
 
 	if (!inv)
 		return;
-	udb_sendto_confirmed_servers(except, ":%s DB * OCL BEGIN %s %s %lu %u %s", me.id, origin_sid, inv->epoch,
-								 inv->generation, inv->count, inv->inventory_digest);
+	list_for_each_entry(server, &server_list, special_node)
+	{
+		if (server == except || (except && server == except->direction) || !udb_ocl_is_participant(server) ||
+			!udb_has_hello(server))
+			continue;
+		udb_send_db_to_one(server, ":%s DB * OCL BEGIN %s %s %lu %u %s", me.id, origin_sid, inv->epoch,
+						   inv->generation, inv->count, inv->inventory_digest);
+	}
 	for (i = 0; i < inv->count; i++)
-		udb_sendto_confirmed_servers(except, ":%s DB * OCL ITEM %s %s %lu %s %s", me.id, origin_sid, inv->epoch,
-									 inv->generation, inv->entries[i].name, inv->entries[i].digest);
-	udb_sendto_confirmed_servers(except, ":%s DB * OCL END %s %s %lu", me.id, origin_sid, inv->epoch, inv->generation);
+		list_for_each_entry(server, &server_list, special_node)
+		{
+			if (server == except || (except && server == except->direction) || !udb_ocl_is_participant(server) ||
+				!udb_has_hello(server))
+				continue;
+			udb_send_db_to_one(server, ":%s DB * OCL ITEM %s %s %lu %s %s", me.id, origin_sid, inv->epoch,
+							   inv->generation, inv->entries[i].name, inv->entries[i].digest);
+		}
+	list_for_each_entry(server, &server_list, special_node)
+	{
+		if (server == except || (except && server == except->direction) || !udb_ocl_is_participant(server) ||
+			!udb_has_hello(server))
+			continue;
+		udb_send_db_to_one(server, ":%s DB * OCL END %s %s %lu", me.id, origin_sid, inv->epoch, inv->generation);
+	}
 }
 
 static void udb_ocl_local_publish(void)
@@ -746,6 +771,8 @@ static void udb_ocl_handle_begin(Client *direct_peer, const char *parv[])
 		return;
 	origin = udb_ocl_validate_frame(direct_peer, origin_sid, 1);
 	if (!origin || !udb_ocl_member_exists(origin_sid))
+		return;
+	if (!strcmp(origin_sid, direct_peer->id) && !udb_hello_epoch_matches(direct_peer, epoch))
 		return;
 
 	if (udb_ocl_epoch_retired(origin, epoch))
@@ -953,18 +980,52 @@ static void udb_ocl_maybe_replay_to_peer(Client *server)
 	if (!udb_ctx || !server)
 		return;
 	peer = udb_hello_peer(server, 0);
-	if (!peer || peer->ocl_replayed || peer->state != UDB_HEL_CONFIRMED || !peer->ocl_capable)
+	if (!peer || peer->state != UDB_HEL_CONFIRMED || !peer->ocl_capable)
 		return;
-	peer->ocl_replayed = 1;
-	if (udb_ocl_local)
-		udb_ocl_send_inventory_to(server, me.id, udb_ocl_local);
-	for (origin = udb_ocl_origins; origin; origin = origin->next)
+	if (udb_ocl_is_participant(server) && !peer->ocl_replayed)
 	{
-		if (origin->member && origin->current)
-			udb_ocl_send_inventory_to(server, origin->sid, origin->current);
+		peer->ocl_replayed = 1;
+		if (udb_ocl_local)
+			udb_ocl_send_inventory_to(server, me.id, udb_ocl_local);
+		for (origin = udb_ocl_origins; origin; origin = origin->next)
+		{
+			if (origin->member && origin->current)
+				udb_ocl_send_inventory_to(server, origin->sid, origin->current);
+		}
 	}
-	if (peer->oclg_subscribed)
+	if (peer->oclg_subscribed && !peer->oclg_replayed)
+	{
+		peer->oclg_replayed = 1;
 		udb_oclg_push(server);
+	}
+}
+
+static void udb_ocl_peer_instance_changed(Client *server)
+{
+	UdbOclOrigin *origin;
+
+	if (!server || !udb_ocl_is_participant(server))
+		return;
+	origin = udb_ocl_find_origin(server->id);
+	if (!origin)
+		return;
+	if (origin->accepted_valid)
+		udb_ocl_retire_epoch(origin, origin->accepted_epoch);
+	if (origin->current)
+	{
+		udb_ocl_retire_epoch(origin, origin->current->epoch);
+		udb_ocl_free_inventory(origin->current);
+		origin->current = NULL;
+	}
+	if (origin->staging)
+	{
+		udb_ocl_retire_epoch(origin, origin->staging->epoch);
+		udb_ocl_free_inventory(origin->staging);
+		origin->staging = NULL;
+	}
+	origin->stage_received = 0;
+	origin->stage_deadline = 0;
+	udb_oclg_recompute();
 }
 
 static void udb_ocl_membership_changed(void)
@@ -1204,8 +1265,8 @@ static void udb_oclg_recompute(void)
 		return;
 	}
 	udb_ocl_hex(raw, 32, hex, sizeof(hex));
-	if (udb_oclg_ready == old_ready && old_view && old_view->count == view->count &&
-		!strcmp(old_view->inventory_digest, hex))
+	if (udb_oclg_ready == old_ready && old_view && !strcmp(old_view->epoch, view->epoch) &&
+		old_view->count == view->count && !strcmp(old_view->inventory_digest, hex))
 	{
 		/* No effective change: keep generation stable to avoid churn. */
 		udb_ocl_free_inventory(view);

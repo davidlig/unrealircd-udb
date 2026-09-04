@@ -169,9 +169,9 @@ class MockPeer:
         self.send("EOS")
         if autostart_hel:
             prop = propagator_advertised if propagator_advertised is not None else "?"
-            self.send(f"DB {self.target_sid} HEL 4 {prop} OCL")
+            self.send(f"DB {self.target_sid} HEL 4 {prop} 0000000000000001 OCL")
             self.wait_for(lambda line: " DB " in line and " HEL 4 " in line, f"{self.name} HEL response")
-            self.send(f"DB {self.target_sid} HEL 4 ACK OCL")
+            self.send(f"DB {self.target_sid} HEL 4 ACK {prop} 0000000000000001 OCL")
             if send_inf:
                 self.send_inventory()
 
@@ -438,7 +438,7 @@ def test_suite():
             leaf = MockPeer("leaf.test", "00L", "127.0.0.1", p3_ports[1], "003", propagator_advertised="?")
             # Hub3 advertises HEL 4 -
             leaf.wait_for(lambda l: " DB " in l and " HEL 4 -" in l, "HEL 4 - from Hub3")
-            leaf.send("DB 003 HEL 4 ACK OCL")
+            leaf.send("DB 003 HEL 4 ACK ? 0000000000000001 OCL")
 
             # Leaf asks for snapshot of N from Hub3 via RES
             leaf.send("DB 003 RES 1 N")
@@ -463,7 +463,7 @@ def test_suite():
         try:
             # Hub4 is clean and NOT_READY (udb_ready == 0)
             leaf4 = MockPeer("leaf.test", "00L", "127.0.0.1", p4_ports[1], "004", propagator_advertised="services.test")
-            leaf4.send("DB 004 HEL 4 ACK OCL")
+            leaf4.send("DB 004 HEL 4 ACK services.test 0000000000000001 OCL")
             leaf4.send("DB 004 RES 1 N")
 
             # Hub4 must reject RES because !udb_ready
@@ -707,9 +707,9 @@ def test_suite():
             crc_bob = zlib.crc32(b"bob::vhost bob.org\n") & 0xFFFFFFFF
             services9b = MockPeer("services.test", "00S", "127.0.0.1", p9_hub_ports[1], "009",
                                   propagator_advertised="services.test", autostart_hel=False)
-            services9b.send("DB 009 HEL 4 services.test OCL")
+            services9b.send("DB 009 HEL 4 services.test 0000000000000001 OCL")
             services9b.wait_for(lambda l: " DB " in l and " HEL 4 " in l, "HEL response from Hub")
-            services9b.send("DB 009 HEL 4 ACK OCL")
+            services9b.send("DB 009 HEL 4 ACK services.test 0000000000000001 OCL")
             services9b.send(f"DB 009 INF 1 N {crc_bob:08x} 0")
             for b in ('C', 'I', 'S', 'L', 'K'):
                 services9b.send(f"DB 009 INF 1 {b} 00000000 0")

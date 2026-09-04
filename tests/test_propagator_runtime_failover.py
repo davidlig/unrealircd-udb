@@ -181,9 +181,9 @@ class MockServices:
         self.send_raw(f"SERVER {self.name} 1 :UDB Mock Services")
         self.wait_for(lambda line: " 001 " in line or " EOS" in line or "NETINFO" in line, f"{self.name} handshake")
         self.send("EOS")
-        self.send(f"DB {self.target_sid} HEL 4 {self.name} OCL")
+        self.send(f"DB {self.target_sid} HEL 4 {self.name} 0000000000000001 OCL")
         self.wait_for(lambda line: " DB " in line and " HEL 4 " in line, f"{self.name} HEL response")
-        self.send(f"DB {self.target_sid} HEL 4 ACK OCL")
+        self.send(f"DB {self.target_sid} HEL 4 ACK {self.name} 0000000000000001 OCL")
         for b in ('N', 'C', 'I', 'L', 'K'):
             self.send(f"DB {self.target_sid} INF 1 {b} 00000000 0")
         s_crc = tree_checksum([("flood", "5:30"), ("propagator", "services-a.test,hub-a.test,services-b.test,hub-b.test")])

@@ -159,6 +159,7 @@ class MockPeer:
         self.sid = PEER_SID
         self.ircd_sid = IRCD_SID
         self.oclg = subscribe_oclg
+        self.instance_epoch = "2222222222222222"
         self.sock = socket.create_connection((host, port), timeout=5)
         self.sock.settimeout(0.25)
         self.lines = []
@@ -181,9 +182,9 @@ class MockPeer:
         """Send the HEL request, answer the IRCd HEL request, and return."""
         token = " OCL" if ocl else ""
         oclg = " OCLG" if (ocl and self.oclg) else ""
-        self.send(f"DB {self.ircd_sid} HEL 4 ?{token}{oclg}")
+        self.send(f"DB {self.ircd_sid} HEL 4 ? {self.instance_epoch}{token}{oclg}")
         response = self.wait_for(lambda line: " DB " in line and " HEL 4 " in line, "UDB HEL response")
-        self.send(f"DB {self.ircd_sid} HEL 4 ACK{token}")
+        self.send(f"DB {self.ircd_sid} HEL 4 ACK ? {self.instance_epoch}{token}{oclg}")
         return response
 
     def receive(self, deadline):
@@ -371,8 +372,9 @@ def rehash_and_replay(config, module, dbdir, client_port, server_port, peer, log
         peer.negotiate(ocl=True)
         peer.wait_for(lambda l: re.search(r" DB \* OCL BEGIN 001 [0-9a-f]{16} 1 ", l),
                       "new local OCL generation")
-        peer.send_ocl_snapshot("ee" * 8, 4, remote_entries)
-        logs.wait_for(lambda l: "Committed operclass inventory for origin 002: generation 4" in l,
+        commits_before = log_count_containing(logs, "Committed operclass inventory for origin 002")
+        peer.send_ocl_snapshot(peer.instance_epoch, 1, remote_entries)
+        logs.wait_for(lambda l: log_count_containing(logs, "Committed operclass inventory for origin 002") > commits_before,
                       "remote replay after rehash")
         peer.drain()
         return peer.collect_oclg_snapshots()
@@ -432,9 +434,22 @@ def run_tests(ircd_bin, keep=False):
         print("PASS: legacy HEL 4 without OCL token aborted the link")
 
         # ---------------------------------------------------------------
-        # Test 2: HEL 4 OCL confirmed; local inventory replayed; OCLG INCOMPLETE
+        # Test 2: malformed HEL ACK cannot confirm the peer
         # ---------------------------------------------------------------
         peer = MockPeer("127.0.0.1", server_port)
+        if not any(" DB " in line and " HEL 4 " in line for line in peer.lines):
+            peer.wait_for(lambda line: " DB " in line and " HEL 4 " in line, "initial UDB HEL request")
+        confirmations_before = log_count_containing(logs, "UDB HEL 4 capability confirmed")
+        peer.send(f"DB {IRCD_SID} HEL 4 ACK ? invalid-epoch OCL")
+        time.sleep(0.5)
+        logs.read_available()
+        assert log_count_containing(logs, "UDB HEL 4 capability confirmed") == confirmations_before, \
+            "malformed HEL ACK confirmed the peer"
+        print("PASS: malformed HEL ACK did not confirm the peer")
+
+        # ---------------------------------------------------------------
+        # Test 3: HEL 4 OCL confirmed; local inventory replayed; OCLG INCOMPLETE
+        # ---------------------------------------------------------------
         peer.negotiate(ocl=True)
         logs.wait_for(lambda l: "UDB HEL 4 capability confirmed" in l, "HEL confirmed")
         peer.wait_for(lambda l: re.search(r" DB \* OCL BEGIN 001 [0-9a-f]{16} \d+ \d+ [0-9a-f]{64}", l),
@@ -452,10 +467,10 @@ def run_tests(ircd_bin, keep=False):
         print("PASS: OCLG snapshot INCOMPLETE while the peer has no inventory")
 
         # ---------------------------------------------------------------
-        # Test 3: divergent committed inventory -> READY registry, empty OCLG
+        # Test 4: divergent committed inventory -> READY registry, empty OCLG
         # ---------------------------------------------------------------
         divergent = ("netadmin", "f" * 64)
-        peer.send_ocl_snapshot("aa" * 8, 1, [divergent])
+        peer.send_ocl_snapshot(peer.instance_epoch, 1, [divergent])
         logs.wait_for(lambda l: "Committed operclass inventory for origin 002: generation 1" in l,
                       "remote commit of divergent inventory")
         peer.drain()
@@ -465,9 +480,9 @@ def run_tests(ircd_bin, keep=False):
         print("PASS: divergent inventory commits; OCLG READY with empty intersection")
 
         # ---------------------------------------------------------------
-        # Test 4: matching inventory -> OCLG READY with both classes
+        # Test 5: matching inventory -> OCLG READY with both classes
         # ---------------------------------------------------------------
-        peer.send_ocl_snapshot("bb" * 8, 2, local_entries)
+        peer.send_ocl_snapshot(peer.instance_epoch, 2, local_entries)
         logs.wait_for(lambda l: "Committed operclass inventory for origin 002: generation 2" in l,
                       "remote commit of matching inventory")
         peer.drain()
@@ -488,10 +503,10 @@ def run_tests(ircd_bin, keep=False):
         print("PASS: /UDB OPERCLASSES and /UDB OPERCLASS report the global view")
 
         # ---------------------------------------------------------------
-        # Test 5: stale generation is ignored
+        # Test 6: stale generation is ignored
         # ---------------------------------------------------------------
         commits_before = log_count_containing(logs, "Committed operclass inventory")
-        peer.send_ocl_snapshot("bb" * 8, 1, [divergent])
+        peer.send_ocl_snapshot(peer.instance_epoch, 1, [divergent])
         time.sleep(0.5)
         logs.read_available()
         assert log_count_containing(logs, "Committed operclass inventory") == commits_before, \
@@ -499,18 +514,18 @@ def run_tests(ircd_bin, keep=False):
         print("PASS: stale generation ignored")
 
         # ---------------------------------------------------------------
-        # Test 6: same generation with different digest is a protocol violation
+        # Test 7: same generation with different digest is a protocol violation
         # ---------------------------------------------------------------
         bad_aggregate = ocl_inventory_digest([(divergent[0], divergent[1]), ("extra", "a" * 64)])
-        peer.send_ocl_snapshot("bb" * 8, 2, [(divergent[0], divergent[1]), ("extra", "a" * 64)],
+        peer.send_ocl_snapshot(peer.instance_epoch, 2, [(divergent[0], divergent[1]), ("extra", "a" * 64)],
                                aggregate=bad_aggregate)
         logs.wait_for(lambda l: "re-advertised" in l, "protocol violation for same-generation")
         assert log_count_containing(logs, "Committed operclass inventory") == commits_before
         print("PASS: same epoch/generation with different digest rejected without replacing state")
 
         # ---------------------------------------------------------------
-        STAGE_EPOCH = "dd" * 8
-        # Test 7: aborting a newer generation cannot roll back to current
+        STAGE_EPOCH = peer.instance_epoch
+        # Test 8: aborting a newer generation cannot roll back to current
         # ---------------------------------------------------------------
         agg = ocl_inventory_digest(local_entries[:1])
         peer.send(f"DB * OCL BEGIN {PEER_SID} {STAGE_EPOCH} 3 1 {agg}")
@@ -519,7 +534,7 @@ def run_tests(ircd_bin, keep=False):
         logs.wait_for(lambda l: "staging for origin" in l and "duplicate item" in l,
                       "newer stage abort")
         commits_after_abort = log_count_containing(logs, "Committed operclass inventory")
-        peer.send_ocl_snapshot("bb" * 8, 2, local_entries)
+        peer.send_ocl_snapshot(STAGE_EPOCH, 2, local_entries)
         time.sleep(0.5)
         logs.read_available()
         assert log_count_containing(logs, "Committed operclass inventory") == commits_after_abort, \
@@ -527,7 +542,7 @@ def run_tests(ircd_bin, keep=False):
         print("PASS: aborted newer generation permanently prevented rollback")
 
         # ---------------------------------------------------------------
-        # Test 8: same high-water generation with a different descriptor is rejected
+        # Test 9: same high-water generation with a different descriptor is rejected
         # ---------------------------------------------------------------
         bad_agg = ("0" if agg[-1] != "0" else "1") + agg[1:]
         peer.send(f"DB * OCL BEGIN {PEER_SID} {STAGE_EPOCH} 3 1 {bad_agg}")
@@ -536,7 +551,7 @@ def run_tests(ircd_bin, keep=False):
         print("PASS: aborted high-water generation kept its descriptor immutable")
 
         # ---------------------------------------------------------------
-        # Test 9: exact retransmission of an aborted generation is accepted
+        # Test 10: exact retransmission of an aborted generation is accepted
         # ---------------------------------------------------------------
         peer.send_ocl_snapshot(STAGE_EPOCH, 3, local_entries[:1])
         logs.wait_for(lambda l: "Committed operclass inventory for origin 002: generation 3" in l,
@@ -544,9 +559,9 @@ def run_tests(ircd_bin, keep=False):
         print("PASS: exact retransmission rebuilt and committed the aborted generation")
 
         # ---------------------------------------------------------------
-        # Test 10: timeout preserves the watermark and exact retry recovers
+        # Test 11: timeout preserves the watermark and exact retry recovers
         # ---------------------------------------------------------------
-        TIMEOUT_EPOCH = "ee" * 8
+        TIMEOUT_EPOCH = peer.instance_epoch
         peer.send(f"DB * OCL BEGIN {PEER_SID} {TIMEOUT_EPOCH} 4 1 {agg}")
         logs.wait_for(lambda l: "Operclass inventory staging for origin 002 timed out" in l,
                       "stage timeout", timeout=UDB_OCL_STAGE_TIMEOUT + 5)
@@ -562,7 +577,22 @@ def run_tests(ircd_bin, keep=False):
         print("PASS: timeout preserved freshness and exact retransmission recovered")
 
         # ---------------------------------------------------------------
-        # Test 11: REHASH creates a new instance and converges after replay
+        # Test 12: an instance change acknowledges HEL before replaying OCLG
+        # ---------------------------------------------------------------
+        peer.drain(0.5)
+        peer.clear()
+        peer.instance_epoch = "3333333333333333"
+        peer.send(f"DB {IRCD_SID} HEL 4 ? {peer.instance_epoch} OCL OCLG")
+        peer.wait_for(lambda l: " HEL 4 ACK " in l, "HEL ACK after peer instance change")
+        if not any(" OCLG BEGIN " in line for line in peer.lines):
+            peer.wait_for(lambda l: " OCLG BEGIN " in l, "OCLG replay after peer instance change")
+        ack_index = next(i for i, line in enumerate(peer.lines) if " HEL 4 ACK " in line)
+        oclg_index = next(i for i, line in enumerate(peer.lines) if " OCLG BEGIN " in line)
+        assert ack_index < oclg_index, f"OCLG preceded HEL ACK after instance change: {peer.lines}"
+        print("PASS: peer instance change acknowledged HEL before replaying OCLG")
+
+        # ---------------------------------------------------------------
+        # Test 13: REHASH creates a new instance and converges after replay
         # ---------------------------------------------------------------
         changed_view = rehash_and_replay(config, module_path, data_dir, client_port, server_port, peer, logs, True,
                                          local_entries[:1])
@@ -571,7 +601,7 @@ def run_tests(ircd_bin, keep=False):
         print("PASS: REHASH created a new OCL epoch and removed the changed class after remote replay")
 
         # ---------------------------------------------------------------
-        # Test 12: restoring the local definition restores the intersection
+        # Test 14: restoring the local definition restores the intersection
         # ---------------------------------------------------------------
         restored_view = rehash_and_replay(config, module_path, data_dir, client_port, server_port, peer, logs, False,
                                           local_entries[:1])
@@ -581,7 +611,7 @@ def run_tests(ircd_bin, keep=False):
         print("PASS: restoring operclass configuration restored the OCLG intersection")
 
         # ---------------------------------------------------------------
-        # Test 13: unchanged rehash has one local publication in the new instance
+        # Test 15: unchanged rehash has one local publication in the new instance
         # ---------------------------------------------------------------
         unchanged_view = rehash_and_replay(config, module_path, data_dir, client_port, server_port, peer, logs, False,
                                            local_entries[:1])
@@ -593,7 +623,7 @@ def run_tests(ircd_bin, keep=False):
         print("PASS: unchanged rehash avoided duplicate local OCL publication")
 
         # ---------------------------------------------------------------
-        # Test 14: origin quit -> member removal keeps the local registry READY
+        # Test 16: origin quit -> member removal keeps the local registry READY
         # ---------------------------------------------------------------
         peer.close()
         time.sleep(0.5)

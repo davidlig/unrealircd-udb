@@ -139,9 +139,9 @@ class MockPeer:
         self.send(f"SERVER {self.name} 1 :UDB peer {self.name}")
         self.wait_for(lambda line: " 001 " in line or " EOS" in line or "NETINFO" in line, f"{self.name} link handshake")
         self.send("EOS")
-        self.send(f"DB {self.ircd_sid} HEL 4 {propagator_advertised} OCL")
+        self.send(f"DB {self.ircd_sid} HEL 4 {propagator_advertised} 0000000000000001 OCL")
         self.wait_for(lambda line: " DB " in line and " HEL 4 " in line, f"{self.name} HEL response")
-        self.send(f"DB {self.ircd_sid} HEL 4 ACK OCL")
+        self.send(f"DB {self.ircd_sid} HEL 4 ACK {propagator_advertised} 0000000000000001 OCL")
 
     def send(self, command):
         if not command.startswith(":"):

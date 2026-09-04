@@ -567,6 +567,10 @@ static int udb_has_staged_sync(Client *server);
 static int udb_peer_authorizes_us(Client *server);
 static int udb_sync_hello_start(Client *server);
 static void udb_sync_hello_ack(Client *server);
+static int udb_hello_epoch_matches(Client *server, const char *epoch);
+static int udb_hello_peer_advertisement(Client *server, const char *propagator, const char *epoch,
+									int oclg_subscribed);
+static const char *udb_sync_hello_propagator(UdbPropagatorSelection *selected);
 static void udb_sync_abort(UdbBlock *block, const char *reason);
 static unsigned int udb_block_letter_to_mask(char letter);
 static int udb_is_database_initialized(UdbContext *ctx);
@@ -661,6 +665,8 @@ static void udb_send_to_debugs(Client *source, const char *fmt, ...) __attribute
 static void udb_ocl_shutdown(void);
 static int udb_ocl_local_rebuild(void);
 static void udb_ocl_maybe_replay_to_peer(Client *server);
+static void udb_ocl_peer_instance_changed(Client *server);
+static const char *udb_ocl_epoch_value(void);
 static void udb_ocl_membership_changed(void);
 static void udb_ocl_origin_quit(Client *client);
 static void udb_ocl_stage_timeout_check(time_t now);
@@ -4019,6 +4025,9 @@ struct UdbHelloPeer
 	int ocl_capable;	 /* Peer advertised the mandatory OCL token. */
 	int oclg_subscribed; /* Peer requested the OCLG consumer view. */
 	int ocl_replayed;	 /* Inventories already replayed to this peer. */
+	int oclg_replayed;	 /* OCLG snapshot already sent for this peer instance. */
+	int remote_epoch_known;
+	char remote_epoch[UDB_OCL_EPOCH_LEN + 1];
 	UdbHelloPeer *next;
 };
 
@@ -4114,6 +4123,91 @@ static int udb_peer_authorizes_us(Client *server)
 	return udb_has_hello(server) && peer->authorizes_us;
 }
 
+static int udb_hello_epoch_valid(const char *epoch)
+{
+	int i;
+
+	if (!epoch || strlen(epoch) != UDB_OCL_EPOCH_LEN)
+		return 0;
+	for (i = 0; i < UDB_OCL_EPOCH_LEN; i++)
+	{
+		char c = epoch[i];
+		if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+			return 0;
+	}
+	return 1;
+}
+
+static int udb_hello_epoch_matches(Client *server, const char *epoch)
+{
+	UdbHelloPeer *peer = udb_hello_peer(server, 0);
+
+	return peer && peer->remote_epoch_known && epoch && !strcmp(peer->remote_epoch, epoch);
+}
+
+static int udb_hello_parse_propagator(const char *propagator, int *authorizes_us)
+{
+	if (!propagator || !*propagator || !authorizes_us)
+		return 0;
+	if (!strcmp(propagator, "?"))
+		*authorizes_us = 1;
+	else if (!strcmp(propagator, "-"))
+		*authorizes_us = 0;
+	else if (udb_server_name_valid(propagator))
+		*authorizes_us = !strcasecmp(propagator, me.name);
+	else
+		return 0;
+	return 1;
+}
+
+static const char *udb_sync_hello_propagator(UdbPropagatorSelection *selected)
+{
+	if (selected && udb_select_propagator(udb_ctx, 1, selected))
+		return selected->name;
+	if (!udb_propagator_policy_present(udb_ctx))
+		return udb_ready ? me.name : "?";
+	return "-";
+}
+
+static int udb_hello_peer_advertisement(Client *server, const char *propagator, const char *epoch,
+									int oclg_subscribed)
+{
+	UdbHelloPeer *peer;
+	int authorizes_us;
+	int epoch_changed;
+	int subscription_changed;
+
+	if (!server || !udb_hello_epoch_valid(epoch) || !udb_hello_parse_propagator(propagator, &authorizes_us))
+		return 0;
+	peer = udb_hello_peer(server, 1);
+	epoch_changed = peer->remote_epoch_known && strcmp(peer->remote_epoch, epoch);
+	subscription_changed = peer->oclg_subscribed != oclg_subscribed;
+	if (epoch_changed)
+	{
+		/* The SERVER connection survives a module reload, but all data and
+		 * replay latches belonging to the old remote instance do not. */
+		peer->reconciliation_offered = 0;
+		peer->ocl_replayed = 0;
+		peer->oclg_replayed = 0;
+		/* Recompute for every other subscriber now, then replay to this peer
+		 * after its HEL exchange has been acknowledged. */
+		peer->oclg_subscribed = 0;
+		udb_ocl_peer_instance_changed(server);
+		udb_log(ULOG_INFO, "UDB_HEL_INSTANCE_CHANGED", server,
+				"Direct peer announced a new UDB instance epoch $epoch",
+				log_data_string("epoch", epoch));
+	}
+	else if (subscription_changed)
+		peer->oclg_replayed = 0;
+	strlcpy(peer->remote_epoch, epoch, sizeof(peer->remote_epoch));
+	peer->remote_epoch_known = 1;
+	peer->authorizes_us = authorizes_us;
+	peer->auth_received = 1;
+	peer->ocl_capable = 1;
+	peer->oclg_subscribed = oclg_subscribed;
+	return 1;
+}
+
 static int udb_sync_hello_start(Client *server)
 {
 	UdbHelloPeer *peer;
@@ -4128,21 +4222,10 @@ static int udb_sync_hello_start(Client *server)
 		return 0;
 	peer->state = UDB_HEL_WAITING;
 	peer->deadline = time(NULL) + UDB_SYNC_TIMEOUT;
-	if (udb_select_propagator(udb_ctx, 1, &selected))
-	{
-		propagator = selected.name;
-	}
-	else if (!udb_propagator_policy_present(udb_ctx))
-	{
-		/* No policy: a fresh node is seeking a bootstrap source, while a READY
-		 * node is its own standalone authority. */
-		propagator = udb_ready ? me.name : "?";
-	}
-	else
-	{
-		propagator = "-";
-	}
-	ok = udb_send_db_to_one(server, ":%s DB %s HEL 4 %s OCL", me.id, server->id, propagator);
+	/* No policy: a fresh node is seeking a bootstrap source, while a READY
+	 * node is its own standalone authority. */
+	propagator = udb_sync_hello_propagator(&selected);
+	ok = udb_send_db_to_one(server, ":%s DB %s HEL 4 %s %s OCL", me.id, server->id, propagator, udb_ocl_epoch_value());
 	if (!ok)
 	{
 		peer->state = 0;
@@ -4161,7 +4244,11 @@ static void udb_sync_hello_ack(Client *server)
 		return;
 
 	if (peer->state == UDB_HEL_CONFIRMED)
+	{
+		udb_maybe_start_reconciliation(server, 0);
+		udb_ocl_maybe_replay_to_peer(server);
 		return;
+	}
 
 	if (peer->state == UDB_HEL_WAITING)
 	{
@@ -4563,18 +4650,14 @@ static void udb_sync_hello_refresh_all(void)
 	UdbPropagatorSelection selected;
 	const char *propagator;
 
-	if (udb_select_propagator(udb_ctx, 1, &selected))
-		propagator = selected.name;
-	else if (!udb_propagator_policy_present(udb_ctx))
-		propagator = udb_ready ? me.name : "?";
-	else
-		propagator = "-";
+	propagator = udb_sync_hello_propagator(&selected);
 	list_for_each_entry(server, &server_list, special_node)
 	{
 		if (IsServer(server) && MyConnect(server) && udb_has_hello(server))
 		{
 			UdbHelloPeer *hello = udb_hello_peer(server, 0);
-			if (udb_send_db_to_one(server, ":%s DB %s HEL 4 %s OCL", me.id, server->id, propagator) && hello)
+			if (udb_send_db_to_one(server, ":%s DB %s HEL 4 %s %s OCL", me.id, server->id, propagator,
+							   udb_ocl_epoch_value()) && hello)
 				hello->local_selection_sent = 1;
 		}
 	}
@@ -5130,6 +5213,12 @@ static int udb_oclg_ready = 0;
 static unsigned long udb_oclg_generation = 0;
 
 static void udb_ocl_ensure_epoch(void);
+
+static const char *udb_ocl_epoch_value(void)
+{
+	udb_ocl_ensure_epoch();
+	return udb_ocl_epoch;
+}
 static void udb_oclg_recompute(void);
 static void udb_oclg_push_subscribers(void);
 static void udb_ocl_stage_discard(UdbOclOrigin *origin);
@@ -5716,7 +5805,7 @@ static void udb_ocl_send_inventory_to(Client *to, const char *origin_sid, UdbOcl
 {
 	unsigned int i;
 
-	if (!to || !inv)
+	if (!to || !inv || !udb_ocl_is_participant(to))
 		return;
 	if (!udb_send_db_to_one(to, ":%s DB * OCL BEGIN %s %s %lu %u %s", me.id, origin_sid, inv->epoch, inv->generation,
 							inv->count, inv->inventory_digest))
@@ -5732,16 +5821,35 @@ static void udb_ocl_send_inventory_to(Client *to, const char *origin_sid, UdbOcl
 
 static void udb_ocl_send_inventory_broadcast(Client *except, const char *origin_sid, UdbOclInventory *inv)
 {
+	Client *server;
 	unsigned int i;
 
 	if (!inv)
 		return;
-	udb_sendto_confirmed_servers(except, ":%s DB * OCL BEGIN %s %s %lu %u %s", me.id, origin_sid, inv->epoch,
-								 inv->generation, inv->count, inv->inventory_digest);
+	list_for_each_entry(server, &server_list, special_node)
+	{
+		if (server == except || (except && server == except->direction) || !udb_ocl_is_participant(server) ||
+			!udb_has_hello(server))
+			continue;
+		udb_send_db_to_one(server, ":%s DB * OCL BEGIN %s %s %lu %u %s", me.id, origin_sid, inv->epoch,
+						   inv->generation, inv->count, inv->inventory_digest);
+	}
 	for (i = 0; i < inv->count; i++)
-		udb_sendto_confirmed_servers(except, ":%s DB * OCL ITEM %s %s %lu %s %s", me.id, origin_sid, inv->epoch,
-									 inv->generation, inv->entries[i].name, inv->entries[i].digest);
-	udb_sendto_confirmed_servers(except, ":%s DB * OCL END %s %s %lu", me.id, origin_sid, inv->epoch, inv->generation);
+		list_for_each_entry(server, &server_list, special_node)
+		{
+			if (server == except || (except && server == except->direction) || !udb_ocl_is_participant(server) ||
+				!udb_has_hello(server))
+				continue;
+			udb_send_db_to_one(server, ":%s DB * OCL ITEM %s %s %lu %s %s", me.id, origin_sid, inv->epoch,
+							   inv->generation, inv->entries[i].name, inv->entries[i].digest);
+		}
+	list_for_each_entry(server, &server_list, special_node)
+	{
+		if (server == except || (except && server == except->direction) || !udb_ocl_is_participant(server) ||
+			!udb_has_hello(server))
+			continue;
+		udb_send_db_to_one(server, ":%s DB * OCL END %s %s %lu", me.id, origin_sid, inv->epoch, inv->generation);
+	}
 }
 
 static void udb_ocl_local_publish(void)
@@ -5849,6 +5957,8 @@ static void udb_ocl_handle_begin(Client *direct_peer, const char *parv[])
 		return;
 	origin = udb_ocl_validate_frame(direct_peer, origin_sid, 1);
 	if (!origin || !udb_ocl_member_exists(origin_sid))
+		return;
+	if (!strcmp(origin_sid, direct_peer->id) && !udb_hello_epoch_matches(direct_peer, epoch))
 		return;
 
 	if (udb_ocl_epoch_retired(origin, epoch))
@@ -6056,18 +6166,52 @@ static void udb_ocl_maybe_replay_to_peer(Client *server)
 	if (!udb_ctx || !server)
 		return;
 	peer = udb_hello_peer(server, 0);
-	if (!peer || peer->ocl_replayed || peer->state != UDB_HEL_CONFIRMED || !peer->ocl_capable)
+	if (!peer || peer->state != UDB_HEL_CONFIRMED || !peer->ocl_capable)
 		return;
-	peer->ocl_replayed = 1;
-	if (udb_ocl_local)
-		udb_ocl_send_inventory_to(server, me.id, udb_ocl_local);
-	for (origin = udb_ocl_origins; origin; origin = origin->next)
+	if (udb_ocl_is_participant(server) && !peer->ocl_replayed)
 	{
-		if (origin->member && origin->current)
-			udb_ocl_send_inventory_to(server, origin->sid, origin->current);
+		peer->ocl_replayed = 1;
+		if (udb_ocl_local)
+			udb_ocl_send_inventory_to(server, me.id, udb_ocl_local);
+		for (origin = udb_ocl_origins; origin; origin = origin->next)
+		{
+			if (origin->member && origin->current)
+				udb_ocl_send_inventory_to(server, origin->sid, origin->current);
+		}
 	}
-	if (peer->oclg_subscribed)
+	if (peer->oclg_subscribed && !peer->oclg_replayed)
+	{
+		peer->oclg_replayed = 1;
 		udb_oclg_push(server);
+	}
+}
+
+static void udb_ocl_peer_instance_changed(Client *server)
+{
+	UdbOclOrigin *origin;
+
+	if (!server || !udb_ocl_is_participant(server))
+		return;
+	origin = udb_ocl_find_origin(server->id);
+	if (!origin)
+		return;
+	if (origin->accepted_valid)
+		udb_ocl_retire_epoch(origin, origin->accepted_epoch);
+	if (origin->current)
+	{
+		udb_ocl_retire_epoch(origin, origin->current->epoch);
+		udb_ocl_free_inventory(origin->current);
+		origin->current = NULL;
+	}
+	if (origin->staging)
+	{
+		udb_ocl_retire_epoch(origin, origin->staging->epoch);
+		udb_ocl_free_inventory(origin->staging);
+		origin->staging = NULL;
+	}
+	origin->stage_received = 0;
+	origin->stage_deadline = 0;
+	udb_oclg_recompute();
 }
 
 static void udb_ocl_membership_changed(void)
@@ -6307,8 +6451,8 @@ static void udb_oclg_recompute(void)
 		return;
 	}
 	udb_ocl_hex(raw, 32, hex, sizeof(hex));
-	if (udb_oclg_ready == old_ready && old_view && old_view->count == view->count &&
-		!strcmp(old_view->inventory_digest, hex))
+	if (udb_oclg_ready == old_ready && old_view && !strcmp(old_view->epoch, view->epoch) &&
+		old_view->count == view->count && !strcmp(old_view->inventory_digest, hex))
 	{
 		/* No effective change: keep generation stable to avoid churn. */
 		udb_ocl_free_inventory(view);
@@ -6973,50 +7117,51 @@ CMD_FUNC(cmd_db)
 			return;
 		snprintf(logbuf, sizeof(logbuf), "[UDB] S2S DB received: parc=%d target=%s subcmd=%s", parc, target, subcmd);
 		unreal_log(ULOG_INFO, "udb", "UDB_CMD_DB", client, "$msg", log_data_string("msg", logbuf));
-		if (parc == 6 && !strcasecmp(parv[4], "ACK") && !strcasecmp(parv[5], "OCL"))
+		if (parc >= 5 && !strcasecmp(parv[4], "ACK"))
 		{
+			int oclg_subscribe;
+			if ((parc != 8 && parc != 9) || !parv[5] || !parv[6] || strcasecmp(parv[7], "OCL") ||
+				(parc == 9 && strcasecmp(parv[8], "OCLG")))
+				return;
+			oclg_subscribe = parc == 9;
+			if (!udb_hello_peer_advertisement(client, parv[5], parv[6], oclg_subscribe))
+				return;
 			udb_sync_hello_ack(client);
 			return;
 		}
 		/* OCL is part of the mandatory HEL 4 contract: a request without the
 		 * OCL token belongs to a legacy peer that can never be confirmed. */
-		if (parc == 5 || (parc >= 6 && strcasecmp(parv[5], "OCL")))
+		if (parc == 5 || (parc == 6 && !strcasecmp(parv[5], "OCL")) ||
+			(parc >= 7 && strcasecmp(parv[6], "OCL")))
 		{
-			udb_log(ULOG_ERROR, "UDB_HEL_OCL_REQUIRED", client,
-					"Link aborted: HEL 4 request without the mandatory OCL capability token");
-			exit_client_fmt(client, NULL, "Link aborted: server does not support UDB OCL capability");
+			if (parc == 5 || (parc >= 7 && strcasecmp(parv[6], "OCL")))
+			{
+				udb_log(ULOG_ERROR, "UDB_HEL_OCL_REQUIRED", client,
+						"Link aborted: HEL 4 request without the mandatory OCL capability token");
+				exit_client_fmt(client, NULL, "Link aborted: server does not support UDB OCL capability");
+			}
+			else
+				udb_log(ULOG_ERROR, "UDB_HEL_EPOCH_REQUIRED", client,
+						"HEL 4 request missing the mandatory instance epoch");
 			return;
 		}
-		if (parc > 7 || (parc == 7 && strcasecmp(parv[6], "OCLG")))
+		if (parc != 7 && parc != 8)
 			return;
-		if (parc < 6 || !parv[4] || !*parv[4])
+		if (parc == 8 && strcasecmp(parv[7], "OCLG"))
+			return;
+		if (!parv[4] || !*parv[4] || !parv[5] || !udb_hello_epoch_valid(parv[5]))
 			return;
 		{
 			const char *prop = parv[4];
-			int oclg_subscribe = (parc == 7 && !strcasecmp(parv[6], "OCLG"));
+			const char *epoch = parv[5];
+			int oclg_subscribe = (parc == 8);
 			int new_auth = 0;
-			UdbHelloPeer *hello_peer;
 
-			if (!strcmp(prop, "?"))
-			{
-				new_auth = 1;
-			}
-			else if (!strcmp(prop, "-"))
-			{
-				new_auth = 0;
-			}
-			else if (udb_server_name_valid(prop))
-			{
-				new_auth = !strcasecmp(prop, me.name);
-			}
-			else
+			if (!udb_hello_parse_propagator(prop, &new_auth))
 				return;
 
-			hello_peer = udb_hello_peer(client, 1);
-			hello_peer->authorizes_us = new_auth;
-			hello_peer->auth_received = 1;
-			hello_peer->ocl_capable = 1;
-			hello_peer->oclg_subscribed = oclg_subscribe;
+			if (!udb_hello_peer_advertisement(client, prop, epoch, oclg_subscribe))
+				return;
 
 			udb_log(ULOG_INFO, "UDB_HEL_AUTHORIZATION", client,
 					"Direct peer selected $propagator as its staged-sync source (authorizes_us=$auth, oclg=$oclg)",
@@ -7026,10 +7171,13 @@ CMD_FUNC(cmd_db)
 			/* Each side sends its own request, so only an ACK confirms outbound data. */
 			if (!udb_has_hello(client))
 				udb_sync_hello_start(client);
-			udb_send_db_to_one(client, ":%s DB %s HEL 4 ACK OCL", me.id, client->id);
+			{
+				UdbPropagatorSelection selected;
+				const char *local_prop = udb_sync_hello_propagator(&selected);
+				udb_send_db_to_one(client, ":%s DB %s HEL 4 ACK %s %s OCL", me.id, client->id, local_prop,
+							   udb_ocl_epoch_value());
+			}
 			udb_ocl_maybe_replay_to_peer(client);
-			if (oclg_subscribe && udb_has_hello(client))
-				udb_oclg_push(client);
 			/* A repeated authorized selection is also the explicit retry trigger. */
 			udb_maybe_start_reconciliation(client, new_auth);
 		}

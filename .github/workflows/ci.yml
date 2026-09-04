@@ -143,6 +143,7 @@ jobs:
           python3 tests/test_bootstrap_readiness_and_convergence.py
            python3 tests/test_hub_multihop_and_persistence.py
            python3 tests/test_ocl_registry.py
+           python3 tests/test_ocl_rehash_replay.py
            python3 tests/test_ocl_membership_multihop.py
 
       - name: Run Integration & Multi-Hop Test Suites
