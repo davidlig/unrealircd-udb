@@ -1,8 +1,11 @@
 # UDB 4 (Unreal DataBase) - Technical Specification & Protocol
 
-This documentation details the internal workings, database design, and Server-to-Server (S2S) protocol of the **UDB 4 (Unreal DataBase v4.1.0)** module for UnrealIRCd 6.2.x.
+**English** | [Español](udb_technical_es.md) | [Project README](../README.md)
 
-This document is designed for developers who wish to implement clients, IRC Services, or other bots compatible with the UDB protocol.
+This document describes the database model, runtime behavior, persistence rules,
+and Server-to-Server (S2S) protocol of **UDB 4.0.0** for UnrealIRCd 6.2.x. It is
+intended for UDB maintainers and developers implementing compatible IRC
+Services or server integrations.
 
 ## 1. Database Architecture
 
@@ -12,54 +15,69 @@ UDB uses an in-memory tree structure and flat-text file storage for persistence.
 Disk storage (`udb_X.db`) follows a flat hierarchical structure:
 ```text
 ; UDB Block N - Version 1
+; Generation: 1
 ; Saved: 1786942751
 ; Records: 5
-davidlig::pass sha256:abcd1234efgh
+davidlig::pass sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 davidlig::vhost admin.davidlig.net
 davidlig::oper netadmin
 ```
 *   Sub-levels are separated by the `::` delimiter.
-*   To support IPv6 addresses (e.g. `2001:db8::1`) and special characters without ambiguity, individual path components are canonically percent-encoded (`%XX`, e.g. `2001%3Adb8%3A%3A1`) in disk files, S2S frames, and HMAC checksum digests. In memory, UDB transparently decodes path components to enable native IP matching and lookups.
-*   An asterisk `*` prefix in the value indicates that the data is numeric (64-bit integer with strict format validation).
+*   To support IPv6 addresses (e.g. `2001:db8::1`) and special characters without ambiguity, individual path components are canonically percent-encoded (`%XX`, e.g. `2001%3Adb8%3A%3A1`) in disk files, S2S frames, and CRC32 checksum input. In memory, UDB transparently decodes path components to enable native IP matching and lookups.
+*   An asterisk `*` prefix in the value indicates an unsigned decimal value representable by C `unsigned long`, with strict format and range validation.
 *   The absence of `*` indicates that the data is a text string.
+
+Readiness is recorded separately in `.udb_state`. The current format contains
+exactly `FORMAT`, `STATE`, `ORIGIN`, `GENERATION`, and `LAST_SYNC`. A `READY`
+marker is accepted only when all six snapshots are valid and carry the same
+non-zero generation.
 
 ### 1.2 Database Directory, Configuration & Transactional Loader
 
-#### Directives in the `udb { }` block:
-*   `database-directory "<path>";`: Selects the directory containing all block files
-    (`udb_N.db`, `udb_C.db`, `udb_I.db`, `udb_S.db`, `udb_L.db`, `udb_K.db`).
-    Absolute local paths are used as written. Relative paths resolve beneath `PERMDATADIR`.
-    UDB creates the directory with `0700` permissions. Defaults to `PERMDATADIR`.
-*   `propagator "<server>";`: Strict local propagator override. The value is one
-    UnrealIRCd server name, must fit `HOSTLEN`, and is rejected during
-    `CONFIGTEST` if it contains whitespace or CR/LF or fails UnrealIRCd's native
-    server-name validation. A remote value authorizes staged sync only when it
-    is a directly connected, `HEL 4`-confirmed peer.
-*   `max-staged-records <number>;`: Maximum number of records allowed per block during a single
-    staged sync transaction. Protects against DoS attacks and memory exhaustion (OOM).
-    Allowed range: `1` to `10000000` (default `500000`).
-*   `max-global-clones <number>;`: Global limit of connections/clones per IP.
-*   `password-flood <attempts>:<seconds>;`: Password brute-force flood protection (default `5:60`).
-*   `stale-timeout <seconds>;`: Grace period a node may remain without a `READY` database during bootstrap before transitioning from `DEGRADED` to `STALE`. It does not measure propagator availability and never affects client admission beyond the `udb_ready` gate. Allowed range: `1` to `604800` seconds (default `300`).
+#### Directives in the `udb { }` block
 
-**Transactional Loader:** During startup, UDB reads each block file into a staging
-candidate tree. The active in-memory database is swapped atomically only after the
-file is completely read and validated without errors. If a block file does not
-exist (`ENOENT`), UDB initializes cleanly with an empty database. If a file cannot
-be opened or read due to permission errors (`EACCES`) or disk I/O errors, UDB aborts
-module startup (`MOD_FAILED`) and marks the block with `UDB_LOAD_FAILED`, strictly
-preventing the module from overwriting or destroying existing database files on disk.
+| Directive | Allowed value | Default | Purpose |
+|---|---:|---:|---|
+| `database-directory` | Local path | `PERMDATADIR` | Directory containing `udb_N.db`, `udb_C.db`, `udb_I.db`, `udb_S.db`, `udb_L.db`, `udb_K.db`, and `.udb_state`. Relative paths resolve beneath `PERMDATADIR`; a missing directory is created with mode `0700`. |
+| `propagator` | One valid server name | None | Strict local authority override. A remote value is usable only while it is a directly connected, HEL-confirmed server. |
+| `max-global-clones` | `0` to `1000000` | `0` | Configuration-level global clone limit. |
+| `password-flood` | Positive `attempts:seconds` | `5:60` | Per-profile and source-IP credential failure limit. |
+| `max-staged-records` | `1` to `10000000` | `500000` | Maximum records accepted in one staged block transaction. |
+| `max-staged-bytes` | `1024` to `1073741824` | `67108864` | Maximum serialized bytes accepted in one staged block transaction. |
+| `sync-inactivity-timeout` | `1` to `86400` seconds | `60` | Maximum inactivity between staged-sync frames. |
+| `sync-absolute-timeout` | `1` to `86400` seconds | `300` | Absolute lifetime of a staged-sync transaction. |
+| `stale-timeout` | `1` to `604800` seconds | `300` | Time a non-READY bootstrap may remain `DEGRADED` before becoming `STALE`. |
+
+`database-directory` rejects URLs, CR/LF, empty paths, and paths that cannot fit
+the UDB filenames. `propagator` rejects whitespace, CR/LF, overlong names, and
+names rejected by UnrealIRCd's server-name validator.
+
+**Transactional loader:** During startup, UDB parses every snapshot into an
+isolated candidate tree. No candidate is published and no runtime effect is
+applied until the complete six-block set and `.udb_state` are accepted together.
+A new standalone/local-authority node with no snapshots can initialize and
+persist an empty generation. A follower with no snapshots remains
+`BOOTSTRAPPING` until an authorized authority supplies them. Missing members of
+an existing set, generation mismatches, malformed state, parse failures,
+permission errors, and I/O failures leave the module loaded but non-READY; the
+candidate set is discarded and existing files are not overwritten. Failure to
+initialize the database engine itself, such as being unable to create its data
+directory, causes module loading to fail.
 
 ### 1.3 Supported Blocks and Their Options
 
 #### Block N (Nicks - Users)
 Stores configurations for registered users.
-*   **pass**: User password hash. Only Argon2id (`$argon2id$...`), `sha256:`,
-    and `crypt:` values are accepted. Plaintext, MD5, bcrypt, and unknown
-    values fail closed.
+*   **pass**: User password hash. The accepted stored forms are
+    `argon2id:$argon2id$...`, `sha256:<64-hex-digest>`, and `crypt:<hash>`.
+    Plaintext, unprefixed hashes, MD5, bcrypt, and unknown formats fail closed.
+*   **challenge**: Optional credential method: `argon2id`, `sha256`, or `crypt`.
+    When present, it must match the stored password format.
 *   **access**: Optional comma- or whitespace-separated IPv4/IPv6 CIDR list.
     A successful NICK or GHOST credential check must also match this list.
 *   **vhost**: Custom virtual host applied on connect.
+*   **forbid**: Reason that prevents use of the registered nickname.
+*   **suspended**: Reason that marks the identified account as suspended.
 *   **oper**: IRCop class name (`operclass`, e.g., `locop`, `globop`, `admin`, `services-admin`, `netadmin`, or `-with-override` variants). Validated against local configuration via `find_operclass()`.
 *   **swhois**: Extra line in the user's /WHOIS output.
 *   **snomasks**: Snomasks to apply automatically.
@@ -80,7 +98,7 @@ Stores configurations for registered users.
     *   `*8` (`0x8` / `UDB_CHOPT_PERSISTENT`): Sets native `+P` when the permanent-channel mode handler is loaded. If the channel does not exist on insert, it is created; if empty when disabled or removed via `DEL`, it is destroyed.
     *   Supports any combination of flags (e.g. `*6` for `0x2 | 0x4` = lock modes + lock topic, `*14` for `0x2 | 0x4 | 0x8`, etc.).
 
-### 1.3 Live Channel Reconciliation
+##### Live Channel Reconciliation
 
 UDB owns the founder `+q` state of a registered channel. When `founder` is
 replaced, UDB removes `+q` from the previous present founder and grants it to
@@ -143,8 +161,8 @@ example `K::G::*@bad.example::duration *3600` and
 expires the G, Z, S, Q, or F record; `0` (or no duration record) is permanent.
 For F, the same duration is also passed to the spamfilter action TKL.
 
-Spamfilter patterns are plain regex strings by default for compatibility. To
-store a pattern that must be represented safely as base64, prefix standard,
+Spamfilter patterns may be stored as plain regex strings. To store a pattern
+using base64, prefix standard,
 padded RFC 4648 base64 with `b64:`: `K::F::b64:Zm9vL2Jhcg==::type c` decodes to
 `foo/bar`. The payload must be a non-empty, valid padded base64 value whose
 decoded pattern is at most 3072 bytes and contains no NUL bytes. Invalid
@@ -177,7 +195,7 @@ Only these values are supported: `clones`, `quit_ips`, `quit_clones`, `flood`,
     of explicit nick vhost, derived IP vhost, and `I::<ip>::host` change or
     restoration notices.
 *   **propagator**: Ordered cluster priority list (for example,
-    `S::propagator "services.example.net, hub1.example.net"`). Spaces are
+    `S::propagator services.example.net,hub1.example.net`). Spaces are
     accepted only around commas and are trimmed per token. Empty tokens, tabs,
     CR/LF, names longer than `HOSTLEN`, names rejected by UnrealIRCd, and total
     values longer than `UDB_RECORD_VALUE_MAX` are rejected. Lists longer than
@@ -189,7 +207,7 @@ as a multi-hop transaction:
 1. **Local override:** `udb { propagator "<server>"; }` takes strict precedence.
    The local server may name itself. A remote name is eligible only if it is a
    directly connected server peer.
-2. **Persisted priority list:** `S::propagator "pri,sec"` selects the first
+2. **Persisted priority list:** `S::propagator pri,sec` selects the first
    entry that names the local server or a directly connected server peer. A
    globally visible server reached through another hub is skipped.
 3. **HEL authorization:** A selected remote peer becomes usable for staged
@@ -221,8 +239,8 @@ configured node accepts staged data only from the direct peer it selected as
 propagator. Once READY without a policy, a node is its own standalone
 authority and accepts no remote imports. This
 permits edge-local A-to-B-to-C propagation when B selects A and C selects B, as well as Ingest Gateway topologies where a Hub shields Services from the rest of the network.
-Real-time mutations must likewise originate from the configured authority; a peer that is actively serving an authorized block
-synchronization may only send records for that block.
+Real-time mutations must likewise originate from the selected direct authority
+and are rejected for a block while its staged transaction is active.
 
 To guarantee network-wide data integrity and consistency, configuring
 `require module { name "third/udb"; };` in `unrealircd.conf` is strongly recommended.
@@ -241,10 +259,10 @@ it. After `HOOKTYPE_SERVER_SYNC`, each directly linked peer receives one
 `HEL 4 ACK <selected-propagator> <epoch16> OCL` confirms UDB V4 for that link; no `INF`, staged frame, or
 forwarded UDB DB frame is sent first. A missing acknowledgement times out after
 60 seconds and automatically aborts the link with `SQUIT`. The `OCL` token is
-mandatory: a bare `HEL 4` belongs to a legacy peer and the link is aborted
-without completing the capability. `HEL` is the only DB frame accepted before
-confirmation and is
-never routed beyond the direct link.
+mandatory. A request or acknowledgement without the required epoch and OCL
+token cannot confirm the capability, and the link is rejected immediately or
+when the HEL deadline expires. `HEL` is the only DB frame accepted before
+confirmation and is never routed beyond the direct link.
 
 **HEL (Capability Negotiation and Auto-Bootstrap):**
 `:<sid> DB <direct-peer-sid> HEL 4 <selected-propagator> <epoch16> OCL [OCLG]`
@@ -287,7 +305,7 @@ before READY), never a timestamp or SID comparison. Only the follower sends
 `RES`; an authority never pulls from its followers, which prevents reciprocal
 RES and snapshot exchange loops.
 
-For peers with the staged capability, `RES` is answered with a transaction:
+After HEL 4 confirmation, `RES` is answered with a staged transaction:
 
 **BEGIN:** `:<sid> DB <target> BEGIN <round_id> <block> <txid> <digest>`
 
@@ -423,7 +441,7 @@ This registry is runtime state and does not affect `udb_ready` nor the
 convergence of the UDB blocks; an operclass divergence never prevents the
 distributed database from converging.
 
-### 2.2 Real-time Data Modification
+### 2.3 Real-time Data Modification
 To inject or delete records on the fly, the following commands are used (usually with target `*` for broadcast).
 
 **INS (Insert / Modify):**
@@ -435,10 +453,10 @@ Deletes a node and cascades to children.
 `:<sid> DB * DEL <block_letter>::<key>[::<subkey>]`
 *Example:* `:<sid> DB * DEL C::#opers::topic`
 
-After HEL 4 confirmation, real-time `INS` and `DEL` are accepted only from the
-selected propagator, except frames belonging to the peer currently serving that
-block's synchronization. They are rejected while that block has a staged
-transaction and are persisted and forwarded only to HEL-confirmed direct peers.
+After HEL 4 confirmation, real-time `INS`, `DEL`, `DRP`, and `OPT` are accepted
+only from the selected direct propagator. They are rejected while that block has
+a staged transaction and are persisted and forwarded only to HEL-confirmed
+direct peers.
 
 UDB strictly validates all records received via `INS`, `PUT`, or loaded from disk
 against a declarative per-block schema catalogue and strict numeric limits. Unknown keys,
@@ -456,7 +474,7 @@ validation applies during startup, so a persisted over-capacity `C::<channel>::m
 rejects the complete candidate set, keeps source snapshots byte-preserved, and leaves the node
 non-READY until authoritative recovery supplies a valid six-block generation.
 
-### 2.2 Numeric Limits & Mathematical Hierarchy
+### 2.4 Numeric Limits & Mathematical Hierarchy
 
 To guarantee zero truncation across the entire lifecycle (runtime store, disk serialization, and Server-to-Server propagation), UDB strictly enforces a unified numeric hierarchy:
 
@@ -513,7 +531,7 @@ classified as a durability-uncertain commit, not as a pre-commit failure.
 **OPT (Optimize):**
 `:<sid> DB * OPT <block_letter>`
 
-### 2.3 Error Handling (ERR)
+### 2.5 Error Handling (ERR)
 All errors use only:
 `:<sid> DB <target> ERR <subcommand> <error_code> <round_id> <block>`
 
@@ -529,22 +547,22 @@ correlation ID and never alter reconciliation.
 *   `5`: UDB_ERR_NO_SYNC (No synchronization was requested)
 *   `6`: UDB_ERR_FORBIDDEN (Action denied due to permissions / non-propagator)
 
-### 2.4 Operational Readiness, Persistence & Health (Invariants R1 - R10)
+### 2.6 Operational Readiness, Persistence & Health (Invariants R1 - R10)
 
 UDB enforces deterministic invariants for database readiness, durable persistence, round-isolated reconciliation, and hop-by-hop topology:
 
 1. **Durable Database Readiness (Invariant R1):** `udb_ready=1` is reachable only after all 6 blocks (`N, C, I, S, L, K`) are durably persisted to disk, `.udb_state` is atomically persisted to `STATE=READY` (with directory `fsync`), and then `udb_ready=1` is set.
-2. **Missing Snapshot Check on Restart (Invariant R2):** On restart with `.udb_state` indicating `READY`, if any required block snapshot `udb_X.db` is missing (`ENOENT` / `UDB_LOAD_EMPTY`), the node does NOT start `READY`; it logs `UDB_READY_MISSING_BLOCK` and fails closed to `BOOTSTRAPPING`.
+2. **Missing Snapshot Check on Restart (Invariant R2):** On restart with `.udb_state` indicating `READY`, if any required block snapshot `udb_X.db` is missing (`ENOENT` / `UDB_LOAD_EMPTY`) or has a different generation, the node does not start `READY`; it logs `UDB_READY_INCOMPLETE` and fails closed to `BOOTSTRAPPING`.
 3. **Bootstrapping Integrity (Invariant R3):** Bootstrapping nodes cannot serve downstream staged snapshots (`RES` rejected with `ERR RES FORBIDDEN`) or accept normal local clients.
-4. **Orthogonality of Readiness and Health (Invariant R4):** `READY + OK`, `READY + DEGRADED`, and `READY + STALE` are valid independent states. Losing upstream does not erase durable `udb_ready=1`.
+4. **Orthogonality of Readiness and Health (Invariant R4):** `READY + OK` and `READY + DEGRADED` are valid states. `STALE` is exclusive to a non-READY bootstrap. Losing upstream does not erase durable `udb_ready=1`.
 5. **Direct Authority & Hop-by-Hop S2S (Invariant R5):** UDB staged synchronization is strictly hop-by-hop. In topology `Services A -> Hub B -> Leaf C`, B selects A as its direct authority, and C selects B as its direct authority. Staged `BEGIN`/`PUT`/`END`/`RES` synchronization is never a transparent multi-hop routed transaction. A direct peer authorizes exports only when `HEL 4 <prop>` specifies `<prop> == me.name` (or `?` during bootstrap).
 6. **Round Isolation & Lifecycle (Invariant R6):** Every reconciliation round has an explicit `round_id` and isolated bitmasks (`compared_blocks`, `divergent_blocks`, `completed_blocks`). Masks reset when starting a new round even with the same peer. Staged `END` commits verify `session->round_id == udb_reconcile.round_id`.
 7. **Reconciliation Convergence Check (Invariant R7):** Transition to `READY` requires all 6 blocks compared in the active round, all divergent blocks committed in that round, and no active or pending sync sessions.
 8. **Bounded Pending RES State (Invariant R8):** Requested sync state (`pending_from`, `pending_deadline`, `pending_round_id`) is bounded and tracked separately from active `session`. Only a same-round `ERR`, plus `BEGIN`, timeout, peer disconnect, policy changes, and shutdown, can clean up pending state. Current-round failures schedule a bounded exponential-backoff retry.
-9. **Orphaned Snapshots Fail Closed:** When `.udb_state` is absent, no storage migration is attempted. Even a complete, loadable six-snapshot database remains `BOOTSTRAPPING` (clients denied), logs `UDB_ORPHANED_SNAPSHOTS`, and requires an authorized bootstrap or explicit operator action. Obsolete state formats (minimal `STATE=`/`LAST_SYNC=` files, `ORIGIN=LEGACY`) are invalid and fail closed.
+9. **Orphaned Snapshots Fail Closed:** When `.udb_state` is absent, even a complete, loadable six-snapshot database remains `BOOTSTRAPPING` (clients denied), logs `UDB_ORPHANED_SNAPSHOTS`, and requires an authorized bootstrap or explicit operator action. Only the complete current state format is accepted.
 10. **Crash Consistency:** Atomically renames `.udb_state.tmp` to `.udb_state` and invokes `fsync` on the containing directory descriptor before closing.
 
-### 2.5 Operational Health State Machine (OK / DEGRADED / STALE)
+### 2.7 Operational Health State Machine (OK / DEGRADED / STALE)
 UDB features a deterministic health state machine to manage node reliability. Client admission is gated exclusively by database readiness (`udb_ready`): a READY node always accepts new local clients regardless of synchronization health, and a node without READY always denies them.
 
 *   **`OK`**: No known divergence with the authority is pending resolution. This does NOT require the propagator to be online: a READY node whose propagator is offline (e.g. services under maintenance) remains `OK` and fully operational. New local clients are accepted.
@@ -555,31 +573,33 @@ UDB features a deterministic health state machine to manage node reliability. Cl
 
 **Key Invariants:**
 1.  **Sole Admission Gate:** Only `udb_ready` decides client admission. Synchronization health (`OK`/`DEGRADED`/`STALE`) never restricts clients, and existing clients and S2S links are strictly never disconnected by health transitions.
-2.  **Strict Trust Invariant:** Elapsed time *never* converts advertised `HEL 4 -` into `HEL 4 ?` or relaxes trust rules. An isolated node with an obsolete policy will never automatically accept staged snapshots from unauthorized neighbors.
+2.  **Strict Trust Invariant:** Elapsed time *never* converts advertised `HEL 4 -` into `HEL 4 ?` or relaxes trust rules. A node whose configured authority is unavailable never accepts staged snapshots from unauthorized neighbors.
 3.  **Automatic Recovery:** As soon as an eligible propagator links and confirms `HEL 4`, a bootstrap-pending node converges to `READY` + `OK`, emits log notice `UDB_SYNC_RECOVERED`, and permits new client connections without requiring an IRCd restart.
-4.  **Administrative Override:** Administrators can recover a bootstrap-pending node by updating `propagator "<new-server>";` in `unrealircd.conf` and issuing `/REHASH`. The local config override takes precedence over obsolete database policies.
+4.  **Administrative Override:** Administrators can recover a bootstrap-pending node by updating `propagator "<new-server>";` in `unrealircd.conf` and issuing `/REHASH`. The local configuration override takes precedence over the persisted `S::propagator` policy.
 
-### 2.6 Diagnostic & Oper Status Commands
+### 2.8 Diagnostic & Oper Status Commands
 Operators can query live synchronization health in real time via `/UDB STATUS` or `/DBQ STATUS` (oper only):
 ```text
 /UDB STATUS
 ```
 Output:
 ```text
-:server 339 oper :UDB synchronization: OK | DEGRADED | STALE
 :server 339 oper :Database readiness: READY | BOOTSTRAPPING
-:server 339 oper :Serving downstream: YES | NO
+:server 339 oper :UDB synchronization: OK | DEGRADED | STALE
+:server 339 oper :Recovery: ACTIVE | IDLE
+:server 339 oper :Selected propagator: <server> | none
 :server 339 oper :Selected direct source: <server> | none
-:server 339 oper :Configured authority: <authority> | none
 :server 339 oper :Advertised state: HEL 4 <server|?|->
+:server 339 oper :Serving downstream: YES | NO
 :server 339 oper :Policy source: local | S | none
 :server 339 oper :Policy: <list>
+:server 339 oper :Configured authority: <authority> | none
 :server 339 oper :Time without propagator: <seconds>
 :server 339 oper :New local clients: ALLOWED | DENIED
 :server 339 oper :Last successful synchronization: <timestamp> | none
 ```
 
-### 2.7 DBQ Secret Redaction
+### 2.9 DBQ Secret Redaction
 
 `DBQ` requires oper privileges and never returns the value of `pass`,
 `challenge`, or `encryption_key`. Direct queries and child listings show
@@ -587,10 +607,11 @@ Output:
 
 ---
 
-## 3. Credits and License
+## 3. Verification
 
-**Author & Lead Developer:**
-The UDB module, its modern modular architecture for UnrealIRCd 6, and the v4 protocol extensions are developed and maintained by **David Abuín Fontán ('davidlig')** (<https://github.com/davidlig/unrealircd-udb>).
-
-**Original Concept & Idea:**
-Based on the original UDB protocol concept conceived by **Trocotronic** (*www.redyc.com*).
+The canonical build and test matrix is maintained in
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml). Focused and runtime
+harnesses live in [`tests/`](../tests/); the harness-specific Markdown files
+document their isolation requirements. Documentation-only changes do not require
+rebuilding the module, but relative links, version references, and Markdown
+formatting must be checked before release.
