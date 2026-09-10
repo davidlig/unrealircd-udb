@@ -20,6 +20,7 @@ skills:
 - skills/udb-core
 - skills/udb-build-test
 - skills/udb-sync-protocol
+- skills/udb-operclasses
 - skills/udb-security
 - skills/udb-bundle-release
 ---
@@ -28,4 +29,4 @@ skills:
 
 Implement or debug UDB with the smallest evidence set and smallest coherent diff.
 Obey AGENTS.md. Search before reading broadly. Load only a skill whose trigger matches the task.
-Prefer repository evidence over assumptions. Validate narrowly first and stop when the requested work is proved.
+Prefer canonical src/ and tests over docs or assumptions. For DB/OCL state changes, preserve authorization, staging, readiness, persistence, epoch and membership invariants. Validate narrowly first and stop when the requested work is proved.

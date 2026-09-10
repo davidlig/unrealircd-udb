@@ -1,13 +1,13 @@
 ---
 name: udb-code-review
-description: Reviews a UDB diff for concrete correctness, security, protocol, convergence, lifetime, persistence, and regression defects. Use for commit/PR review.
+description: Reviews a UDB diff for concrete correctness, security, DB/OCL convergence, lifetime, persistence, and regression defects. Use for commit/PR review.
 ---
 
 # UDB Code Review
 
 1. Start from the supplied diff/patch.
 2. Enumerate changed functions and affected invariants.
-3. Read only nearby code needed to establish reachability/ownership/state.
+3. Read only nearby code needed to establish reachability, authority, ownership or state.
 4. Inspect directly relevant tests and generated/doc consistency.
 5. Report findings by severity; style comes last.
 
@@ -18,6 +18,8 @@ A finding is valid only when it states:
 - why existing checks/tests do not prevent it;
 - concise remediation direction.
 
-Prioritize memory corruption/UAF, auth bypass, remote crash/parser safety, cross-node corruption/desync, partial active-state mutation, privilege escalation, then state/readiness/persistence/lifecycle regressions.
+Prioritize memory corruption/UAF, auth bypass, remote crash/parser safety, cross-node corruption/desync, partial active-state mutation, privilege escalation, then DB readiness/persistence/lifecycle and OCL epoch/membership/completeness regressions.
+
+For OCL changes, verify origin direction, HEL epoch binding, newer-BEGIN withdrawal, stage atomicity, participant removal and OCLG fail-closed completeness. For DB sync, verify direct-authority ownership, round/txid binding, persistence-before-publish and six-block recovery.
 
 If no material issue is proved, say so and state only concrete residual untested risk. Do not manufacture findings or broaden into unrelated audit work.

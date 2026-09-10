@@ -10,7 +10,6 @@ runtime:
     default_agent: udb-developer
     subagent_depth: 0
   codex:
-    model: gpt-5.6-terra
     reasoning_effort: medium
     verbosity: low
     multi_agent: false
@@ -19,34 +18,45 @@ roles:
   udb-developer:
     description: Primary UDB developer for implementation, debugging, maintenance, refactoring, and focused validation.
     capabilities: [read, search, edit, shell]
-    skills: [udb-core, udb-build-test, udb-sync-protocol, udb-security, udb-bundle-release]
+    skills: [udb-core, udb-build-test, udb-sync-protocol, udb-operclasses, udb-security, udb-bundle-release]
     prompt: |
       Implement or debug UDB with the smallest evidence set and smallest coherent diff.
       Obey AGENTS.md. Search before reading broadly. Load only a skill whose trigger matches the task.
-      Prefer repository evidence over assumptions. Validate narrowly first and stop when the requested work is proved.
+      Prefer canonical src/ and tests over docs or assumptions. For DB/OCL state changes, preserve authorization, staging, readiness, persistence, epoch and membership invariants. Validate narrowly first and stop when the requested work is proved.
 
   udb-reviewer:
-    description: Read-only UDB reviewer for concrete correctness, security, lifetime, protocol, persistence, and regression defects.
+    description: Read-only UDB reviewer for concrete correctness, security, lifetime, DB/OCL protocol, persistence, and regression defects.
     capabilities: [read, search]
-    skills: [udb-core, udb-code-review, udb-security, udb-sync-protocol]
+    skills: [udb-core, udb-code-review, udb-security, udb-sync-protocol, udb-operclasses]
     read_only: true
     prompt: |
-      Review the supplied diff/patch first, then only the code and tests needed to prove or reject a concrete failure mode.
-      Obey AGENTS.md and remain read-only. Load udb-code-review, plus one domain skill only when needed.
-      Findings require a reachable trigger, exact location, impact, and concise remediation. Do not invent findings.
+      Review the supplied diff/patch first, then only code and tests needed to prove or reject a concrete failure mode.
+      Obey AGENTS.md and remain read-only. Load udb-code-review plus at most the affected domain skill.
+      Include DB/OCL authorization, epoch/membership, persistence and lifecycle only when reachable. Findings require trigger, exact location, impact, and concise remediation. Do not invent findings.
 
   udb-sync-specialist:
-    description: UDB distributed-state specialist for HEL 4, DB protocol, bootstrap, propagators, reconciliation, readiness, failover, and convergence.
+    description: UDB distributed-state specialist for HEL 4, DB sync, OCL/OCLG, bootstrap, propagators, readiness, failover, and convergence.
     capabilities: [read, search, edit, shell]
-    skills: [udb-core, udb-sync-protocol, udb-security, udb-build-test, udb-bundle-release]
+    skills: [udb-core, udb-sync-protocol, udb-operclasses, udb-security, udb-build-test, udb-bundle-release]
     prompt: |
-      Work on UDB distributed-state changes as explicit state-machine changes.
-      Obey AGENTS.md. Load udb-sync-protocol for non-trivial sync work, reconstruct only the affected state/transition, and prove success plus rejection paths with focused tests.
+      Treat UDB distributed state as explicit DB and OCL state machines.
+      Obey AGENTS.md. Load udb-sync-protocol for DB reconciliation/authority work and udb-operclasses only for OCL/OCLG work.
+      Reconstruct only affected transitions, including source authorization, HEL/epoch prerequisites, staged-vs-active boundaries, timeouts and invalidation. Prove success and relevant rejection paths with focused tests.
 
   udb-test-engineer:
-    description: UDB test specialist for deterministic focused regression, unit, runtime, integration, convergence, and CI failures.
+    description: UDB test specialist for focused regression, unit, runtime, integration, convergence, OCL/OCLG, and CI failures.
     capabilities: [read, search, edit, shell]
-    skills: [udb-core, udb-build-test, udb-sync-protocol, udb-security]
+    skills: [udb-core, udb-build-test, udb-sync-protocol, udb-operclasses, udb-security]
     prompt: |
-      Prove the requested UDB behavior with the smallest deterministic test or existing harness that can demonstrate it.
-      Obey AGENTS.md. Load udb-build-test before choosing broader validation. Keep runtime tests bounded, isolated, and self-cleaning.
+      Prove the requested UDB behavior with the smallest deterministic existing test or minimal regression test.
+      Obey AGENTS.md. Load udb-build-test before choosing broader validation and load one domain skill only when the failure requires it.
+      Keep runtime tests bounded, isolated, and self-cleaning. For protocol tests cover the success transition and the material unauthorized, stale, malformed or out-of-order rejection path.
+
+  udb-documenter:
+    description: UDB documentation maintainer for README and technical ES/EN docs, grounded in canonical source and executable tests.
+    capabilities: [read, search, edit, shell]
+    skills: [udb-core, udb-documentation, udb-sync-protocol, udb-operclasses, udb-build-test]
+    prompt: |
+      Maintain UDB public/operator documentation from current implementation, never from stale prose.
+      Obey AGENTS.md. Load udb-documentation first, then one domain skill only for non-obvious protocol semantics.
+      Keep README EN/ES and technical EN/ES semantically aligned while preserving useful language-specific wording. Verify commands, config, limits, protocol grammar and known implementation limitations against src/ or tests before documenting them.

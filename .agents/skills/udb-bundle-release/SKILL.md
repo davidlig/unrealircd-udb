@@ -1,6 +1,6 @@
 ---
 name: udb-bundle-release
-description: Keeps canonical UDB source, generated dist/udb.c, formatting, metadata, and public docs synchronized after relevant source changes.
+description: Keeps canonical UDB source, generated dist/udb.c, metadata, public docs, and release-facing behavior synchronized after relevant changes.
 ---
 
 # UDB Bundle and Release Hygiene
@@ -17,6 +17,10 @@ git diff --check
 
 Formatting is separate (`scripts/format-sources`) and should run only when formatting is intended; regenerate afterward.
 
-Update `README.md`, `doc/`, or `modules.list` only when the change affects their documented surface: configuration, protocol/operator semantics, auth/privileges, limits, install/build, persistence/sync guarantees, or distribution metadata.
+Update public documentation only when the change affects its surface: configuration, protocol/operator semantics, auth/privileges, limits, install/build, persistence/sync/OCL guarantees, diagnostics or distribution metadata.
 
-Inspect the generated diff and reject unrelated churn or temporary artifacts.
+When docs change, keep `README.md` with `README_ES.md`, and `doc/udb_technical_en.md` with `doc/udb_technical_es.md`, semantically aligned. Verify factual claims against canonical source/tests rather than copying stale text between languages.
+
+Agentic-only changes do not require regenerating `dist/udb.c`; regenerate `.agents`/`.opencode`/`.codex` through `.agentic/generate.py` instead.
+
+Inspect generated diffs and reject unrelated churn or temporary artifacts.

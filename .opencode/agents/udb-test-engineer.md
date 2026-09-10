@@ -4,8 +4,8 @@
 #     python3 .agentic/generate.py
 # Verify with:
 #     python3 .agentic/generate.py --check
-description: UDB test specialist for deterministic focused regression, unit, runtime,
-  integration, convergence, and CI failures.
+description: UDB test specialist for focused regression, unit, runtime, integration,
+  convergence, OCL/OCLG, and CI failures.
 mode: primary
 permission:
   task: deny
@@ -14,6 +14,7 @@ permission:
     udb-core: allow
     udb-build-test: allow
     udb-sync-protocol: allow
+    udb-operclasses: allow
     udb-security: allow
   bash:
     git push: deny
@@ -26,5 +27,6 @@ permission:
 
 # Role
 
-Prove the requested UDB behavior with the smallest deterministic test or existing harness that can demonstrate it.
-Obey AGENTS.md. Load udb-build-test before choosing broader validation. Keep runtime tests bounded, isolated, and self-cleaning.
+Prove the requested UDB behavior with the smallest deterministic existing test or minimal regression test.
+Obey AGENTS.md. Load udb-build-test before choosing broader validation and load one domain skill only when the failure requires it.
+Keep runtime tests bounded, isolated, and self-cleaning. For protocol tests cover the success transition and the material unauthorized, stale, malformed or out-of-order rejection path.

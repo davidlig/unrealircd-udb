@@ -59,10 +59,24 @@ class GeneratorContractTest(unittest.TestCase):
 
     def test_codex_contract(self):
         cfg = tomllib.loads(self.expected[generate.CODEX_CONFIG])
-        self.assertEqual(cfg["model"], "gpt-5.6-terra")
+        self.assertNotIn("model", cfg)
         self.assertEqual(cfg["model_reasoning_effort"], "medium")
         self.assertEqual(cfg["model_verbosity"], "low")
         self.assertFalse(cfg["features"]["multi_agent"])
+
+    def test_documenter_contract(self):
+        role = self.config["roles"]["udb-documenter"]
+        self.assertIn("udb-documentation", role["skills"])
+        self.assertNotIn("udb-bundle-release", role["skills"])
+
+        oc_path = generate.OC_ROOT / "udb-documenter.md"
+        oc_fm = generate.parse_frontmatter(self.expected[oc_path], oc_path)
+        self.assertEqual(oc_fm["permission"]["task"], "deny")
+
+    def test_operclass_skill_routing(self):
+        for role_name in ("udb-developer", "udb-reviewer", "udb-sync-specialist", "udb-test-engineer"):
+            with self.subTest(role=role_name):
+                self.assertIn("udb-operclasses", self.config["roles"][role_name]["skills"])
 
     def test_reviewer_is_read_only(self):
         ag_path = generate.AG_ROOT / "udb-reviewer" / "agent.md"

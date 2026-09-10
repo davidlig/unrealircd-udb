@@ -137,10 +137,7 @@ def antigravity_content(name, role, defaults):
 
 def opencode_permissions(role):
     capabilities = set(role.get("capabilities", []))
-    permissions = {
-        "task": "deny",
-        "skill": {"*": "deny"},
-    }
+    permissions = {"task": "deny", "skill": {"*": "deny"}}
     for skill in role.get("skills", []):
         permissions["skill"][skill] = "allow"
 
@@ -168,8 +165,6 @@ def opencode_permissions(role):
 
 
 def opencode_content(name, role, defaults):
-    # Model is deliberately session-controlled: the user's OpenAI/GLM provider IDs
-    # are installation-specific. Project config only enforces orchestration safety.
     fm = {
         "description": role["description"],
         "mode": "primary",
@@ -191,7 +186,6 @@ def render_codex_config(runtime):
     multi_agent = "true" if runtime["multi_agent"] else "false"
     return (
         GENERATED_NOTICE
-        + f'model = "{runtime["model"]}"\n'
         + f'model_reasoning_effort = "{runtime["reasoning_effort"]}"\n'
         + f'model_verbosity = "{runtime["verbosity"]}"\n\n'
         + "[features]\n"
@@ -240,6 +234,7 @@ def validate(cfg):
     runtime = _require_mapping(cfg.get("runtime"), "runtime")
     if set(runtime) != {"opencode", "codex"}:
         raise SystemExit("runtime must contain exactly opencode and codex")
+
     oc_runtime = _require_mapping(runtime["opencode"], "runtime.opencode")
     if set(oc_runtime) != {"default_agent", "subagent_depth"}:
         raise SystemExit("runtime.opencode must contain default_agent and subagent_depth")
@@ -247,10 +242,8 @@ def validate(cfg):
         raise SystemExit("runtime.opencode.subagent_depth must remain 0")
 
     codex = _require_mapping(runtime["codex"], "runtime.codex")
-    if set(codex) != {"model", "reasoning_effort", "verbosity", "multi_agent"}:
-        raise SystemExit("runtime.codex has unsupported/missing keys")
-    if not isinstance(codex["model"], str) or not codex["model"].strip():
-        raise SystemExit("runtime.codex.model must be a string")
+    if set(codex) != {"reasoning_effort", "verbosity", "multi_agent"}:
+        raise SystemExit("runtime.codex must contain reasoning_effort, verbosity and multi_agent only")
     if codex["reasoning_effort"] not in {"minimal", "low", "medium", "high", "xhigh"}:
         raise SystemExit("runtime.codex.reasoning_effort is invalid")
     if codex["verbosity"] not in {"low", "medium", "high"}:
@@ -375,8 +368,11 @@ def check(expected):
         if current != content:
             print(f"OUTDATED: {path.relative_to(ROOT)}")
             diff = difflib.unified_diff(
-                current.splitlines(), content.splitlines(),
-                fromfile=str(path.relative_to(ROOT)), tofile="expected", lineterm="",
+                current.splitlines(),
+                content.splitlines(),
+                fromfile=str(path.relative_to(ROOT)),
+                tofile="expected",
+                lineterm="",
             )
             for line in list(diff)[:40]:
                 print(line)
