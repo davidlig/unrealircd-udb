@@ -121,7 +121,7 @@ module
 /* Line sub-records: K::<type>::<pattern>::<key> <value> */
 #define KKEY_TYPE "type"		 /* Spamfilter target type */
 #define KKEY_ACTION "action"	 /* Spamfilter action */
-#define KKEY_DURATION "duration" /* TKL duration */
+#define KKEY_EXPIRES "expires"   /* Absolute Unix expiry timestamp */
 #define KKEY_REASON "reason"	 /* Ban reason */
 
 /* Spamfilter pattern encoding: K::F::b64:<RFC 4648 base64>::... */
@@ -190,6 +190,7 @@ module
 #define UDB_HASH_MASK (UDB_HASH_SIZE - 1)
 #define UDB_PASSWORD_FAILURE_SLOTS 256
 #define UDB_TKL_MASK_COMPONENT_MAX 127
+#define UDB_LINE_EXPIRY_SWEEP_MAX 64
 /* Operclass registry (OCL / OCLG) limits */
 #define UDB_OCL_MAX_CLASSES 1024
 #define UDB_OCL_STAGE_TIMEOUT 30
@@ -624,6 +625,9 @@ static void udb_mutation_drp(UdbContext *ctx, Client *client, Client *direct_pee
 							 int is_for_me, int is_broadcast);
 static void udb_mutation_opt(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, char letter,
 							 const char *modified_at, int is_for_me, int is_broadcast);
+static void udb_mutation_exp(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, const char *path,
+					 time_t expected_expires, int is_for_me, int is_broadcast);
+static int udb_mutation_expire_local(UdbContext *ctx, const char *path, time_t expected_expires);
 static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync);
 static void udb_nick_strip(Client *client, UdbRecord *nick_rec);
 static void udb_nick_remove_record(UdbBlock *block, UdbRecord *rec);
@@ -681,6 +685,10 @@ int udb_nicks_load(ModuleInfo *modinfo);
 static void udb_channels_init(ModuleInfo *modinfo);
 static void udb_ips_init(ModuleInfo *modinfo);
 static void udb_lines_init(ModuleInfo *modinfo);
+static void udb_lines_shutdown(void);
+static void udb_lines_expiry_sweep(time_t now);
+static void udb_lines_expiry_peer_disconnected(Client *client);
+static void udb_lines_expiry_pending_clear_record(UdbRecord *rec);
 static void udb_query_init(ModuleInfo *modinfo);
 static void udb_sync_snomask_filter(void);
 
@@ -854,7 +862,7 @@ static const char *udb_get_shared_subkey(const char *key)
 									   "access",	 "forbid",	 "suspended", "challenge", "founder",		 "topic",
 									   "options",	 "clones",	 "nolines",	  "host",	   "encryption_key", "suffix",
 									   "nickserv",	 "chanserv", "ipserv",	  "quit_ips",  "quit_clones",	 "flood",
-									   "propagator", "type",	 "action",	  "duration",  "reason",		 NULL};
+									   "propagator", "type",	 "action",	  "expires",   "reason",		 NULL};
 
 	for (int i = 0; known_keys[i]; i++)
 		if (!strcasecmp(known_keys[i], key))
@@ -2224,6 +2232,55 @@ static int udb_clone_limit_valid(const char *value)
 	return udb_numeric_record_valid(value) && udb_strtoul_strict(value + 1, &val) && val <= INT_MAX;
 }
 
+static int udb_k_expires_valid(const char *value)
+{
+	time_t expires;
+
+	/* Zero is deliberately not a second spelling of permanent. */
+	return udb_numeric_record_valid(value) && udb_parse_time_t(value + 1, &expires) && expires > 0;
+}
+
+static int udb_zline_mask_valid(const char *mask)
+{
+	char address[INET6_ADDRSTRLEN];
+	const char *slash;
+	unsigned int prefix;
+	int family;
+	size_t length;
+
+	if (!mask || !*mask || strchr(mask, '@'))
+		return 0;
+	slash = strchr(mask, '/');
+	length = slash ? (size_t)(slash - mask) : strlen(mask);
+	if (!length || length >= sizeof(address) || (slash && strchr(slash + 1, '/')))
+		return 0;
+	memcpy(address, mask, length);
+	address[length] = '\0';
+	if (inet_pton(AF_INET, address, &(struct in_addr){0}) == 1)
+		family = AF_INET;
+	else if (inet_pton(AF_INET6, address, &(struct in6_addr){0}) == 1)
+		family = AF_INET6;
+	else
+		return 0;
+	if (!slash)
+		return 1;
+	return udb_parse_uint_strict(slash + 1, &prefix, 0, family == AF_INET ? 32 : 128);
+}
+
+static int udb_spamfilter_regex_valid(const char *stored)
+{
+	char pattern[UDB_SPAMFILTER_PATTERN_MAX + 1];
+	Match *match;
+
+	if (!udb_spamfilter_pattern(stored, pattern, sizeof(pattern)))
+		return 0;
+	match = unreal_create_match(MATCH_PCRE_REGEX, pattern, NULL);
+	if (!match)
+		return 0;
+	unreal_delete_match(match);
+	return 1;
+}
+
 static int udb_line_mask_valid(const char *mask)
 {
 	const char *at;
@@ -2544,7 +2601,8 @@ static int udb_spamfilter_type_valid(const char *value)
 
 static int udb_spamfilter_action_valid(const char *value)
 {
-	return value && *value && banact_stringtoval(value) > 0;
+	BanActionValue action = value && *value ? banact_stringtoval(value) : 0;
+	return action && !banact_config_only(action);
 }
 
 static const UdbKeyDescriptor udb_schema_n_subkeys[] = {
@@ -2698,7 +2756,9 @@ static int udb_record_validate(UdbBlock *block, const char *path, const char *va
 		const char *type = parts[0];
 		if (depth < 2 || !udb_tkl_type_valid(type))
 			goto done;
-		if (type[0] != 'F' && type[0] != 'Q' && !udb_line_mask_valid(parts[1]))
+		if (type[0] == 'Z' && !udb_zline_mask_valid(parts[1]))
+			goto done;
+		if (type[0] != 'F' && type[0] != 'Q' && type[0] != 'Z' && !udb_line_mask_valid(parts[1]))
 			goto done;
 
 		if (type[0] == 'F') /* Spamfilter */
@@ -2707,8 +2767,7 @@ static int udb_record_validate(UdbBlock *block, const char *path, const char *va
 				goto done;
 			const char *pattern = parts[1];
 			const char *subkey = parts[2];
-			char pat_buf[UDB_SPAMFILTER_PATTERN_MAX + 1];
-			if (!pattern || !*pattern || !udb_spamfilter_pattern(pattern, pat_buf, sizeof(pat_buf)))
+			if (!pattern || !*pattern || !udb_spamfilter_regex_valid(pattern))
 				goto done;
 			if (!strcasecmp(subkey, KKEY_TYPE))
 			{
@@ -2720,9 +2779,9 @@ static int udb_record_validate(UdbBlock *block, const char *path, const char *va
 				result = udb_spamfilter_action_valid(value);
 				goto done;
 			}
-			if (!strcasecmp(subkey, KKEY_DURATION))
+			if (!strcasecmp(subkey, KKEY_EXPIRES))
 			{
-				result = udb_numeric_record_valid(value);
+				result = udb_k_expires_valid(value);
 				goto done;
 			}
 			if (!strcasecmp(subkey, KKEY_REASON))
@@ -2750,9 +2809,9 @@ static int udb_record_validate(UdbBlock *block, const char *path, const char *va
 					result = udb_non_empty_string_valid(value) && value[0] != '*';
 					goto done;
 				}
-				if (!strcasecmp(subkey, KKEY_DURATION))
+				if (!strcasecmp(subkey, KKEY_EXPIRES))
 				{
-					result = udb_numeric_record_valid(value);
+					result = udb_k_expires_valid(value);
 					goto done;
 				}
 				goto done;
@@ -5099,6 +5158,7 @@ EVENT(udb_sync_timeout_event)
 	if (abort_reason)
 		udb_reconcile_abort(udb_ctx, abort_reason, 1);
 	udb_ocl_stage_timeout_check(now);
+	udb_lines_expiry_sweep(now);
 	for (peer = udb_hello_peers; peer; peer = next)
 	{
 		next = peer->next;
@@ -5138,6 +5198,7 @@ EVENT(udb_sync_timeout_event)
 
 static void udb_sync_server_quit(Client *client)
 {
+	udb_lines_expiry_peer_disconnected(client);
 	UdbBlock *block;
 	UdbHelloPeer **peer;
 
@@ -6713,6 +6774,8 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 				 strcmp(old_rec->key, CKEY_OPTIONS)))
 				udb_remove_special_record(ctx, block, old_rec);
 		}
+		if (block->letter == 'K')
+			udb_lines_expiry_pending_clear_record(old_rec ? old_rec : rec);
 		udb_block_replace_tree(ctx, block, tree, udb_record_count_tree(tree));
 		if (!unchanged)
 		{
@@ -6736,6 +6799,53 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 	udb_mutation_forward_ins(client, direct_peer, target, path, data);
 }
 
+static int udb_mutation_delete_local(UdbContext *ctx, UdbBlock *block, UdbRecord *old_rec, Client *direct_peer,
+							 const char *operation)
+{
+	UdbRecord *candidate_rec = NULL;
+	UdbRecord *candidate_line = NULL;
+	UdbRecord *tree;
+	unsigned int record_count;
+	UdbSnapshotResult snap_res;
+
+	if (!ctx || !block || !old_rec)
+		return 0;
+	tree = udb_record_clone_tree(block->tree, old_rec, &candidate_rec);
+	if (!tree || !candidate_rec)
+	{
+		udb_record_free_tree(tree);
+		return 0;
+	}
+	if (block->letter == 'K' && candidate_rec->parent && candidate_rec->parent->parent &&
+		candidate_rec->parent->parent != tree)
+		candidate_line = candidate_rec->parent;
+	udb_record_delete_tree(candidate_rec);
+	record_count = udb_record_count_tree(tree);
+	snap_res = udb_file_write_snapshot(block, tree, record_count);
+	if (snap_res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
+	{
+		udb_record_free_tree(tree);
+		udb_handle_persistence_failure(ctx, direct_peer, block, operation, 0);
+		return 0;
+	}
+	/* This is the common DEL transaction: persisted candidate first, then old
+	 * runtime effect removal, active-tree replacement, and candidate reapply. */
+	udb_remove_special_record(ctx, block, old_rec);
+	if (block->letter == 'K')
+		udb_lines_expiry_pending_clear_record(old_rec);
+	udb_block_replace_tree(ctx, block, tree, record_count);
+	if (candidate_line)
+		udb_lines_apply_effect(ctx, block, candidate_line, 0);
+	if (block->letter == 'L')
+		udb_sync_snomask_filter();
+	if (snap_res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
+	{
+		udb_handle_persistence_failure(ctx, direct_peer, block, operation, 1);
+		return 2;
+	}
+	return 1;
+}
+
 static void udb_mutation_del(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, const char *path,
 							 int is_for_me, int is_broadcast)
 {
@@ -6749,6 +6859,8 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, Client *direct_pee
 	}
 	if (is_for_me)
 	{
+		UdbRecord *old_rec;
+		int result;
 		if (block->session || (block->syncing_from && block->syncing_from != direct_peer))
 		{
 			udb_protocol_mutation_error(client, "DEL", UDB_ERR_SYNC_ACTIVE, letter);
@@ -6759,7 +6871,7 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, Client *direct_pee
 			udb_protocol_mutation_error(client, "DEL", UDB_ERR_FORBIDDEN, letter);
 			return;
 		}
-		UdbRecord *old_rec = udb_record_find_path(ctx, block, path + 3);
+		old_rec = udb_record_find_path(ctx, block, path + 3);
 		if (!old_rec)
 		{
 			if (!is_broadcast)
@@ -6767,44 +6879,89 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, Client *direct_pee
 			udb_mutation_forward_del(client, direct_peer, target, path);
 			return;
 		}
-		UdbRecord *candidate_rec = NULL;
-		UdbRecord *candidate_line = NULL;
-		UdbRecord *tree = udb_record_clone_tree(block->tree, old_rec, &candidate_rec);
-		unsigned int record_count;
-		if (block->letter == 'K' && candidate_rec && candidate_rec->parent && candidate_rec->parent->parent &&
-			candidate_rec->parent->parent != tree)
-			candidate_line = candidate_rec->parent;
-		if (candidate_rec)
-			udb_record_delete_tree(candidate_rec);
-		record_count = udb_record_count_tree(tree);
-		UdbSnapshotResult snap_res = udb_file_write_snapshot(block, tree, record_count);
-		if (snap_res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
+		result = udb_mutation_delete_local(ctx, block, old_rec, direct_peer, "DEL snapshot");
+		if (result != 1)
 		{
-			udb_record_free_tree(tree);
-			udb_handle_persistence_failure(ctx, direct_peer, block, "DEL snapshot", 0);
 			udb_mutation_persist_error(client, "DEL", letter);
 			return;
 		}
-		if (old_rec)
-			udb_remove_special_record(ctx, block, old_rec);
-		udb_block_replace_tree(ctx, block, tree, record_count);
-		if (candidate_line)
-			udb_lines_apply_effect(ctx, block, candidate_line, 0);
-		if (block->letter == 'L')
-			udb_sync_snomask_filter();
-		if (snap_res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
 		{
-			udb_handle_persistence_failure(ctx, direct_peer, block, "DEL snapshot", 1);
-			udb_mutation_persist_error(client, "DEL", letter);
-			return;
+			char logbuf[512];
+			snprintf(logbuf, sizeof(logbuf), "Deleted record via S2S: %s", path);
+			udb_log(ULOG_INFO, "UDB_DEL_RECEIVED", client, "$msg", log_data_string("msg", logbuf));
 		}
-		char logbuf[512];
-		snprintf(logbuf, sizeof(logbuf), "Deleted record via S2S: %s", path);
-		udb_log(ULOG_INFO, "UDB_DEL_RECEIVED", client, "$msg", log_data_string("msg", logbuf));
 		if (!is_broadcast)
 			return;
 	}
 	udb_mutation_forward_del(client, direct_peer, target, path);
+}
+
+static int udb_mutation_k_expiry_matches(UdbBlock *block, const char *path, time_t expected_expires, UdbRecord **record)
+{
+	UdbRecord *line;
+	UdbRecord *expires;
+
+	if (!block || block->letter != UDB_BLOCK_LINES || !path || strncmp(path, "K::", 3))
+		return 0;
+	line = udb_record_find_path(udb_ctx, block, path + 3);
+	if (!line || !line->parent || line->parent->parent != block->tree)
+		return 0;
+	expires = udb_record_find(udb_ctx, KKEY_EXPIRES, line);
+	if (!expires || expires->data_str || !expires->data_num || expires->data_num != (unsigned long)expected_expires ||
+		expected_expires > TStime())
+		return 0;
+	if (record)
+		*record = line;
+	return 1;
+}
+
+/* Only an authority performs this operation.  It deliberately calls the same
+ * transactional subtree DEL primitive used by the normal mutation path. */
+static int udb_mutation_expire_local(UdbContext *ctx, const char *path, time_t expected_expires)
+{
+	UdbBlock *block = udb_mutation_path_block(ctx, path);
+	UdbRecord *line;
+
+	if (!block || !udb_mutation_k_expiry_matches(block, path, expected_expires, &line))
+		return 0;
+	if (udb_mutation_delete_local(ctx, block, line, NULL, "EXP snapshot") != 1)
+		return 0;
+	udb_sendto_confirmed_servers(NULL, ":%s DB * DEL %s", me.id, path);
+	return 1;
+}
+
+static void udb_mutation_exp(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, const char *path,
+							 time_t expected_expires, int is_for_me, int is_broadcast)
+{
+	UdbBlock *block = udb_mutation_path_block(ctx, path);
+	UdbRecord *line;
+
+	(void)target;
+	if (!block || !path || expected_expires <= 0 || is_broadcast || !is_for_me || client != direct_peer ||
+		!udb_peer_authorizes_us(direct_peer))
+	{
+		udb_protocol_mutation_error(client, "EXP", UDB_ERR_FORBIDDEN, 'K');
+		return;
+	}
+	if (block->session || (block->syncing_from && block->syncing_from != direct_peer))
+	{
+		udb_protocol_mutation_error(client, "EXP", UDB_ERR_SYNC_ACTIVE, 'K');
+		return;
+	}
+	if (!udb_mutation_k_expiry_matches(block, path, expected_expires, &line))
+	{
+		udb_log(ULOG_INFO, "UDB_K_EXP_STALE", client, "Ignored stale K expiry request for $path",
+				log_data_string("path", path), NULL);
+		return;
+	}
+	if (udb_mutation_delete_local(ctx, block, line, direct_peer, "EXP snapshot") != 1)
+	{
+		udb_protocol_mutation_error(client, "EXP", UDB_ERR_FATAL, 'K');
+		return;
+	}
+	udb_sendto_confirmed_servers(NULL, ":%s DB * DEL %s", me.id, path);
+	udb_log(ULOG_INFO, "UDB_K_EXP_ACCEPTED", client, "Accepted K expiry request and removed $path",
+			log_data_string("path", path), NULL);
 }
 
 static void udb_mutation_drp(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, char letter,
@@ -7288,6 +7445,17 @@ CMD_FUNC(cmd_db)
 		break;
 
 	case 'E':
+		if (!strcasecmp(subcmd, "EXP"))
+		{
+			time_t expected_expires;
+			if (parc != 5 || !udb_parse_time_t(parv[4], &expected_expires) || expected_expires <= 0)
+			{
+				udb_protocol_mutation_error(client, "EXP", UDB_ERR_PARAMS, 'K');
+				return;
+			}
+			udb_mutation_exp(ctx, client, direct_peer, target, parv[3], expected_expires, is_for_me, is_broadcast);
+			return;
+		}
 		if (!strcasecmp(subcmd, "END"))
 		{
 			UdbBlock *block;
@@ -10063,6 +10231,17 @@ static void udb_ips_init(ModuleInfo *modinfo)
  * License: GNU General Public License v2+
  */
 
+typedef struct UdbLineExpiryPending
+{
+	char type;
+	char *pattern;
+	time_t expires;
+	int sent;
+	struct UdbLineExpiryPending *next;
+} UdbLineExpiryPending;
+
+static UdbLineExpiryPending *udb_line_expiry_pending = NULL;
+
 static UdbRecord *udb_line_owner(UdbRecord *rec)
 {
 	while (rec && rec->parent && rec->parent->parent && rec->parent->parent->parent)
@@ -10194,12 +10373,91 @@ static void udb_line_remove_owned(char type, const char *pattern)
 	}
 }
 
+/* A numeric expires record is a single absolute timestamp.  Its absence, not
+ * zero, is the only permanent representation. */
+static int udb_line_expiry(UdbRecord *line_rec, time_t *expires)
+{
+	UdbRecord *record;
+
+	if (!line_rec)
+		return 0;
+	record = udb_record_find(udb_ctx, KKEY_EXPIRES, line_rec);
+	if (!record)
+		return 0;
+	if (!record->data_num || (unsigned long long)record->data_num > udb_time_t_max_val())
+		return -1;
+	if (expires)
+		*expires = (time_t)record->data_num;
+	return 1;
+}
+
+static int udb_line_path(UdbRecord *line_rec, char *path, size_t pathsz)
+{
+	if (!line_rec || !line_rec->parent || !line_rec->parent->key || !line_rec->key)
+		return 0;
+	strlcpy(path, "K", pathsz);
+	return udb_path_append_component(path, pathsz, line_rec->parent->key) &&
+		   udb_path_append_component(path, pathsz, line_rec->key);
+}
+
+static UdbLineExpiryPending *udb_line_expiry_pending_find(char type, const char *pattern, time_t expires)
+{
+	UdbLineExpiryPending *pending;
+
+	for (pending = udb_line_expiry_pending; pending; pending = pending->next)
+		if (pending->type == type && pending->expires == expires && !strcmp(pending->pattern, pattern))
+			return pending;
+	return NULL;
+}
+
+static UdbLineExpiryPending *udb_line_expiry_pending_add(char type, const char *pattern, time_t expires)
+{
+	UdbLineExpiryPending *pending = udb_line_expiry_pending_find(type, pattern, expires);
+
+	if (pending)
+		return pending;
+	pending = safe_alloc(sizeof(*pending));
+	pending->type = type;
+	pending->expires = expires;
+	safe_strdup(pending->pattern, pattern);
+	pending->next = udb_line_expiry_pending;
+	udb_line_expiry_pending = pending;
+	return pending;
+}
+
+static void udb_line_expiry_pending_clear(char type, const char *pattern)
+{
+	UdbLineExpiryPending **link;
+
+	for (link = &udb_line_expiry_pending; *link;)
+	{
+		UdbLineExpiryPending *pending = *link;
+		if (pending->type == type && !strcmp(pending->pattern, pattern))
+		{
+			*link = pending->next;
+			safe_free(pending->pattern);
+			safe_free(pending);
+			continue;
+		}
+		link = &pending->next;
+	}
+}
+
+static void udb_lines_expiry_pending_clear_record(UdbRecord *rec)
+{
+	UdbRecord *line_rec = udb_line_owner(rec);
+
+	if (line_rec && line_rec->parent && line_rec->parent->key)
+		udb_line_expiry_pending_clear(line_rec->parent->key[0], line_rec->key);
+}
+
 static void udb_line_apply_record(UdbRecord *rec, int is_new)
 {
 	char type;
 	char pattern[UDB_SPAMFILTER_PATTERN_MAX + 1];
-	UdbRecord *line_rec, *raz, *dur;
-	time_t expires;
+	UdbRecord *line_rec, *raz;
+	time_t expires = 0;
+	int expiry_state;
 
 	(void)is_new;
 	line_rec = udb_line_owner(rec);
@@ -10217,32 +10475,27 @@ static void udb_line_apply_record(UdbRecord *rec, int is_new)
 	if (type != 'F')
 		strlcpy(pattern, line_rec->key, sizeof(pattern));
 
+	/* Runtime state is never authoritative: remove a previous owned TKL before
+	 * either reapplying an active record or leaving an expired/partial one inert. */
 	udb_line_remove_owned(type, pattern);
+	expiry_state = udb_line_expiry(line_rec, &expires);
+	if (expiry_state < 0)
+	{
+		udb_log(ULOG_ERROR, "UDB_K_EXPIRES_INVALID", NULL, "Ignoring invalid K expires record for $pattern",
+				log_data_string("pattern", pattern), NULL);
+		return;
+	}
+	if (expiry_state > 0 && expires <= TStime())
+		return;
 
 	const char *reason = NULL;
 	raz = udb_record_find(udb_ctx, KKEY_REASON, line_rec);
 	if (raz && raz->data_str)
-	{
 		reason = raz->data_str;
-	}
 	else if (line_rec->data_str)
-	{
 		reason = line_rec->data_str;
-	}
-
 	if (!reason)
 		return;
-
-	dur = udb_record_find(udb_ctx, KKEY_DURATION, line_rec);
-	if (dur && dur->data_num)
-	{
-		if (!udb_time_add(TStime(), dur->data_num, &expires))
-			expires = 0;
-	}
-	else
-	{
-		expires = 0;
-	}
 
 	if (type == 'F')
 	{
@@ -10253,44 +10506,29 @@ static void udb_line_apply_record(UdbRecord *rec, int is_new)
 		{
 			int target = spamfilter_getconftargets(tip->data_str);
 			BanActionValue act_val = banact_stringtoval(acc->data_str);
-			BanAction *action = banact_value_to_struct(act_val);
-
+			BanAction *action = act_val && !banact_config_only(act_val) ? banact_value_to_struct(act_val) : NULL;
 			const char *err = NULL;
 			Match *match = target > 0 && action ? unreal_create_match(MATCH_PCRE_REGEX, pattern, &err) : NULL;
 			if (match)
-			{
 				tkl_add_spamfilter(TKL_SPAMF | TKL_GLOBAL, pattern, target, action, match, pattern, NULL, "UDB",
-								   expires, TStime(), dur ? (time_t)dur->data_num : 0, reason, 0, 0, 0);
-			}
+							   expires, TStime(), 0, reason, 0, 0, 0);
 			else
-			{
 				udb_log(ULOG_ERROR, "UDB_SPAMF_ERROR", NULL, "Failed to compile spamfilter regex: $regex ($err)",
 						log_data_string("regex", pattern), log_data_string("err", err ? err : "unknown error"), NULL);
-			}
 		}
 	}
 	else
 	{
-		char user[128];
-		char host[128];
+		char user[128], host[128];
 		udb_line_split_mask(pattern, user, sizeof(user), host, sizeof(host));
-
 		if (type == 'G')
-		{
 			tkl_add_serverban(TKL_KILL | TKL_GLOBAL, user, host, NULL, reason, "UDB", expires, TStime(), 0, 0);
-		}
 		else if (type == 'Z')
-		{
 			tkl_add_serverban(TKL_ZAP | TKL_GLOBAL, user, host, NULL, reason, "UDB", expires, TStime(), 0, 0);
-		}
 		else if (type == 'S')
-		{
 			tkl_add_serverban(TKL_SHUN | TKL_GLOBAL, user, host, NULL, reason, "UDB", expires, TStime(), 0, 0);
-		}
 		else if (type == 'Q')
-		{
 			tkl_add_nameban(TKL_NAME | TKL_GLOBAL, pattern, 0, reason, "UDB", expires, TStime(), 0);
-		}
 	}
 }
 
@@ -10302,7 +10540,6 @@ static void udb_line_remove_record(UdbRecord *rec)
 
 	if (!line_rec || !line_rec->parent || !line_rec->parent->key)
 		return;
-
 	type = line_rec->parent->key[0];
 	if (!strchr("GZSQF", type))
 		return;
@@ -10312,9 +10549,7 @@ static void udb_line_remove_record(UdbRecord *rec)
 			return;
 	}
 	else
-	{
 		strlcpy(pattern, line_rec->key, sizeof(pattern));
-	}
 	udb_line_remove_owned(type, pattern);
 }
 
@@ -10332,9 +10567,86 @@ static void udb_lines_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord 
 	udb_line_remove_record(rec);
 }
 
+static void udb_lines_expiry_sweep(time_t now)
+{
+	UdbBlock *block;
+	UdbRecord *type_rec, *line_rec;
+	char paths[UDB_LINE_EXPIRY_SWEEP_MAX][UDB_RECORD_PATH_MAX + 1];
+	time_t expires[UDB_LINE_EXPIRY_SWEEP_MAX];
+	unsigned int count = 0, i;
+
+	if (!udb_ctx || !udb_ready || !(block = udb_block_by_letter(udb_ctx, UDB_BLOCK_LINES)) || !block->tree)
+		return;
+	for (type_rec = block->tree->child; type_rec && count < UDB_LINE_EXPIRY_SWEEP_MAX; type_rec = type_rec->sibling)
+	{
+		if (!type_rec->key || !udb_tkl_type_valid(type_rec->key))
+			continue;
+		for (line_rec = type_rec->child; line_rec && count < UDB_LINE_EXPIRY_SWEEP_MAX; line_rec = line_rec->sibling)
+		{
+			time_t expiry;
+			if (udb_line_expiry(line_rec, &expiry) == 1 && expiry <= now &&
+				udb_line_path(line_rec, paths[count], sizeof(paths[count])))
+				expires[count++] = expiry;
+		}
+	}
+	for (i = 0; i < count; i++)
+	{
+		UdbPropagatorSelection selected;
+		UdbRecord *record = udb_record_find_path(udb_ctx, block, paths[i] + 3);
+		UdbRecord *line = record && record->parent && record->parent->parent == block->tree ? record : NULL;
+		UdbLineExpiryPending *pending;
+		char type;
+
+		if (!line || udb_line_expiry(line, NULL) != 1)
+			continue;
+		type = line->parent->key[0];
+		udb_line_remove_record(line);
+		if (!udb_propagator_policy_present(udb_ctx) ||
+			(udb_select_propagator(udb_ctx, 1, &selected) && selected.is_local))
+		{
+			if (udb_mutation_expire_local(udb_ctx, paths[i], expires[i]))
+				udb_log(ULOG_INFO, "UDB_K_EXP_REMOVED", NULL, "Expired K profile removed authoritatively: $path",
+						log_data_string("path", paths[i]), NULL);
+			continue;
+		}
+		pending = udb_line_expiry_pending_add(type, line->key, expires[i]);
+		if (udb_select_propagator(udb_ctx, 1, &selected) && selected.peer && !pending->sent)
+		{
+			if (udb_send_db_to_one(selected.peer, ":%s DB %s EXP %s %lu", me.id, selected.peer->id, paths[i],
+							   (unsigned long)expires[i]))
+			{
+				pending->sent = 1;
+				udb_log(ULOG_INFO, "UDB_K_EXP_REQUEST", selected.peer, "Requested authoritative expiry of $path",
+						log_data_string("path", paths[i]), NULL);
+			}
+		}
+	}
+}
+
+static void udb_lines_expiry_peer_disconnected(Client *client)
+{
+	UdbLineExpiryPending *pending;
+	(void)client;
+	/* A reconnect is an explicit controlled retry boundary. */
+	for (pending = udb_line_expiry_pending; pending; pending = pending->next)
+		pending->sent = 0;
+}
+
+static void udb_lines_shutdown(void)
+{
+	while (udb_line_expiry_pending)
+	{
+		UdbLineExpiryPending *next = udb_line_expiry_pending->next;
+		safe_free(udb_line_expiry_pending->pattern);
+		safe_free(udb_line_expiry_pending);
+		udb_line_expiry_pending = next;
+	}
+}
+
 static void udb_lines_init(ModuleInfo *modinfo)
 {
-	/* TKL system handles network bans automatically, no hooks required here */
+	(void)modinfo;
+	/* The shared one-second sync event invokes the lightweight K expiry sweep. */
 }
 
 /* End of udb_lines.c.inc */
@@ -11085,6 +11397,7 @@ static void udb_engine_cleanup(UdbContext *ctx)
 	for (b = ctx->block_list; b; b = b->next)
 		udb_remove_tree_effects(ctx, b);
 	udb_ips_shutdown();
+	udb_lines_shutdown();
 	udb_hello_cleanup_all();
 	udb_ocl_shutdown();
 	for (b = ctx->block_list; b;)

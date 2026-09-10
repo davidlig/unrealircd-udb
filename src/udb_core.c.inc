@@ -168,6 +168,55 @@ static int udb_clone_limit_valid(const char *value)
 	return udb_numeric_record_valid(value) && udb_strtoul_strict(value + 1, &val) && val <= INT_MAX;
 }
 
+static int udb_k_expires_valid(const char *value)
+{
+	time_t expires;
+
+	/* Zero is deliberately not a second spelling of permanent. */
+	return udb_numeric_record_valid(value) && udb_parse_time_t(value + 1, &expires) && expires > 0;
+}
+
+static int udb_zline_mask_valid(const char *mask)
+{
+	char address[INET6_ADDRSTRLEN];
+	const char *slash;
+	unsigned int prefix;
+	int family;
+	size_t length;
+
+	if (!mask || !*mask || strchr(mask, '@'))
+		return 0;
+	slash = strchr(mask, '/');
+	length = slash ? (size_t)(slash - mask) : strlen(mask);
+	if (!length || length >= sizeof(address) || (slash && strchr(slash + 1, '/')))
+		return 0;
+	memcpy(address, mask, length);
+	address[length] = '\0';
+	if (inet_pton(AF_INET, address, &(struct in_addr){0}) == 1)
+		family = AF_INET;
+	else if (inet_pton(AF_INET6, address, &(struct in6_addr){0}) == 1)
+		family = AF_INET6;
+	else
+		return 0;
+	if (!slash)
+		return 1;
+	return udb_parse_uint_strict(slash + 1, &prefix, 0, family == AF_INET ? 32 : 128);
+}
+
+static int udb_spamfilter_regex_valid(const char *stored)
+{
+	char pattern[UDB_SPAMFILTER_PATTERN_MAX + 1];
+	Match *match;
+
+	if (!udb_spamfilter_pattern(stored, pattern, sizeof(pattern)))
+		return 0;
+	match = unreal_create_match(MATCH_PCRE_REGEX, pattern, NULL);
+	if (!match)
+		return 0;
+	unreal_delete_match(match);
+	return 1;
+}
+
 static int udb_line_mask_valid(const char *mask)
 {
 	const char *at;
@@ -488,7 +537,8 @@ static int udb_spamfilter_type_valid(const char *value)
 
 static int udb_spamfilter_action_valid(const char *value)
 {
-	return value && *value && banact_stringtoval(value) > 0;
+	BanActionValue action = value && *value ? banact_stringtoval(value) : 0;
+	return action && !banact_config_only(action);
 }
 
 static const UdbKeyDescriptor udb_schema_n_subkeys[] = {
@@ -642,7 +692,9 @@ static int udb_record_validate(UdbBlock *block, const char *path, const char *va
 		const char *type = parts[0];
 		if (depth < 2 || !udb_tkl_type_valid(type))
 			goto done;
-		if (type[0] != 'F' && type[0] != 'Q' && !udb_line_mask_valid(parts[1]))
+		if (type[0] == 'Z' && !udb_zline_mask_valid(parts[1]))
+			goto done;
+		if (type[0] != 'F' && type[0] != 'Q' && type[0] != 'Z' && !udb_line_mask_valid(parts[1]))
 			goto done;
 
 		if (type[0] == 'F') /* Spamfilter */
@@ -651,8 +703,7 @@ static int udb_record_validate(UdbBlock *block, const char *path, const char *va
 				goto done;
 			const char *pattern = parts[1];
 			const char *subkey = parts[2];
-			char pat_buf[UDB_SPAMFILTER_PATTERN_MAX + 1];
-			if (!pattern || !*pattern || !udb_spamfilter_pattern(pattern, pat_buf, sizeof(pat_buf)))
+			if (!pattern || !*pattern || !udb_spamfilter_regex_valid(pattern))
 				goto done;
 			if (!strcasecmp(subkey, KKEY_TYPE))
 			{
@@ -664,9 +715,9 @@ static int udb_record_validate(UdbBlock *block, const char *path, const char *va
 				result = udb_spamfilter_action_valid(value);
 				goto done;
 			}
-			if (!strcasecmp(subkey, KKEY_DURATION))
+			if (!strcasecmp(subkey, KKEY_EXPIRES))
 			{
-				result = udb_numeric_record_valid(value);
+				result = udb_k_expires_valid(value);
 				goto done;
 			}
 			if (!strcasecmp(subkey, KKEY_REASON))
@@ -694,9 +745,9 @@ static int udb_record_validate(UdbBlock *block, const char *path, const char *va
 					result = udb_non_empty_string_valid(value) && value[0] != '*';
 					goto done;
 				}
-				if (!strcasecmp(subkey, KKEY_DURATION))
+				if (!strcasecmp(subkey, KKEY_EXPIRES))
 				{
-					result = udb_numeric_record_valid(value);
+					result = udb_k_expires_valid(value);
 					goto done;
 				}
 				goto done;

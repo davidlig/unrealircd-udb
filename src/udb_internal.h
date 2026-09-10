@@ -47,6 +47,7 @@
 #define UDB_HASH_MASK (UDB_HASH_SIZE - 1)
 #define UDB_PASSWORD_FAILURE_SLOTS 256
 #define UDB_TKL_MASK_COMPONENT_MAX 127
+#define UDB_LINE_EXPIRY_SWEEP_MAX 64
 /* Operclass registry (OCL / OCLG) limits */
 #define UDB_OCL_MAX_CLASSES 1024
 #define UDB_OCL_STAGE_TIMEOUT 30
@@ -481,6 +482,9 @@ static void udb_mutation_drp(UdbContext *ctx, Client *client, Client *direct_pee
 							 int is_for_me, int is_broadcast);
 static void udb_mutation_opt(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, char letter,
 							 const char *modified_at, int is_for_me, int is_broadcast);
+static void udb_mutation_exp(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, const char *path,
+					 time_t expected_expires, int is_for_me, int is_broadcast);
+static int udb_mutation_expire_local(UdbContext *ctx, const char *path, time_t expected_expires);
 static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync);
 static void udb_nick_strip(Client *client, UdbRecord *nick_rec);
 static void udb_nick_remove_record(UdbBlock *block, UdbRecord *rec);
@@ -538,6 +542,10 @@ int udb_nicks_load(ModuleInfo *modinfo);
 static void udb_channels_init(ModuleInfo *modinfo);
 static void udb_ips_init(ModuleInfo *modinfo);
 static void udb_lines_init(ModuleInfo *modinfo);
+static void udb_lines_shutdown(void);
+static void udb_lines_expiry_sweep(time_t now);
+static void udb_lines_expiry_peer_disconnected(Client *client);
+static void udb_lines_expiry_pending_clear_record(UdbRecord *rec);
 static void udb_query_init(ModuleInfo *modinfo);
 static void udb_sync_snomask_filter(void);
 

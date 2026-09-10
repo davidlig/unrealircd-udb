@@ -240,6 +240,8 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 				 strcmp(old_rec->key, CKEY_OPTIONS)))
 				udb_remove_special_record(ctx, block, old_rec);
 		}
+		if (block->letter == 'K')
+			udb_lines_expiry_pending_clear_record(old_rec ? old_rec : rec);
 		udb_block_replace_tree(ctx, block, tree, udb_record_count_tree(tree));
 		if (!unchanged)
 		{
@@ -263,6 +265,53 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 	udb_mutation_forward_ins(client, direct_peer, target, path, data);
 }
 
+static int udb_mutation_delete_local(UdbContext *ctx, UdbBlock *block, UdbRecord *old_rec, Client *direct_peer,
+							 const char *operation)
+{
+	UdbRecord *candidate_rec = NULL;
+	UdbRecord *candidate_line = NULL;
+	UdbRecord *tree;
+	unsigned int record_count;
+	UdbSnapshotResult snap_res;
+
+	if (!ctx || !block || !old_rec)
+		return 0;
+	tree = udb_record_clone_tree(block->tree, old_rec, &candidate_rec);
+	if (!tree || !candidate_rec)
+	{
+		udb_record_free_tree(tree);
+		return 0;
+	}
+	if (block->letter == 'K' && candidate_rec->parent && candidate_rec->parent->parent &&
+		candidate_rec->parent->parent != tree)
+		candidate_line = candidate_rec->parent;
+	udb_record_delete_tree(candidate_rec);
+	record_count = udb_record_count_tree(tree);
+	snap_res = udb_file_write_snapshot(block, tree, record_count);
+	if (snap_res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
+	{
+		udb_record_free_tree(tree);
+		udb_handle_persistence_failure(ctx, direct_peer, block, operation, 0);
+		return 0;
+	}
+	/* This is the common DEL transaction: persisted candidate first, then old
+	 * runtime effect removal, active-tree replacement, and candidate reapply. */
+	udb_remove_special_record(ctx, block, old_rec);
+	if (block->letter == 'K')
+		udb_lines_expiry_pending_clear_record(old_rec);
+	udb_block_replace_tree(ctx, block, tree, record_count);
+	if (candidate_line)
+		udb_lines_apply_effect(ctx, block, candidate_line, 0);
+	if (block->letter == 'L')
+		udb_sync_snomask_filter();
+	if (snap_res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
+	{
+		udb_handle_persistence_failure(ctx, direct_peer, block, operation, 1);
+		return 2;
+	}
+	return 1;
+}
+
 static void udb_mutation_del(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, const char *path,
 							 int is_for_me, int is_broadcast)
 {
@@ -276,6 +325,8 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, Client *direct_pee
 	}
 	if (is_for_me)
 	{
+		UdbRecord *old_rec;
+		int result;
 		if (block->session || (block->syncing_from && block->syncing_from != direct_peer))
 		{
 			udb_protocol_mutation_error(client, "DEL", UDB_ERR_SYNC_ACTIVE, letter);
@@ -286,7 +337,7 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, Client *direct_pee
 			udb_protocol_mutation_error(client, "DEL", UDB_ERR_FORBIDDEN, letter);
 			return;
 		}
-		UdbRecord *old_rec = udb_record_find_path(ctx, block, path + 3);
+		old_rec = udb_record_find_path(ctx, block, path + 3);
 		if (!old_rec)
 		{
 			if (!is_broadcast)
@@ -294,44 +345,89 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, Client *direct_pee
 			udb_mutation_forward_del(client, direct_peer, target, path);
 			return;
 		}
-		UdbRecord *candidate_rec = NULL;
-		UdbRecord *candidate_line = NULL;
-		UdbRecord *tree = udb_record_clone_tree(block->tree, old_rec, &candidate_rec);
-		unsigned int record_count;
-		if (block->letter == 'K' && candidate_rec && candidate_rec->parent && candidate_rec->parent->parent &&
-			candidate_rec->parent->parent != tree)
-			candidate_line = candidate_rec->parent;
-		if (candidate_rec)
-			udb_record_delete_tree(candidate_rec);
-		record_count = udb_record_count_tree(tree);
-		UdbSnapshotResult snap_res = udb_file_write_snapshot(block, tree, record_count);
-		if (snap_res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
+		result = udb_mutation_delete_local(ctx, block, old_rec, direct_peer, "DEL snapshot");
+		if (result != 1)
 		{
-			udb_record_free_tree(tree);
-			udb_handle_persistence_failure(ctx, direct_peer, block, "DEL snapshot", 0);
 			udb_mutation_persist_error(client, "DEL", letter);
 			return;
 		}
-		if (old_rec)
-			udb_remove_special_record(ctx, block, old_rec);
-		udb_block_replace_tree(ctx, block, tree, record_count);
-		if (candidate_line)
-			udb_lines_apply_effect(ctx, block, candidate_line, 0);
-		if (block->letter == 'L')
-			udb_sync_snomask_filter();
-		if (snap_res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
 		{
-			udb_handle_persistence_failure(ctx, direct_peer, block, "DEL snapshot", 1);
-			udb_mutation_persist_error(client, "DEL", letter);
-			return;
+			char logbuf[512];
+			snprintf(logbuf, sizeof(logbuf), "Deleted record via S2S: %s", path);
+			udb_log(ULOG_INFO, "UDB_DEL_RECEIVED", client, "$msg", log_data_string("msg", logbuf));
 		}
-		char logbuf[512];
-		snprintf(logbuf, sizeof(logbuf), "Deleted record via S2S: %s", path);
-		udb_log(ULOG_INFO, "UDB_DEL_RECEIVED", client, "$msg", log_data_string("msg", logbuf));
 		if (!is_broadcast)
 			return;
 	}
 	udb_mutation_forward_del(client, direct_peer, target, path);
+}
+
+static int udb_mutation_k_expiry_matches(UdbBlock *block, const char *path, time_t expected_expires, UdbRecord **record)
+{
+	UdbRecord *line;
+	UdbRecord *expires;
+
+	if (!block || block->letter != UDB_BLOCK_LINES || !path || strncmp(path, "K::", 3))
+		return 0;
+	line = udb_record_find_path(udb_ctx, block, path + 3);
+	if (!line || !line->parent || line->parent->parent != block->tree)
+		return 0;
+	expires = udb_record_find(udb_ctx, KKEY_EXPIRES, line);
+	if (!expires || expires->data_str || !expires->data_num || expires->data_num != (unsigned long)expected_expires ||
+		expected_expires > TStime())
+		return 0;
+	if (record)
+		*record = line;
+	return 1;
+}
+
+/* Only an authority performs this operation.  It deliberately calls the same
+ * transactional subtree DEL primitive used by the normal mutation path. */
+static int udb_mutation_expire_local(UdbContext *ctx, const char *path, time_t expected_expires)
+{
+	UdbBlock *block = udb_mutation_path_block(ctx, path);
+	UdbRecord *line;
+
+	if (!block || !udb_mutation_k_expiry_matches(block, path, expected_expires, &line))
+		return 0;
+	if (udb_mutation_delete_local(ctx, block, line, NULL, "EXP snapshot") != 1)
+		return 0;
+	udb_sendto_confirmed_servers(NULL, ":%s DB * DEL %s", me.id, path);
+	return 1;
+}
+
+static void udb_mutation_exp(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, const char *path,
+							 time_t expected_expires, int is_for_me, int is_broadcast)
+{
+	UdbBlock *block = udb_mutation_path_block(ctx, path);
+	UdbRecord *line;
+
+	(void)target;
+	if (!block || !path || expected_expires <= 0 || is_broadcast || !is_for_me || client != direct_peer ||
+		!udb_peer_authorizes_us(direct_peer))
+	{
+		udb_protocol_mutation_error(client, "EXP", UDB_ERR_FORBIDDEN, 'K');
+		return;
+	}
+	if (block->session || (block->syncing_from && block->syncing_from != direct_peer))
+	{
+		udb_protocol_mutation_error(client, "EXP", UDB_ERR_SYNC_ACTIVE, 'K');
+		return;
+	}
+	if (!udb_mutation_k_expiry_matches(block, path, expected_expires, &line))
+	{
+		udb_log(ULOG_INFO, "UDB_K_EXP_STALE", client, "Ignored stale K expiry request for $path",
+				log_data_string("path", path), NULL);
+		return;
+	}
+	if (udb_mutation_delete_local(ctx, block, line, direct_peer, "EXP snapshot") != 1)
+	{
+		udb_protocol_mutation_error(client, "EXP", UDB_ERR_FATAL, 'K');
+		return;
+	}
+	udb_sendto_confirmed_servers(NULL, ":%s DB * DEL %s", me.id, path);
+	udb_log(ULOG_INFO, "UDB_K_EXP_ACCEPTED", client, "Accepted K expiry request and removed $path",
+			log_data_string("path", path), NULL);
 }
 
 static void udb_mutation_drp(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, char letter,

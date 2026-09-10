@@ -76,7 +76,7 @@
 /* Line sub-records: K::<type>::<pattern>::<key> <value> */
 #define KKEY_TYPE "type"		 /* Spamfilter target type */
 #define KKEY_ACTION "action"	 /* Spamfilter action */
-#define KKEY_DURATION "duration" /* TKL duration */
+#define KKEY_EXPIRES "expires"   /* Absolute Unix expiry timestamp */
 #define KKEY_REASON "reason"	 /* Ban reason */
 
 /* Spamfilter pattern encoding: K::F::b64:<RFC 4648 base64>::... */

@@ -2,9 +2,9 @@
 
 UDB (Unreal DataBase) es un módulo global para **UnrealIRCd 6** que mantiene una base distribuida de nicks, canales, políticas por IP, ajustes, opciones por servidor y sanciones, con persistencia atómica, reconciliación por snapshots y control explícito de autoridad.
 
-**Versión actual del módulo:** `4.0.0`  
-**Compatibilidad declarada:** UnrealIRCd `6.2.*`  
-**Módulo:** `third/udb`  
+**Versión actual del módulo:** `4.0.0`
+**Compatibilidad declarada:** UnrealIRCd `6.2.*`
+**Módulo:** `third/udb`
 **Licencia:** GPL v2 o posterior
 
 Esta documentación se ha reconstruido desde el código de `main` en el commit `75d017117d934f9dcb64dbeabe99d1888b72dcab` (10-09-2026).
@@ -131,10 +131,13 @@ DB <peer> HEL 4 <selector> <epoch> OCL [OCLG]
 ```
 
 Sin HEL 4/OCL confirmado no se acepta el resto del protocolo; un timeout de HEL puede provocar que UDB aborte el enlace.
+El bloque `K` usa `expires *<timestamp_unix>` para sanciones temporales G/Z/S/Q/F; sin `expires` es permanente. La autoridad elimina transaccionalmente el subtree K completo vencido, mientras los followers solicitan `EXP` y nunca borran persistencia autoritativa localmente.
+
+
 
 La reconciliación compara los seis bloques mediante `INF`. Sólo los bloques divergentes se solicitan con `RES` y se reciben en un árbol privado con `BEGIN/PUT/END`. El `END` valida el checksum, persiste el snapshot y sólo después publica el nuevo árbol.
 
-Las mutaciones en vivo son `INS`, `DEL`, `DRP` y `OPT`. Pueden retransmitirse multihop; las transferencias staged no se retransmiten.
+Las mutaciones en vivo son `INS`, `DEL`, `DRP` y `OPT`; `EXP` es una solicitud dirigida de expiración follower-a-autoridad. Pueden retransmitirse multihop; las transferencias staged no se retransmiten.
 
 Consulta [doc/udb_technical_es.md](doc/udb_technical_es.md) para la gramática completa y las invariantes de autoridad.
 

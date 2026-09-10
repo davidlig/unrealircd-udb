@@ -386,6 +386,17 @@ CMD_FUNC(cmd_db)
 		break;
 
 	case 'E':
+		if (!strcasecmp(subcmd, "EXP"))
+		{
+			time_t expected_expires;
+			if (parc != 5 || !udb_parse_time_t(parv[4], &expected_expires) || expected_expires <= 0)
+			{
+				udb_protocol_mutation_error(client, "EXP", UDB_ERR_PARAMS, 'K');
+				return;
+			}
+			udb_mutation_exp(ctx, client, direct_peer, target, parv[3], expected_expires, is_for_me, is_broadcast);
+			return;
+		}
 		if (!strcasecmp(subcmd, "END"))
 		{
 			UdbBlock *block;

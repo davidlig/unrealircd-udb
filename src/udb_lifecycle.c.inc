@@ -354,6 +354,7 @@ static void udb_engine_cleanup(UdbContext *ctx)
 	for (b = ctx->block_list; b; b = b->next)
 		udb_remove_tree_effects(ctx, b);
 	udb_ips_shutdown();
+	udb_lines_shutdown();
 	udb_hello_cleanup_all();
 	udb_ocl_shutdown();
 	for (b = ctx->block_list; b;)

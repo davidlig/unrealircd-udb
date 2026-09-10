@@ -130,7 +130,7 @@ static const char *udb_get_shared_subkey(const char *key)
 									   "access",	 "forbid",	 "suspended", "challenge", "founder",		 "topic",
 									   "options",	 "clones",	 "nolines",	  "host",	   "encryption_key", "suffix",
 									   "nickserv",	 "chanserv", "ipserv",	  "quit_ips",  "quit_clones",	 "flood",
-									   "propagator", "type",	 "action",	  "duration",  "reason",		 NULL};
+									   "propagator", "type",	 "action",	  "expires",   "reason",		 NULL};
 
 	for (int i = 0; known_keys[i]; i++)
 		if (!strcasecmp(known_keys[i], key))

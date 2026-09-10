@@ -290,10 +290,12 @@ Para G/Z/S/Q se admite:
 ```text
 K::<tipo>::<patron> <reason>
 K::<tipo>::<patron>::reason <reason>
-K::<tipo>::<patron>::duration *<segundos>
+K::<tipo>::<patron>::expires *<timestamp_unix>
 ```
 
-El reason puede estar directamente en el nodo de patrón o en `::reason`. `duration` produce una expiración relativa a la hora de aplicación; si no se proporciona, la línea no tiene expiración UDB.
+El reason puede estar directamente en el nodo de patrón o en `::reason`. `expires` es un único timestamp Unix absoluto elegido por el origen; su ausencia es la única representación de una línea permanente. `expires *0` es inválido. Un timestamp igual o anterior a la hora local nunca se materializa como TKL.
+
+La expiración no se deriva del estado runtime de la TKL. La autoridad barre perfiles K vencidos y realiza el `DEL K::<tipo>::<patron>` transaccional canónico, que elimina el subtree completo de memoria y de `udb_K.db`; los followers sólo eliminan su TKL runtime local y envían una solicitud compare-and-delete `EXP <path> <expected-expires>`. Por tanto restart, reload, snapshot, reconnect o un cambio de `reason`, `type` o `action` no pueden renovar ni resucitar una línea temporal. Sólo un `INS ...::expires` explícito cambia su vida; `DEL ...::expires` convierte un perfil restante válido en permanente.
 
 UDB etiqueta sus TKL con `set_by="UDB"` y sólo elimina/reemplaza líneas que reconoce como propias para el mismo tipo/patrón.
 
@@ -302,11 +304,11 @@ Para spamfilter F la profundidad es obligatoriamente 3 y se utilizan estas propi
 ```text
 K::F::<patron>::type <targets>
 K::F::<patron>::action <action>
-K::F::<patron>::duration *<segundos>
+K::F::<patron>::expires *<timestamp_unix>
 K::F::<patron>::reason <texto>
 ```
 
-`type` se valida con los targets nativos de UnrealIRCd y `action` con su parser de ban actions. El patrón se compila como PCRE. Puede almacenarse en claro o como Base64 canónico con prefijo `b64:`; el patrón decodificado no puede superar 3072 bytes ni contener NUL.
+`type` se valida con los targets nativos de UnrealIRCd y `action` con su parser de ban actions; se rechazan acciones config-only. El patrón debe compilar como PCRE antes de persistirse. Puede almacenarse en claro o como Base64 canónico con prefijo `b64:`; el patrón decodificado no puede superar 3072 bytes ni contener NUL.
 
 ## 5. Configuración `udb {}`
 

@@ -2,9 +2,9 @@
 
 UDB (Unreal DataBase) is a global **UnrealIRCd 6** module that maintains a distributed database for nicknames, channels, per-IP policy, settings, per-server options, and sanctions, with atomic persistence, staged snapshot reconciliation, and explicit authority control.
 
-**Current module version:** `4.0.0`  
-**Declared compatibility:** UnrealIRCd `6.2.*`  
-**Module name:** `third/udb`  
+**Current module version:** `4.0.0`
+**Declared compatibility:** UnrealIRCd `6.2.*`
+**Module name:** `third/udb`
 **License:** GPL v2 or later
 
 This documentation was rebuilt from `main` code at commit `75d017117d934f9dcb64dbeabe99d1888b72dcab` (2026-09-10).
@@ -131,10 +131,13 @@ DB <peer> HEL 4 <selector> <epoch> OCL [OCLG]
 ```
 
 The rest of the protocol is not accepted until HEL 4/OCL is confirmed; HEL timeout can cause UDB to abort the server link.
+Block `K` uses `expires *<unix_timestamp>` for temporary G/Z/S/Q/F sanctions; no `expires` means permanent. The authority removes an expired complete K subtree transactionally, while followers request `EXP` and never delete authoritative persistence locally.
+
+
 
 Reconciliation compares all six blocks with `INF`. Only divergent blocks are requested through `RES` and received into a private staged tree using `BEGIN/PUT/END`. END validates the checksum, persists the snapshot, and only then publishes the new tree.
 
-Live mutations are `INS`, `DEL`, `DRP`, and `OPT`. They can be relayed multihop; staged snapshot transfers are never forwarded.
+Live mutations are `INS`, `DEL`, `DRP`, and `OPT`; `EXP` is a directed follower-to-authority expiry request. They can be relayed multihop; staged snapshot transfers are never forwarded.
 
 See [doc/udb_technical_en.md](doc/udb_technical_en.md) for the complete grammar and authority invariants.
 

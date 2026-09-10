@@ -371,6 +371,70 @@ def test_line_mask_component_and_native_boundaries(services, data_dir):
     print("PASS: line masks preserve exact native boundaries and reject one-over components")
 
 
+def test_block_k_absolute_expiry_schema(services, data_dir):
+    db = data_dir / "udb_K.db"
+    future = int(time.time()) + 3600
+    services.send_ins("K::G::*@expires.test::reason", "absolute expiry")
+    services.send_ins("K::G::*@expires.test::expires", f"*{future}")
+    time.sleep(0.25)
+    content = db.read_text(encoding="ascii")
+    require(f"G::*@expires.test::expires *{future}" in content,
+            "absolute K expires value was not persisted exactly")
+    require("duration" not in content, "legacy K duration unexpectedly persisted")
+
+    for path, value, label in (
+        ("K::G::*@expires.test::duration", "*60", "legacy duration"),
+        ("K::G::*@expires.test::expires", "*0", "zero expires"),
+        ("K::G::*@expires.test::expires", "*18446744073709551616", "overflow expires"),
+        ("K::Z::host.invalid::reason", "bad Z", "hostname Z-line"),
+        ("K::F::(unclosed::type", "c", "invalid regex"),
+        ("K::F::validregex::action", "set", "config-only spamfilter action"),
+    ):
+        before = db.read_text(encoding="ascii")
+        start = len(services.lines)
+        services.send_ins(path, value)
+        services.wait_for(lambda line: " DB " in line and " ERR " in line and " INS " in line and " K" in line,
+                          f"rejection of {label}", start=start)
+        require(before == db.read_text(encoding="ascii"), f"{label} changed udb_K.db despite rejection")
+    print("PASS: Block K accepts absolute expires only and rejects legacy/invalid expiry, Z, regex, and config-only action")
+
+
+def test_block_k_expiry_gc(services, data_dir, client_port):
+    path = "K::G::*@127.0.0.1"
+    db = data_dir / "udb_K.db"
+    future = int(time.time()) + 60
+    services.send_ins(path + "::reason", "expiry GC")
+    services.send_ins(path + "::expires", f"*{future}")
+    time.sleep(0.3)
+    require(f"G::*@127.0.0.1::expires *{future}" in db.read_text(encoding="ascii"),
+            "temporary K profile was not in active persisted state")
+
+    # A non-expiry field change must not extend the absolute expiry.
+    services.send_ins(path + "::reason", "expiry GC changed reason")
+    time.sleep(0.2)
+    require(f"G::*@127.0.0.1::expires *{future}" in db.read_text(encoding="ascii"),
+            "reason update changed the absolute expiry")
+
+    # Expire now. The follower cannot edit authoritative persistence; it asks
+    # the configured authority, whose canonical DEL removes the whole profile.
+    start = len(services.lines)
+    services.send_ins(path + "::expires", "*1")
+    services.wait_for(lambda line: " DB " in line and " EXP " in line and path in line,
+                      "EXP request for expired K profile", start=start, timeout=5)
+    services.send_del(path)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and "G::*@127.0.0.1" in db.read_text(encoding="ascii"):
+        time.sleep(0.1)
+    require("G::*@127.0.0.1" not in db.read_text(encoding="ascii"),
+            "canonical expiry DEL left K subtree residue in udb_K.db")
+
+    # The runtime TKL was removed before EXP and remains absent after the DEL:
+    # a matching local client can register immediately.
+    client = IrcClient("127.0.0.1", client_port, "afterexpiry")
+    client.close()
+    print("PASS: expired K profile requested EXP, canonical DEL removed the full persisted subtree, and no TKL resurrected")
+
+
 def test_channel_mode_parameter_capacity_atomic(services, data_dir):
     params12 = [str(index + 10) for index in range(12)]
     value12 = " ".join(["+" + ("l" * len(params12)), *params12])
@@ -522,6 +586,8 @@ def run_tests(ircd_bin, keep=False):
         test_secret_mutation_log_redaction(services, proc)
         test_secret_mutation_log_redaction_encoded(services, proc, data_dir)
         test_line_mask_component_and_native_boundaries(services, data_dir)
+        test_block_k_absolute_expiry_schema(services, data_dir)
+        test_block_k_expiry_gc(services, data_dir, client_port)
         test_channel_mode_parameter_capacity_atomic(services, data_dir)
 
         # -------------------------------------------------------------

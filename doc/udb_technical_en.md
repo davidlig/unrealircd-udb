@@ -285,10 +285,12 @@ For G/Z/S/Q:
 ```text
 K::<type>::<pattern> <reason>
 K::<type>::<pattern>::reason <reason>
-K::<type>::<pattern>::duration *<seconds>
+K::<type>::<pattern>::expires *<unix_timestamp>
 ```
 
-The reason can live directly on the pattern node or in `::reason`. `duration` produces an expiry relative to application time; without it the UDB line has no expiration time.
+The reason can live directly on the pattern node or in `::reason`. `expires` is one absolute Unix timestamp chosen by the origin; its absence is the only representation of a permanent line. `expires *0` is invalid. A timestamp at or before the local time is never materialized as a TKL.
+
+Expiry is not derived from the TKL runtime state. The authority sweeps expired K profiles and performs the canonical transactional `DEL K::<type>::<pattern>`, which removes the complete subtree from memory and `udb_K.db`; followers remove only their local runtime TKL and send an `EXP <path> <expected-expires>` compare-and-delete request. Therefore restart, reload, snapshot, reconnect, or a change to `reason`, `type`, or `action` cannot renew or resurrect a temporary line. Only an explicit `INS ...::expires` changes its lifetime; `DEL ...::expires` converts a valid remaining profile to permanent.
 
 UDB tags managed TKLs with `set_by="UDB"` and only removes/replaces matching lines it recognizes as UDB-owned.
 
@@ -297,11 +299,11 @@ Spamfilter F requires depth 3:
 ```text
 K::F::<pattern>::type <targets>
 K::F::<pattern>::action <action>
-K::F::<pattern>::duration *<seconds>
+K::F::<pattern>::expires *<unix_timestamp>
 K::F::<pattern>::reason <text>
 ```
 
-`type` is validated by UnrealIRCd's spamfilter target parser and `action` by its ban-action parser. Patterns compile as PCRE and may be stored plain or as canonical RFC4648 Base64 with the `b64:` prefix. Decoded patterns are limited to 3072 bytes and may not contain NUL.
+`type` is validated by UnrealIRCd's spamfilter target parser and `action` by its ban-action parser; config-only actions are rejected. Patterns must compile as PCRE before persistence and may be stored plain or as canonical RFC4648 Base64 with the `b64:` prefix. Decoded patterns are limited to 3072 bytes and may not contain NUL.
 
 ## 5. `udb {}` configuration
 

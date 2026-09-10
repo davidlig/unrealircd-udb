@@ -1099,6 +1099,7 @@ EVENT(udb_sync_timeout_event)
 	if (abort_reason)
 		udb_reconcile_abort(udb_ctx, abort_reason, 1);
 	udb_ocl_stage_timeout_check(now);
+	udb_lines_expiry_sweep(now);
 	for (peer = udb_hello_peers; peer; peer = next)
 	{
 		next = peer->next;
@@ -1138,6 +1139,7 @@ EVENT(udb_sync_timeout_event)
 
 static void udb_sync_server_quit(Client *client)
 {
+	udb_lines_expiry_peer_disconnected(client);
 	UdbBlock *block;
 	UdbHelloPeer **peer;
 
