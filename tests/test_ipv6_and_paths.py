@@ -228,6 +228,12 @@ def run_tests(ircd_bin, keep=False):
         time.sleep(0.3)
         services.send_ins("K::G::*@2001%3Adb8%3A%3A3::reason", "IPv6 G-line test")
         time.sleep(0.3)
+        # Raw ':' is not a canonical UDB component even when this expanded
+        # IPv6 spelling avoids a literal '::' separator collision.
+        services.send_ins("K::G::*@2001:db8:0:0:0:0:0:4::reason", "raw IPv6 must reject")
+        services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " K" in l,
+                          "rejection of raw colon in IPv6 path")
+        print("PASS: IPv6 colons must use canonical %3A path encoding")
 
         # -------------------------------------------------------------
         # Test 3: Path escaping rejection for malformed / overlong paths

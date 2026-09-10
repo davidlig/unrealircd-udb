@@ -7,8 +7,6 @@ UDB (Unreal DataBase) es un módulo global para **UnrealIRCd 6** que mantiene un
 **Módulo:** `third/udb`
 **Licencia:** GPL v2 o posterior
 
-Esta documentación se ha reconstruido desde el código de `main` en el commit `75d017117d934f9dcb64dbeabe99d1888b72dcab` (10-09-2026).
-
 ## Qué gestiona
 
 | Bloque | Contenido |
@@ -20,7 +18,7 @@ Esta documentación se ha reconstruido desde el código de `main` en el commit `
 | `L` | Opciones por servidor, actualmente `DEBUG` |
 | `K` | G-Line, Z-Line, Shun, Q-Line y Spamfilter |
 
-UDB **no es un NickServ/ChanServ de registro interactivo**. Normalmente una autoridad/Services modifica la base por el protocolo S2S `DB`; cada IRCd valida, persiste y aplica esos cambios.
+UDB **no es un NickServ/ChanServ de registro interactivo**. Normalmente una autoridad/Services modifica la base por el protocolo S2S `DB`; cada IRCd valida, persiste y aplica esos cambios. El bloque K usa un único schema de perfil canónico; el contrato exacto de G/Z/S/Q y Spamfilter F dinámico está documentado en la guía técnica.
 
 ## Características principales
 
@@ -133,6 +131,10 @@ DB <peer> HEL 4 <selector> <epoch> OCL [OCLG]
 Sin HEL 4/OCL confirmado no se acepta el resto del protocolo; un timeout de HEL puede provocar que UDB aborte el enlace.
 El bloque `K` usa `expires *<timestamp_unix>` para sanciones temporales G/Z/S/Q/F; sin `expires` es permanente. La autoridad elimina transaccionalmente el subtree K completo vencido, mientras los followers solicitan `EXP` y nunca borran persistencia autoritativa localmente.
 
+
+### Rutas IPv4/IPv6 del bloque K
+
+En una ruta UDB, `::` es el separador de componentes, por lo que cada `:` de IPv6 es `%3A`; `@` y `/` imprimibles permanecen literales. Por ejemplo: `K::Z::2001%3Adb8%3A%3A1::reason`, `K::Z::2001%3Adb8%3A1234%3A%3A/48::reason`, `K::G::*@2001%3Adb8%3A%3A1::reason` y `K::S::*@2001%3Adb8%3A%3A1::reason`. Z exige la grafía canónica de dirección de `inet_ntop()` y la dirección de red CIDR (sin bits de host); G/S mantienen `user@host` y todavía no canonicalizan hosts IPv6. Consulta la guía técnica para ejemplos `DB INS`/`DEL` y la política completa.
 
 
 La reconciliación compara los seis bloques mediante `INF`. Sólo los bloques divergentes se solicitan con `RES` y se reciben en un árbol privado con `BEGIN/PUT/END`. El `END` valida el checksum, persiste el snapshot y sólo después publica el nuevo árbol.

@@ -7,8 +7,6 @@ UDB (Unreal DataBase) is a global **UnrealIRCd 6** module that maintains a distr
 **Module name:** `third/udb`
 **License:** GPL v2 or later
 
-This documentation was rebuilt from `main` code at commit `75d017117d934f9dcb64dbeabe99d1888b72dcab` (2026-09-10).
-
 ## What UDB manages
 
 | Block | Content |
@@ -20,7 +18,7 @@ This documentation was rebuilt from `main` code at commit `75d017117d934f9dcb64d
 | `L` | Per-server options, currently `DEBUG` |
 | `K` | G-Line, Z-Line, Shun, Q-Line, Spamfilter |
 
-UDB is **not an interactive NickServ/ChanServ registration service**. A selected authority/Services normally changes the database through the S2S `DB` protocol; each IRCd validates, persists, and applies those changes.
+UDB is **not an interactive NickServ/ChanServ registration service**. A selected authority/Services normally changes the database through the S2S `DB` protocol; each IRCd validates, persists, and applies those changes. Block K uses one canonical profile schema; its exact G/Z/S/Q and dynamic Spamfilter F contract is documented in the technical guide.
 
 ## Highlights
 
@@ -133,6 +131,10 @@ DB <peer> HEL 4 <selector> <epoch> OCL [OCLG]
 The rest of the protocol is not accepted until HEL 4/OCL is confirmed; HEL timeout can cause UDB to abort the server link.
 Block `K` uses `expires *<unix_timestamp>` for temporary G/Z/S/Q/F sanctions; no `expires` means permanent. The authority removes an expired complete K subtree transactionally, while followers request `EXP` and never delete authoritative persistence locally.
 
+
+### Block K IPv4/IPv6 routes
+
+In a UDB path, `::` is the component separator, so every IPv6 `:` is `%3A`; printable `@` and `/` remain literal. For example, use `K::Z::2001%3Adb8%3A%3A1::reason`, `K::Z::2001%3Adb8%3A1234%3A%3A/48::reason`, `K::G::*@2001%3Adb8%3A%3A1::reason`, and `K::S::*@2001%3Adb8%3A%3A1::reason`. Z requires the canonical `inet_ntop()` address spelling and CIDR network address (no host bits); G/S retain `user@host` and do not yet canonicalize IPv6 hosts. See the technical guide for `DB INS`/`DEL` examples and the full policy.
 
 
 Reconciliation compares all six blocks with `INF`. Only divergent blocks are requested through `RES` and received into a private staged tree using `BEGIN/PUT/END`. END validates the checksum, persists the snapshot, and only then publishes the new tree.

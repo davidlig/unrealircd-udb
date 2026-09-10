@@ -52,7 +52,7 @@ class BlockKExpiryContractTest(unittest.TestCase):
 
     def test_k_validation_hardening(self):
         self.assertIn("udb_zline_mask_valid", self.core)
-        self.assertIn("udb_spamfilter_regex_valid", self.core)
+        self.assertIn("udb_spamfilter_pattern_valid", self.core)
         self.assertIn("!banact_config_only(action)", self.core)
 
 

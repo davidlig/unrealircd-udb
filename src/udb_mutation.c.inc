@@ -217,10 +217,13 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 		}
 		tree = udb_record_clone_tree(block->tree, old_rec, &rec);
 		rec = udb_record_insert_path(tree, path + 3, data);
-		if (!rec)
+		if (!rec || (block->letter == UDB_BLOCK_LINES && !udb_k_profile_valid(rec->parent)))
 		{
 			udb_record_free_tree(tree);
-			udb_mutation_persist_error(client, "INS", letter);
+			udb_log(ULOG_WARNING, "UDB_INS_PROFILE_REJECT", client,
+					"Rejected INS that would create an invalid complete K profile: $path",
+					log_data_string("path", path));
+			udb_protocol_mutation_error(client, "INS", UDB_ERR_PARAMS, letter);
 			return;
 		}
 		UdbSnapshotResult snap_res = udb_file_write_snapshot(block, tree, udb_record_count_tree(tree));

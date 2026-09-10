@@ -74,14 +74,17 @@
 #define LKEY_OPTIONS "options" /* Link option flags (*N) */
 
 /* Line sub-records: K::<type>::<pattern>::<key> <value> */
-#define KKEY_TYPE "type"		 /* Spamfilter target type */
-#define KKEY_ACTION "action"	 /* Spamfilter action */
-#define KKEY_EXPIRES "expires"   /* Absolute Unix expiry timestamp */
-#define KKEY_REASON "reason"	 /* Ban reason */
+#define KKEY_MATCH_TYPE "match-type" /* Spamfilter match method: regex|simple */
+#define KKEY_TARGETS "targets"       /* Canonical Spamfilter target letters */
+#define KKEY_ACTION "action"         /* Dynamic Spamfilter action */
+#define KKEY_BAN_TIME "ban-time"     /* Duration of sanction emitted on match */
+#define KKEY_EXPIRES "expires"       /* Absolute Unix expiry timestamp */
+#define KKEY_REASON "reason"         /* Ban reason */
 
 /* Spamfilter pattern encoding: K::F::b64:<RFC 4648 base64>::... */
 #define UDB_SPAMFILTER_B64_PREFIX "b64:"
 #define UDB_SPAMFILTER_PATTERN_MAX 3072
+#define UDB_TKL_SET_BY "UDB:managed"
 
 /* ========================================================================
  * Error Codes (for DB ERR protocol messages)

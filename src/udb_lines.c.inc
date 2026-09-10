@@ -57,13 +57,9 @@ static int udb_spamfilter_pattern(const char *stored, char *pattern, size_t patt
 	char canonical[UDB_SPAMFILTER_PATTERN_MAX * 4 / 3 + 5];
 	int n;
 
+	/* A raw regex is not a second spelling of a b64 pattern. */
 	if (strncmp(stored, UDB_SPAMFILTER_B64_PREFIX, strlen(UDB_SPAMFILTER_B64_PREFIX)))
-	{
-		if (!*stored || strlen(stored) >= patternsz)
-			return 0;
-		strlcpy(pattern, stored, patternsz);
-		return 1;
-	}
+		return 0;
 
 	encoded = stored + strlen(UDB_SPAMFILTER_B64_PREFIX);
 	encoded_len = strlen(encoded);
@@ -102,7 +98,7 @@ static int udb_line_matches_tkl(TKL *tkl, char type, const char *pattern)
 {
 	char user[128], host[128];
 
-	if (!tkl || !tkl->set_by || strcmp(tkl->set_by, "UDB"))
+	if (!tkl || !tkl->set_by || strcmp(tkl->set_by, UDB_TKL_SET_BY))
 		return 0;
 	if (type == 'F')
 		return TKLIsSpamfilter(tkl) && (tkl->type & TKL_GLOBAL) && tkl->ptr.spamfilter && tkl->ptr.spamfilter->match &&
@@ -233,9 +229,10 @@ static void udb_line_apply_record(UdbRecord *rec, int is_new)
 {
 	char type;
 	char pattern[UDB_SPAMFILTER_PATTERN_MAX + 1];
-	UdbRecord *line_rec, *raz;
+	UdbRecord *line_rec, *reason_rec;
 	time_t expires = 0;
 	int expiry_state;
+	const char *reason;
 
 	(void)is_new;
 	line_rec = udb_line_owner(rec);
@@ -246,16 +243,20 @@ static void udb_line_apply_record(UdbRecord *rec, int is_new)
 		return;
 	if (type == 'F' && !udb_spamfilter_pattern(line_rec->key, pattern, sizeof(pattern)))
 	{
-		udb_log(ULOG_ERROR, "UDB_SPAMF_PATTERN", NULL, "Invalid spamfilter pattern: $pattern",
+		udb_log(ULOG_ERROR, "UDB_SPAMF_PATTERN", NULL, "Invalid canonical spamfilter pattern: $pattern",
 				log_data_string("pattern", line_rec->key), NULL);
 		return;
 	}
 	if (type != 'F')
 		strlcpy(pattern, line_rec->key, sizeof(pattern));
 
-	/* Runtime state is never authoritative: remove a previous owned TKL before
-	 * either reapplying an active record or leaving an expired/partial one inert. */
-	udb_line_remove_owned(type, pattern);
+	/* An invalid complete candidate must not withdraw a valid live TKL. */
+	if (!udb_k_profile_valid(line_rec))
+	{
+		udb_log(ULOG_ERROR, "UDB_K_PROFILE_INVALID", NULL, "Ignoring invalid complete K profile: $pattern",
+				log_data_string("pattern", pattern), NULL);
+		return;
+	}
 	expiry_state = udb_line_expiry(line_rec, &expires);
 	if (expiry_state < 0)
 	{
@@ -264,52 +265,81 @@ static void udb_line_apply_record(UdbRecord *rec, int is_new)
 		return;
 	}
 	if (expiry_state > 0 && expires <= TStime())
+	{
+		udb_line_remove_owned(type, pattern);
 		return;
-
-	const char *reason = NULL;
-	raz = udb_record_find(udb_ctx, KKEY_REASON, line_rec);
-	if (raz && raz->data_str)
-		reason = raz->data_str;
-	else if (line_rec->data_str)
-		reason = line_rec->data_str;
+	}
+	reason_rec = udb_record_find(udb_ctx, KKEY_REASON, line_rec);
+	reason = reason_rec && reason_rec->data_str ? reason_rec->data_str : NULL;
 	if (!reason)
+	{
+		/* A valid partial profile is deliberately inert. */
+		udb_line_remove_owned(type, pattern);
 		return;
+	}
 
 	if (type == 'F')
 	{
-		UdbRecord *tip = udb_record_find(udb_ctx, KKEY_TYPE, line_rec);
-		UdbRecord *acc = udb_record_find(udb_ctx, KKEY_ACTION, line_rec);
+		UdbRecord *match_type_rec = udb_record_find(udb_ctx, KKEY_MATCH_TYPE, line_rec);
+		UdbRecord *targets_rec = udb_record_find(udb_ctx, KKEY_TARGETS, line_rec);
+		UdbRecord *action_rec = udb_record_find(udb_ctx, KKEY_ACTION, line_rec);
+		UdbRecord *ban_time_rec = udb_record_find(udb_ctx, KKEY_BAN_TIME, line_rec);
+		const char *err = NULL;
+		int target, match_type;
+		BanActionValue action_value;
+		BanAction *action;
+		Match *match;
+		time_t ban_time = 0;
 
-		if (tip && acc && tip->data_str && acc->data_str)
+		if (!match_type_rec || !targets_rec || !action_rec || !match_type_rec->data_str ||
+			!targets_rec->data_str || !action_rec->data_str)
 		{
-			int target = spamfilter_getconftargets(tip->data_str);
-			BanActionValue act_val = banact_stringtoval(acc->data_str);
-			BanAction *action = act_val && !banact_config_only(act_val) ? banact_value_to_struct(act_val) : NULL;
-			const char *err = NULL;
-			Match *match = target > 0 && action ? unreal_create_match(MATCH_PCRE_REGEX, pattern, &err) : NULL;
-			if (match)
-				tkl_add_spamfilter(TKL_SPAMF | TKL_GLOBAL, pattern, target, action, match, pattern, NULL, "UDB",
-							   expires, TStime(), 0, reason, 0, 0, 0);
-			else
-				udb_log(ULOG_ERROR, "UDB_SPAMF_ERROR", NULL, "Failed to compile spamfilter regex: $regex ($err)",
-						log_data_string("regex", pattern), log_data_string("err", err ? err : "unknown error"), NULL);
+			udb_line_remove_owned(type, pattern);
+			return;
 		}
+		match_type = udb_spamfilter_match_type_value(match_type_rec->data_str);
+		target = spamfilter_gettargets(targets_rec->data_str, NULL);
+		action_value = banact_stringtoval(action_rec->data_str);
+		action = action_value && !banact_config_only(action_value) ? banact_value_to_struct(action_value) : NULL;
+		if (ban_time_rec)
+			ban_time = (time_t)ban_time_rec->data_num;
+		/* Compile before removing the old effect. */
+		match = target > 0 && action ? unreal_create_match(match_type, pattern, &err) : NULL;
+		if (!match)
+		{
+			udb_log(ULOG_ERROR, "UDB_SPAMF_ERROR", NULL, "Failed to prepare spamfilter candidate: $pattern ($err)",
+					log_data_string("pattern", pattern), log_data_string("err", err ? err : "unknown error"), NULL);
+			return;
+		}
+		udb_line_remove_owned(type, pattern);
+		if (!tkl_add_spamfilter(TKL_SPAMF | TKL_GLOBAL, pattern, (unsigned short)target, action, match, pattern, NULL,
+							UDB_TKL_SET_BY, expires, TStime(), ban_time, reason, INPUT_CONVERSION_DEFAULT, 0, 0))
+		{
+			unreal_delete_match(match);
+			udb_log(ULOG_ERROR, "UDB_SPAMF_ADD_FAILED", NULL, "Failed to materialize spamfilter candidate: $pattern",
+					log_data_string("pattern", pattern), NULL);
+		}
+		return;
 	}
-	else
+
+	udb_line_remove_owned(type, pattern);
+	if (type == 'G')
 	{
 		char user[128], host[128];
 		udb_line_split_mask(pattern, user, sizeof(user), host, sizeof(host));
-		if (type == 'G')
-			tkl_add_serverban(TKL_KILL | TKL_GLOBAL, user, host, NULL, reason, "UDB", expires, TStime(), 0, 0);
-		else if (type == 'Z')
-			tkl_add_serverban(TKL_ZAP | TKL_GLOBAL, user, host, NULL, reason, "UDB", expires, TStime(), 0, 0);
-		else if (type == 'S')
-			tkl_add_serverban(TKL_SHUN | TKL_GLOBAL, user, host, NULL, reason, "UDB", expires, TStime(), 0, 0);
-		else if (type == 'Q')
-			tkl_add_nameban(TKL_NAME | TKL_GLOBAL, pattern, 0, reason, "UDB", expires, TStime(), 0);
+		tkl_add_serverban(TKL_KILL | TKL_GLOBAL, user, host, NULL, reason, UDB_TKL_SET_BY, expires, TStime(), 0, 0);
 	}
+	else if (type == 'Z')
+		tkl_add_serverban(TKL_ZAP | TKL_GLOBAL, "*", pattern, NULL, reason, UDB_TKL_SET_BY, expires, TStime(), 0, 0);
+	else if (type == 'S')
+	{
+		char user[128], host[128];
+		udb_line_split_mask(pattern, user, sizeof(user), host, sizeof(host));
+		tkl_add_serverban(TKL_SHUN | TKL_GLOBAL, user, host, NULL, reason, UDB_TKL_SET_BY, expires, TStime(), 0, 0);
+	}
+	else if (type == 'Q')
+		tkl_add_nameban(TKL_NAME | TKL_GLOBAL, pattern, 0, reason, UDB_TKL_SET_BY, expires, TStime(), 0);
 }
-
 static void udb_line_remove_record(UdbRecord *rec)
 {
 	char type;

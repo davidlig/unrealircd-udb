@@ -152,6 +152,16 @@ static UdbRecord *udb_record_create(UdbRecord *parent)
 	return rec;
 }
 
+/* F pattern components are regex/simple bytes, not IRC identifiers.  Keep the
+ * general UDB tree case-insensitive, but make only K::F::<pattern> exact. */
+static int udb_record_key_equal(const UdbRecord *parent, const char *left, const char *right)
+{
+	if (parent && parent->parent && parent->parent->parent == NULL && parent->key &&
+		!strcmp(parent->key, "F"))
+		return !strcmp(left, right);
+	return !strcasecmp(left, right);
+}
+
 static UdbRecord *udb_record_find(UdbContext *ctx, const char *key, UdbRecord *parent)
 {
 	UdbRecord *child;
@@ -161,7 +171,7 @@ static UdbRecord *udb_record_find(UdbContext *ctx, const char *key, UdbRecord *p
 	if (parent->parent == NULL && ctx)
 		return udb_hash_find(ctx, parent->block_idx, key);
 	for (child = parent->child; child; child = child->sibling)
-		if (!strcasecmp(child->key, key))
+		if (udb_record_key_equal(parent, child->key, key))
 			return child;
 	return NULL;
 }
@@ -315,6 +325,10 @@ static int udb_path_decode_component(const char *encoded, char *buf, size_t bufs
 		}
 		else
 		{
+			/* A raw colon could be mistaken for :: path syntax.  The encoder
+			 * always writes it as %3A, so reject the non-canonical spelling. */
+			if (*p == ':')
+				return 0;
 			if (out_len + 1 >= bufsz)
 				return 0;
 			buf[out_len++] = *p;

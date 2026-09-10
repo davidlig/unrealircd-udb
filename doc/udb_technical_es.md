@@ -285,31 +285,114 @@ Tipos raíz admitidos:
 - `Q`: name/Q-Line global.
 - `F`: spamfilter global.
 
-Para G/Z/S/Q se admite:
+Para G y S el patrón usa obligatoriamente la máscara `<user>@<host>`. Z sólo acepta direcciones IP o redes CIDR canónicas (sin hostname, usuario, alias ni bits de host en CIDR); Q acepta una máscara name-ban nativa. Cada perfil tiene una única representación:
 
 ```text
-K::<tipo>::<patron> <reason>
-K::<tipo>::<patron>::reason <reason>
+K::G::<user@host>::reason <texto>
+K::Z::<ip-o-red>::reason <texto>
+K::S::<user@host>::reason <texto>
+K::Q::<mascara-nick>::reason <texto>
 K::<tipo>::<patron>::expires *<timestamp_unix>
 ```
 
-El reason puede estar directamente en el nodo de patrón o en `::reason`. `expires` es un único timestamp Unix absoluto elegido por el origen; su ausencia es la única representación de una línea permanente. `expires *0` es inválido. Un timestamp igual o anterior a la hora local nunca se materializa como TKL.
+El nodo patrón es un contenedor y no tiene valor directo. `expires` es un único timestamp Unix absoluto elegido por el origen; su ausencia es la única representación de una línea permanente. `expires *0` es inválido. Un timestamp igual o anterior a la hora local nunca se materializa como TKL.
 
-La expiración no se deriva del estado runtime de la TKL. La autoridad barre perfiles K vencidos y realiza el `DEL K::<tipo>::<patron>` transaccional canónico, que elimina el subtree completo de memoria y de `udb_K.db`; los followers sólo eliminan su TKL runtime local y envían una solicitud compare-and-delete `EXP <path> <expected-expires>`. Por tanto restart, reload, snapshot, reconnect o un cambio de `reason`, `type` o `action` no pueden renovar ni resucitar una línea temporal. Sólo un `INS ...::expires` explícito cambia su vida; `DEL ...::expires` convierte un perfil restante válido en permanente.
+La expiración no se deriva del estado runtime de la TKL. La autoridad barre perfiles K vencidos y realiza el `DEL K::<tipo>::<patron>` transaccional canónico, que elimina el subtree completo de memoria y de `udb_K.db`; los followers sólo eliminan su TKL runtime local y envían una solicitud compare-and-delete `EXP <path> <expected-expires>`. Por tanto restart, reload, snapshot, reconnect o un cambio de una propiedad del perfil no pueden renovar ni resucitar una línea temporal. Sólo un `INS ...::expires` explícito cambia su vida; `DEL ...::expires` convierte un perfil restante válido en permanente.
 
-UDB etiqueta sus TKL con `set_by="UDB"` y sólo elimina/reemplaza líneas que reconoce como propias para el mismo tipo/patrón.
+UDB etiqueta las TKL gestionadas con el marcador reservado `set_by="UDB:managed"` y sólo elimina líneas propias coincidentes.
 
-Para spamfilter F la profundidad es obligatoriamente 3 y se utilizan estas propiedades:
+Spamfilter F es un perfil Spamfilter dinámico nativo. Su patrón se almacena **siempre** en Base64 RFC4648 canónico (prefijo `b64:`); se rechazan patrones raw. El patrón decodificado es byte-exacto y case-sensitive como identidad, está limitado a 3072 bytes y no puede contener NUL:
 
 ```text
-K::F::<patron>::type <targets>
-K::F::<patron>::action <action>
-K::F::<patron>::expires *<timestamp_unix>
-K::F::<patron>::reason <texto>
+K::F::<patron-b64>::match-type <regex|simple>
+K::F::<patron-b64>::targets <letras-target-canonicas>
+K::F::<patron-b64>::action <accion-dinamica>
+K::F::<patron-b64>::ban-time *<segundos>
+K::F::<patron-b64>::reason <texto>
+K::F::<patron-b64>::expires *<timestamp_unix>
 ```
 
-`type` se valida con los targets nativos de UnrealIRCd y `action` con su parser de ban actions; se rechazan acciones config-only. El patrón debe compilar como PCRE antes de persistirse. Puede almacenarse en claro o como Base64 canónico con prefijo `b64:`; el patrón decodificado no puede superar 3072 bytes ni contener NUL.
+`match-type` es explícito: `regex` compila PCRE y `simple` usa el matcher nativo de wildcards de UnrealIRCd. `targets` debe usar el orden canónico nativo `cpnNPqduatTR` (channel/private/private-notice/channel-notice/part/quit/dcc/user/away/topic/message-tag/raw), sin duplicados. `action` sólo se admite cuando UnrealIRCd la reconoce como dinámica y no config-only. `ban-time` es opcional, positivo y es la duración de la sanción generada por un match; es distinto del `expires` de la regla. Un perfil F parcial es inerte de forma segura; un candidato completo inválido se rechaza antes de persistirse y no puede sustituir una regla activa.
 
+
+### 4.6.1 IPv4, IPv6, CIDR y codificación de rutas UDB
+
+Esta sección trata una dirección IPv4/IPv6 **como valor de una política del bloque K**. No describe listeners IPv6, sockets, transporte S2S, direcciones del servidor ni la configuración `listen {}`.
+
+#### Identidad lógica, componente UDB y ruta wire
+
+`::` separa los componentes de una ruta UDB. Por ello `:` está reservado dentro de un componente. El codec actual codifica `:`, `%`, bytes de control/espacio y bytes no ASCII; emite escapes hexadecimales en mayúsculas. Mantiene literales los caracteres imprimibles `@` y `/`. Por tanto, cada `:` de una IPv6 se escribe como `%3A`; `@` y `/` no necesitan escaparse en las formas mostradas.
+
+Estas son tres representaciones diferentes del mismo valor:
+
+```text
+Identidad lógica:   2001:db8::1
+Componente UDB:     2001%3Adb8%3A%3A1
+Ruta de protocolo:  K::Z::2001%3Adb8%3A%3A1::reason
+```
+
+El percent-encoding pertenece sólo a la ruta UDB. UDB decodifica el componente antes de validar y materializar la TKL, por lo que UnrealIRCd recibe `2001:db8::1`, no `%3A`. Una IPv6 literal no es válida dentro de una ruta `DB INS`/`DB DEL`: sus dos puntos se interpretarían como sintaxis de ruta (o como un `:` simple inválido).
+
+| Caso | Valor lógico | Componente/ruta UDB |
+|---|---|---|
+| IPv4 Z | `198.51.100.10` | `K::Z::198.51.100.10` |
+| IPv4 CIDR Z | `198.51.100.0/24` | `K::Z::198.51.100.0/24` |
+| IPv6 Z | `2001:db8::1` | `K::Z::2001%3Adb8%3A%3A1` |
+| IPv6 CIDR Z | `2001:db8:1234::/48` | `K::Z::2001%3Adb8%3A1234%3A%3A/48` |
+| G IPv6 | `*@2001:db8::1` | `K::G::*@2001%3Adb8%3A%3A1` |
+| S IPv6 | `*@2001:db8::1` | `K::S::*@2001%3Adb8%3A%3A1` |
+
+IPv4 no contiene `:`, por lo que estas formas IPv4 normales no necesitan percent-encoding:
+
+```text
+K::Z::198.51.100.10::reason
+K::Z::198.51.100.0/24::reason
+K::G::*@198.51.100.10::reason
+```
+
+#### Z/GZ-Line IPv6 y CIDR
+
+Z tiene un validador propio. Sólo admite una dirección IPv4/IPv6 o red CIDR canónica; rechaza hostname y `user@address`. UDB no normaliza la entrada Z antes de persistir. En cambio, parsea la dirección y compara el texto recibido con la salida de `inet_ntop()` de la plataforma: una grafía textual alternativa se rechaza. Así, `2001:db8::1` se acepta, mientras que `2001:0db8:0000:0000:0000:0000:0000:0001` se rechaza en vez de reescribirse. Usa la forma comprimida y en minúsculas emitida por `inet_ntop()`.
+
+CIDR también es identidad. Z valida el rango del prefijo y rechaza bits de host en vez de enmascararlos. Por ejemplo, `2001:db8:1234:5678::1/48` se rechaza; debe enviarse `2001:db8:1234::/48`. Esta política se aplica a redes Z IPv4 e IPv6.
+
+```text
+DB * INS K::Z::2001%3Adb8%3A%3A1234::reason :IPv6 bloqueada
+DB * INS K::Z::2001%3Adb8%3A%3A1234::expires *<unix_timestamp>
+DB * DEL K::Z::2001%3Adb8%3A%3A1234
+
+DB * INS K::Z::2001%3Adb8%3A1234%3A%3A/48::reason :Red IPv6 bloqueada
+DB * DEL K::Z::2001%3Adb8%3A1234%3A%3A/48
+```
+
+#### G-Line y Shun con IPv6
+
+G y S conservan la identidad `user@host`; una IPv6 pertenece a la parte `host`. El encoder de rutas UDB sólo transforma los dos puntos:
+
+```text
+DB * INS K::G::*@2001%3Adb8%3A%3A1234::reason :G-Line IPv6
+DB * INS K::G::baduser@2001%3Adb8%3A%3A1234::reason :G-Line IPv6 por ident
+DB * DEL K::G::*@2001%3Adb8%3A%3A1234
+
+DB * INS K::S::*@2001%3Adb8%3A%3A1234::reason :Shun IPv6
+DB * DEL K::S::*@2001%3Adb8%3A%3A1234
+```
+
+El schema UDB actual de G/S comprueba que existan `user` y `host`, que haya exactamente un `@` y que cada componente tenga como máximo 127 bytes. Reenvía el host decodificado a la API nativa de server-ban de UnrealIRCd. **No** parsea, normaliza ni rechaza grafías IPv6/CIDR alternativas para G/S. Por tanto, un CIDR IPv6 como `*@2001%3Adb8%3A1234%3A%3A/48` pasa la validación estructural de UDB y se reenvía como `*@2001:db8:1234::/48`, pero las garantías de identidad canónica anteriores sólo se aplican a Z. Los operadores deben usar la misma grafía canónica de `inet_ntop()` para G/S y evitar aliases textuales hasta que exista canonicalización específica de G/S.
+
+Ejemplos de protocolo DB listos para enviar:
+
+```text
+DB * INS K::Z::2001%3Adb8%3A%3A1::reason :Prueba Z IPv6
+DB * INS K::Z::2001%3Adb8%3A1234%3A%3A/48::reason :Prueba red IPv6
+DB * INS K::G::*@2001%3Adb8%3A%3A1::reason :Prueba G IPv6
+DB * INS K::S::*@2001%3Adb8%3A%3A1::reason :Prueba Shun IPv6
+
+DB * DEL K::Z::2001%3Adb8%3A%3A1
+DB * DEL K::Z::2001%3Adb8%3A1234%3A%3A/48
+DB * DEL K::G::*@2001%3Adb8%3A%3A1
+DB * DEL K::S::*@2001%3Adb8%3A%3A1
+```
 ## 5. Configuración `udb {}`
 
 Configuración mínima típica:

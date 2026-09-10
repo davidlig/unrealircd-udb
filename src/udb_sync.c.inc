@@ -901,6 +901,12 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, unsigned
 		return UDB_ERR_PARAMS;
 	}
 	session->record_count = udb_record_count_tree(session->tree);
+	if (block->letter == UDB_BLOCK_LINES && !udb_k_tree_profiles_valid(session->tree))
+	{
+		udb_sync_abort(block, "invalid complete K profile in staged snapshot");
+		udb_sync_round_failure(block, peer, round_id, "invalid complete K profile in staged END");
+		return UDB_ERR_PARAMS;
+	}
 	if (!udb_compute_tree_checksum(session->tree, digest))
 	{
 		udb_sync_abort(block, "digest calculation failure");

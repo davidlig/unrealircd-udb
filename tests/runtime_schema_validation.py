@@ -2,6 +2,7 @@
 """Integration tests for UDB declarative schema validation across all database blocks."""
 
 import argparse
+import base64
 import hashlib
 import os
 import pathlib
@@ -355,7 +356,7 @@ def test_secret_mutation_log_redaction_encoded(services, process, data_dir):
 def test_line_mask_component_and_native_boundaries(services, data_dir):
     user = "u" * 127
     host = "h" * 127
-    valid_path = f"K::G::{user}@{host}"
+    valid_path = f"K::G::{user}@{host}::reason"
     services.send_ins(valid_path, "boundary mask")
     time.sleep(0.2)
     db = data_dir / "udb_K.db"
@@ -363,7 +364,7 @@ def test_line_mask_component_and_native_boundaries(services, data_dir):
 
     for invalid_mask in (("u" * 128) + "@host.test", "user@" + ("h" * 128)):
         start = len(services.lines)
-        services.send_ins(f"K::G::{invalid_mask}", "must reject")
+        services.send_ins(f"K::G::{invalid_mask}::reason", "must reject")
         services.wait_for(lambda line: " DB " in line and " ERR INS " in line,
                           "rejection of over-capacity line-mask component", start=start)
         require(invalid_mask not in db.read_text(encoding="ascii"),
@@ -387,8 +388,9 @@ def test_block_k_absolute_expiry_schema(services, data_dir):
         ("K::G::*@expires.test::expires", "*0", "zero expires"),
         ("K::G::*@expires.test::expires", "*18446744073709551616", "overflow expires"),
         ("K::Z::host.invalid::reason", "bad Z", "hostname Z-line"),
-        ("K::F::(unclosed::type", "c", "invalid regex"),
-        ("K::F::validregex::action", "set", "config-only spamfilter action"),
+        ("K::F::raw-pattern::reason", "raw", "raw spamfilter alias"),
+        ("K::F::b64%3AcmVnZXg=::type", "c", "legacy spamfilter target key"),
+        ("K::F::b64%3AcmVnZXg=::action", "set", "config-only spamfilter action"),
     ):
         before = db.read_text(encoding="ascii")
         start = len(services.lines)
@@ -396,7 +398,59 @@ def test_block_k_absolute_expiry_schema(services, data_dir):
         services.wait_for(lambda line: " DB " in line and " ERR " in line and " INS " in line and " K" in line,
                           f"rejection of {label}", start=start)
         require(before == db.read_text(encoding="ascii"), f"{label} changed udb_K.db despite rejection")
-    print("PASS: Block K accepts absolute expires only and rejects legacy/invalid expiry, Z, regex, and config-only action")
+    print("PASS: Block K accepts absolute expires only and rejects legacy/invalid expiry, Z, raw/legacy F aliases, and config-only action")
+
+
+def test_block_k_canonical_profiles(services, data_dir):
+    """Exercise K identity admission without relying on daemon internals."""
+    db = data_dir / "udb_K.db"
+
+    def encoded(pattern):
+        return "b64%3A" + base64.b64encode(pattern.encode("ascii")).decode("ascii")
+
+    # No direct reason alias and no G shorthand can create a second identity.
+    for path, value, label in (
+        ("K::G::example.test", "legacy direct reason", "direct G reason"),
+        ("K::G::example.test::reason", "shorthand", "G shorthand"),
+        ("K::Z::2001%3A0db8%3A0%3A0%3A0%3A0%3A0%3A1::reason", "alias", "noncanonical IPv6"),
+        ("K::Z::2001%3Adb8%3A%3A1/32::reason", "host bits", "CIDR host bits"),
+    ):
+        before = db.read_text(encoding="ascii") if db.exists() else ""
+        start = len(services.lines)
+        services.send_ins(path, value)
+        services.wait_for(lambda line: " DB " in line and " ERR INS " in line,
+                          f"rejection of {label}", start=start)
+        require((db.read_text(encoding="ascii") if db.exists() else "") == before,
+                f"{label} changed persistent K state")
+
+    # Foo and foo are different regex bytes and must remain distinct tree keys.
+    for pattern in ("Foo", "foo"):
+        root = f"K::F::{encoded(pattern)}"
+        services.send_ins(root + "::match-type", "regex")
+        services.send_ins(root + "::targets", "c")
+        services.send_ins(root + "::action", "warn")
+        services.send_ins(root + "::ban-time", "*60")
+        services.send_ins(root + "::reason", f"case {pattern}")
+    time.sleep(0.35)
+    content = db.read_text(encoding="ascii")
+    require(encoded("Foo") in content and encoded("foo") in content,
+            "case-distinct Base64 F patterns did not coexist in udb_K.db")
+    require("::targets c" in content and "::match-type regex" in content and "::ban-time *60" in content,
+            "complete F profile was not persisted with explicit schema")
+
+    for path, value, label in (
+        (f"K::F::{encoded('targets')}::targets", "pc", "noncanonical target order"),
+        (f"K::F::{encoded('targets')}::targets", "cc", "duplicate target"),
+        (f"K::F::{encoded('targets')}::match-type", "implicit", "unknown match type"),
+        (f"K::F::{encoded('targets')}::ban-time", "*0", "zero ban-time"),
+    ):
+        before = db.read_text(encoding="ascii")
+        start = len(services.lines)
+        services.send_ins(path, value)
+        services.wait_for(lambda line: " DB " in line and " ERR INS " in line,
+                          f"rejection of {label}", start=start)
+        require(db.read_text(encoding="ascii") == before, f"{label} changed udb_K.db")
+    print("PASS: canonical K masks and explicit case-sensitive F profiles reject aliases and preserve identity")
 
 
 def test_block_k_expiry_gc(services, data_dir, client_port):
@@ -587,28 +641,27 @@ def run_tests(ircd_bin, keep=False):
         test_secret_mutation_log_redaction_encoded(services, proc, data_dir)
         test_line_mask_component_and_native_boundaries(services, data_dir)
         test_block_k_absolute_expiry_schema(services, data_dir)
+        test_block_k_canonical_profiles(services, data_dir)
         test_block_k_expiry_gc(services, data_dir, client_port)
         test_channel_mode_parameter_capacity_atomic(services, data_dir)
 
         # -------------------------------------------------------------
         # Test 6b: Spamfilter regex pattern length limits (3071, 3072, 3073 bytes)
         # -------------------------------------------------------------
-        # Pattern of 3071 bytes -> Valid
+        # Canonical Base64 patterns preserve the 3072-byte native limit.
         pat3071 = "a" * 3071
-        services.send_ins(f"K::F::{pat3071}::type", "c")
-        time.sleep(0.1)
-
-        # Pattern of 3072 bytes (exact max) -> Valid
         pat3072 = "b" * 3072
-        services.send_ins(f"K::F::{pat3072}::type", "c")
-        time.sleep(0.1)
-
-        # Pattern of 3073 bytes (over max) -> Rejected with correlated ERR INS 2
         pat3073 = "c" * 3073
-        services.send_ins(f"K::F::{pat3073}::type", "c")
+        b64_3071 = "b64%3A" + base64.b64encode(pat3071.encode()).decode()
+        b64_3072 = "b64%3A" + base64.b64encode(pat3072.encode()).decode()
+        b64_3073 = "b64%3A" + base64.b64encode(pat3073.encode()).decode()
+        services.send_ins(f"K::F::{b64_3071}::reason", "partial")
+        services.send_ins(f"K::F::{b64_3072}::reason", "partial")
+        time.sleep(0.1)
+        services.send_ins(f"K::F::{b64_3073}::reason", "too long")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " K" in l,
                           "rejection of spamfilter pattern exceeding 3072 bytes")
-        print("PASS: Spamfilter pattern lengths: 3071 (accepted), 3072 (accepted), 3073 (rejected)")
+        print("PASS: canonical Base64 Spamfilter pattern lengths: 3071/3072 accepted, 3073 rejected")
 
         services.close()
         stop(proc)
