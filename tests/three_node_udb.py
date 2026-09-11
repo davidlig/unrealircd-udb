@@ -112,7 +112,6 @@ listen {{ ip "127.0.0.1"; port {ports[2]}; options {{ tls; }} }}
 loadmodule "third/udb";
 {('loadmodule "third/udb_test_mutator";' if load_mutator else '')}
 udb {{
-    database-directory "{dbdir}";
     propagator "{propagator}";
 }}
 ''', encoding="ascii")
@@ -129,7 +128,7 @@ def bwrap_command(node, ircd, config, configtest=False):
                 "--bind", str(node / "logs"), str(RUNTIME_ROOT / "logs"),
                 "--ro-bind", str(node / "modules" / "third"), str(RUNTIME_ROOT / "modules/third"),
                 "--dev-bind", "/dev", "/dev", "--proc", "/proc",
-                "--setenv", "UDB_TEST_MUTATOR_DIRECTORY", str(node / "data"),
+                "--setenv", "UDB_TEST_MUTATOR_DIRECTORY", str(node / "runtime-data"),
                 str(ircd), "-f", str(config)]
     command.append("-c" if configtest else "-F")
     return command
@@ -244,7 +243,7 @@ def wait_for_mutation(receiver_log, db, record, deleted, timeout):
 
 def arm_mutators(nodes):
     for node in nodes:
-        (node / "data" / "udb-test-mutator-go").touch()
+        (node / "runtime-data" / "udb-test-mutator-go").touch()
 
 
 def staged_authorization_rejected(b_log, c_log, b_log_offset, c_log_offset, b_db, baseline):
@@ -304,26 +303,25 @@ def main():
         build_mutator()
         a, b, c = root / "node-a", root / "node-b", root / "node-c"
         for node in (a, b, c):
-            (node / "data").mkdir(parents=True)
-            (node / "runtime-data").mkdir()
+            (node / "runtime-data").mkdir(parents=True, exist_ok=True)
             (node / "tmp").mkdir()
             (node / "modules" / "third").mkdir(parents=True)
             shutil.copy2(args.module, node / "modules" / "third" / "udb.so")
         for node in (a, b, c):
             shutil.copy2(MUTATOR_MODULE, node / "modules" / "third" / "udb_test_mutator.so")
-        a_db, b_db, c_db = (node / "data" / "udb_N.db" for node in (a, b, c))
+        a_db, b_db, c_db = (node / "runtime-data" / "udb_N.db" for node in (a, b, c))
         # Only A has a record. Empty, old placeholders make B and C request A's block.
         seed_block(a_db, "N", N_MARKER)
         for n in (a, b, c):
             for letter in ('C', 'I', 'S', 'L', 'K'):
-                seed_block(n / "data" / f"udb_{letter}.db", letter)
-        seed_ready_state(a / "data")
+                seed_block(n / "runtime-data" / f"udb_{letter}.db", letter)
+        seed_ready_state(a / "runtime-data")
         for db in (b_db, c_db):
             seed_block(db, "N")
             old_time = time.time() - 60
             os.utime(db, (old_time, old_time))
-        seed_ready_state(b / "data", last_sync=1787710000)
-        seed_ready_state(c / "data", last_sync=1787710000)
+        seed_ready_state(b / "runtime-data", last_sync=1787710000)
+        seed_ready_state(c / "runtime-data", last_sync=1787710000)
 
         raw_ports = free_ports(9)
         ports = [tuple(raw_ports[i * 3:(i + 1) * 3]) for i in range(3)]
@@ -332,12 +330,12 @@ def main():
         # A is the root authority (it selects itself); B selects A and C
         # selects B, so the staged record travels strictly downstream.
         write_config(a_conf, "udb-a.test", "0A1", ports[0], (("udb-b.test", ports[1][1], True),),
-                     args.module, a / "data", "udb-a.test", link_password, True)
+                     args.module, a / "runtime-data", "udb-a.test", link_password, True)
         write_config(b_conf, "udb-b.test", "0B1", ports[1],
                      (("udb-a.test", ports[0][1], False), ("udb-c.test", ports[2][1], True)),
-                     args.module, b / "data", "udb-a.test", link_password, True)
+                     args.module, b / "runtime-data", "udb-a.test", link_password, True)
         write_config(c_conf, "udb-c.test", "0C1", ports[2], (("udb-b.test", ports[1][1], False),),
-                     args.module, c / "data", "udb-b.test", link_password, True)
+                     args.module, c / "runtime-data", "udb-b.test", link_password, True)
         for node, config in ((a, a_conf), (b, b_conf), (c, c_conf)):
             run_configtest(node, args.ircd, config)
 
@@ -377,7 +375,7 @@ def main():
         b_log_offset = len(log_text(logs["B"]))
         c_log_offset = len(log_text(logs["C"]))
         b_baseline = b_db.read_bytes()
-        (c / "data" / STAGED_AUTH_TRIGGER).touch()
+        (c / "runtime-data" / STAGED_AUTH_TRIGGER).touch()
         deadline = time.monotonic() + args.timeout
         while time.monotonic() < deadline:
             if staged_authorization_rejected(logs["B"], logs["C"], b_log_offset, c_log_offset,

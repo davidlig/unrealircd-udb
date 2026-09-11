@@ -93,7 +93,6 @@ ulines {{
 loadmodule "cloak_sha256";
 loadmodule "third/udb";
 udb {{
-    database-directory "{dbdir}";
     propagator "{propagator}";
 }}
 ''', encoding="ascii")
@@ -210,8 +209,7 @@ def run_tests(ircd_bin, keep=False):
     try:
         b_dir, c_dir = tmpdir / "node-b", tmpdir / "node-c"
         for node in (b_dir, c_dir):
-            (node / "data").mkdir(parents=True)
-            (node / "runtime-data").mkdir()
+            (node / "runtime-data").mkdir(parents=True, exist_ok=True)
             (node / "tmp").mkdir()
             third_modules = node / "modules" / "third"
             third_modules.mkdir(parents=True)
@@ -226,10 +224,10 @@ def run_tests(ircd_bin, keep=False):
         # Topology: A (MockPropagator) <-> B (Node B) <-> C (Node C)
         write_config(b_conf, "udb-b.test", "0B1", b_ports,
                      (("udb-c.test", c_ports[1], True),),
-                     module_path, b_dir / "data", SERVICES_NAME, link_password)
+                     module_path, b_dir / "runtime-data", SERVICES_NAME, link_password)
         write_config(c_conf, "udb-c.test", "0C1", c_ports,
                      (("udb-b.test", b_ports[1], False), ("udb-export.test", 0, False)),
-                     module_path, c_dir / "data", "udb-b.test", link_password)
+                     module_path, c_dir / "runtime-data", "udb-b.test", link_password)
 
         b_log, c_log = b_dir / "ircd.log", c_dir / "ircd.log"
 
@@ -247,8 +245,8 @@ def run_tests(ircd_bin, keep=False):
         prop_a = MockPropagator("127.0.0.1", b_ports[1], "0B1", link_password)
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
-            b_state = b_dir / "data" / ".udb_state"
-            c_state = c_dir / "data" / ".udb_state"
+            b_state = b_dir / "runtime-data" / ".udb_state"
+            c_state = c_dir / "runtime-data" / ".udb_state"
             if (b_state.exists() and c_state.exists() and
                     "STATE=READY" in b_state.read_text() and "STATE=READY" in c_state.read_text()):
                 break
@@ -290,10 +288,10 @@ def run_tests(ircd_bin, keep=False):
         # -------------------------------------------------------------
         # Verify durable .db files on B and C are byte-for-byte identical
         # -------------------------------------------------------------
-        b_c_db = (b_dir / "data" / "udb_C.db").read_text(encoding="ascii")
-        c_c_db = (c_dir / "data" / "udb_C.db").read_text(encoding="ascii")
-        b_k_db = (b_dir / "data" / "udb_K.db").read_text(encoding="ascii")
-        c_k_db = (c_dir / "data" / "udb_K.db").read_text(encoding="ascii")
+        b_c_db = (b_dir / "runtime-data" / "udb_C.db").read_text(encoding="ascii")
+        c_c_db = (c_dir / "runtime-data" / "udb_C.db").read_text(encoding="ascii")
+        b_k_db = (b_dir / "runtime-data" / "udb_K.db").read_text(encoding="ascii")
+        c_k_db = (c_dir / "runtime-data" / "udb_K.db").read_text(encoding="ascii")
 
         for path, data in test_mutations.items():
             subpath = path.split("::", 1)[1]

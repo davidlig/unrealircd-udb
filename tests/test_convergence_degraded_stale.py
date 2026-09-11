@@ -65,7 +65,6 @@ def write_config(path, name, sid, ports, links, dbdir, propagator=None, stale_ti
     udb_sync_to = f'    sync-inactivity-timeout {sync_timeout};\n' if sync_timeout is not None else ""
     udb_sync_abs = f'    sync-absolute-timeout {sync_absolute_timeout};\n' if sync_absolute_timeout is not None else ""
     udb_block = f'''udb {{
-    database-directory "{dbdir}";
 {udb_prop}{udb_stale_to}{udb_sync_to}{udb_sync_abs}}}'''
 
     path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
@@ -268,7 +267,7 @@ def test_suite():
         nodeA = tmpdir / "nodeA"
         portsA = free_ports(3)
         linksA = [("p1.test", 0, False), ("p2.test", 0, False)]
-        dbdirA = nodeA / "db"
+        dbdirA = nodeA / "runtime-data"
         dbdirA.mkdir(parents=True, exist_ok=True)
         (nodeA / "modules" / "third").mkdir(parents=True, exist_ok=True)
         shutil.copy(module_src, nodeA / "modules" / "third" / "udb.so")
@@ -324,7 +323,7 @@ def test_suite():
         nodeB = tmpdir / "nodeB"
         portsB = free_ports(3)
         linksB = [("p1.test", 0, False), ("p2.test", 0, False)]
-        dbdirB = nodeB / "db"
+        dbdirB = nodeB / "runtime-data"
         dbdirB.mkdir(parents=True, exist_ok=True)
         (nodeB / "modules" / "third").mkdir(parents=True, exist_ok=True)
         shutil.copy(module_src, nodeB / "modules" / "third" / "udb.so")
@@ -368,7 +367,7 @@ def test_suite():
         nodeC = tmpdir / "nodeC"
         portsC = free_ports(3)
         linksC = [("peer.test", 0, False)]
-        dbdirC = nodeC / "db"
+        dbdirC = nodeC / "runtime-data"
         dbdirC.mkdir(parents=True, exist_ok=True)
         (nodeC / "modules" / "third").mkdir(parents=True, exist_ok=True)
         shutil.copy(module_src, nodeC / "modules" / "third" / "udb.so")
@@ -393,7 +392,7 @@ def test_suite():
         nodeD = tmpdir / "nodeD"
         portsD = free_ports(3)
         linksD = [("prop.test", 0, False)]
-        dbdirD = nodeD / "db"
+        dbdirD = nodeD / "runtime-data"
         dbdirD.mkdir(parents=True, exist_ok=True)
         (nodeD / "modules" / "third").mkdir(parents=True, exist_ok=True)
         shutil.copy(module_src, nodeD / "modules" / "third" / "udb.so")
@@ -464,7 +463,7 @@ def test_suite():
         # observer.test has a link block so it can link and query STATUS, but it
         # is not in the propagator policy, so the node stays bootstrap-pending.
         linksD2 = [("prop.test", 0, False), ("observer.test", 0, False)]
-        dbdirD2 = nodeD2 / "db"
+        dbdirD2 = nodeD2 / "runtime-data"
         dbdirD2.mkdir(parents=True, exist_ok=True)
         (nodeD2 / "modules" / "third").mkdir(parents=True, exist_ok=True)
         shutil.copy(module_src, nodeD2 / "modules" / "third" / "udb.so")
@@ -542,7 +541,7 @@ def test_suite():
         nodeK = tmpdir / "nodeK"
         portsK = free_ports(3)
         linksK = [("prop.test", 0, False)]
-        dbdirK = nodeK / "db"
+        dbdirK = nodeK / "runtime-data"
         dbdirK.mkdir(parents=True, exist_ok=True)
         (nodeK / "modules" / "third").mkdir(parents=True, exist_ok=True)
         shutil.copy(module_src, nodeK / "modules" / "third" / "udb.so")
@@ -621,7 +620,7 @@ def test_suite():
         nodeL = tmpdir / "nodeL"
         portsL = free_ports(3)
         linksL = [("prop.test", 0, False)]
-        dbdirL = nodeL / "db"
+        dbdirL = nodeL / "runtime-data"
         dbdirL.mkdir(parents=True, exist_ok=True)
         (nodeL / "modules" / "third").mkdir(parents=True, exist_ok=True)
         shutil.copy(module_src, nodeL / "modules" / "third" / "udb.so")
@@ -664,7 +663,7 @@ def test_suite():
         nodeG = tmpdir / "nodeG"
         portsG = free_ports(3)
         linksG = [("new-a.test", 0, False), ("other.test", 0, False)]
-        dbdirG = nodeG / "db"
+        dbdirG = nodeG / "runtime-data"
         dbdirG.mkdir(parents=True, exist_ok=True)
         (nodeG / "modules" / "third").mkdir(parents=True, exist_ok=True)
         shutil.copy(module_src, nodeG / "modules" / "third" / "udb.so")
@@ -743,7 +742,7 @@ def test_suite():
         nodeI = tmpdir / "nodeI"
         portsI = free_ports(3)
         linksI = [("peer.test", 0, False)]
-        dbdirI = nodeI / "db"
+        dbdirI = nodeI / "runtime-data"
         dbdirI.mkdir(parents=True, exist_ok=True)
         (nodeI / "modules" / "third").mkdir(parents=True, exist_ok=True)
         shutil.copy(module_src, nodeI / "modules" / "third" / "udb.so")
@@ -777,7 +776,7 @@ def test_suite():
         # bootstrap source and announces the bootstrap wildcard.
         nodeI2 = tmpdir / "nodeI2"
         portsI2 = free_ports(3)
-        dbdirI2 = nodeI2 / "db"
+        dbdirI2 = nodeI2 / "runtime-data"
         dbdirI2.mkdir(parents=True, exist_ok=True)
         (nodeI2 / "modules" / "third").mkdir(parents=True, exist_ok=True)
         shutil.copy(module_src, nodeI2 / "modules" / "third" / "udb.so")

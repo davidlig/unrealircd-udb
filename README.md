@@ -11,8 +11,8 @@ UDB (Unreal DataBase) is a global **UnrealIRCd 6** module that maintains a distr
 
 | Block | Content |
 |---|---|
-| `N` | Nicks: password, CIDR access, vhost, operclass, modes, snomasks, SWHOIS, forbid/suspended |
-| `C` | Channels: founder, modes, topic, access, password, forbid/suspended, options |
+| `N` | Nicks: password, CIDR access, vhost, operclass, modes, snomasks, SWHOIS, forbid/suspend |
+| `C` | Channels: founder, modes, topic, access, forbid/suspend, options |
 | `I` | IP/realhost: clone limits, `nolines` exemptions, explicit host/vhost |
 | `S` | Global settings: clones, flood, service masks, vhost key/suffix, propagator |
 | `L` | Per-server options, currently `DEBUG` |
@@ -70,9 +70,7 @@ With no propagator policy, a truly fresh database directory initializes as a **s
 
 ```text
 udb {
-    database-directory "/local/path";
     propagator "ares-services.example.net";
-    max-global-clones 0;
     password-flood "5:60";
     max-staged-records 500000;
     max-staged-bytes 67108864;
@@ -84,9 +82,7 @@ udb {
 
 | Directive | Default | Note |
 |---|---:|---|
-| `database-directory` | `PERMDATADIR` | Holds `udb_[NCISLK].db` and `.udb_state` |
 | `propagator` | — | One server name in local configuration |
-| `max-global-clones` | 0 | **Currently parsed but not consumed at runtime** |
 | `password-flood` | `5:60` | Failed attempts per profile/IP and time window |
 | `max-staged-records` | 500000 | Incoming snapshot cap |
 | `max-staged-bytes` | 64 MiB | Accumulated staged payload cap |
@@ -104,7 +100,7 @@ Local configuration takes precedence over S.
 
 ## Persistence
 
-The configured database directory contains:
+UnrealIRCd `PERMDATADIR` contains:
 
 ```text
 udb_N.db
@@ -160,19 +156,7 @@ To recover an occupied registered nick:
 
 When `N::access` exists, the client IP must also match an authorized CIDR.
 
-For a registered channel with `pass`, use the password as JOIN key:
-
-```text
-/JOIN #channel Password
-```
-
-Successful authentication may grant `+a`; an identified founder receives `+q`. The extension:
-
-```text
-/INVITE nick #channel Password
-```
-
-validates the channel password and creates a temporary invite grant for a local target.
+A channel key is exclusively the native `+k` parameter in `C::<channel>::modes`, for example `+ntk secret`. It protects the first JOIN as well as later joins. An identified founder receives UDB-owned `+q`.
 
 ## Operator diagnostics
 
@@ -190,7 +174,7 @@ Start with `/UDB STATUS`: it reports readiness, sync health, recovery state, sel
 
 ### Current DBQ warning
 
-The implementation redacts `N::*::pass`, `N::*::challenge`, and `S::encryption_key`, but **does not currently redact `C::*::pass` or `C::*::challenge`**. Until fixed, treat DBQ as a privileged interface that may reveal channel credentials to authorized opers.
+The implementation redacts `N::*::pass`, `N::*::challenge`, and `S::encryption_key`.
 
 ## Development
 

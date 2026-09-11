@@ -78,7 +78,6 @@ def write_config(path, name, sid, ports, links, dbdir, propagator=None):
 '''
     udb_prop = f'    propagator "{propagator}";\n' if propagator is not None else ""
     udb_block = f'''udb {{
-    database-directory "{dbdir}";
 {udb_prop}}}'''
 
     path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
@@ -276,8 +275,8 @@ def main():
         node_c = temp_root / "node-c"
 
         for n in (node_a, node_b, node_c):
-            (n / "data").mkdir(parents=True)
-            (n / "runtime-data").mkdir(parents=True)
+            (n / "runtime-data").mkdir(parents=True, exist_ok=True)
+            (n / "runtime-data").mkdir(parents=True, exist_ok=True)
             (n / "tmp").mkdir(parents=True)
             (n / "modules/third").mkdir(parents=True)
             shutil.copy2(module, n / "modules/third/udb.so")
@@ -291,7 +290,7 @@ def main():
         seed_generation = 1
 
         for n in (node_a, node_b, node_c):
-            data_dir = n / "data"
+            data_dir = n / "runtime-data"
             for letter in ("N", "C", "I", "L", "K"):
                 seed_block(data_dir / f"udb_{letter}.db", letter, generation=seed_generation)
             seed_block(data_dir / "udb_S.db", "S",
@@ -300,7 +299,7 @@ def main():
 
         # This is a READY runtime fixture, not a bootstrap fixture.
         for n in (node_a, node_b, node_c):
-            data_dir = n / "data"
+            data_dir = n / "runtime-data"
             for letter in ("N", "C", "I", "S", "L", "K"):
                 block = data_dir / f"udb_{letter}.db"
                 assert block.is_file(), f"missing READY fixture block {block}"
@@ -321,17 +320,17 @@ def main():
         # Node A accepts services-a.test and connects to hub-b.test
         write_config(config_a, "hub-a.test", "00A", ports_a,
                      [("services-a.test", 0, False), ("hub-b.test", ports_b[1], False)],
-                     node_a / "data", propagator=None)
+                     node_a / "runtime-data", propagator=None)
 
         # Node B links to hub-a.test, leaf-c.test, and allows services-b.test
         write_config(config_b, "hub-b.test", "00B", ports_b,
                      [("hub-a.test", ports_a[1], True), ("leaf-c.test", ports_c[1], False), ("services-b.test", 0, False)],
-                     node_b / "data", propagator=None)
+                     node_b / "runtime-data", propagator=None)
 
         # Node C links to hub-b.test
         write_config(config_c, "leaf-c.test", "00C", ports_c,
                      [("hub-b.test", ports_b[1], True)],
-                     node_c / "data", propagator=None)
+                     node_c / "runtime-data", propagator=None)
 
         log_a = node_a / "ircd.log"
         log_b = node_b / "ircd.log"
@@ -363,9 +362,9 @@ def main():
         services_a.send_snapshot([("alice::vhost", "official.alice.net")], "primary-a1")
         time.sleep(0.5)
 
-        n_file_a = node_a / "data/udb_N.db"
-        n_file_b = node_b / "data/udb_N.db"
-        n_file_c = node_c / "data/udb_N.db"
+        n_file_a = node_a / "runtime-data/udb_N.db"
+        n_file_b = node_b / "runtime-data/udb_N.db"
+        n_file_c = node_c / "runtime-data/udb_N.db"
 
         deadline = time.monotonic() + 10
         persisted = False

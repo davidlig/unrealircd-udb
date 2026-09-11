@@ -229,97 +229,104 @@ static void udb_nick_set_snomasks(Client *client, UdbRecord *nick_rec, UdbRecord
 	send_umode_out(client, 1, old_umodes);
 }
 
-static void udb_nick_force_rename(Client *client, const char *nick_in_db)
+static void udb_nick_force_rename_with_notice(Client *client, const char *nick_in_db, const char *notice,
+										int offer_identify)
 {
 	char newnick[32];
 	char rand_suffix[6];
+	const char *args[5];
+	char tsbuf[32];
 
 	gen_random_alnum(rand_suffix, 5);
 	rand_suffix[5] = '\0';
 	snprintf(newnick, sizeof(newnick), "Guest%s", rand_suffix);
-
-	udb_send_service_notice(client, SKEY_NICKSERV,
+	if (notice)
+		udb_send_service_notice(client, SKEY_NICKSERV, "%s", notice);
+	else
+		udb_send_service_notice(client, SKEY_NICKSERV,
 							"This nickname (%s) has been registered or synced in the UDB database.", nick_in_db);
-	udb_send_service_notice(client, SKEY_NICKSERV,
+	if (offer_identify)
+		udb_send_service_notice(client, SKEY_NICKSERV,
 							"You have been renamed. If you are the owner, please identify: /NICK %s:Password",
 							nick_in_db);
 
-	const char *args[5];
-	char tsbuf[32];
+	tsbuf[0] = '\0';
 	snprintf(tsbuf, sizeof(tsbuf), "%lld", (long long)TStime());
 	args[0] = NULL;
 	args[1] = client->name;
 	args[2] = newnick;
 	args[3] = tsbuf;
 	args[4] = NULL;
-
 	do_cmd(&me, NULL, "SVSNICK", 4, args);
+}
+
+static void udb_nick_force_rename(Client *client, const char *nick_in_db)
+{
+	udb_nick_force_rename_with_notice(client, nick_in_db, NULL, 1);
 }
 
 static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync)
 {
+	UdbRecord *forbid;
+	UdbRecord *suspend;
+
 	if (!client || !nick_rec)
 		return;
-
-	UdbRecord *forbid = udb_record_find(udb_ctx, NKEY_FORBID, nick_rec);
+	forbid = udb_record_find(udb_ctx, NKEY_FORBID, nick_rec);
 	if (forbid)
 	{
-		udb_nick_force_rename(client, nick_rec->key);
+		char notice[UDB_RECORD_VALUE_MAX + 64];
+		snprintf(notice, sizeof(notice), "This nickname is forbidden. Reason: %s",
+				 forbid->data_str ? forbid->data_str : "No reason given");
+		udb_nick_force_rename_with_notice(client, nick_rec->key, notice, 0);
 		return;
 	}
+	suspend = udb_record_find(udb_ctx, NKEY_SUSPEND, nick_rec);
 
-	/* If this is a hot sync, check if the user is identified */
+	/* A hot replacement only applies privileged profile effects to its matching
+	 * owner. Suspend deliberately keeps a previously verified owner on the nick,
+	 * but never lets an unverified user retain a password-protected profile. */
 	if (is_hot_sync)
 	{
-		/* A full-N replacement must not evict the account that already owns
-		 * this profile; +r alone is insufficient without the matching account. */
 		int matching_account = client->user && has_user_mode(client, 'r') && strcmp(client->user->account, "*") &&
 							   !strcasecmp(client->user->account, nick_rec->key);
 		if (!matching_account)
 		{
 			UdbRecord *pass_rec = udb_record_find(udb_ctx, NKEY_PASS, nick_rec);
 			if (pass_rec)
-			{
 				udb_nick_force_rename(client, nick_rec->key);
-			}
-			return; /* Abort applying vhosts/opers to this unauthorized user */
+			return;
 		}
 	}
 
-	if (client->user)
+	if (suspend)
 	{
-		strlcpy(client->user->account, nick_rec->key, sizeof(client->user->account));
+		/* Suspension clears UDB identity and active profile effects. */
+		udb_nick_strip(client, nick_rec);
+		udb_send_service_notice(client, SKEY_NICKSERV, "This nickname is suspended. Reason: %s",
+							suspend->data_str ? suspend->data_str : "No reason given");
+		return;
 	}
+
+	if (client->user)
+		strlcpy(client->user->account, nick_rec->key, sizeof(client->user->account));
 
 	long old_umodes = client->umodes & ALL_UMODES;
 	client->umodes |= UMODE_REGNICK;
-
-	UdbRecord *susp = udb_record_find(udb_ctx, NKEY_SUSPENDED, nick_rec);
-	if (susp)
-	{
-		client->umodes |= set_usermode("S");
-	}
-
 	send_umode_out(client, 1, old_umodes);
 
 	UdbRecord *vhost_rec = udb_record_find(udb_ctx, NKEY_VHOST, nick_rec);
 	if (vhost_rec)
 		udb_nick_set_vhost(client, vhost_rec);
-
 	UdbRecord *oper_rec = udb_record_find(udb_ctx, NKEY_OPER, nick_rec);
 	if (oper_rec)
 		udb_nick_grant_oper(client, nick_rec, oper_rec);
-
 	UdbRecord *modes_rec = udb_record_find(udb_ctx, NKEY_MODES, nick_rec);
 	if (modes_rec && modes_rec->data_str)
-	{
 		udb_nick_set_modes(client, nick_rec, modes_rec, modes_rec->data_str);
-	}
-
 	UdbRecord *swhois_rec = udb_record_find(udb_ctx, NKEY_SWHOIS, nick_rec);
 	if (swhois_rec)
 		udb_nick_set_swhois(client, nick_rec, swhois_rec);
-
 	UdbRecord *sno_rec = udb_record_find(udb_ctx, NKEY_SNOMASKS, nick_rec);
 	if (sno_rec)
 		udb_nick_set_snomasks(client, nick_rec, sno_rec);
@@ -412,11 +419,10 @@ static void udb_nick_remove_record(UdbBlock *block, UdbRecord *rec)
 				}
 				send_umode_out(client, 1, old_umodes);
 			}
-			else if (!strcmp(rec->key, NKEY_SUSPENDED))
+			else if (!strcmp(rec->key, NKEY_SUSPEND))
 			{
-				long old_umodes = client->umodes & ALL_UMODES;
-				client->umodes &= ~set_usermode("S");
-				send_umode_out(client, 1, old_umodes);
+				udb_nick_force_rename_with_notice(client, nick_rec->key,
+											"This nickname suspension has ended. Please identify again.", 1);
 			}
 			else if (!strcmp(rec->key, NKEY_PASS))
 			{
@@ -717,23 +723,34 @@ CMD_OVERRIDE_FUNC(udb_override_nick)
 
 	if (pass_colon && (!pass_bang || pass_colon < pass_bang))
 	{
-		pass = pass_colon;
+		*pass_colon = '\0';
+		pass = pass_colon + 1;
 		force_ghost = 0;
 	}
 	else if (pass_bang && (!pass_colon || pass_bang < pass_colon))
 	{
-		pass = pass_bang;
+		*pass_bang = '\0';
+		pass = pass_bang + 1;
 		force_ghost = 1;
 	}
 
+	UdbRecord *rec = (udb_ctx && udb_ctx->nicks) ? udb_record_find(udb_ctx, clean_nick, udb_ctx->nicks) : NULL;
+	if (rec)
+	{
+		UdbRecord *forbid = udb_record_find(udb_ctx, NKEY_FORBID, rec);
+		if (forbid)
+		{
+			udb_send_service_notice(client, SKEY_NICKSERV, "This nickname is forbidden. Reason: %s",
+								forbid->data_str ? forbid->data_str : "No reason given");
+			return;
+		}
+	}
 	if (!pass)
 		goto passthrough;
 
-	*pass++ = '\0';
 	if (client->local)
 		safe_strdup(client->local->passwd, pass);
 
-	UdbRecord *rec = (udb_ctx && udb_ctx->nicks) ? udb_record_find(udb_ctx, clean_nick, udb_ctx->nicks) : NULL;
 	Client *acptr = rec ? find_client(clean_nick, NULL) : NULL;
 
 	/* The core NICK path checks the password too. Only pre-check when a
@@ -795,8 +812,10 @@ static int udb_hook_can_use_nick(Client *client, const char *newnick, const char
 		UdbRecord *forbid = udb_record_find(udb_ctx, NKEY_FORBID, nick_rec);
 		if (forbid)
 		{
-			udb_send_service_notice(client, SKEY_NICKSERV, "This nickname is forbidden.");
-			*reject_reason = "This nick is forbidden.";
+			static char forbid_reject[UDB_RECORD_VALUE_MAX + 64];
+			snprintf(forbid_reject, sizeof(forbid_reject), "This nickname is forbidden. Reason: %s",
+					 forbid->data_str ? forbid->data_str : "No reason given");
+			*reject_reason = forbid_reject;
 			return HOOK_DENY;
 		}
 

@@ -82,7 +82,6 @@ listen {{ ip "127.0.0.1"; port {tls_port}; options {{ tls; }} }}
 loadmodule "cloak_sha256";
 loadmodule "third/udb";
 udb {{
-    database-directory "{dbdir}";
     propagator "{name}";
 }}
 ''', encoding="ascii")
@@ -236,7 +235,7 @@ def exercise(host, port):
 
         alice.request("CAP REQ :multi-prefix", lambda line: " CAP " in line and
                       (" ACK " in line or " NAK " in line), "CAP reply")
-        alice.request("JOIN #vault", lambda line: " 366 " in line, "end of founder JOIN")
+        alice.request("JOIN #vault chansecret", lambda line: " 366 " in line, "end of founder JOIN")
         founder_names = names(alice)
         require(any("~alice" in line for line in founder_names),
                 f"founder did not receive +q: {founder_names!r}")
@@ -251,16 +250,47 @@ def exercise(host, port):
         require(any("registered" in line.lower() or "password" in line.lower() for line in rejected_nick),
                 f"invalid nick credentials not rejected by UDB: {rejected_nick!r}")
 
-        rejected_join = bob.request("JOIN #vault wrong", lambda line: " 475 " in line,
-                                    "rejection of invalid channel password")
-        require(any(" 475 " in line for line in rejected_join),
-                f"invalid password was not rejected: {rejected_join!r}")
-        bob.request("JOIN #vault chansecret", lambda line: " 366 " in line, "end of password JOIN")
-        bob_names = names(bob)
-        require(any("&bob" in line for line in bob_names),
-                f"channel authentication did not grant +a: {bob_names!r}")
-        require(not any("@bob" in line for line in bob_names),
-                f"channel authentication granted +o: {bob_names!r}")
+        # The NICK override owns the normal forbid path: it gives one reason
+        # NOTICE and does not delegate to the hook that would create a 432.
+        start = len(bob.lines)
+        bob.send("NICK reserved:anything")
+        bob.wait_for(lambda line: "This nickname is forbidden. Reason: reserved for testing" in line,
+                     "forbid reason NOTICE", start=start)
+        bob.receive(time.monotonic() + 0.5)
+        forbid_lines = bob.lines[start:]
+        require(sum("This nickname is forbidden. Reason: reserved for testing" in line for line in forbid_lines) == 1 and
+                not any(" 432 " in line for line in forbid_lines),
+                f"forbid produced a duplicate notice or 432: {forbid_lines!r}")
+
+        # A suspended profile still requires its password. Once authenticated it
+        # keeps the nick but deliberately has no UDB identity/effects.
+        for command in ("NICK suspended", "NICK suspended:wrong"):
+            rejected_suspend = bob.request(command,
+                                           lambda line: any(code in line for code in (" 432 ", " 433 ", " 437 ")),
+                                           "rejection of unauthenticated suspended nick")
+            require(any("password" in line.lower() or "registered" in line.lower()
+                        for line in rejected_suspend),
+                    f"suspended nick bypassed password validation: {rejected_suspend!r}")
+        bob.request("NICK suspended:holdsecret", lambda line: " NICK :suspended" in line,
+                    "authenticated suspended nick")
+        bob.wait_for(lambda line: "This nickname is suspended. Reason: pending review" in line,
+                     "suspension reason")
+        mode_lines = bob.request("MODE suspended", lambda line: " 221 " in line,
+                                 "suspended user mode reply")
+        require(not any("+r" in line for line in mode_lines),
+                f"suspended nick received UDB identity: {mode_lines!r}")
+        suspended_whois = bob.request("WHOIS suspended", lambda line: " 318 " in line,
+                                      "suspended WHOIS")
+        require(not any("suspended.test" in line for line in suspended_whois),
+                f"suspended nick received its UDB vhost: {suspended_whois!r}")
+
+        for command in ("JOIN #firstkey", "JOIN #firstkey wrong"):
+            rejected_join = bob.request(command, lambda line: " 475 " in line,
+                                        "rejection of first JOIN with invalid channel key")
+            require(any(" 475 " in line for line in rejected_join),
+                    f"first JOIN key was not rejected: {rejected_join!r}")
+        bob.request("JOIN #firstkey firstsecret", lambda line: " 366 " in line, "first keyed JOIN")
+        bob.request("JOIN #vault chansecret", lambda line: " 366 " in line, "end of keyed JOIN")
 
         alice.request("NICK alice2", lambda line: " NICK :alice2" in line, "nick change")
         mode_reply = alice.wait_for(lambda line: " MODE alice2 " in line and "-r" in line,
@@ -269,7 +299,7 @@ def exercise(host, port):
                 f"+r persisted after nick drop: {mode_reply!r}")
         require(any("-t" in line or "-rt" in line for line in mode_reply),
                 f"UDB vhost persisted after nick drop: {mode_reply!r}")
-        print("PASS: nick sha256 +r/vhost, founder only +q, JOIN sha256 +a without +o, and invalid credentials rejected")
+        print("PASS: nick sha256 +r/vhost, founder-only +q, and native +k including the first JOIN")
     finally:
         for client in clients:
             client.close()
@@ -298,9 +328,8 @@ def main():
     process = None
     try:
         node = root / "node"
-        data = node / "data"
+        data = node / "runtime-data"
         data.mkdir(parents=True)
-        (node / "runtime-data").mkdir()
         (node / "tmp").mkdir()
         third_modules = node / "modules" / "third"
         third_modules.mkdir(parents=True)
@@ -309,11 +338,17 @@ def main():
                    f"alice::pass sha256:{sha256('secret')}\n"
                    "alice::challenge sha256\n"
                    "alice::access 127.0.0.0/8\n"
-                   "alice::vhost alice.test\n")
+                   "alice::vhost alice.test\n"
+                   f"reserved::forbid reserved for testing\n"
+                   f"suspended::pass sha256:{sha256('holdsecret')}\n"
+                   "suspended::challenge sha256\n"
+                   "suspended::access 127.0.0.0/8\n"
+                   "suspended::suspend pending review\n"
+                   "suspended::vhost suspended.test\n")
         seed_block(data / "udb_C.db", "C",
                    "#vault::founder alice\n"
-                   f"#vault::pass sha256:{sha256('chansecret')}\n"
-                   "#vault::challenge sha256\n")
+                   "#vault::modes +ntk chansecret\n"
+                   "#firstkey::modes +ntk firstsecret\n")
         seed_block(data / "udb_L.db", "L",
                    "udb-one.test::options *1\n")
         for block in ("I", "S", "K"):

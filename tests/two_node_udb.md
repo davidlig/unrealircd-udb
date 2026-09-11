@@ -7,7 +7,7 @@ python3 src/modules/third/udb/tests/two_node_udb.py
 ```
 
 The harness creates two temporary configs, two independent UDB data trees, and
-four loopback ports. Each config sets `udb::database-directory` to its node's
+four loopback ports. Each config sets the isolated `PERMDATADIR` mount to its node's
 temporary data tree. It loads the supplied compiled UDB module on both nodes.
 `bwrap` keeps the host root read-only while each node directory, including its
 configured database directory, remains writable. Its separate runtime-data
@@ -120,4 +120,4 @@ diagnostic evidence, not a pass.
 
 If bubblewrap is prohibited by the host, the harness skips because it uses its
 read-only module/runtime mount layout. The generated configurations themselves
-keep UDB data isolated through distinct absolute `database-directory` paths.
+keep UDB data isolated through distinct isolated `PERMDATADIR` mounts.

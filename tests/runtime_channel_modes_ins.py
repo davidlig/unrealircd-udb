@@ -107,7 +107,6 @@ ulines {{
 loadmodule "cloak_sha256";
 loadmodule "third/udb";
 udb {{
-    database-directory "{dbdir}";
     propagator "{SERVICES_NAME}";
 }}
 ''', encoding="ascii")
@@ -362,12 +361,8 @@ def exercise(host, client_port, server_port, c_db):
 
         bob = IrcClient(host, client_port, "bob")
         clients.append(bob)
-        bob_join_start = len(bob.lines)
         bob.request("JOIN " + CHANNEL + " chansecret", lambda line: " 366 " in line,
-                    "end of password JOIN")
-        bob.wait_for(lambda line: line.startswith(f"{CHANSERV_PREFIX} MODE {CHANNEL} ") and
-                     "+a bob" in line,
-                     "ChanServ authentication +a", start=bob_join_start)
+                    "end of keyed JOIN")
         alice.receive(time.monotonic() + 1)
 
         # NickServ must own password failures, while server numerics remain intact.
@@ -384,10 +379,10 @@ def exercise(host, client_port, server_port, c_db):
                 any("Too many failed password attempts" in line for line in flood_failure),
                 f"the flood lock was not one NickServ NOTICE: {flood_failure!r}")
 
-        # Phase 1: identical modes INS must be a no-op (no -ntM/+ntM churn,
-        # and above all no founder +q removal).
+        # Phase 1: identical modes INS must be a no-op (including its +k parameter),
+        # and above all must not remove founder +q.
         start = len(alice.lines)
-        services.send_ins(f"C::{CHANNEL}::modes", "+ntM")
+        services.send_ins(f"C::{CHANNEL}::modes", "+ntk chansecret")
         deadline = time.monotonic() + 1.5
         while time.monotonic() < deadline:
             alice.receive(deadline)
@@ -400,14 +395,14 @@ def exercise(host, client_port, server_port, c_db):
 
         # Phase 2: a changed modes value must apply, still without touching +q.
         start = len(alice.lines)
-        services.send_ins(f"C::{CHANNEL}::modes", "+ntm")
+        services.send_ins(f"C::{CHANNEL}::modes", "+ntkm chansecret")
         alice.wait_for(lambda line: f"MODE {CHANNEL}" in line and "+m" in line,
                        "application of new modes value", start=start)
         require(not any("-q" in line for line in alice.lines[start:]),
                 f"modes change revoked founder +q: {alice.lines[start:]!r}")
         require(any("~alice" in line for line in names(alice)),
                 f"modes change removed founder +q: {names(alice)!r}")
-        require(wait_for_file_content(c_db, f"{CHANNEL}::modes +ntm", 5),
+        require(wait_for_file_content(c_db, f"{CHANNEL}::modes +ntkm chansecret", 5),
                 f"changed modes value was not persisted in {c_db}")
 
         # Every UDB-managed member rank, including generic C::modes ranks, must
@@ -420,12 +415,6 @@ def exercise(host, client_port, server_port, c_db):
         require(any(line.startswith(f"{CHANSERV_PREFIX} MODE {CHANNEL} ") and "+ovh" in line
                     for line in rank_traffic),
                 f"the o/h/v ranks were not originated by ChanServ: {rank_traffic!r}")
-
-        services.send_del(f"C::{CHANNEL}::pass")
-        bob.wait_for(lambda line: line.startswith(f"{CHANSERV_PREFIX} MODE {CHANNEL} ") and
-                     "-a bob" in line,
-                     "ChanServ authentication +a revocation")
-        alice.receive(time.monotonic() + 1)
 
         start = len(alice.lines)
         services.send_ins(f"C::{CHANNEL}::modes", "+ntM")
@@ -504,18 +493,15 @@ def main():
     process = None
     try:
         node = root / "node"
-        data = node / "data"
+        data = node / "runtime-data"
         data.mkdir(parents=True)
-        (node / "runtime-data").mkdir()
         (node / "tmp").mkdir()
         third_modules = node / "modules" / "third"
         third_modules.mkdir(parents=True)
         shutil.copy2(args.module, third_modules / "udb.so")
         seed_block(data / "udb_C.db", "C",
                    f"{CHANNEL}::founder alice\n"
-                   f"{CHANNEL}::pass sha256:{sha256('chansecret')}\n"
-                   f"{CHANNEL}::challenge sha256\n"
-                   f"{CHANNEL}::modes +ntM\n"
+                   f"{CHANNEL}::modes +ntk chansecret\n"
                    f"{CHANNEL}::topic Persistent topic\n")
         seed_block(data / "udb_N.db", "N",
                    f"alice::pass sha256:{sha256('secret')}\n"
@@ -551,7 +537,7 @@ def main():
         wait_for_daemon(process, (("127.0.0.1", port), ("127.0.0.1", server_port)), args.timeout)
         require(wait_for_file_absent(residual_snapshot, 5),
                 f"the residual temporary snapshot was not cleaned: {residual_snapshot}")
-        require(wait_for_file_content(data / "udb_C.db", f"{CHANNEL}::modes +ntM", 1),
+        require(wait_for_file_content(data / "udb_C.db", f"{CHANNEL}::modes +ntk chansecret", 1),
                 "temporary snapshot cleanup changed the active snapshot")
         exercise("127.0.0.1", port, server_port, data / "udb_C.db")
         return 0

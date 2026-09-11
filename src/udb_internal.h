@@ -20,7 +20,6 @@
 #include <openssl/rand.h>
 #include <openssl/sha.h>
 
-#define UDB_DEFAULT_DB_DIRECTORY PERMDATADIR
 #define UDB_BLOCK_PATH_MAX 1024
 #define UDB_RECORD_PATH_MAX 8192
 #define UDB_COMPONENT_RAW_MAX 4608
@@ -229,9 +228,7 @@ typedef enum UdbSyncStatus
 
 typedef struct UdbConfig
 {
-	char *db_directory;
 	char *propagator;
-	int max_global_clones;
 	int flood_attempts;
 	int flood_period;
 	int config_flood_attempts;
@@ -354,7 +351,6 @@ static int udb_config_posttest(int *errs);
 static int udb_config_rehash(void);
 static int udb_config_postconf(void);
 static void udb_config_free(UdbContext *ctx);
-static int udb_database_directory_valid(const char *value);
 static char *udb_block_filepath(char letter);
 static int udb_module_test(ModuleInfo *modinfo);
 static int udb_module_init(ModuleInfo *modinfo);
@@ -398,6 +394,9 @@ static UdbRecord *udb_record_delete(UdbContext *ctx, UdbBlock *block, UdbRecord 
 static void udb_record_free_tree(UdbRecord *rec);
 static UdbRecord *udb_record_clone_tree(UdbRecord *rec, UdbRecord *needle, UdbRecord **needle_clone);
 static unsigned int udb_record_count_tree(UdbRecord *rec);
+static unsigned int udb_record_count_logical(UdbRecord *rec);
+static int udb_n_tree_profiles_valid(UdbRecord *tree);
+static void udb_n_profile_canonicalize_forbid(UdbRecord *profile);
 static UdbRecord *udb_record_insert_path(UdbRecord *tree, const char *path, const char *data);
 static void udb_record_delete_tree(UdbRecord *rec);
 static void udb_hash_init(UdbContext *ctx);

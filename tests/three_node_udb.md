@@ -60,5 +60,5 @@ directory after stopping all three processes.
 - Loopback TCP connectivity and nine available ephemeral ports.
 
 The generated configurations isolate UDB through distinct absolute
-`database-directory` paths. Bubblewrap remains required by this harness for its
+isolated `PERMDATADIR` mounts. Bubblewrap remains required by this harness for its
 read-only module/runtime mount layout.

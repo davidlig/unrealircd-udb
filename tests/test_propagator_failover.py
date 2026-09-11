@@ -53,7 +53,6 @@ def write_config(path, name, sid, ports, links, dbdir, propagator=None, link_pas
 }}
 '''
     udb_block = f'''udb {{
-    database-directory "{dbdir}";
 {f'    propagator "{propagator}";' if propagator else ''}
 }}'''
 
@@ -165,8 +164,8 @@ def main():
         node_a = temp_root / "node-a"
         node_b = temp_root / "node-b"
         for n in (node_a, node_b):
-            (n / "data").mkdir(parents=True)
-            (n / "runtime-data").mkdir(parents=True)
+            (n / "runtime-data").mkdir(parents=True, exist_ok=True)
+            (n / "runtime-data").mkdir(parents=True, exist_ok=True)
             (n / "tmp").mkdir(parents=True)
             (n / "modules/third").mkdir(parents=True)
             shutil.copy2(module, n / "modules/third/udb.so")
@@ -177,19 +176,19 @@ def main():
         long_propagator_setting = f"{offline_prefix},hub-a.test,hub-b.test"
         assert len(offline_prefix) > 550, f"Prefix too short: {len(offline_prefix)}"
 
-        s_file_a = node_a / "data/udb_S.db"
+        s_file_a = node_a / "runtime-data/udb_S.db"
         seed_block(s_file_a, "S",
                    f"propagator {long_propagator_setting}\nflood 5:30\n")
 
         # Seed one complete six-block database. Auto-bootstrap must use a
         # genuinely READY source rather than a partial fixture.
         for letter in ("N", "C", "I", "L", "K"):
-            seed_block(node_a / f"data/udb_{letter}.db", letter)
+            seed_block(node_a / f"runtime-data/udb_{letter}.db", letter)
 
         # Seed Node A with an N record
-        n_file_a = node_a / "data/udb_N.db"
+        n_file_a = node_a / "runtime-data/udb_N.db"
         seed_block(n_file_a, "N", "davidlig::vhost root.admin.net\n")
-        seed_ready_state(node_a / "data")
+        seed_ready_state(node_a / "runtime-data")
 
         all_ports = free_ports(6)
         ports_a = tuple(all_ports[0:3])
@@ -201,14 +200,14 @@ def main():
 
         write_config(config_a, "hub-a.test", "00A", ports_a,
                      [("leaf-b.test", ports_b[1], False)],
-                     node_a / "data", propagator=None, link_password=link_pw)
+                     node_a / "runtime-data", propagator=None, link_password=link_pw)
 
         # Node B selects Hub A explicitly: only the selected direct authority
         # may feed it.  (A fresh node without any policy is a standalone
         # authority and must never import automatically.)
         write_config(config_b, "leaf-b.test", "00B", ports_b,
                      [("hub-a.test", ports_a[1], True)],
-                     node_b / "data", propagator="hub-a.test", link_password=link_pw)
+                     node_b / "runtime-data", propagator="hub-a.test", link_password=link_pw)
 
         log_a = node_a / "ircd.log"
         log_b = node_b / "ircd.log"
@@ -226,8 +225,8 @@ def main():
         wait_for_daemon(proc_b, "127.0.0.1", ports_b[0])
 
         # Wait for S2S autoconnect and UDB sync
-        s_file_b = node_b / "data/udb_S.db"
-        n_file_b = node_b / "data/udb_N.db"
+        s_file_b = node_b / "runtime-data/udb_S.db"
+        n_file_b = node_b / "runtime-data/udb_N.db"
 
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
@@ -244,7 +243,7 @@ def main():
         assert f"propagator {long_propagator_setting}" in content_s, f"propagator missing in B: {content_s}"
         assert "davidlig::vhost root.admin.net" in content_n, f"davidlig missing in B: {content_n}"
 
-        state_b = node_b / "data/.udb_state"
+        state_b = node_b / "runtime-data/.udb_state"
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             if state_b.exists() and "STATE=READY" in state_b.read_text():

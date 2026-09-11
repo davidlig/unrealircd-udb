@@ -93,7 +93,6 @@ ulines {{
 loadmodule "cloak_sha256";
 loadmodule "third/udb";
 udb {{
-    database-directory "{dbdir}";
     propagator "{SERVICES_A_NAME}";
 }}
 ''', encoding="ascii")
@@ -219,9 +218,8 @@ def run_tests(ircd_bin, keep=False):
 
     try:
         node = tmpdir / "node"
-        data_dir = node / "data"
+        data_dir = node / "runtime-data"
         data_dir.mkdir(parents=True)
-        (node / "runtime-data").mkdir()
         (node / "tmp").mkdir()
         third_modules = node / "modules" / "third"
         third_modules.mkdir(parents=True)

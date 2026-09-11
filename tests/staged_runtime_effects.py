@@ -105,7 +105,6 @@ link {peer} {{
 loadmodule "cloak_sha256";
 loadmodule "third/udb";
 udb {{
-    database-directory "{dbdir}";
     propagator "udb-a.test";
 }}
 ''', encoding="ascii")
@@ -279,37 +278,36 @@ def main():
     try:
         a, b = root / "node-a", root / "node-b"
         for node in (a, b):
-            (node / "data").mkdir(parents=True)
-            (node / "runtime-data").mkdir()
+            (node / "runtime-data").mkdir(parents=True, exist_ok=True)
             (node / "tmp").mkdir()
             (node / "modules" / "third").mkdir(parents=True)
             shutil.copy2(args.module, node / "modules" / "third" / "udb.so")
 
         # B starts with an active UDB oper; A's newer snapshot deliberately omits it.
-        b_n = b / "data" / "udb_N.db"
-        a_n = a / "data" / "udb_N.db"
+        b_n = b / "runtime-data" / "udb_N.db"
+        a_n = a / "runtime-data" / "udb_N.db"
         seed_block(b_n, "N", f"alice::pass sha256:{sha256('secret')}\nalice::oper netadmin\n")
         seed_block(a_n, "N", f"alice::pass sha256:{sha256('secret')}\n")
-        seed_block(b / "data" / "udb_K.db", "K")
-        seed_block(a / "data" / "udb_K.db", "K",
+        seed_block(b / "runtime-data" / "udb_K.db", "K")
+        seed_block(a / "runtime-data" / "udb_K.db", "K",
                    "G::*@127.0.0.1::reason staged loopback ban\n"
                    "Q::banned::reason staged fresh-client rejection\n")
         for n in (a, b):
             for letter in ('C', 'I', 'S', 'L'):
-                seed_block(n / "data" / f"udb_{letter}.db", letter)
-        seed_ready_state(a / "data")
-        seed_ready_state(b / "data", last_sync=1787710000)
+                seed_block(n / "runtime-data" / f"udb_{letter}.db", letter)
+        seed_ready_state(a / "runtime-data")
+        seed_ready_state(b / "runtime-data", last_sync=1787710000)
         old_time = time.time() - 120
-        for db in (b_n, b / "data" / "udb_K.db", b / "data" / ".udb_state"):
+        for db in (b_n, b / "runtime-data" / "udb_K.db", b / "runtime-data" / ".udb_state"):
             os.utime(db, (old_time, old_time))
 
         a_client, a_server, a_tls, b_client, b_server, b_tls = free_ports(6)
         a_conf, b_conf = a / "unrealircd.conf", b / "unrealircd.conf"
         link_password = "udb-test-" + secrets.token_hex(32)
         write_config(a_conf, "udb-a.test", "0A1", a_client, a_server, a_tls, "udb-b.test", b_server,
-                     a / "data", True, link_password)
+                     a / "runtime-data", True, link_password)
         write_config(b_conf, "udb-b.test", "0B1", b_client, b_server, b_tls, "udb-a.test", a_server,
-                     b / "data", False, link_password)
+                     b / "runtime-data", False, link_password)
         run_configtest(a, args.ircd, a_conf)
         run_configtest(b, args.ircd, b_conf)
 

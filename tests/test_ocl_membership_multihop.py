@@ -85,7 +85,7 @@ oper udbtest-oper {{
 }}
 loadmodule "cloak_sha256";
 loadmodule "{MODULE_NAME}";
-udb {{ database-directory "{dbdir}"; }}
+udb {{ }}
 ''', encoding="ascii")
 
 
@@ -186,7 +186,7 @@ def run_tests(ircd, module, keep=False):
         nodes = {label: tmpdir / f"node-{label.lower()}" for label in names}
         ports = {label: tuple(free_ports(3)) for label in names}
         for label, node in nodes.items():
-            (node / "data").mkdir(parents=True)
+            (node / "runtime-data").mkdir(parents=True, exist_ok=True)
             (node / "modules" / "third").mkdir(parents=True)
             shutil.copy2(module, node / "modules" / "third" / "udb.so")
             links = []
@@ -200,7 +200,7 @@ def run_tests(ircd, module, keep=False):
                 links = [(names["B"], ports["B"][1], False)]
             config = node / "unrealircd.conf"
             write_config(config, names[label], sids[label], ports[label], links,
-                         node / "data", divergent=label == "D")
+                         node / "runtime-data", divergent=label == "D")
             logs[label] = node / "ircd.log"
 
         def start(label):

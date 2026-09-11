@@ -45,7 +45,6 @@ def write_config(path, name, sid, ports, links, dbdir, propagator=None):
 '''
     udb_prop = f'    propagator "{propagator}";\n' if propagator is not None else ""
     udb_block = f'''udb {{
-    database-directory "{dbdir}";
 {udb_prop}}}'''
 
     path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
@@ -223,8 +222,8 @@ def main():
 
     try:
         node = temp_root / "node"
-        (node / "data").mkdir(parents=True)
-        (node / "runtime-data").mkdir(parents=True)
+        (node / "runtime-data").mkdir(parents=True, exist_ok=True)
+        (node / "runtime-data").mkdir(parents=True, exist_ok=True)
         (node / "tmp").mkdir(parents=True)
         (node / "modules/third").mkdir(parents=True)
         shutil.copy2(module, node / "modules/third/udb.so")
@@ -253,7 +252,7 @@ def main():
         ]
 
         for inv in invalid_propagator_cfgs:
-            write_config(config_path, "test.hub.net", IRCD_SID, ports, [], node / "data", propagator=inv)
+            write_config(config_path, "test.hub.net", IRCD_SID, ports, [], node / "runtime-data", propagator=inv)
             passed, out = run_configtest(node, ircd, config_path)
             assert not passed, f"Configtest should fail for invalid udb::propagator: {inv!r}, but passed! Output:\n{out}"
             print(f"PASS: configtest rejected invalid udb::propagator: {inv!r}")
@@ -267,7 +266,7 @@ def main():
         ]
 
         for val in valid_propagator_cfgs:
-            write_config(config_path, "test.hub.net", IRCD_SID, ports, [], node / "data", propagator=val)
+            write_config(config_path, "test.hub.net", IRCD_SID, ports, [], node / "runtime-data", propagator=val)
             passed, out = run_configtest(node, ircd, config_path)
             assert passed, f"Configtest should succeed for valid udb::propagator: {val!r}, but failed! Output:\n{out}"
             print(f"PASS: configtest accepted valid udb::propagator: {val!r}")
@@ -276,7 +275,7 @@ def main():
         # Part 2: Runtime S2S validation for S::propagator
         # -------------------------------------------------------------
         links = [("peer.net", 0, False)]
-        write_config(config_path, "test.hub.net", IRCD_SID, ports, links, node / "data", propagator="peer.net")
+        write_config(config_path, "test.hub.net", IRCD_SID, ports, links, node / "runtime-data", propagator="peer.net")
         log_file = node / "ircd.log"
         out_f = log_file.open("w")
         proc = subprocess.Popen(bwrap_command(node, ircd, config_path), stdout=out_f, stderr=subprocess.STDOUT)
@@ -342,7 +341,7 @@ def main():
                 assert "ERR INS" not in line, f"Unexpected ERR INS for valid S::propagator of len {len(val)}: {line}"
             deadline = time.monotonic() + 3
             while time.monotonic() < deadline:
-                db_text = (node / "data/udb_S.db").read_text(errors="replace")
+                db_text = (node / "runtime-data/udb_S.db").read_text(errors="replace")
                 if f"propagator {val}" in db_text:
                     break
                 time.sleep(0.05)

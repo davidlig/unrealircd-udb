@@ -127,7 +127,7 @@ static UdbRecord *udb_hash_find(UdbContext *ctx, int block_idx, const char *key)
 static const char *udb_get_shared_subkey(const char *key)
 {
 	static const char *known_keys[] = {"pass",		 "vhost",	 "oper",	  "swhois",	   "snomasks",		 "modes",
-									   "access",	 "forbid",	 "suspended", "challenge", "founder",		 "topic",
+									   "access",	 "forbid",	 "suspend", "challenge", "founder",		 "topic",
 									   "options",	 "clones",	 "nolines",	  "host",	   "encryption_key", "suffix",
 									   "nickserv",	 "chanserv", "ipserv",	  "quit_ips",  "quit_clones",	 "flood",
 									   "propagator", "type",	 "action",	  "expires",   "reason",		 NULL};
@@ -466,6 +466,23 @@ static unsigned int udb_record_count_tree(UdbRecord *rec)
 	return count;
 }
 
+/* Persisted Records is the number of logical lines, not container nodes. */
+static unsigned int udb_record_count_logical(UdbRecord *rec)
+{
+	unsigned int count = 0;
+	UdbRecord *child;
+
+	if (!rec)
+		return 0;
+	for (child = rec->child; child; child = child->sibling)
+	{
+		if (child->data_str || child->data_num > 0 || !child->child)
+			count++;
+		count += udb_record_count_logical(child);
+	}
+	return count;
+}
+
 static UdbRecord *udb_record_insert_path(UdbRecord *tree, const char *path, const char *data)
 {
 	char pathbuf[UDB_RECORD_PATH_MAX + 1];
@@ -676,6 +693,8 @@ static UdbSnapshotResult udb_file_write_snapshot(UdbBlock *block, UdbRecord *tre
 	int tmp_created = 0;
 	int saved_errno;
 
+	/* record_count stays structural for internal callers; the serialized header is logical. */
+	record_count = udb_record_count_logical(tree);
 	if (!block || !block->filepath)
 		return UDB_SNAPSHOT_FAILED_BEFORE_COMMIT;
 	if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", block->filepath) >= (int)sizeof(tmp_path))

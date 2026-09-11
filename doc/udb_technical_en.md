@@ -96,7 +96,7 @@ Allowed keys:
 | `challenge` | string | Forces auth type: `argon2id`, `sha256`, or `crypt`. |
 | `vhost` | string | Vhost applied to an identified user. |
 | `forbid` | string | Prevents nick use; hot sync may force a rename. |
-| `suspended` | string | Adds user mode `+S` to an identified profile. |
+| `suspend` | string | Allows the nick after required `pass` authentication, but grants no account/`+r` or UDB effects. |
 | `oper` | string | Local operclass name to grant. |
 | `modes` | string | Valid user modes; `o` is explicitly forbidden here. |
 | `snomasks` | string | Snomasks to apply. |
@@ -135,6 +135,11 @@ On successful identification UDB sets `account=<nick>` and `+r`, then applies su
 
 During a hot replacement of N, `+r` alone is not trusted: the current account must match the profile. Otherwise profile vhosts/opers are not applied and, when a password record exists, the current nick holder may be renamed.
 
+
+`N::forbid` is exclusive: inserting it atomically removes all sibling profile properties, and no other property may be inserted until `forbid` is deleted. The normal NICK override reports its reason without a duplicate 432.
+
+With `N::suspend`, required `pass`/`access` validation still applies before adopting the nick. A successful adopter keeps the nick but receives no account, `+r`, oper, vhost, modes, snomasks or SWHOIS. Adding it to an identified user strips those UDB effects while retaining the nick; removing it renames the occupant and requires a new identification.
+
 ### 4.2 C block — Channels
 
 Forms:
@@ -153,9 +158,7 @@ Keys:
 | `topic` | string | UDB-managed topic. |
 | `access` | container | Authorized nickname list. |
 | `forbid` | string | Rejects JOIN with the stored reason. |
-| `suspended` | string | Suppresses registered-channel/founder behavior. |
-| `pass` | string | Channel administrator password. |
-| `challenge` | string | Password hash type. |
+| `suspend` | string | Suppresses registered-channel/founder behavior. |
 | `options` | numeric | Bitmask described below. |
 
 `C::<channel>::access::<nick>` may carry a numeric or string value according to the schema, but **the current JOIN hook only checks that the child exists and that the user has `+r`**. The child value is not interpreted as a rank.
@@ -171,25 +174,11 @@ Options:
 
 Bits may be combined; `*15` enables all four.
 
-#### JOIN, founder and password
+#### JOIN, founder and native key
 
-The founder is identified only when the nickname matches `founder` and the user has `+r`. The founder can bypass JOIN bans/keys/invite and receives `+q` unless the profile is suspended.
+The founder is identified only when the nickname matches `founder` and the user has `+r`. The founder can bypass JOIN bans/keys/invite and receives `+q` unless the profile has `suspend`.
 
-When `pass` exists, a non-founder uses it as the JOIN key:
-
-```text
-/JOIN #channel Password
-```
-
-After successful authentication UDB records pending authorization and grants `+a` after JOIN. Channel passwords use the same hash verifier as N.
-
-`INVITE` has an extension when the channel has `pass`:
-
-```text
-/INVITE nick #channel Password
-```
-
-The password must be valid and the target must be local to the processing server. A successful invite creates a 300-second grant that can permit JOIN without presenting the password again. Supplying the password in JOIN is still treated as administrator authentication and may grant `+a`.
+`C::modes` is the key source: `+k` uses UnrealIRCd native semantics, including exact comparison. UDB covers only the first-JOIN gap before the mode is materialized; later joins are enforced by UnrealIRCd.
 
 Protected-ban ownership is tracked in channel runtime memory. The owner is not a persistent C record.
 
@@ -404,9 +393,7 @@ Accepted directives:
 
 | Directive | Range / format | Default |
 |---|---|---|
-| `database-directory` | local path, no `://`, no CR/LF | UnrealIRCd `PERMDATADIR` |
 | `propagator` | one valid server name | unset |
-| `max-global-clones` | 0..1,000,000 | 0 |
 | `password-flood` | `attempts:seconds`, both > 0 | `5:60` |
 | `max-staged-records` | 1..10,000,000 | 500,000 |
 | `max-staged-bytes` | 1,024..1,073,741,824 bytes | 64 MiB |
@@ -429,26 +416,20 @@ There is a deliberate difference: local `udb::propagator` validates **one server
 
 A remote candidate is selectable only when directly linked to the current node; when protocol availability is required it must also have confirmed HEL. A non-adjacent server does not become this node's snapshot source merely because it exists in the global topology.
 
-### 5.2 Current implementation note: `max-global-clones`
-
-`max-global-clones` is validated and stored in `UdbConfig.max_global_clones`, but current code does not read that field outside configuration. The implemented global clone fallback is `S::clones`.
-
-It therefore must not be described as an effective runtime limit until a consumer is wired to it.
-
 ## 6. Persistence and atomicity
 
 Each block is stored at:
 
 ```text
-<database-directory>/udb_N.db
-<database-directory>/udb_C.db
-<database-directory>/udb_I.db
-<database-directory>/udb_S.db
-<database-directory>/udb_L.db
-<database-directory>/udb_K.db
+PERMDATADIR/udb_N.db
+PERMDATADIR/udb_C.db
+PERMDATADIR/udb_I.db
+PERMDATADIR/udb_S.db
+PERMDATADIR/udb_L.db
+PERMDATADIR/udb_K.db
 ```
 
-Files are created mode `0600`; a missing database directory is created mode `0700`.
+Files are stored under `PERMDATADIR` and created mode `0600`.
 
 Snapshot header:
 
@@ -459,7 +440,7 @@ Snapshot header:
 ; Records: 42
 ```
 
-The checksum excludes headers and file ordering. It is CRC32 over logical `path value\n` lines sorted lexicographically. An empty tree has checksum `0`.
+`Records` counts persisted logical lines, not container nodes. The checksum excludes headers and file ordering. It is CRC32 over logical `path value\n` lines sorted lexicographically. An empty tree has checksum `0`.
 
 ### 6.1 Single-block commit
 
@@ -759,7 +740,6 @@ Current `udb_query_is_secret()` explicitly hides:
 - `N::*::challenge`;
 - `S::encryption_key`.
 
-It **does not include `C::*::pass` or `C::*::challenge`**, even though mutation logging treats channel passwords/challenges as sensitive. Until that mismatch is fixed, an oper with DBQ access should be assumed capable of querying channel credentials.
 
 ## 15. Security and invariants
 
@@ -852,11 +832,9 @@ To diagnose a node:
 
 At the documented commit:
 
-- `udb::max-global-clones` is parsed but does not participate in the runtime hook; effective global fallback is `S::clones`.
 - `S::quit_ips` is stored but has no runtime consumer in current sources.
 - `C::<channel>::access::<nick>` values do not define ranks; child presence plus `+r` identification authorizes JOIN.
 - I root keys use exact runtime lookup and are not CIDR matching rules.
-- `DBQ` currently does not redact `C::*::pass`/`challenge`, although it redacts N secrets and the S encryption key.
 - `PERSISTENT` depends on UnrealIRCd having native channel mode `+P`; UDB does not create a substitute.
 
 These notes intentionally describe real code behavior rather than capabilities inferred from the data model.

@@ -80,7 +80,6 @@ listen {{ ip "127.0.0.1"; port {tls_port}; options {{ tls; }} }}
 loadmodule "cloak_sha256";
 loadmodule "third/udb";
 udb {{
-    database-directory "{dbdir}";
     propagator "{name}";
 }}
 ''', encoding="ascii")
@@ -197,33 +196,32 @@ def test_node(ircd, module, enable_debug):
     server_name = f"udb-{'debug' if enable_debug else 'nodebug'}.test"
     with tempfile.TemporaryDirectory(prefix=f"udb-debug-test-{'on' if enable_debug else 'off'}-") as temp_dir:
         node = pathlib.Path(temp_dir)
-        (node / "data").mkdir()
-        (node / "runtime-data").mkdir()
+        (node / "runtime-data").mkdir(exist_ok=True)
         (node / "tmp").mkdir()
         (node / "modules" / "third").mkdir(parents=True)
         shutil.copy2(module, node / "modules" / "third" / "udb.so")
 
         # Configure Nick and Channel blocks
-        seed_block(node / "data" / "udb_N.db", "N",
+        seed_block(node / "runtime-data" / "udb_N.db", "N",
                    f"alice::pass sha256:{sha256('secret')}\n"
                    "alice::oper netadmin\n")
-        seed_block(node / "data" / "udb_C.db", "C",
+        seed_block(node / "runtime-data" / "udb_C.db", "C",
                    "#test::founder alice\n"
-                   f"#test::pass sha256:{sha256('chansecret')}\n")
+                   "#test::modes +ntk chansecret\n")
 
         if enable_debug:
-            seed_block(node / "data" / "udb_L.db", "L",
+            seed_block(node / "runtime-data" / "udb_L.db", "L",
                        f"{server_name}::options *1\n")
         else:
-            seed_block(node / "data" / "udb_L.db", "L",
+            seed_block(node / "runtime-data" / "udb_L.db", "L",
                        f"{server_name}::options *0\n")
         for letter in ('I', 'S', 'K'):
-            seed_block(node / "data" / f"udb_{letter}.db", letter)
-        seed_ready_state(node / "data")
+            seed_block(node / "runtime-data" / f"udb_{letter}.db", letter)
+        seed_ready_state(node / "runtime-data")
 
         client_port, server_port, tls_port = free_port(), free_port(), free_port()
         config = node / "unrealircd.conf"
-        write_config(config, server_name, "0D1", client_port, server_port, tls_port, module, node / "data")
+        write_config(config, server_name, "0D1", client_port, server_port, tls_port, module, node / "runtime-data")
         run_configtest(node, ircd, config)
 
         log = node / "ircd.log"

@@ -75,7 +75,6 @@ listen {{ ip "127.0.0.1"; port {tls_port}; options {{ tls; }} }}
 loadmodule "cloak_sha256";
 loadmodule "third/udb";
 udb {{
-    database-directory "{dbdir}";
     propagator "{name}";
 }}
 ''', encoding="ascii")
@@ -204,22 +203,21 @@ def test_clone_limit(ircd, module):
     server_name = "udb-clones.test"
     with tempfile.TemporaryDirectory(prefix="udb-clone-test-") as temp_dir:
         node = pathlib.Path(temp_dir)
-        (node / "data").mkdir()
-        (node / "runtime-data").mkdir()
+        (node / "runtime-data").mkdir(exist_ok=True)
         (node / "tmp").mkdir()
         (node / "modules" / "third").mkdir(parents=True)
         shutil.copy2(module, node / "modules" / "third" / "udb.so")
 
         # Configure global clone limit = 3 and custom quit message
         custom_quit = "Demasiadas conexiones simultaneas (limite global)"
-        seed_block(node / "data" / "udb_S.db", "S", f"clones *3\nquit_clones {custom_quit}\n")
+        seed_block(node / "runtime-data" / "udb_S.db", "S", f"clones *3\nquit_clones {custom_quit}\n")
         for letter in ("N", "C", "I", "L", "K"):
-            seed_block(node / "data" / f"udb_{letter}.db", letter)
-        seed_ready_state(node / "data")
+            seed_block(node / "runtime-data" / f"udb_{letter}.db", letter)
+        seed_ready_state(node / "runtime-data")
 
         client_port, server_port, tls_port = free_port(), free_port(), free_port()
         config = node / "unrealircd.conf"
-        write_config(config, server_name, "0C1", client_port, server_port, tls_port, node / "data")
+        write_config(config, server_name, "0C1", client_port, server_port, tls_port, node / "runtime-data")
         run_configtest(node, ircd, config)
 
         log = node / "ircd.log"

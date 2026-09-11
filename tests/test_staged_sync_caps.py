@@ -78,7 +78,6 @@ ulines {{
 loadmodule "cloak_sha256";
 loadmodule "third/udb";
 udb {{
-    database-directory "{dbdir}";
     propagator "{SERVICES_NAME}";
     max-staged-records {max_records};
     max-staged-bytes {max_bytes};
@@ -266,9 +265,8 @@ def run_tests(ircd_bin, keep=False):
 
     try:
         node = tmpdir / "node"
-        data_dir = node / "data"
+        data_dir = node / "runtime-data"
         data_dir.mkdir(parents=True)
-        (node / "runtime-data").mkdir()
         (node / "tmp").mkdir()
         third_modules = node / "modules" / "third"
         third_modules.mkdir(parents=True)
@@ -300,7 +298,7 @@ def run_tests(ircd_bin, keep=False):
         # PUT 1: #chan1::topic (creates 2 nodes: #chan1, topic -> total 2 nodes) <= 4 (OK)
         # PUT 2: #chan1::founder (adds 1 node under #chan1: founder -> total 3 nodes = limit - 1) <= 4 (OK)
         # PUT 3: #chan1::forbid (adds 1 node under #chan1: forbid -> total 4 nodes = limit) <= 4 (OK)
-        # PUT 4: #chan1::suspended (adds 1 node under #chan1: suspended -> total 5 nodes = limit + 1) -> ABORT
+        # PUT 4: #chan1::suspend (adds 1 node under #chan1: suspend -> total 5 nodes = limit + 1) -> ABORT
         # -------------------------------------------------------------
         services.send_begin("C", "tx-rec-cap", "00000000")
         # PUT 1: 2 nodes (limit - 2)
@@ -313,7 +311,7 @@ def run_tests(ircd_bin, keep=False):
         services.send_put("C", "tx-rec-cap", "#chan1::forbid", "Prohibited channel")
         time.sleep(0.1)
         # PUT 4: 5 nodes (limit + 1) -> Must abort session
-        services.send_put("C", "tx-rec-cap", "#chan1::suspended", "Suspended reason")
+        services.send_put("C", "tx-rec-cap", "#chan1::suspend", "Suspended reason")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " PUT " in l,
                           "rejection of exceeding max-staged-records with ERR PUT")
         print("PASS: max-staged-records limit+1 correctly aborted session with ERR PUT (exact node count 5 > 4)")

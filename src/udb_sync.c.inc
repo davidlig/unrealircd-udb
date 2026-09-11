@@ -877,6 +877,7 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, unsigned
 	UdbSyncSession *session = block ? block->session : NULL;
 	unsigned long received_digest;
 	unsigned long previous_generation;
+	char profile_failure_reason[96];
 
 	if (!session || session->peer != peer || session->round_id != round_id || strcmp(session->txid, txid))
 	{
@@ -901,10 +902,13 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, unsigned
 		return UDB_ERR_PARAMS;
 	}
 	session->record_count = udb_record_count_tree(session->tree);
-	if (block->letter == UDB_BLOCK_LINES && !udb_k_tree_profiles_valid(session->tree))
+	if ((block->letter == UDB_BLOCK_LINES && !udb_k_tree_profiles_valid(session->tree)) ||
+		(block->letter == UDB_BLOCK_NICKS && !udb_n_tree_profiles_valid(session->tree)))
 	{
-		udb_sync_abort(block, "invalid complete K profile in staged snapshot");
-		udb_sync_round_failure(block, peer, round_id, "invalid complete K profile in staged END");
+		snprintf(profile_failure_reason, sizeof(profile_failure_reason),
+				 "invalid complete profile in staged END for block %c", block->letter);
+		udb_sync_abort(block, profile_failure_reason);
+		udb_sync_round_failure(block, peer, round_id, profile_failure_reason);
 		return UDB_ERR_PARAMS;
 	}
 	if (!udb_compute_tree_checksum(session->tree, digest))

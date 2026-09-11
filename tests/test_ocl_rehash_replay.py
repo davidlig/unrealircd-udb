@@ -96,7 +96,7 @@ oper udbtest-oper {{
 }}
 loadmodule "cloak_sha256";
 loadmodule "third/udb";
-udb {{ database-directory "{dbdir}"; }}
+udb {{ }}
 ''', encoding="ascii")
 
 
@@ -255,16 +255,16 @@ def run_tests(ircd, module):
         node_a = root / "node-a"
         node_b = root / "node-b"
         for node in (node_a, node_b):
-            (node / "data").mkdir(parents=True)
+            (node / "runtime-data").mkdir(parents=True, exist_ok=True)
             (node / "modules" / "third").mkdir(parents=True)
             shutil.copy2(module, node / "modules" / "third" / "udb.so")
         ports_a = free_ports(3)
         ports_b = free_ports(3)
         conf_a = node_a / "unrealircd.conf"
         conf_b = node_b / "unrealircd.conf"
-        write_config(conf_a, "udb-a.test", "001", ports_a, module, node_a / "data",
+        write_config(conf_a, "udb-a.test", "001", ports_a, module, node_a / "runtime-data",
                      peer_name="udb-b.test", peer_port=ports_b[1], service=True)
-        write_config(conf_b, "udb-b.test", "002", ports_b, module, node_b / "data",
+        write_config(conf_b, "udb-b.test", "002", ports_b, module, node_b / "runtime-data",
                      peer_name="udb-a.test")
         log_a = node_a / "ircd.log"
         log_b = node_b / "ircd.log"
@@ -301,7 +301,7 @@ def run_tests(ircd, module):
         assert not any(" OCL BEGIN " in line for line in service.lines), service.lines
         print("PASS: unchanged REHASH replayed automatically without SERVER reconnect or OCL leakage")
 
-        write_config(conf_a, "udb-a.test", "001", ports_a, module, node_a / "data",
+        write_config(conf_a, "udb-a.test", "001", ports_a, module, node_a / "runtime-data",
                      peer_name="udb-b.test", peer_port=ports_b[1], service=True, changed=True)
         before_changed = len(service.snapshots())
         client.send("REHASH")

@@ -11,8 +11,8 @@ UDB (Unreal DataBase) es un módulo global para **UnrealIRCd 6** que mantiene un
 
 | Bloque | Contenido |
 |---|---|
-| `N` | Nicks: contraseña, acceso CIDR, vhost, operclass, modos, snomasks, SWHOIS, forbid/suspended |
-| `C` | Canales: founder, modos, topic, access, contraseña, forbid/suspended y opciones |
+| `N` | Nicks: contraseña, acceso CIDR, vhost, operclass, modos, snomasks, SWHOIS, forbid/suspend |
+| `C` | Canales: founder, modos, topic, access, forbid/suspend y opciones |
 | `I` | IP/realhost: clones, excepciones `nolines`, host/vhost explícito |
 | `S` | Ajustes globales: clones, flood, servicios, cifrado/sufijo y propagador |
 | `L` | Opciones por servidor, actualmente `DEBUG` |
@@ -70,9 +70,7 @@ Si no hay ninguna política de propagador, un directorio realmente nuevo se inic
 
 ```text
 udb {
-    database-directory "/ruta/local";
     propagator "ares-services.example.net";
-    max-global-clones 0;
     password-flood "5:60";
     max-staged-records 500000;
     max-staged-bytes 67108864;
@@ -84,9 +82,7 @@ udb {
 
 | Directiva | Default | Observación |
 |---|---:|---|
-| `database-directory` | `PERMDATADIR` | Directorio de `udb_[NCISLK].db` y `.udb_state` |
 | `propagator` | — | Un único nombre de servidor en configuración local |
-| `max-global-clones` | 0 | **Actualmente se parsea pero no se usa en runtime** |
 | `password-flood` | `5:60` | Intentos fallidos por perfil/IP y ventana temporal |
 | `max-staged-records` | 500000 | Máximo por snapshot entrante |
 | `max-staged-bytes` | 64 MiB | Máximo acumulado de payload staged |
@@ -104,7 +100,7 @@ La configuración local tiene precedencia sobre el valor distribuido de S.
 
 ## Persistencia
 
-En el directorio configurado se mantienen:
+En `PERMDATADIR` de UnrealIRCd se mantienen:
 
 ```text
 udb_N.db
@@ -160,19 +156,7 @@ Si el nick está ocupado y se quiere recuperar:
 
 Si `N::access` existe, también debe coincidir la IP con sus CIDR autorizados.
 
-En un canal registrado con `pass`, la contraseña se utiliza como key del JOIN:
-
-```text
-/JOIN #canal Password
-```
-
-Una autenticación correcta puede conceder `+a`. El fundador identificado recibe `+q`. La extensión:
-
-```text
-/INVITE nick #canal Password
-```
-
-valida la contraseña del canal y crea, para un target local, una autorización temporal de invitación.
+La clave de canal es exclusivamente el parámetro nativo `+k` de `C::<canal>::modes`, por ejemplo `+ntk secret`. Protege tanto el primer JOIN como los posteriores. Un fundador identificado recibe `+q` de UDB.
 
 ## Diagnóstico de operador
 
@@ -190,7 +174,7 @@ valida la contraseña del canal y crea, para un target local, una autorización 
 
 ### Advertencia actual de DBQ
 
-El código redacciona `N::*::pass`, `N::*::challenge` y `S::encryption_key`, pero **todavía no redacciona `C::*::pass` ni `C::*::challenge`**. Hasta que se corrija, considera `DBQ` una interfaz privilegiada que puede exponer credenciales de canal a opers autorizados.
+El código redacciona `N::*::pass`, `N::*::challenge` y `S::encryption_key`.
 
 ## Desarrollo
 

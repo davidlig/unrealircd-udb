@@ -62,7 +62,6 @@ def write_config(path, name, sid, ports, links, dbdir, propagator=None, link_pas
 '''
     udb_prop = f'    propagator "{propagator}";\n' if propagator is not None else ""
     udb_block = f'''udb {{
-    database-directory "{dbdir}";
 {udb_prop}}}'''
 
     path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
@@ -170,8 +169,8 @@ def main():
         node_c = temp_root / "node-c"
 
         for n in (node_a, node_b, node_c):
-            (n / "data").mkdir(parents=True)
-            (n / "runtime-data").mkdir(parents=True)
+            (n / "runtime-data").mkdir(parents=True, exist_ok=True)
+            (n / "runtime-data").mkdir(parents=True, exist_ok=True)
             (n / "tmp").mkdir(parents=True)
             (n / "modules/third").mkdir(parents=True)
             shutil.copy2(module, n / "modules/third/udb.so")
@@ -182,25 +181,25 @@ def main():
         # Initialize all 6 blocks with S block on nodes A, B, C
         for n in (node_a, node_b, node_c):
             for letter in ('N', 'C', 'I', 'S', 'L', 'K'):
-                seed_block(n / f"data/udb_{letter}.db", letter)
-            seed_block(n / "data/udb_S.db", "S",
+                seed_block(n / f"runtime-data/udb_{letter}.db", letter)
+            seed_block(n / "runtime-data/udb_S.db", "S",
                        f"propagator {propagator_list}\nflood 5:30\n")
-            seed_ready_state(n / "data")
+            seed_ready_state(n / "runtime-data")
 
         # Seed Node A (Root Propagator) with latest N block
-        seed_block(node_a / "data/udb_N.db", "N",
+        seed_block(node_a / "runtime-data/udb_N.db", "N",
                    "alice::vhost official.alice.net\nbob::vhost official.bob.net\n")
         new_time = time.time() + 60
-        os.utime(node_a / "data/udb_N.db", (new_time, new_time))
-        os.utime(node_a / "data/.udb_state", (new_time, new_time))
+        os.utime(node_a / "runtime-data/udb_N.db", (new_time, new_time))
+        os.utime(node_a / "runtime-data/.udb_state", (new_time, new_time))
 
         # Seed Node C (Leaf) with older, outdated N.db
-        seed_block(node_c / "data/udb_N.db", "N",
+        seed_block(node_c / "runtime-data/udb_N.db", "N",
                    "olduser::vhost outdated.vhost.net\n")
-        seed_ready_state(node_c / "data", last_sync=1787710000)
+        seed_ready_state(node_c / "runtime-data", last_sync=1787710000)
         old_time = time.time() - 120
-        os.utime(node_c / "data/udb_N.db", (old_time, old_time))
-        os.utime(node_c / "data/.udb_state", (old_time, old_time))
+        os.utime(node_c / "runtime-data/udb_N.db", (old_time, old_time))
+        os.utime(node_c / "runtime-data/.udb_state", (old_time, old_time))
 
         all_ports = free_ports(9)
         ports_a = tuple(all_ports[0:3])
@@ -215,15 +214,15 @@ def main():
         # Topology: A <-> B <-> C (A is not linked to C)
         write_config(config_a, "hub-a.test", "00A", ports_a,
                      [("hub-b.test", ports_b[1], False)],
-                     node_a / "data", propagator=None, link_password=link_pw)
+                     node_a / "runtime-data", propagator=None, link_password=link_pw)
 
         write_config(config_b, "hub-b.test", "00B", ports_b,
                      [("hub-a.test", ports_a[1], True), ("leaf-c.test", ports_c[1], False)],
-                     node_b / "data", propagator=None, link_password=link_pw)
+                     node_b / "runtime-data", propagator=None, link_password=link_pw)
 
         write_config(config_c, "leaf-c.test", "00C", ports_c,
                      [("hub-b.test", ports_b[1], True)],
-                     node_c / "data", propagator=None, link_password=link_pw)
+                     node_c / "runtime-data", propagator=None, link_password=link_pw)
 
         for name, n, cfg, p0 in (("A", node_a, config_a, ports_a[0]),
                                  ("B", node_b, config_b, ports_b[0]),
@@ -236,7 +235,7 @@ def main():
             wait_for_daemon(proc, "127.0.0.1", p0)
 
         # Wait for 3-node network to link and staged sync to complete down to Leaf C
-        n_file_c = node_c / "data/udb_N.db"
+        n_file_c = node_c / "runtime-data/udb_N.db"
         deadline = time.monotonic() + 15
         reconciled = False
 

@@ -64,7 +64,6 @@ def write_config(path, name, sid, ports, links, dbdir, propagator=None, stale_ti
     udb_prop = f'    propagator "{propagator}";\n' if propagator is not None else ""
     udb_stale_to = f'    stale-timeout {stale_timeout};\n' if stale_timeout is not None else ""
     udb_block = f'''udb {{
-    database-directory "{dbdir}";
 {udb_prop}{udb_stale_to}}}'''
 
     path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
@@ -308,7 +307,7 @@ class MockClient:
 def setup_node(tempdir, name, sid, ports, links, propagator=None, stale_timeout=None):
     node_dir = pathlib.Path(tempdir) / name
     node_dir.mkdir(parents=True, exist_ok=True)
-    dbdir = node_dir / "db"
+    dbdir = node_dir / "runtime-data"
     dbdir.mkdir(parents=True, exist_ok=True)
     moddir = node_dir / "modules" / "third"
     moddir.mkdir(parents=True, exist_ok=True)

@@ -101,7 +101,6 @@ ulines {{
 loadmodule "cloak_sha256";
 loadmodule "third/udb";
 udb {{
-    database-directory "{dbdir}";
     propagator "{SERVICES_NAME}";
 }}
 ''', encoding="ascii")
@@ -483,9 +482,8 @@ def main():
     process = None
     try:
         node = root / "node"
-        data = node / "data"
+        data = node / "runtime-data"
         data.mkdir(parents=True)
-        (node / "runtime-data").mkdir()
         (node / "tmp").mkdir()
         third_modules = node / "modules" / "third"
         third_modules.mkdir(parents=True)

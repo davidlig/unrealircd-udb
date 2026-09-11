@@ -102,7 +102,6 @@ listen {{ ip "127.0.0.1"; port {ports[2]}; options {{ tls; }} }}
 loadmodule "third/udb";
 {('loadmodule "third/udb_test_mutator";' if load_mutator else '')}
 udb {{
-    database-directory "{dbdir}";
     propagator "{propagator}";
 }}
 ''', encoding="ascii")
@@ -119,7 +118,7 @@ def bwrap_command(node, ircd, config):
             "--bind", str(node / "logs"), str(RUNTIME_ROOT / "logs"),
             "--ro-bind", str(node / "modules" / "third"), str(RUNTIME_ROOT / "modules/third"),
             "--dev-bind", "/dev", "/dev", "--proc", "/proc",
-            "--setenv", "UDB_TEST_MUTATOR_DIRECTORY", str(node / "data"),
+            "--setenv", "UDB_TEST_MUTATOR_DIRECTORY", str(node / "runtime-data"),
             str(ircd), "-F", "-f", str(config)]
 
 
@@ -161,8 +160,7 @@ def run_tests(ircd_bin, keep=False):
     try:
         a, b, c = tmpdir / "node-a", tmpdir / "node-b", tmpdir / "node-c"
         for node in (a, b, c):
-            (node / "data").mkdir(parents=True)
-            (node / "runtime-data").mkdir()
+            (node / "runtime-data").mkdir(parents=True, exist_ok=True)
             (node / "tmp").mkdir()
             third_modules = node / "modules" / "third"
             third_modules.mkdir(parents=True)
@@ -178,13 +176,13 @@ def run_tests(ircd_bin, keep=False):
         # Topology: A <-> B <-> C. A is root propagator.
         write_config(a_conf, "udb-a.test", "0A1", ports[0],
                      (("udb-b.test", ports[1][1], True),),
-                     module_path, a / "data", "udb-a.test", link_password, load_mutator=True)
+                     module_path, a / "runtime-data", "udb-a.test", link_password, load_mutator=True)
         write_config(b_conf, "udb-b.test", "0B1", ports[1],
                      (("udb-a.test", ports[0][1], False), ("udb-c.test", ports[2][1], True)),
-                     module_path, b / "data", "udb-a.test", link_password, load_mutator=False)
+                     module_path, b / "runtime-data", "udb-a.test", link_password, load_mutator=False)
         write_config(c_conf, "udb-c.test", "0C1", ports[2],
                      (("udb-b.test", ports[1][1], False),),
-                     module_path, c / "data", "udb-b.test", link_password, load_mutator=False)
+                     module_path, c / "runtime-data", "udb-b.test", link_password, load_mutator=False)
 
         logs = {"A": a / "ircd.log", "B": b / "ircd.log", "C": c / "ircd.log"}
 
@@ -206,11 +204,11 @@ def run_tests(ircd_bin, keep=False):
 
         # Arm and trigger authorized INS at Node A
         time.sleep(1.0)
-        (a / "data" / "udb-test-mutator-ins-go").touch()
+        (a / "runtime-data" / "udb-test-mutator-ins-go").touch()
 
         deadline = time.monotonic() + 10
-        c_db_n = c / "data" / "udb_N.db"
-        b_db_n = b / "data" / "udb_N.db"
+        c_db_n = c / "runtime-data" / "udb_N.db"
+        b_db_n = b / "runtime-data" / "udb_N.db"
 
         # Check that mutation was applied and persisted across B and C
         while time.monotonic() < deadline:
@@ -231,7 +229,7 @@ def run_tests(ircd_bin, keep=False):
         print("PASS: INS mutation propagated multi-hop A -> B -> C and persisted to disk across all nodes")
 
         # Arm and trigger authorized DEL at Node A
-        (a / "data" / "udb-test-mutator-del-go").touch()
+        (a / "runtime-data" / "udb-test-mutator-del-go").touch()
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             b_text = b_db_n.read_text(errors="replace") if b_db_n.exists() else ""

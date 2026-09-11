@@ -38,7 +38,7 @@ static UdbBlock *udb_block_create(UdbContext *ctx, char letter, const char *name
 
 static char *udb_block_filepath(char letter)
 {
-	const char *directory = udb_cfg ? udb_cfg->db_directory : NULL;
+	const char *directory = PERMDATADIR;
 	char *path;
 	size_t directory_length;
 	size_t path_length;
@@ -379,7 +379,7 @@ static void udb_engine_cleanup(UdbContext *ctx)
 static UdbStatePersistResult udb_persistence_set_state(UdbPersistentState state, UdbPersistenceOrigin origin,
 													   unsigned long generation, time_t last_sync)
 {
-	const char *directory = udb_cfg ? udb_cfg->db_directory : NULL;
+	const char *directory = PERMDATADIR;
 	char tmp_path[UDB_BLOCK_PATH_MAX];
 	char final_path[UDB_BLOCK_PATH_MAX];
 	char dir_path[UDB_BLOCK_PATH_MAX];
@@ -525,7 +525,7 @@ static void udb_mark_durability_uncertain(UdbContext *ctx, UdbBlock *block, cons
 static int udb_persistence_load_state(UdbPersistentState *state_out, UdbPersistenceOrigin *origin_out,
 									  unsigned long *generation_out, time_t *last_sync_out)
 {
-	const char *directory = udb_cfg ? udb_cfg->db_directory : NULL;
+	const char *directory = PERMDATADIR;
 	char state_path[UDB_BLOCK_PATH_MAX];
 	char line[256];
 	FILE *fp;
@@ -656,7 +656,7 @@ invalid:
 
 static int udb_persistence_has_state_file(void)
 {
-	const char *directory = udb_cfg ? udb_cfg->db_directory : NULL;
+	const char *directory = PERMDATADIR;
 	char state_path[UDB_BLOCK_PATH_MAX];
 	struct stat st;
 
@@ -738,13 +738,11 @@ static int udb_engine_init(void)
 
 	if (!udb_cfg)
 		udb_cfg = safe_alloc(sizeof(UdbConfig));
-	if (!udb_cfg->db_directory)
-		safe_strdup(udb_cfg->db_directory, UDB_DEFAULT_DB_DIRECTORY);
 	if (udb_cfg->max_staged_records == 0)
 		udb_cfg->max_staged_records = UDB_DEFAULT_MAX_STAGED_RECORDS;
 	udb_ctx = safe_alloc(sizeof(UdbContext));
 	udb_hash_init(udb_ctx);
-	dir = udb_cfg && udb_cfg->db_directory ? udb_cfg->db_directory : NULL;
+	dir = PERMDATADIR;
 	if (!dir)
 		return 0;
 	if (stat(dir, &st) == -1)

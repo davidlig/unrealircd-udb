@@ -129,8 +129,6 @@ static int udb_mutation_value_is_secret(const char *path)
 		return 0;
 	if (!strncasecmp(path, "N::", 3))
 		return !strcasecmp(decoded, NKEY_PASS);
-	if (!strncasecmp(path, "C::", 3))
-		return !strcasecmp(decoded, CKEY_PASS) || !strcasecmp(decoded, CKEY_CHALLENGE);
 	return 0;
 }
 
@@ -217,7 +215,15 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 		}
 		tree = udb_record_clone_tree(block->tree, old_rec, &rec);
 		rec = udb_record_insert_path(tree, path + 3, data);
-		if (!rec || (block->letter == UDB_BLOCK_LINES && !udb_k_profile_valid(rec->parent)))
+		if (rec && block->letter == UDB_BLOCK_NICKS && rec->parent && rec->parent != tree)
+		{
+			if (!strcmp(rec->key, NKEY_FORBID))
+				udb_n_profile_canonicalize_forbid(rec->parent);
+			else if (udb_record_find(NULL, NKEY_FORBID, rec->parent))
+				rec = NULL;
+		}
+		if (!rec || (block->letter == UDB_BLOCK_LINES && !udb_k_profile_valid(rec->parent)) ||
+			(block->letter == UDB_BLOCK_NICKS && !udb_n_tree_profiles_valid(tree)))
 		{
 			udb_record_free_tree(tree);
 			udb_log(ULOG_WARNING, "UDB_INS_PROFILE_REJECT", client,
@@ -236,7 +242,13 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 		}
 		/* Revoke the old value's effects only when the value actually changes:
 		 * an identical INS must not churn channel modes nor revoke +q ranks. */
-		if (old_rec && !unchanged)
+		if (!unchanged && block->letter == UDB_BLOCK_NICKS && rec && !strcmp(rec->key, NKEY_FORBID))
+		{
+			UdbRecord *old_profile = old_rec ? old_rec->parent : udb_record_find(ctx, rec->parent->key, block->tree);
+			if (old_profile)
+				udb_remove_special_record(ctx, block, old_profile);
+		}
+		else if (old_rec && !unchanged)
 		{
 			if (block->letter != 'C' || old_rec->parent == block->tree ||
 				(strcmp(old_rec->key, CKEY_MODES) && strcmp(old_rec->key, CKEY_TOPIC) &&

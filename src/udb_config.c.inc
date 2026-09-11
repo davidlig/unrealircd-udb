@@ -14,20 +14,6 @@ static int udb_config_seen_propagator = 0;
 
 static int udb_flood_valid(const char *value, int *attempts, int *period);
 
-static int udb_database_directory_valid(const char *value)
-{
-	char *path = NULL;
-	int valid;
-
-	if (!value || !*value || strstr(value, "://") || strpbrk(value, "\r\n"))
-		return 0;
-	safe_strdup(path, value);
-	convert_to_absolute_path(&path, PERMDATADIR);
-	valid = strlen(path) + sizeof("/udb_N.db") <= UDB_BLOCK_PATH_MAX;
-	safe_free(path);
-	return valid;
-}
-
 static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
 {
 	int errors = 0;
@@ -41,30 +27,11 @@ static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
 
 	for (cep = ce->items; cep; cep = cep->next)
 	{
-		if (!strcmp(cep->name, "database-directory"))
-		{
-			if (!udb_database_directory_valid(cep->value))
-			{
-				config_error("%s:%i: udb::database-directory must be a local path that leaves room for UDB block files",
-							 cep->file->filename, cep->line_number);
-				errors++;
-			}
-		}
-		else if (!strcmp(cep->name, "propagator"))
+		if (!strcmp(cep->name, "propagator"))
 		{
 			if (!cep->value || !udb_server_name_valid(cep->value))
 			{
 				config_error("%s:%i: udb::propagator requires a valid server name", cep->file->filename,
-							 cep->line_number);
-				errors++;
-			}
-		}
-		else if (!strcmp(cep->name, "max-global-clones"))
-		{
-			unsigned int val;
-			if (!cep->value || !udb_parse_uint_strict(cep->value, &val, 0, 1000000))
-			{
-				config_error("%s:%i: udb::max-global-clones requires a non-negative integer", cep->file->filename,
 							 cep->line_number);
 				errors++;
 			}
@@ -187,20 +154,10 @@ static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
 
 	for (cep = ce->items; cep; cep = cep->next)
 	{
-		if (!strcmp(cep->name, "database-directory"))
-		{
-			safe_strdup(udb_cfg->db_directory, cep->value);
-		}
-		else if (!strcmp(cep->name, "propagator"))
+		if (!strcmp(cep->name, "propagator"))
 		{
 			udb_config_seen_propagator = 1;
 			safe_strdup(udb_cfg->propagator, cep->value);
-		}
-		else if (!strcmp(cep->name, "max-global-clones"))
-		{
-			unsigned int val = 0;
-			if (udb_parse_uint_strict(cep->value, &val, 0, 1000000))
-				udb_cfg->max_global_clones = (int)val;
 		}
 		else if (!strcmp(cep->name, "max-staged-records"))
 		{
@@ -238,10 +195,7 @@ static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
 		}
 	}
 
-	/* Set defaults if not configured */
-	if (!udb_cfg->db_directory)
-		safe_strdup(udb_cfg->db_directory, UDB_DEFAULT_DB_DIRECTORY);
-	convert_to_absolute_path(&udb_cfg->db_directory, PERMDATADIR);
+	/* Persistent files always live in UnrealIRCd PERMDATADIR. */
 	if (udb_cfg->max_staged_records == 0)
 		udb_cfg->max_staged_records = UDB_DEFAULT_MAX_STAGED_RECORDS;
 	if (udb_cfg->max_staged_bytes == 0)
@@ -277,7 +231,6 @@ static void udb_config_free(UdbContext *ctx)
 	}
 	if (udb_cfg)
 	{
-		safe_free(udb_cfg->db_directory);
 		safe_free(udb_cfg->propagator);
 		safe_free(udb_cfg);
 		udb_cfg = NULL;

@@ -99,7 +99,6 @@ ulines {{
 loadmodule "cloak_sha256";
 loadmodule "third/udb";
 udb {{
-    database-directory "{dbdir}";
     propagator "{SERVICES_NAME}";
 }}
 ''', encoding="ascii")
@@ -304,8 +303,6 @@ def test_secret_mutation_log_redaction(services, process):
     mutations = (
         ("S::encryption_key", secret_key),
         ("N::secretlogger::pass", secret_hash),
-        ("C::#secretlogger::pass", secret_hash),
-        ("C::#secretlogger::challenge", "sha256"),
     )
     for path, value in mutations:
         services.send_ins(path, value)
@@ -328,8 +325,6 @@ def test_secret_mutation_log_redaction_encoded(services, process, data_dir):
         ("S::encryption%5Fkey", secret_key),
         ("N::encodedtest::%70ass", secret_hash),
         ("N::encodedtest2::p%61ss", secret_hash),
-        ("C::#encodedtest::%70ass", secret_hash),
-        ("C::#encodedtest::ch%61llenge", "sha256"),
     )
     for path, value in encoded_mutations:
         start = len(services.lines)
@@ -514,7 +509,7 @@ def run_tests(ircd_bin, keep=False):
     proc = None
 
     try:
-        data_dir = node / "data"
+        data_dir = node / "runtime-data"
         runtime_data = node / "runtime-data"
         tmp_dir = node / "tmp"
         mods_third = node / "modules" / "third"
@@ -559,6 +554,25 @@ def run_tests(ircd_bin, keep=False):
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INS " in l and " C" in l,
                           "rejection of unknown key testinvalidkey in Block C")
         print("PASS: INS of unknown key testinvalidkey in Block C was rejected with correlated ERR INS 2")
+
+        # `forbid` is canonical and exclusive: an INS atomically drops siblings
+        # and future sibling inserts are rejected until forbid is deleted.
+        services.send_ins("N::forbidtest::pass", "sha256:" + "ab" * 32)
+        services.send_ins("N::forbidtest::forbid", "reserved")
+        time.sleep(0.2)
+        n_db = (data_dir / "udb_N.db").read_text(encoding="ascii")
+        require("forbidtest::forbid reserved" in n_db and "forbidtest::pass" not in n_db,
+                "INS forbid did not persist an exclusive canonical profile")
+        records_header = next((line for line in n_db.splitlines() if line.startswith("; Records: ")), None)
+        require(records_header is not None, "N snapshot omitted its Records header")
+        logical_records = [line for line in n_db.splitlines() if line and not line.startswith(";")]
+        require(int(records_header.rsplit(" ", 1)[1]) == len(logical_records),
+                "Records header does not match the exact serialized logical-record count")
+        start = len(services.lines)
+        services.send_ins("N::forbidtest::vhost", "forbid.example")
+        services.wait_for(lambda line: " DB " in line and " ERR INS " in line,
+                          "rejection of sibling under forbid", start=start)
+        print("PASS: removed schema names reject; suspend and canonical forbid enforce the new N/C contracts")
 
         # -------------------------------------------------------------
         # Test 2: Rejection of wrong data types in Block C

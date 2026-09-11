@@ -9,28 +9,13 @@
  * License: GNU General Public License v2+
  */
 
-typedef struct UdbPendingChannelAuth UdbPendingChannelAuth;
 typedef struct UdbChannelModeState UdbChannelModeState;
-typedef struct UdbInviteGrant UdbInviteGrant;
 typedef struct UdbBanOwner UdbBanOwner;
 typedef struct UdbBanSnapshot UdbBanSnapshot;
-
-struct UdbPendingChannelAuth
-{
-	UdbPendingChannelAuth *next;
-	char channel[CHANNELLEN + 1];
-};
 
 struct UdbChannelModeState
 {
 	char *value;
-};
-
-struct UdbInviteGrant
-{
-	UdbInviteGrant *next;
-	char channel[CHANNELLEN + 1];
-	time_t expires;
 };
 
 struct UdbBanOwner
@@ -46,12 +31,7 @@ struct UdbBanSnapshot
 	char *ban;
 };
 
-#define UDB_INVITE_GRANT_TTL 300
-
-static ModDataInfo *udb_channel_auth_pending_md = NULL;
-static ModDataInfo *udb_channel_auth_member_md = NULL;
 static ModDataInfo *udb_channel_modes_md = NULL;
-static ModDataInfo *udb_channel_invite_grant_md = NULL;
 static ModDataInfo *udb_channel_ban_owners_md = NULL;
 
 /* Forward declarations */
@@ -62,7 +42,6 @@ static int udb_hook_remote_join(Client *client, Channel *channel, MessageTag *mt
 static int udb_hook_pre_chanmode(Client *client, Channel *channel, MessageTag *mtags, const char *modebuf,
 								 const char *parabuf, time_t sendts, int samode);
 static const char *udb_hook_pre_topic(Client *client, Channel *channel, const char *topic);
-CMD_OVERRIDE_FUNC(udb_override_invite);
 CMD_OVERRIDE_FUNC(udb_override_mode);
 
 static int udb_channel_is_identified_founder(Client *client, UdbRecord *chan_rec)
@@ -76,19 +55,6 @@ static int udb_channel_is_identified_founder(Client *client, UdbRecord *chan_rec
 		   has_user_mode(client, 'r');
 }
 
-static void udb_channel_pending_auth_free(ModData *m)
-{
-	UdbPendingChannelAuth *entry = m->ptr;
-
-	while (entry)
-	{
-		UdbPendingChannelAuth *next = entry->next;
-		safe_free(entry);
-		entry = next;
-	}
-	m->ptr = NULL;
-}
-
 static void udb_channel_modes_free(ModData *m)
 {
 	UdbChannelModeState *state = m->ptr;
@@ -97,19 +63,6 @@ static void udb_channel_modes_free(ModData *m)
 	{
 		safe_free(state->value);
 		safe_free(state);
-	}
-	m->ptr = NULL;
-}
-
-static void udb_channel_invite_grant_free(ModData *m)
-{
-	UdbInviteGrant *grant = m->ptr;
-
-	while (grant)
-	{
-		UdbInviteGrant *next = grant->next;
-		safe_free(grant);
-		grant = next;
 	}
 	m->ptr = NULL;
 }
@@ -281,60 +234,6 @@ static void udb_channel_set_persistent(Channel *channel, int enabled)
 		udb_channel_do_mode(channel, NULL, "-P", "");
 }
 
-static void udb_channel_invite_grant_set(Client *client, Channel *channel)
-{
-	UdbInviteGrant *grant;
-
-	if (!MyUser(client) || !udb_channel_invite_grant_md)
-		return;
-	for (grant = moddata_local_client(client, udb_channel_invite_grant_md).ptr; grant; grant = grant->next)
-	{
-		if (!strcasecmp(grant->channel, channel->name))
-		{
-			udb_time_add(TStime(), UDB_INVITE_GRANT_TTL, &grant->expires);
-			return;
-		}
-	}
-	grant = safe_alloc(sizeof(*grant));
-	strlcpy(grant->channel, channel->name, sizeof(grant->channel));
-	udb_time_add(TStime(), UDB_INVITE_GRANT_TTL, &grant->expires);
-	grant->next = moddata_local_client(client, udb_channel_invite_grant_md).ptr;
-	moddata_local_client(client, udb_channel_invite_grant_md).ptr = grant;
-}
-
-static int udb_channel_invite_grant_take(Client *client, Channel *channel, int consume)
-{
-	UdbInviteGrant *grant, *previous = NULL;
-
-	if (!MyUser(client) || !udb_channel_invite_grant_md)
-		return 0;
-	grant = moddata_local_client(client, udb_channel_invite_grant_md).ptr;
-	while (grant)
-	{
-		UdbInviteGrant *next = grant->next;
-		if (grant->expires <= TStime() || !strcasecmp(grant->channel, channel->name))
-		{
-			if (grant->expires > TStime() && !strcasecmp(grant->channel, channel->name) && !consume)
-				return 1;
-			if (previous)
-				previous->next = next;
-			else
-				moddata_local_client(client, udb_channel_invite_grant_md).ptr = next;
-			if (grant->expires > TStime() && !strcasecmp(grant->channel, channel->name))
-			{
-				safe_free(grant);
-				return 1;
-			}
-			safe_free(grant);
-			grant = next;
-			continue;
-		}
-		previous = grant;
-		grant = next;
-	}
-	return 0;
-}
-
 static UdbBanOwner *udb_channel_ban_owner_find(Channel *channel, const char *ban)
 {
 	UdbBanOwner *owner;
@@ -421,52 +320,10 @@ static void udb_channel_track_new_bans(Channel *channel, Client *client, UdbBanS
 	}
 }
 
-static void udb_channel_pending_auth_set(Client *client, Channel *channel)
-{
-	UdbPendingChannelAuth *entry;
-
-	if (!MyUser(client) || !udb_channel_auth_pending_md)
-		return;
-	for (entry = moddata_local_client(client, udb_channel_auth_pending_md).ptr; entry; entry = entry->next)
-	{
-		if (!strcasecmp(entry->channel, channel->name))
-			return;
-	}
-	entry = safe_alloc(sizeof(*entry));
-	strlcpy(entry->channel, channel->name, sizeof(entry->channel));
-	entry->next = moddata_local_client(client, udb_channel_auth_pending_md).ptr;
-	moddata_local_client(client, udb_channel_auth_pending_md).ptr = entry;
-}
-
-static int udb_channel_pending_auth_take(Client *client, Channel *channel)
-{
-	UdbPendingChannelAuth *entry;
-	UdbPendingChannelAuth *previous = NULL;
-
-	if (!MyUser(client) || !udb_channel_auth_pending_md)
-		return 0;
-	entry = moddata_local_client(client, udb_channel_auth_pending_md).ptr;
-	while (entry)
-	{
-		if (!strcasecmp(entry->channel, channel->name))
-		{
-			if (previous)
-				previous->next = entry->next;
-			else
-				moddata_local_client(client, udb_channel_auth_pending_md).ptr = entry->next;
-			safe_free(entry);
-			return 1;
-		}
-		previous = entry;
-		entry = entry->next;
-	}
-	return 0;
-}
-
 static void udb_channel_reconcile_founder(Channel *channel, UdbRecord *chan_rec)
 {
 	Member *member;
-	int suspended = chan_rec && udb_record_find(udb_ctx, CKEY_SUSPENDED, chan_rec);
+	int suspended = chan_rec && udb_record_find(udb_ctx, CKEY_SUSPEND, chan_rec);
 
 	for (member = channel->members; member; member = member->next)
 	{
@@ -485,36 +342,6 @@ static void udb_channel_reconcile_founder(Channel *channel, UdbRecord *chan_rec)
 			udb_channel_do_mode(channel, NULL, "-q", member->client->name);
 		}
 	}
-}
-
-static void udb_channel_revoke_udb_admins(Channel *channel)
-{
-	Member *member;
-
-	if (!udb_channel_auth_member_md)
-		return;
-	for (member = channel->members; member; member = member->next)
-	{
-		if (!moddata_member(member, udb_channel_auth_member_md).i)
-			continue;
-		if (check_channel_access_member(member, "a"))
-			udb_channel_do_mode(channel, NULL, "-a", member->client->name);
-		moddata_member(member, udb_channel_auth_member_md).i = 0;
-	}
-}
-
-static void udb_channel_grant_pending_admin(Client *client, Channel *channel, MessageTag *mtags)
-{
-	Member *member;
-
-	if (!udb_channel_pending_auth_take(client, channel) || !udb_channel_auth_member_md ||
-		!find_channel_mode_handler('a'))
-		return;
-	member = find_member_link(channel->members, client);
-	if (!member || check_channel_access_member(member, "a"))
-		return;
-	udb_channel_do_mode(channel, mtags, "+a", client->name);
-	moddata_member(member, udb_channel_auth_member_md).i = 1;
 }
 
 static void udb_channel_clear_topic(Channel *channel)
@@ -579,10 +406,6 @@ static void udb_channel_apply_subrecord(UdbContext *ctx, Channel *channel, UdbRe
 	{
 		udb_channel_apply_modes(channel, sub_rec->data_str);
 	}
-	else if (!strcmp(subkey, CKEY_PASS) || !strcmp(subkey, CKEY_CHALLENGE))
-	{
-		udb_channel_revoke_udb_admins(channel);
-	}
 	else if (!strcmp(subkey, CKEY_TOPIC))
 	{
 		udb_channel_apply_topic(channel, sub_rec);
@@ -604,10 +427,6 @@ static void udb_channel_remove_subrecord(UdbContext *ctx, Channel *channel, UdbR
 	{
 		udb_channel_set_persistent(channel, 0);
 	}
-	else if (!strcmp(subkey, CKEY_PASS) || !strcmp(subkey, CKEY_CHALLENGE))
-	{
-		udb_channel_revoke_udb_admins(channel);
-	}
 	else if (!strcmp(subkey, CKEY_TOPIC))
 	{
 		udb_channel_clear_topic(channel);
@@ -616,7 +435,6 @@ static void udb_channel_remove_subrecord(UdbContext *ctx, Channel *channel, UdbR
 	{
 		UdbRecord *mode_rec = udb_record_find(ctx, CKEY_MODES, chan_rec);
 		udb_channel_reconcile_founder(channel, NULL);
-		udb_channel_revoke_udb_admins(channel);
 		udb_channel_remove_modes(channel, mode_rec ? mode_rec->data_str : NULL);
 		udb_channel_set_persistent(channel, 0);
 		if (udb_record_find(ctx, CKEY_TOPIC, chan_rec))
@@ -658,65 +476,89 @@ static void udb_channel_remove_record(UdbContext *ctx, UdbBlock *block, UdbRecor
 static int udb_hook_pre_local_join(Client *client, Channel *channel, const char *key)
 {
 	UdbRecord *chan_rec = udb_record_find(udb_ctx, channel->name, udb_ctx->channels);
-	UdbRecord *pass_rec;
+	(void)key;
 	if (!chan_rec)
 		return HOOK_CONTINUE;
-
-	UdbRecord *forbid_rec = udb_record_find(udb_ctx, CKEY_FORBID, chan_rec);
-	if (forbid_rec)
-	{
-		return HOOK_CONTINUE; /* Let can_join handle the reject with proper numeric */
-	}
-
+	if (udb_record_find(udb_ctx, CKEY_FORBID, chan_rec))
+		return HOOK_CONTINUE; /* Let CAN_JOIN provide the numeric. */
 	if (udb_channel_is_identified_founder(client, chan_rec))
-		return HOOK_ALLOW; /* Bypass bans/keys/invite */
-
-	/* CAN_JOIN already verified this credential. Record it only after all
-	 * regular join checks have succeeded, immediately before membership. */
-	pass_rec = udb_record_find(udb_ctx, CKEY_PASS, chan_rec);
-	if (pass_rec && pass_rec->data_str && *pass_rec->data_str && key && udb_check_password(key, chan_rec, client))
-	{
-		/* A supplied password remains an admin authentication, even if invited. */
-		udb_channel_invite_grant_take(client, channel, 1);
-		udb_channel_pending_auth_set(client, channel);
-	}
-	else
-	{
-		udb_channel_invite_grant_take(client, channel, 1);
-	}
+		return HOOK_ALLOW; /* Preserve the established founder exemption. */
 	return HOOK_CONTINUE;
+}
+
+static int udb_channel_modes_key(const char *value, char *key_out, size_t key_out_size)
+{
+	char modebuf[512];
+	char *p, *param;
+	const char *modes;
+	int what = MODE_ADD;
+
+	if (key_out && key_out_size)
+		key_out[0] = '\0';
+	if (!value || !*value || strlen(value) >= sizeof(modebuf))
+		return 0;
+	strlcpy(modebuf, value, sizeof(modebuf));
+	modes = strtoken(&p, modebuf, " ");
+	if (!modes)
+		return 0;
+	for (; *modes; modes++)
+	{
+		Cmode *handler;
+		int takes_parameter;
+		if (*modes == '+') { what = MODE_ADD; continue; }
+		if (*modes == '-') { what = MODE_DEL; continue; }
+		handler = find_channel_mode_handler(*modes);
+		if (!handler)
+			return 0;
+		takes_parameter = handler->paracount && (what == MODE_ADD || handler->unset_with_param);
+		if (!takes_parameter)
+			continue;
+		param = strtoken(&p, NULL, " ");
+		if (!param)
+			return 0;
+		if (*modes == 'k' && what == MODE_ADD)
+		{
+			if (!key_out || !key_out_size || strlcpy(key_out, param, key_out_size) >= key_out_size)
+				return 0;
+			return 1;
+		}
+	}
+	return 0;
 }
 
 static int udb_hook_can_join(Client *client, Channel *channel, const char *key, char **errmsg)
 {
 	static char errbuf[512];
 	UdbRecord *chan_rec = udb_record_find(udb_ctx, channel->name, udb_ctx->channels);
+	UdbRecord *forbid_rec;
+	UdbRecord *access_rec;
+	int is_founder;
+
 	if (!chan_rec)
 		return 0;
-
-	UdbRecord *forbid_rec = udb_record_find(udb_ctx, CKEY_FORBID, chan_rec);
+	forbid_rec = udb_record_find(udb_ctx, CKEY_FORBID, chan_rec);
 	if (forbid_rec)
 	{
-		snprintf(errbuf, sizeof(errbuf), "%%s :%s",
-				 forbid_rec->data_str ? forbid_rec->data_str : "Channel is forbidden");
+		snprintf(errbuf, sizeof(errbuf), "%%s :%s", forbid_rec->data_str ? forbid_rec->data_str : "Channel is forbidden");
 		*errmsg = errbuf;
 		return ERR_FORBIDDENCHANNEL;
 	}
-
-	int is_founder = udb_channel_is_identified_founder(client, chan_rec);
-	int has_invite_grant = udb_channel_invite_grant_take(client, channel, 0);
-
-	UdbRecord *pass_rec = udb_record_find(udb_ctx, CKEY_PASS, chan_rec);
-	if (pass_rec && pass_rec->data_str && *pass_rec->data_str && !is_founder && !has_invite_grant)
+	is_founder = udb_channel_is_identified_founder(client, chan_rec);
+	/* Native +k materializes after the first successful JOIN. This is only the
+	 * pre-materialization check; later joins remain entirely native. */
+	if (channel->users == 0 && !is_founder)
 	{
-		if (!key || !udb_check_password(key, chan_rec, client))
+		UdbRecord *modes_rec = udb_record_find(udb_ctx, CKEY_MODES, chan_rec);
+		char configured_key[512];
+		if (modes_rec && modes_rec->data_str &&
+			udb_channel_modes_key(modes_rec->data_str, configured_key, sizeof(configured_key)) &&
+			(!key || strcmp(key, configured_key)))
 		{
 			*errmsg = STR_ERR_BADCHANNELKEY;
 			return ERR_BADCHANNELKEY;
 		}
 	}
-
-	UdbRecord *access_rec = udb_record_find(udb_ctx, CKEY_ACCESS, chan_rec);
+	access_rec = udb_record_find(udb_ctx, CKEY_ACCESS, chan_rec);
 	if (access_rec && !is_founder)
 	{
 		UdbRecord *acc_entry = udb_record_find(udb_ctx, client->name, access_rec);
@@ -740,7 +582,7 @@ static void handle_join(Client *client, Channel *channel, MessageTag *mtags)
 
 	if (channel->users == 1)
 	{
-		UdbRecord *susp_rec = udb_record_find(udb_ctx, CKEY_SUSPENDED, chan_rec);
+		UdbRecord *susp_rec = udb_record_find(udb_ctx, CKEY_SUSPEND, chan_rec);
 
 		/* A registered channel assigns founder authority exclusively as +q. */
 		if (!IsServer(client) && !IsULine(client))
@@ -765,7 +607,6 @@ static void handle_join(Client *client, Channel *channel, MessageTag *mtags)
 static int udb_hook_local_join(Client *client, Channel *channel, MessageTag *mtags)
 {
 	handle_join(client, channel, mtags);
-	udb_channel_grant_pending_admin(client, channel, mtags);
 	return 0;
 }
 
@@ -864,46 +705,6 @@ static int udb_channel_blocks_ban_removal(Client *client, Channel *channel, int 
 		param++;
 	}
 	return 0;
-}
-
-CMD_OVERRIDE_FUNC(udb_override_invite)
-{
-	Channel *channel;
-	Client *target;
-	UdbRecord *chan_rec, *pass_rec;
-
-	if (!MyUser(client) || parc < 4 || !udb_ctx || !udb_ctx->channels)
-	{
-		CALL_NEXT_COMMAND_OVERRIDE();
-		return;
-	}
-	channel = find_channel(parv[2]);
-	target = find_user(parv[1], NULL);
-	chan_rec = channel ? udb_record_find(udb_ctx, channel->name, udb_ctx->channels) : NULL;
-	pass_rec = chan_rec ? udb_record_find(udb_ctx, CKEY_PASS, chan_rec) : NULL;
-	if (!pass_rec || !pass_rec->data_str || !*pass_rec->data_str)
-	{
-		CALL_NEXT_COMMAND_OVERRIDE();
-		return;
-	}
-	if (!channel || !target)
-	{
-		CALL_NEXT_COMMAND_OVERRIDE();
-		return;
-	}
-	if (!MyUser(target))
-	{
-		udb_send_service_notice(client, SKEY_CHANSERV, "Password INVITE requires a local target");
-		return;
-	}
-	if (!udb_check_password(parv[3], chan_rec, client))
-	{
-		sendnumeric(client, ERR_BADCHANNELKEY, channel->name);
-		return;
-	}
-	CALL_NEXT_COMMAND_OVERRIDE();
-	if (is_invited(target, channel))
-		udb_channel_invite_grant_set(target, channel);
 }
 
 CMD_OVERRIDE_FUNC(udb_override_mode)
@@ -1034,27 +835,10 @@ static void udb_channels_init(ModuleInfo *modinfo)
 	ModDataInfo mreq;
 
 	memset(&mreq, 0, sizeof(mreq));
-	mreq.name = "udb_channel_auth_pending";
-	mreq.type = MODDATATYPE_LOCAL_CLIENT;
-	mreq.free = udb_channel_pending_auth_free;
-	udb_channel_auth_pending_md = ModDataAdd(modinfo->handle, mreq);
-
-	memset(&mreq, 0, sizeof(mreq));
-	mreq.name = "udb_channel_auth_admin";
-	mreq.type = MODDATATYPE_MEMBER;
-	udb_channel_auth_member_md = ModDataAdd(modinfo->handle, mreq);
-
-	memset(&mreq, 0, sizeof(mreq));
 	mreq.name = "udb_channel_modes";
 	mreq.type = MODDATATYPE_CHANNEL;
 	mreq.free = udb_channel_modes_free;
 	udb_channel_modes_md = ModDataAdd(modinfo->handle, mreq);
-
-	memset(&mreq, 0, sizeof(mreq));
-	mreq.name = "udb_channel_invite_grant";
-	mreq.type = MODDATATYPE_LOCAL_CLIENT;
-	mreq.free = udb_channel_invite_grant_free;
-	udb_channel_invite_grant_md = ModDataAdd(modinfo->handle, mreq);
 
 	memset(&mreq, 0, sizeof(mreq));
 	mreq.name = "udb_channel_ban_owners";
@@ -1071,7 +855,6 @@ static void udb_channels_init(ModuleInfo *modinfo)
 
 static int udb_channels_load(ModuleInfo *modinfo)
 {
-	CommandOverrideAdd(modinfo->handle, "INVITE", 0, udb_override_invite);
 	CommandOverrideAdd(modinfo->handle, "MODE", 0, udb_override_mode);
 	CommandOverrideAdd(modinfo->handle, "SAMODE", 0, udb_override_mode);
 	CommandOverrideAdd(modinfo->handle, "TOPIC", 0, udb_override_topic);

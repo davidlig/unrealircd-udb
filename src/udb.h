@@ -35,7 +35,7 @@
 #define NKEY_PASS "pass"		   /* Password hash */
 #define NKEY_VHOST "vhost"		   /* Virtual host */
 #define NKEY_FORBID "forbid"	   /* Forbidden nick (value = reason) */
-#define NKEY_SUSPENDED "suspended" /* Suspended nick (value = reason) */
+#define NKEY_SUSPEND "suspend"     /* Suspended nick (value = reason) */
 #define NKEY_OPER "oper"		   /* Operclass name string (e.g. "locop", "netadmin-with-override") */
 #define NKEY_CHALLENGE "challenge" /* Password hash method */
 #define NKEY_MODES "modes"		   /* Allowed oper modes */
@@ -48,9 +48,7 @@
 #define CKEY_TOPIC "topic"		   /* Persistent topic */
 #define CKEY_ACCESS "access"	   /* Access list (has sub-records per nick) */
 #define CKEY_FORBID "forbid"	   /* Forbidden channel (value = reason) */
-#define CKEY_SUSPENDED "suspended" /* Suspended channel */
-#define CKEY_PASS "pass"		   /* Channel password for +ao */
-#define CKEY_CHALLENGE "challenge" /* Channel password hash method */
+#define CKEY_SUSPEND "suspend"     /* Suspended channel */
 #define CKEY_OPTIONS "options"	   /* Channel option flags (*N) */
 
 /* IP sub-records: I::<ip|host>::<key> <value> */

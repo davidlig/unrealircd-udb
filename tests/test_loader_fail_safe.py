@@ -80,7 +80,6 @@ ulines {{
 loadmodule "cloak_sha256";
 loadmodule "third/udb";
 udb {{
-    database-directory "{dbdir}";
     propagator "{SERVICES_NAME}";
 }}
 ''', encoding="ascii")
@@ -237,9 +236,8 @@ def run_tests(ircd_bin, keep=False):
         # Test 1: ENOENT (empty directory -> starts cleanly)
         # -------------------------------------------------------------
         node = tmpdir / "node1"
-        data_dir = node / "data"
+        data_dir = node / "runtime-data"
         data_dir.mkdir(parents=True)
-        (node / "runtime-data").mkdir()
         (node / "tmp").mkdir()
         third_modules = node / "modules" / "third"
         third_modules.mkdir(parents=True)
@@ -263,9 +261,9 @@ def run_tests(ircd_bin, keep=False):
         # Test 2: EACCES on one block file aborts module load
         # -------------------------------------------------------------
         node2 = tmpdir / "node2"
-        data_dir2 = node2 / "data"
+        data_dir2 = node2 / "runtime-data"
         data_dir2.mkdir(parents=True)
-        (node2 / "runtime-data").mkdir()
+        (node2 / "runtime-data").mkdir(exist_ok=True)
         (node2 / "tmp").mkdir()
         third_modules2 = node2 / "modules" / "third"
         third_modules2.mkdir(parents=True)
@@ -299,9 +297,9 @@ def run_tests(ircd_bin, keep=False):
         # Test 3: Malformed record in middle aborts load and keeps file intact
         # -------------------------------------------------------------
         node3 = tmpdir / "node3"
-        data_dir3 = node3 / "data"
+        data_dir3 = node3 / "runtime-data"
         data_dir3.mkdir(parents=True)
-        (node3 / "runtime-data").mkdir()
+        (node3 / "runtime-data").mkdir(exist_ok=True)
         (node3 / "tmp").mkdir()
         third_modules3 = node3 / "modules" / "third"
         third_modules3.mkdir(parents=True)
@@ -331,9 +329,9 @@ def run_tests(ircd_bin, keep=False):
         # Sizes: 500B, 1024B, 2048B, 4095B, 4096B (UDB_RECORD_VALUE_MAX)
         # -------------------------------------------------------------
         node4 = tmpdir / "node4"
-        data_dir4 = node4 / "data"
+        data_dir4 = node4 / "runtime-data"
         data_dir4.mkdir(parents=True)
-        (node4 / "runtime-data").mkdir()
+        (node4 / "runtime-data").mkdir(exist_ok=True)
         (node4 / "tmp").mkdir()
         third_modules4 = node4 / "modules" / "third"
         third_modules4.mkdir(parents=True)
@@ -401,9 +399,9 @@ def run_tests(ircd_bin, keep=False):
         # Test 5: Overlong record (> 12320 bytes) aborts load and preserves disk
         # -------------------------------------------------------------
         node5 = tmpdir / "node5"
-        data_dir5 = node5 / "data"
+        data_dir5 = node5 / "runtime-data"
         data_dir5.mkdir(parents=True)
-        (node5 / "runtime-data").mkdir()
+        (node5 / "runtime-data").mkdir(exist_ok=True)
         (node5 / "tmp").mkdir()
         third_modules5 = node5 / "modules" / "third"
         third_modules5.mkdir(parents=True)
@@ -433,9 +431,9 @@ def run_tests(ircd_bin, keep=False):
         # Test 6: Multi-block init failure does not persist other blocks
         # -------------------------------------------------------------
         node6 = tmpdir / "node6"
-        data_dir6 = node6 / "data"
+        data_dir6 = node6 / "runtime-data"
         data_dir6.mkdir(parents=True)
-        (node6 / "runtime-data").mkdir()
+        (node6 / "runtime-data").mkdir(exist_ok=True)
         (node6 / "tmp").mkdir()
         third_modules6 = node6 / "modules" / "third"
         third_modules6.mkdir(parents=True)
@@ -479,9 +477,9 @@ def run_tests(ircd_bin, keep=False):
         )
         for offset, (name, changed_block, generation, ready) in enumerate(invalid_candidates):
             node7 = tmpdir / f"node7-{name}"
-            data_dir7 = node7 / "data"
+            data_dir7 = node7 / "runtime-data"
             data_dir7.mkdir(parents=True)
-            (node7 / "runtime-data").mkdir()
+            (node7 / "runtime-data").mkdir(exist_ok=True)
             (node7 / "tmp").mkdir()
             third_modules7 = node7 / "modules" / "third"
             third_modules7.mkdir(parents=True)
@@ -529,7 +527,7 @@ def run_tests(ircd_bin, keep=False):
 
 def test_persisted_over_capacity_modes_fail_closed(tmpdir, ircd_bin, module_path):
     node = tmpdir / "node-over-capacity-modes"
-    data_dir = node / "data"
+    data_dir = node / "runtime-data"
     data_dir.mkdir(parents=True)
     for subdir in ("runtime-data", "tmp", "modules/third"):
         (node / subdir).mkdir(parents=True, exist_ok=True)
@@ -560,7 +558,7 @@ def test_persisted_over_capacity_modes_fail_closed(tmpdir, ircd_bin, module_path
 
 def test_persisted_over_capacity_line_mask_fail_closed(tmpdir, ircd_bin, module_path):
     node = tmpdir / "node-over-capacity-line-mask"
-    data_dir = node / "data"
+    data_dir = node / "runtime-data"
     data_dir.mkdir(parents=True)
     for subdir in ("runtime-data", "tmp", "modules/third"):
         (node / subdir).mkdir(parents=True, exist_ok=True)

@@ -667,12 +667,56 @@ static int udb_k_tree_profiles_valid(UdbRecord *tree)
 	return 1;
 }
 
+static int udb_n_profile_valid(UdbRecord *profile)
+{
+	UdbRecord *child;
+	UdbRecord *forbid;
+
+	if (!profile)
+		return 0;
+	forbid = udb_record_find(NULL, NKEY_FORBID, profile);
+	if (!forbid)
+		return 1;
+	for (child = profile->child; child; child = child->sibling)
+		if (child != forbid)
+			return 0;
+	return 1;
+}
+
+static int udb_n_tree_profiles_valid(UdbRecord *tree)
+{
+	UdbRecord *profile;
+
+	if (!tree)
+		return 0;
+	for (profile = tree->child; profile; profile = profile->sibling)
+		if (!udb_n_profile_valid(profile))
+			return 0;
+	return 1;
+}
+
+static void udb_n_profile_canonicalize_forbid(UdbRecord *profile)
+{
+	UdbRecord *forbid;
+	UdbRecord *child;
+
+	if (!profile || !(forbid = udb_record_find(NULL, NKEY_FORBID, profile)))
+		return;
+	for (child = profile->child; child;)
+	{
+		UdbRecord *next = child->sibling;
+		if (child != forbid)
+			udb_record_delete_tree(child);
+		child = next;
+	}
+}
+
 static const UdbKeyDescriptor udb_schema_n_subkeys[] = {
 	{NKEY_ACCESS, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL},
 	{NKEY_PASS, UDB_VAL_STRING, udb_password_hash_valid, 0, NULL},
 	{NKEY_VHOST, UDB_VAL_STRING, udb_vhost_valid, 0, NULL},
 	{NKEY_FORBID, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL},
-	{NKEY_SUSPENDED, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL},
+	{NKEY_SUSPEND, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL},
 	{NKEY_OPER, UDB_VAL_STRING, udb_oper_record_valid, 0, NULL},
 	{NKEY_CHALLENGE, UDB_VAL_STRING, udb_challenge_valid, 0, NULL},
 	{NKEY_MODES, UDB_VAL_STRING, udb_user_modes_record_valid, 0, NULL},
@@ -685,9 +729,7 @@ static const UdbKeyDescriptor udb_schema_c_subkeys[] = {
 	{CKEY_TOPIC, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL},
 	{CKEY_ACCESS, UDB_VAL_ANY, NULL, 1, udb_nick_name_valid},
 	{CKEY_FORBID, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL},
-	{CKEY_SUSPENDED, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL},
-	{CKEY_PASS, UDB_VAL_STRING, udb_password_hash_valid, 0, NULL},
-	{CKEY_CHALLENGE, UDB_VAL_STRING, udb_challenge_valid, 0, NULL},
+	{CKEY_SUSPEND, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL},
 	{CKEY_OPTIONS, UDB_VAL_NUMERIC, udb_options_record_valid, 0, NULL}};
 
 static const UdbKeyDescriptor udb_schema_i_subkeys[] = {
@@ -1758,10 +1800,12 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 		return 0;
 	}
 
-	if (block->letter == UDB_BLOCK_LINES && !udb_k_tree_profiles_valid(candidate))
+	if ((block->letter == UDB_BLOCK_LINES && !udb_k_tree_profiles_valid(candidate)) ||
+		(block->letter == UDB_BLOCK_NICKS && !udb_n_tree_profiles_valid(candidate)))
 	{
-		udb_log(ULOG_ERROR, "UDB_FILE_K_PROFILE_REJECTED", NULL,
-				"Persisted Block K contains an invalid complete profile");
+		udb_log(ULOG_ERROR, "UDB_FILE_PROFILE_REJECTED", NULL,
+				"Persisted block $block contains an invalid complete profile",
+				log_data_string("block", (char[]){block->letter, '\0'}));
 		udb_record_free_tree(candidate);
 		if (startup_candidate)
 			startup_candidate->load_state = UDB_LOAD_FAILED;

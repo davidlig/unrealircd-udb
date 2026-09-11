@@ -12,10 +12,9 @@ namespace. It uses `UDB_TEST_IRCD_ROOT` (default: `~/unrealircd`) for the
 installed daemon, default configuration includes, and runtime paths. Use
 `--ircd`, `--module`, `--timeout`, or `--keep` when needed.
 
-It writes valid SHA-256 `N::alice` and `C::#vault` password/challenge records.
-The protocol client verifies nick password registration and vhost cleanup,
-founder-only `+q`, password `JOIN` granting `+a` but not `+o`, and invalid nick
-and channel credentials being rejected. Every command waits for its IRC numeric
+It seeds valid nickname records and channel modes. The protocol client verifies
+nick password registration and vhost cleanup, founder-only `+q`, and native keyed
+JOIN behavior. Every command waits for its IRC numeric
 or protocol terminator rather than using timed input drains.
 
 Use the two-node harness for HEL 4, staged synchronization, and the authorized

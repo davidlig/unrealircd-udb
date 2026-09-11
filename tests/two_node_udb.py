@@ -110,7 +110,6 @@ loadmodule "cloak_sha256";
 loadmodule "third/udb";
 {('loadmodule "third/udb_test_mutator";' if load_mutator else '')}
 udb {{
-    database-directory "{dbdir}";
     propagator "{propagator}";
 }}
 ''', encoding="ascii")
@@ -120,7 +119,7 @@ def bwrap_command(node, ircd, config, module, mutator=None, configtest=False, re
                     rename_failure_arm=False, fsync_failure=False, directory_fsync_failure=False,
                     state_directory_fsync_failure=False, rename_failure_target=None):
     # A read-only host root leaves dependencies and installed modules available.
-    # The runtime data mount isolates UnrealIRCd's control socket; UDB uses data/.
+    # The runtime data mount isolates UnrealIRCd's control socket; UDB uses the isolated PERMDATADIR mount.
     for sub in ("runtime-data", "tmp", "cache", "logs"):
         (node / sub).mkdir(parents=True, exist_ok=True)
     command = ["bwrap", "--die-with-parent", "--ro-bind", "/", "/",
@@ -131,22 +130,22 @@ def bwrap_command(node, ircd, config, module, mutator=None, configtest=False, re
                 "--bind", str(node / "logs"), str(RUNTIME_ROOT / "logs"),
                 "--ro-bind", str(node / "modules" / "third"), str(RUNTIME_ROOT / "modules/third"),
                 "--dev-bind", "/dev", "/dev", "--proc", "/proc",
-                "--setenv", "UDB_TEST_MUTATOR_DIRECTORY", str(node / "data")]
+                "--setenv", "UDB_TEST_MUTATOR_DIRECTORY", str(node / "runtime-data")]
     if rename_failure or fsync_failure or directory_fsync_failure or state_directory_fsync_failure:
         command.extend(("--setenv", "LD_PRELOAD", str(RENAME_FAIL_MODULE)))
     if rename_failure:
         command.extend(("--setenv", "UDB_SNAPSHOT_RENAME_FAIL_TARGET",
-                        str(rename_failure_target or (node / "data" / "udb_N.db"))))
+                        str(rename_failure_target or (node / "runtime-data" / "udb_N.db"))))
         if rename_failure_arm:
             command.extend(("--setenv", "UDB_SNAPSHOT_RENAME_FAIL_ARM",
-                            str(node / "data" / "udb-snapshot-rename-fail-go")))
+                            str(node / "runtime-data" / "udb-snapshot-rename-fail-go")))
     if fsync_failure:
-        command.extend(("--setenv", "UDB_SNAPSHOT_FSYNC_FAIL_TARGET", str(node / "data" / "udb_N.db.tmp")))
+        command.extend(("--setenv", "UDB_SNAPSHOT_FSYNC_FAIL_TARGET", str(node / "runtime-data" / "udb_N.db.tmp")))
     if directory_fsync_failure:
-        command.extend(("--setenv", "UDB_SNAPSHOT_DIR_FSYNC_FAIL_TARGET", str(node / "data")))
-        command.extend(("--setenv", "UDB_SNAPSHOT_DIR_FSYNC_FAIL_SNAPSHOT", str(node / "data" / "udb_N.db")))
+        command.extend(("--setenv", "UDB_SNAPSHOT_DIR_FSYNC_FAIL_TARGET", str(node / "runtime-data")))
+        command.extend(("--setenv", "UDB_SNAPSHOT_DIR_FSYNC_FAIL_SNAPSHOT", str(node / "runtime-data" / "udb_N.db")))
     if state_directory_fsync_failure:
-        command.extend(("--setenv", "UDB_STATE_DIR_FSYNC_FAIL_TARGET", str(node / "data")))
+        command.extend(("--setenv", "UDB_STATE_DIR_FSYNC_FAIL_TARGET", str(node / "runtime-data")))
     command.extend((str(ircd), "-f", str(config)))
     if configtest:
         command.append("-c")
@@ -451,8 +450,7 @@ def main():
             build_rename_fail_interposer()
         a, b = root / "node-a", root / "node-b"
         for node in (a, b):
-            (node / "data").mkdir(parents=True)
-            (node / "runtime-data").mkdir()
+            (node / "runtime-data").mkdir(parents=True, exist_ok=True)
             (node / "tmp").mkdir()
             third_modules = node / "modules" / "third"
             third_modules.mkdir(parents=True)
@@ -462,28 +460,28 @@ def main():
         # the winning records; node B holds divergent data with a NEWER mtime
         # and a higher SID (0B1 > 0A1).  Neither timestamp nor SID may win:
         # B must import A's blocks because A is the selected authority.
-        a_db = a / "data" / "udb_N.db"
-        b_db = b / "data" / "udb_N.db"
-        a_k_db = a / "data" / "udb_K.db"
-        b_k_db = b / "data" / "udb_K.db"
+        a_db = a / "runtime-data" / "udb_N.db"
+        b_db = b / "runtime-data" / "udb_N.db"
+        a_k_db = a / "runtime-data" / "udb_K.db"
+        b_k_db = b / "runtime-data" / "udb_K.db"
         seed_block(a_db, "N", "harness-a::vhost winner.test\n")
         seed_block(b_db, "N", "harness-b::vhost loser.test\n")
         seed_block(a_k_db, "K", K_STAGED_RECORD + "\n")
         seed_block(b_k_db, "K", "G::*@udb-loser.test::reason loser\n")
         for n in (a, b):
             for letter in ('C', 'I', 'S', 'L'):
-                seed_block(n / "data" / f"udb_{letter}.db", letter)
-        seed_ready_state(a / "data")
+                seed_block(n / "runtime-data" / f"udb_{letter}.db", letter)
+        seed_ready_state(a / "runtime-data")
         # The state-fsync failure mode needs node B to attempt a READY
         # transition during the run, so it starts NOT_READY.  The six-block
         # set-rename failure mode exercises the same transition path.
         if args.state_directory_fsync_failure or args.snapshot_set_rename_failure:
-            seed_bootstrapping_state(b / "data")
+            seed_bootstrapping_state(b / "runtime-data")
         else:
-            seed_ready_state(b / "data")
+            seed_ready_state(b / "runtime-data")
         a_baseline = a_db.read_bytes()
         b_baseline = b_db.read_bytes()
-        set_baselines = {letter: (b / "data" / f"udb_{letter}.db").read_bytes()
+        set_baselines = {letter: (b / "runtime-data" / f"udb_{letter}.db").read_bytes()
                          for letter in ('N', 'C', 'I', 'S', 'L', 'K')}
         tie_time = int(time.time()) - 60
         for db in (a_db, a_k_db):
@@ -497,10 +495,10 @@ def main():
         link_password = "udb-test-" + secrets.token_hex(32)
         # A is the sole authority (it selects itself); B selects A and imports.
         write_config(a_conf, "udb-a.test", "0A1", a_client, a_server, a_tls,
-                     "udb-b.test", b_server, args.module, a / "data", "udb-a.test", True,
+                     "udb-b.test", b_server, args.module, a / "runtime-data", "udb-a.test", True,
                      link_password, load_mutator=True)
         write_config(b_conf, "udb-b.test", "0B1", b_client, b_server, b_tls,
-                     "udb-a.test", a_server, args.module, b / "data", "udb-a.test", False,
+                     "udb-a.test", a_server, args.module, b / "runtime-data", "udb-a.test", False,
                      link_password)
         run_configtest(a, args.ircd, a_conf, args.module, MUTATOR_MODULE)
         run_configtest(b, args.ircd, b_conf, args.module)
@@ -526,7 +524,7 @@ def main():
                                                                   state_directory_fsync_failure=
                                                                   args.state_directory_fsync_failure and node == b,
                                                                   rename_failure_target=
-                                                                  (b / "data" / "udb_I.db")
+                                                                  (b / "runtime-data" / "udb_I.db")
                                                                   if (args.snapshot_set_rename_failure and node == b)
                                                                   else None),
                                                    stdout=output, stderr=subprocess.STDOUT,
@@ -565,7 +563,7 @@ def main():
             print("PASS: failed N temporary snapshot fsync left node B baseline unchanged with no tmp or ACK/commit")
             return 0
         if args.snapshot_directory_fsync_failure:
-            state_file = b / "data" / ".udb_state"
+            state_file = b / "runtime-data" / ".udb_state"
             while time.monotonic() < deadline:
                 if snapshot_directory_fsync_failure_observed(logs[0], logs[1], b_db, state_file, b_baseline):
                     break
@@ -576,7 +574,7 @@ def main():
             print("PASS: post-rename directory fsync failure kept active/disk committed and forced BOOTSTRAPPING")
             return 0
         if args.state_directory_fsync_failure:
-            state_file = b / "data" / ".udb_state"
+            state_file = b / "runtime-data" / ".udb_state"
             while time.monotonic() < deadline:
                 if state_directory_fsync_failure_observed(logs[1], state_file):
                     break
@@ -587,18 +585,18 @@ def main():
             print("PASS: post-rename .udb_state directory fsync failure replaced visible READY with BOOTSTRAPPING")
             return 0
         if args.snapshot_set_rename_failure:
-            state_file = b / "data" / ".udb_state"
+            state_file = b / "runtime-data" / ".udb_state"
             # N and K were committed from the authority before the transition;
             # their durable content must be A's winner records, not B's seeds.
             imported = {
-                "N": (b / "data" / "udb_N.db").read_bytes(),
-                "K": (b / "data" / "udb_K.db").read_bytes(),
+                "N": (b / "runtime-data" / "udb_N.db").read_bytes(),
+                "K": (b / "runtime-data" / "udb_K.db").read_bytes(),
             }
             while time.monotonic() < deadline:
-                if snapshot_set_rename_failure_observed(logs[1], state_file, b / "data", set_baselines, imported):
+                if snapshot_set_rename_failure_observed(logs[1], state_file, b / "runtime-data", set_baselines, imported):
                     break
                 time.sleep(0.25)
-            if not snapshot_set_rename_failure_observed(logs[1], state_file, b / "data", set_baselines, imported):
+            if not snapshot_set_rename_failure_observed(logs[1], state_file, b / "runtime-data", set_baselines, imported):
                 print_diagnostics(logs, b_db)
                 return 1
             print("PASS: block I publication failure during the six-block READY transition restored the complete previous snapshot set")
@@ -628,7 +626,7 @@ def main():
               "with exactly one RES per divergent block and no reverse transfer")
         if args.malformed_end_checksum:
             b_baseline = b_db.read_bytes()
-            (a / "data" / MUTATOR_END_TRIGGER).touch()
+            (a / "runtime-data" / MUTATOR_END_TRIGGER).touch()
             deadline = time.monotonic() + args.timeout
             while time.monotonic() < deadline:
                 if malformed_end_checksums_rejected(logs[0], logs[1], b_db, b_baseline):
@@ -640,7 +638,7 @@ def main():
             print("PASS: empty-tree staged END rejected empty, partial, and overflowing checksums without commit")
             return 0
         if args.runtime_del_rename_failure:
-            (a / "data" / MUTATOR_INS_TRIGGER).touch()
+            (a / "runtime-data" / MUTATOR_INS_TRIGGER).touch()
             deadline = time.monotonic() + args.timeout
             while time.monotonic() < deadline and not mutator_insert_observed(logs[1], b_db):
                 time.sleep(0.25)
@@ -648,17 +646,17 @@ def main():
                 print_diagnostics(logs, b_db)
                 return 1
             b_baseline = b_db.read_bytes()
-            (b / "data" / "udb-snapshot-rename-fail-go").touch()
-            (a / "data" / MUTATOR_DEL_TRIGGER).touch()
+            (b / "runtime-data" / "udb-snapshot-rename-fail-go").touch()
+            (a / "runtime-data" / MUTATOR_DEL_TRIGGER).touch()
         elif args.runtime_rename_failure or args.runtime_opt_rename_failure or args.runtime_drp_rename_failure:
             b_baseline = b_db.read_bytes()
-            (b / "data" / "udb-snapshot-rename-fail-go").touch()
+            (b / "runtime-data" / "udb-snapshot-rename-fail-go").touch()
         if args.runtime_drp_rename_failure:
-            (a / "data" / MUTATOR_DRP_TRIGGER).touch()
+            (a / "runtime-data" / MUTATOR_DRP_TRIGGER).touch()
         elif args.runtime_opt_rename_failure:
-            (a / "data" / MUTATOR_OPT_TRIGGER).touch()
+            (a / "runtime-data" / MUTATOR_OPT_TRIGGER).touch()
         elif not args.runtime_del_rename_failure:
-            (a / "data" / "udb-test-mutator-go").touch()
+            (a / "runtime-data" / "udb-test-mutator-go").touch()
         deadline = time.monotonic() + args.timeout
         if args.runtime_rename_failure:
             while time.monotonic() < deadline:
