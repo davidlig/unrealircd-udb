@@ -297,8 +297,7 @@ static int udb_line_mask_valid(const char *mask)
 		return 0;
 	userlen = (size_t)(at - mask);
 	hostlen = strlen(at + 1);
-	return userlen > 0 && userlen <= UDB_TKL_MASK_COMPONENT_MAX && hostlen > 0 &&
-		hostlen <= UDB_TKL_MASK_COMPONENT_MAX;
+	return userlen > 0 && userlen <= UDB_TKL_MASK_COMPONENT_MAX && hostlen > 0 && hostlen <= UDB_TKL_MASK_COMPONENT_MAX;
 }
 
 static int udb_qline_mask_valid(const char *mask)
@@ -616,7 +615,6 @@ static int udb_spamfilter_action_valid(const char *value)
 	return action && !banact_config_only(action);
 }
 
-
 /* Admission, staged snapshots, disk load and runtime apply all use this
  * candidate-level check.  Partial profiles are safe and inert; a complete
  * profile must be materializable before it can replace an active one. */
@@ -639,16 +637,13 @@ static int udb_k_profile_valid(UdbRecord *line_rec)
 		return 1;
 	if (!match_type->data_str || !targets->data_str || !action->data_str || !reason->data_str)
 		return 0;
-	if (!udb_spamfilter_match_type_valid(match_type->data_str) ||
-		!udb_spamfilter_targets_valid(targets->data_str) ||
-		!udb_spamfilter_action_valid(action->data_str) ||
-		!udb_line_reason_valid(reason->data_str) ||
+	if (!udb_spamfilter_match_type_valid(match_type->data_str) || !udb_spamfilter_targets_valid(targets->data_str) ||
+		!udb_spamfilter_action_valid(action->data_str) || !udb_line_reason_valid(reason->data_str) ||
 		!udb_spamfilter_pattern_valid(line_rec->key, match_type->data_str))
 		return 0;
 	return !ban_time || (!ban_time->data_str && ban_time->data_num &&
-		(unsigned long long)ban_time->data_num <= udb_time_t_max_val());
+						 (unsigned long long)ban_time->data_num <= udb_time_t_max_val());
 }
-
 
 static int udb_k_tree_profiles_valid(UdbRecord *tree)
 {
@@ -973,7 +968,7 @@ done:
 }
 
 static void udb_block_replace_tree(UdbContext *ctx, UdbBlock *block, UdbRecord *tree, unsigned int record_count,
-							   UdbHashIndex *index)
+								   UdbHashIndex *index)
 {
 	struct stat st;
 	int block_idx;

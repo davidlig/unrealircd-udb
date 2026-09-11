@@ -230,7 +230,7 @@ static void udb_nick_set_snomasks(Client *client, UdbRecord *nick_rec, UdbRecord
 }
 
 static void udb_nick_force_rename_with_notice(Client *client, const char *nick_in_db, const char *notice,
-										int offer_identify)
+											  int offer_identify)
 {
 	char newnick[32];
 	char rand_suffix[6];
@@ -244,11 +244,11 @@ static void udb_nick_force_rename_with_notice(Client *client, const char *nick_i
 		udb_send_service_notice(client, SKEY_NICKSERV, "%s", notice);
 	else
 		udb_send_service_notice(client, SKEY_NICKSERV,
-							"This nickname (%s) has been registered or synced in the UDB database.", nick_in_db);
+								"This nickname (%s) has been registered or synced in the UDB database.", nick_in_db);
 	if (offer_identify)
 		udb_send_service_notice(client, SKEY_NICKSERV,
-							"You have been renamed. If you are the owner, please identify: /NICK %s:Password",
-							nick_in_db);
+								"You have been renamed. If you are the owner, please identify: /NICK %s:Password",
+								nick_in_db);
 
 	tsbuf[0] = '\0';
 	snprintf(tsbuf, sizeof(tsbuf), "%lld", (long long)TStime());
@@ -304,7 +304,7 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync)
 		/* Suspension clears UDB identity and active profile effects. */
 		udb_nick_strip(client, nick_rec);
 		udb_send_service_notice(client, SKEY_NICKSERV, "This nickname is suspended. Reason: %s",
-							suspend->data_str ? suspend->data_str : "No reason given");
+								suspend->data_str ? suspend->data_str : "No reason given");
 		return;
 	}
 
@@ -352,7 +352,6 @@ static void udb_nick_strip(Client *client, UdbRecord *nick_rec)
 			client->umodes &= ~(set_usermode(mode_rec->data_str) & ~UMODE_OPER);
 	}
 	client->umodes &= ~UMODE_REGNICK;
-	client->umodes &= ~set_usermode("S");
 	send_umode_out(client, 1, old_umodes);
 
 	set_snomask(client, NULL);
@@ -422,7 +421,7 @@ static void udb_nick_remove_record(UdbBlock *block, UdbRecord *rec)
 			else if (!strcmp(rec->key, NKEY_SUSPEND))
 			{
 				udb_nick_force_rename_with_notice(client, nick_rec->key,
-											"This nickname suspension has ended. Please identify again.", 1);
+												  "This nickname suspension has ended. Please identify again.", 1);
 			}
 			else if (!strcmp(rec->key, NKEY_PASS))
 			{
@@ -741,7 +740,7 @@ CMD_OVERRIDE_FUNC(udb_override_nick)
 		if (forbid)
 		{
 			udb_send_service_notice(client, SKEY_NICKSERV, "This nickname is forbidden. Reason: %s",
-								forbid->data_str ? forbid->data_str : "No reason given");
+									forbid->data_str ? forbid->data_str : "No reason given");
 			return;
 		}
 	}

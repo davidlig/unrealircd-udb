@@ -226,10 +226,12 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 		if (!rec || (block->letter == UDB_BLOCK_LINES && !udb_k_profile_valid(rec->parent)) ||
 			(block->letter == UDB_BLOCK_NICKS && !udb_n_tree_profiles_valid(tree)))
 		{
+			const char *profile_kind = block->letter == UDB_BLOCK_NICKS ? "N" : "K";
+
 			udb_record_free_tree(tree);
 			udb_log(ULOG_WARNING, "UDB_INS_PROFILE_REJECT", client,
-					"Rejected INS that would create an invalid complete K profile: $path",
-					log_data_string("path", path));
+					"Rejected INS that would create an invalid complete $profile_kind profile: $path",
+					log_data_string("profile_kind", profile_kind), log_data_string("path", path));
 			udb_protocol_mutation_error(client, "INS", UDB_ERR_PARAMS, letter);
 			return;
 		}
@@ -289,7 +291,7 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 }
 
 static int udb_mutation_delete_local(UdbContext *ctx, UdbBlock *block, UdbRecord *old_rec, Client *direct_peer,
-							 const char *operation)
+									 const char *operation)
 {
 	UdbRecord *candidate_rec = NULL;
 	UdbRecord *candidate_line = NULL;

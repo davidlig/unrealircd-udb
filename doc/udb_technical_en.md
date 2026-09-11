@@ -73,7 +73,8 @@ The implementation enforces, among others:
 - snapshot `txid`: **31 characters**;
 - decoded spamfilter pattern: **3072 bytes**;
 - each logical record must also fit an UnrealIRCd S2S line with an internal 256-byte overhead budget;
-- top-level hash: 2048 slots per block.
+- top-level hash: dynamically sized per block, with a 2048-bucket minimum;
+  bucket counts are powers of two and grow with root-profile load.
 
 A record fitting on disk is not sufficient; it must also satisfy the S2S bound so it can be safely synchronized.
 

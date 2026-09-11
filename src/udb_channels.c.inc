@@ -505,8 +505,16 @@ static int udb_channel_modes_key(const char *value, char *key_out, size_t key_ou
 	{
 		Cmode *handler;
 		int takes_parameter;
-		if (*modes == '+') { what = MODE_ADD; continue; }
-		if (*modes == '-') { what = MODE_DEL; continue; }
+		if (*modes == '+')
+		{
+			what = MODE_ADD;
+			continue;
+		}
+		if (*modes == '-')
+		{
+			what = MODE_DEL;
+			continue;
+		}
 		handler = find_channel_mode_handler(*modes);
 		if (!handler)
 			return 0;
@@ -539,14 +547,16 @@ static int udb_hook_can_join(Client *client, Channel *channel, const char *key, 
 	forbid_rec = udb_record_find(udb_ctx, CKEY_FORBID, chan_rec);
 	if (forbid_rec)
 	{
-		snprintf(errbuf, sizeof(errbuf), "%%s :%s", forbid_rec->data_str ? forbid_rec->data_str : "Channel is forbidden");
+		snprintf(errbuf, sizeof(errbuf), "%%s :%s",
+				 forbid_rec->data_str ? forbid_rec->data_str : "Channel is forbidden");
 		*errmsg = errbuf;
 		return ERR_FORBIDDENCHANNEL;
 	}
 	is_founder = udb_channel_is_identified_founder(client, chan_rec);
-	/* Native +k materializes after the first successful JOIN. This is only the
-	 * pre-materialization check; later joins remain entirely native. */
-	if (channel->users == 0 && !is_founder)
+	/* Native +k normally materializes after the first successful JOIN, but a
+	 * persistent empty channel can already have one.  Never let the persisted
+	 * C::modes key compete with the native mode when it is materialized. */
+	if (channel->users == 0 && !cm_getparameter(channel, 'k') && !is_founder)
 	{
 		UdbRecord *modes_rec = udb_record_find(udb_ctx, CKEY_MODES, chan_rec);
 		char configured_key[512];

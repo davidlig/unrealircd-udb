@@ -279,6 +279,8 @@ def exercise(host, port):
                                  "suspended user mode reply")
         require(not any("+r" in line for line in mode_lines),
                 f"suspended nick received UDB identity: {mode_lines!r}")
+        require(not any("S" in line.split(" :", 1)[-1] for line in mode_lines),
+                f"suspended nick implicitly received +S: {mode_lines!r}")
         suspended_whois = bob.request("WHOIS suspended", lambda line: " 318 " in line,
                                       "suspended WHOIS")
         require(not any("suspended.test" in line for line in suspended_whois),

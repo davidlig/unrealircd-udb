@@ -211,9 +211,8 @@ static void udb_ocl_membership_rebuild(void)
 
 	for (origin = udb_ocl_origins; origin; origin = origin->next)
 		origin->member = 0;
-	list_for_each_entry(server, &global_server_list, client_node)
-		if (udb_ocl_is_participant(server) && !IsMe(server))
-			udb_ocl_member_add(server->id);
+	list_for_each_entry(server, &global_server_list, client_node) if (udb_ocl_is_participant(server) && !IsMe(server))
+		udb_ocl_member_add(server->id);
 	udb_ocl_membership_prune_invisible();
 	udb_ocl_purge_nonmembers();
 }
@@ -645,8 +644,8 @@ static void udb_ocl_send_inventory_broadcast(Client *except, const char *origin_
 		if (server == except || (except && server == except->direction) || !udb_ocl_is_participant(server) ||
 			!udb_has_hello(server))
 			continue;
-		udb_send_db_to_one(server, ":%s DB * OCL BEGIN %s %s %lu %u %s", me.id, origin_sid, inv->epoch,
-						   inv->generation, inv->count, inv->inventory_digest);
+		udb_send_db_to_one(server, ":%s DB * OCL BEGIN %s %s %lu %u %s", me.id, origin_sid, inv->epoch, inv->generation,
+						   inv->count, inv->inventory_digest);
 	}
 	for (i = 0; i < inv->count; i++)
 		list_for_each_entry(server, &server_list, special_node)
@@ -749,8 +748,7 @@ static UdbOclOrigin *udb_ocl_validate_frame(Client *direct_peer, const char *ori
 		return NULL;
 	origin_client = udb_ocl_find_server(origin_sid);
 	if (!origin_client || !udb_ocl_is_participant(origin_client) || IsMe(origin_client) ||
-		!udb_ocl_member_exists(origin_sid) ||
-		origin_client->direction != direct_peer)
+		!udb_ocl_member_exists(origin_sid) || origin_client->direction != direct_peer)
 		return NULL;
 	return create ? udb_ocl_get_origin(origin_sid) : udb_ocl_find_origin(origin_sid);
 }
@@ -792,13 +790,11 @@ static void udb_ocl_handle_begin(Client *direct_peer, const char *parv[])
 						log_data_string("origin", origin->sid), log_data_integer("gen", (long long)generation));
 				return;
 			}
-			if (origin->current && !strcmp(origin->current->epoch, epoch) &&
-				origin->current->generation == generation)
+			if (origin->current && !strcmp(origin->current->epoch, epoch) && origin->current->generation == generation)
 				return; /* already committed */
-			if (origin->staging && !strcmp(origin->staging->epoch, epoch) &&
-				origin->staging->generation == generation)
+			if (origin->staging && !strcmp(origin->staging->epoch, epoch) && origin->staging->generation == generation)
 				return; /* already staging */
-			/* The previous attempt was aborted; rebuild the same high-water snapshot. */
+						/* The previous attempt was aborted; rebuild the same high-water snapshot. */
 		}
 	}
 	else if (origin->accepted_valid && strcmp(origin->accepted_epoch, epoch))

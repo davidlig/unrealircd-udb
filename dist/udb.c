@@ -80,7 +80,7 @@ module
 #define NKEY_PASS "pass"		   /* Password hash */
 #define NKEY_VHOST "vhost"		   /* Virtual host */
 #define NKEY_FORBID "forbid"	   /* Forbidden nick (value = reason) */
-#define NKEY_SUSPEND "suspend"     /* Suspended nick (value = reason) */
+#define NKEY_SUSPEND "suspend"	   /* Suspended nick (value = reason) */
 #define NKEY_OPER "oper"		   /* Operclass name string (e.g. "locop", "netadmin-with-override") */
 #define NKEY_CHALLENGE "challenge" /* Password hash method */
 #define NKEY_MODES "modes"		   /* Allowed oper modes */
@@ -88,13 +88,13 @@ module
 #define NKEY_SWHOIS "swhois"	   /* Custom SWHOIS line */
 
 /* Channel sub-records: C::<#chan>::<key> <value> */
-#define CKEY_FOUNDER "founder"	   /* Founder nick */
-#define CKEY_MODES "modes"		   /* Locked channel modes */
-#define CKEY_TOPIC "topic"		   /* Persistent topic */
-#define CKEY_ACCESS "access"	   /* Access list (has sub-records per nick) */
-#define CKEY_FORBID "forbid"	   /* Forbidden channel (value = reason) */
-#define CKEY_SUSPEND "suspend"     /* Suspended channel */
-#define CKEY_OPTIONS "options"	   /* Channel option flags (*N) */
+#define CKEY_FOUNDER "founder" /* Founder nick */
+#define CKEY_MODES "modes"	   /* Locked channel modes */
+#define CKEY_TOPIC "topic"	   /* Persistent topic */
+#define CKEY_ACCESS "access"   /* Access list (has sub-records per nick) */
+#define CKEY_FORBID "forbid"   /* Forbidden channel (value = reason) */
+#define CKEY_SUSPEND "suspend" /* Suspended channel */
+#define CKEY_OPTIONS "options" /* Channel option flags (*N) */
 
 /* IP sub-records: I::<ip|host>::<key> <value> */
 #define IKEY_CLONES "clones"   /* Max clones allowed (*N) */
@@ -118,11 +118,11 @@ module
 
 /* Line sub-records: K::<type>::<pattern>::<key> <value> */
 #define KKEY_MATCH_TYPE "match-type" /* Spamfilter match method: regex|simple */
-#define KKEY_TARGETS "targets"       /* Canonical Spamfilter target letters */
-#define KKEY_ACTION "action"         /* Dynamic Spamfilter action */
-#define KKEY_BAN_TIME "ban-time"     /* Duration of sanction emitted on match */
-#define KKEY_EXPIRES "expires"       /* Absolute Unix expiry timestamp */
-#define KKEY_REASON "reason"         /* Ban reason */
+#define KKEY_TARGETS "targets"		 /* Canonical Spamfilter target letters */
+#define KKEY_ACTION "action"		 /* Dynamic Spamfilter action */
+#define KKEY_BAN_TIME "ban-time"	 /* Duration of sanction emitted on match */
+#define KKEY_EXPIRES "expires"		 /* Absolute Unix expiry timestamp */
+#define KKEY_REASON "reason"		 /* Ban reason */
 
 /* Spamfilter pattern encoding: K::F::b64:<RFC 4648 base64>::... */
 #define UDB_SPAMFILTER_B64_PREFIX "b64:"
@@ -564,7 +564,7 @@ static UdbRecord *udb_hash_find(UdbContext *ctx, int block_idx, const char *key)
 static UdbSnapshotResult udb_file_write_snapshot(UdbBlock *block, UdbRecord *tree, unsigned int record_count);
 static int udb_file_save_block(UdbContext *ctx, UdbBlock *block);
 static void udb_block_replace_tree(UdbContext *ctx, UdbBlock *block, UdbRecord *tree, unsigned int record_count,
-							   UdbHashIndex *index);
+								   UdbHashIndex *index);
 static int udb_file_load_block(UdbContext *ctx, UdbBlock *block);
 static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *line);
 static int udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbuf, size_t pathlen);
@@ -583,8 +583,7 @@ static int udb_peer_authorizes_us(Client *server);
 static int udb_sync_hello_start(Client *server);
 static void udb_sync_hello_ack(Client *server);
 static int udb_hello_epoch_matches(Client *server, const char *epoch);
-static int udb_hello_peer_advertisement(Client *server, const char *propagator, const char *epoch,
-									int oclg_subscribed);
+static int udb_hello_peer_advertisement(Client *server, const char *propagator, const char *epoch, int oclg_subscribed);
 static const char *udb_sync_hello_propagator(UdbPropagatorSelection *selected);
 static void udb_sync_abort(UdbBlock *block, const char *reason);
 static unsigned int udb_block_letter_to_mask(char letter);
@@ -640,7 +639,7 @@ static void udb_mutation_drp(UdbContext *ctx, Client *client, Client *direct_pee
 static void udb_mutation_opt(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, char letter,
 							 const char *modified_at, int is_for_me, int is_broadcast);
 static void udb_mutation_exp(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, const char *path,
-					 time_t expected_expires, int is_for_me, int is_broadcast);
+							 time_t expected_expires, int is_for_me, int is_broadcast);
 static int udb_mutation_expire_local(UdbContext *ctx, const char *path, time_t expected_expires);
 static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync);
 static void udb_nick_strip(Client *client, UdbRecord *nick_rec);
@@ -990,11 +989,11 @@ static UdbRecord *udb_hash_find(UdbContext *ctx, int block_idx, const char *key)
  * ======================================================================== */
 static const char *udb_get_shared_subkey(const char *key)
 {
-	static const char *known_keys[] = {"pass",		 "vhost",	 "oper",	  "swhois",	   "snomasks",		 "modes",
-									   "access",	 "forbid",	 "suspend", "challenge", "founder",		 "topic",
-									   "options",	 "clones",	 "nolines",	  "host",	   "encryption_key", "suffix",
-									   "nickserv",	 "chanserv", "ipserv",	  "quit_ips",  "quit_clones",	 "flood",
-									   "propagator", "type",	 "action",	  "expires",   "reason",		 NULL};
+	static const char *known_keys[] = {"pass",		 "vhost",	 "oper",	"swhois",	 "snomasks",	   "modes",
+									   "access",	 "forbid",	 "suspend", "challenge", "founder",		   "topic",
+									   "options",	 "clones",	 "nolines", "host",		 "encryption_key", "suffix",
+									   "nickserv",	 "chanserv", "ipserv",	"quit_ips",	 "quit_clones",	   "flood",
+									   "propagator", "type",	 "action",	"expires",	 "reason",		   NULL};
 
 	for (int i = 0; known_keys[i]; i++)
 		if (!strcasecmp(known_keys[i], key))
@@ -1020,8 +1019,7 @@ static UdbRecord *udb_record_create(UdbRecord *parent)
  * general UDB tree case-insensitive, but make only K::F::<pattern> exact. */
 static int udb_record_key_equal(const UdbRecord *parent, const char *left, const char *right)
 {
-	if (parent && parent->parent && parent->parent->parent == NULL && parent->key &&
-		!strcmp(parent->key, "F"))
+	if (parent && parent->parent && parent->parent->parent == NULL && parent->key && !strcmp(parent->key, "F"))
 		return !strcmp(left, right);
 	return !strcasecmp(left, right);
 }
@@ -2479,8 +2477,7 @@ static int udb_line_mask_valid(const char *mask)
 		return 0;
 	userlen = (size_t)(at - mask);
 	hostlen = strlen(at + 1);
-	return userlen > 0 && userlen <= UDB_TKL_MASK_COMPONENT_MAX && hostlen > 0 &&
-		hostlen <= UDB_TKL_MASK_COMPONENT_MAX;
+	return userlen > 0 && userlen <= UDB_TKL_MASK_COMPONENT_MAX && hostlen > 0 && hostlen <= UDB_TKL_MASK_COMPONENT_MAX;
 }
 
 static int udb_qline_mask_valid(const char *mask)
@@ -2798,7 +2795,6 @@ static int udb_spamfilter_action_valid(const char *value)
 	return action && !banact_config_only(action);
 }
 
-
 /* Admission, staged snapshots, disk load and runtime apply all use this
  * candidate-level check.  Partial profiles are safe and inert; a complete
  * profile must be materializable before it can replace an active one. */
@@ -2821,16 +2817,13 @@ static int udb_k_profile_valid(UdbRecord *line_rec)
 		return 1;
 	if (!match_type->data_str || !targets->data_str || !action->data_str || !reason->data_str)
 		return 0;
-	if (!udb_spamfilter_match_type_valid(match_type->data_str) ||
-		!udb_spamfilter_targets_valid(targets->data_str) ||
-		!udb_spamfilter_action_valid(action->data_str) ||
-		!udb_line_reason_valid(reason->data_str) ||
+	if (!udb_spamfilter_match_type_valid(match_type->data_str) || !udb_spamfilter_targets_valid(targets->data_str) ||
+		!udb_spamfilter_action_valid(action->data_str) || !udb_line_reason_valid(reason->data_str) ||
 		!udb_spamfilter_pattern_valid(line_rec->key, match_type->data_str))
 		return 0;
 	return !ban_time || (!ban_time->data_str && ban_time->data_num &&
-		(unsigned long long)ban_time->data_num <= udb_time_t_max_val());
+						 (unsigned long long)ban_time->data_num <= udb_time_t_max_val());
 }
-
 
 static int udb_k_tree_profiles_valid(UdbRecord *tree)
 {
@@ -3155,7 +3148,7 @@ done:
 }
 
 static void udb_block_replace_tree(UdbContext *ctx, UdbBlock *block, UdbRecord *tree, unsigned int record_count,
-							   UdbHashIndex *index)
+								   UdbHashIndex *index)
 {
 	struct stat st;
 	int block_idx;
@@ -4527,8 +4520,7 @@ static const char *udb_sync_hello_propagator(UdbPropagatorSelection *selected)
 	return "-";
 }
 
-static int udb_hello_peer_advertisement(Client *server, const char *propagator, const char *epoch,
-									int oclg_subscribed)
+static int udb_hello_peer_advertisement(Client *server, const char *propagator, const char *epoch, int oclg_subscribed)
 {
 	UdbHelloPeer *peer;
 	int authorizes_us;
@@ -4551,8 +4543,7 @@ static int udb_hello_peer_advertisement(Client *server, const char *propagator, 
 		 * after its HEL exchange has been acknowledged. */
 		peer->oclg_subscribed = 0;
 		udb_ocl_peer_instance_changed(server);
-		udb_log(ULOG_INFO, "UDB_HEL_INSTANCE_CHANGED", server,
-				"Direct peer announced a new UDB instance epoch $epoch",
+		udb_log(ULOG_INFO, "UDB_HEL_INSTANCE_CHANGED", server, "Direct peer announced a new UDB instance epoch $epoch",
 				log_data_string("epoch", epoch));
 	}
 	else if (subscription_changed)
@@ -5015,7 +5006,8 @@ static void udb_sync_hello_refresh_all(void)
 		{
 			UdbHelloPeer *hello = udb_hello_peer(server, 0);
 			if (udb_send_db_to_one(server, ":%s DB %s HEL 4 %s %s OCL", me.id, server->id, propagator,
-							   udb_ocl_epoch_value()) && hello)
+								   udb_ocl_epoch_value()) &&
+				hello)
 				hello->local_selection_sent = 1;
 		}
 	}
@@ -5774,9 +5766,8 @@ static void udb_ocl_membership_rebuild(void)
 
 	for (origin = udb_ocl_origins; origin; origin = origin->next)
 		origin->member = 0;
-	list_for_each_entry(server, &global_server_list, client_node)
-		if (udb_ocl_is_participant(server) && !IsMe(server))
-			udb_ocl_member_add(server->id);
+	list_for_each_entry(server, &global_server_list, client_node) if (udb_ocl_is_participant(server) && !IsMe(server))
+		udb_ocl_member_add(server->id);
 	udb_ocl_membership_prune_invisible();
 	udb_ocl_purge_nonmembers();
 }
@@ -6208,8 +6199,8 @@ static void udb_ocl_send_inventory_broadcast(Client *except, const char *origin_
 		if (server == except || (except && server == except->direction) || !udb_ocl_is_participant(server) ||
 			!udb_has_hello(server))
 			continue;
-		udb_send_db_to_one(server, ":%s DB * OCL BEGIN %s %s %lu %u %s", me.id, origin_sid, inv->epoch,
-						   inv->generation, inv->count, inv->inventory_digest);
+		udb_send_db_to_one(server, ":%s DB * OCL BEGIN %s %s %lu %u %s", me.id, origin_sid, inv->epoch, inv->generation,
+						   inv->count, inv->inventory_digest);
 	}
 	for (i = 0; i < inv->count; i++)
 		list_for_each_entry(server, &server_list, special_node)
@@ -6312,8 +6303,7 @@ static UdbOclOrigin *udb_ocl_validate_frame(Client *direct_peer, const char *ori
 		return NULL;
 	origin_client = udb_ocl_find_server(origin_sid);
 	if (!origin_client || !udb_ocl_is_participant(origin_client) || IsMe(origin_client) ||
-		!udb_ocl_member_exists(origin_sid) ||
-		origin_client->direction != direct_peer)
+		!udb_ocl_member_exists(origin_sid) || origin_client->direction != direct_peer)
 		return NULL;
 	return create ? udb_ocl_get_origin(origin_sid) : udb_ocl_find_origin(origin_sid);
 }
@@ -6355,13 +6345,11 @@ static void udb_ocl_handle_begin(Client *direct_peer, const char *parv[])
 						log_data_string("origin", origin->sid), log_data_integer("gen", (long long)generation));
 				return;
 			}
-			if (origin->current && !strcmp(origin->current->epoch, epoch) &&
-				origin->current->generation == generation)
+			if (origin->current && !strcmp(origin->current->epoch, epoch) && origin->current->generation == generation)
 				return; /* already committed */
-			if (origin->staging && !strcmp(origin->staging->epoch, epoch) &&
-				origin->staging->generation == generation)
+			if (origin->staging && !strcmp(origin->staging->epoch, epoch) && origin->staging->generation == generation)
 				return; /* already staging */
-			/* The previous attempt was aborted; rebuild the same high-water snapshot. */
+						/* The previous attempt was aborted; rebuild the same high-water snapshot. */
 		}
 	}
 	else if (origin->accepted_valid && strcmp(origin->accepted_epoch, epoch))
@@ -7076,10 +7064,12 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 		if (!rec || (block->letter == UDB_BLOCK_LINES && !udb_k_profile_valid(rec->parent)) ||
 			(block->letter == UDB_BLOCK_NICKS && !udb_n_tree_profiles_valid(tree)))
 		{
+			const char *profile_kind = block->letter == UDB_BLOCK_NICKS ? "N" : "K";
+
 			udb_record_free_tree(tree);
 			udb_log(ULOG_WARNING, "UDB_INS_PROFILE_REJECT", client,
-					"Rejected INS that would create an invalid complete K profile: $path",
-					log_data_string("path", path));
+					"Rejected INS that would create an invalid complete $profile_kind profile: $path",
+					log_data_string("profile_kind", profile_kind), log_data_string("path", path));
 			udb_protocol_mutation_error(client, "INS", UDB_ERR_PARAMS, letter);
 			return;
 		}
@@ -7139,7 +7129,7 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 }
 
 static int udb_mutation_delete_local(UdbContext *ctx, UdbBlock *block, UdbRecord *old_rec, Client *direct_peer,
-							 const char *operation)
+									 const char *operation)
 {
 	UdbRecord *candidate_rec = NULL;
 	UdbRecord *candidate_line = NULL;
@@ -7642,8 +7632,7 @@ CMD_FUNC(cmd_db)
 		}
 		/* OCL is part of the mandatory HEL 4 contract: a request without the
 		 * OCL token belongs to a legacy peer that can never be confirmed. */
-		if (parc == 5 || (parc == 6 && !strcasecmp(parv[5], "OCL")) ||
-			(parc >= 7 && strcasecmp(parv[6], "OCL")))
+		if (parc == 5 || (parc == 6 && !strcasecmp(parv[5], "OCL")) || (parc >= 7 && strcasecmp(parv[6], "OCL")))
 		{
 			if (parc == 5 || (parc >= 7 && strcasecmp(parv[6], "OCL")))
 			{
@@ -7686,7 +7675,7 @@ CMD_FUNC(cmd_db)
 				UdbPropagatorSelection selected;
 				const char *local_prop = udb_sync_hello_propagator(&selected);
 				udb_send_db_to_one(client, ":%s DB %s HEL 4 ACK %s %s OCL", me.id, client->id, local_prop,
-							   udb_ocl_epoch_value());
+								   udb_ocl_epoch_value());
 			}
 			udb_ocl_maybe_replay_to_peer(client);
 			/* A repeated authorized selection is also the explicit retry trigger. */
@@ -8304,7 +8293,7 @@ static void udb_nick_set_snomasks(Client *client, UdbRecord *nick_rec, UdbRecord
 }
 
 static void udb_nick_force_rename_with_notice(Client *client, const char *nick_in_db, const char *notice,
-										int offer_identify)
+											  int offer_identify)
 {
 	char newnick[32];
 	char rand_suffix[6];
@@ -8318,11 +8307,11 @@ static void udb_nick_force_rename_with_notice(Client *client, const char *nick_i
 		udb_send_service_notice(client, SKEY_NICKSERV, "%s", notice);
 	else
 		udb_send_service_notice(client, SKEY_NICKSERV,
-							"This nickname (%s) has been registered or synced in the UDB database.", nick_in_db);
+								"This nickname (%s) has been registered or synced in the UDB database.", nick_in_db);
 	if (offer_identify)
 		udb_send_service_notice(client, SKEY_NICKSERV,
-							"You have been renamed. If you are the owner, please identify: /NICK %s:Password",
-							nick_in_db);
+								"You have been renamed. If you are the owner, please identify: /NICK %s:Password",
+								nick_in_db);
 
 	tsbuf[0] = '\0';
 	snprintf(tsbuf, sizeof(tsbuf), "%lld", (long long)TStime());
@@ -8378,7 +8367,7 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync)
 		/* Suspension clears UDB identity and active profile effects. */
 		udb_nick_strip(client, nick_rec);
 		udb_send_service_notice(client, SKEY_NICKSERV, "This nickname is suspended. Reason: %s",
-							suspend->data_str ? suspend->data_str : "No reason given");
+								suspend->data_str ? suspend->data_str : "No reason given");
 		return;
 	}
 
@@ -8426,7 +8415,6 @@ static void udb_nick_strip(Client *client, UdbRecord *nick_rec)
 			client->umodes &= ~(set_usermode(mode_rec->data_str) & ~UMODE_OPER);
 	}
 	client->umodes &= ~UMODE_REGNICK;
-	client->umodes &= ~set_usermode("S");
 	send_umode_out(client, 1, old_umodes);
 
 	set_snomask(client, NULL);
@@ -8496,7 +8484,7 @@ static void udb_nick_remove_record(UdbBlock *block, UdbRecord *rec)
 			else if (!strcmp(rec->key, NKEY_SUSPEND))
 			{
 				udb_nick_force_rename_with_notice(client, nick_rec->key,
-											"This nickname suspension has ended. Please identify again.", 1);
+												  "This nickname suspension has ended. Please identify again.", 1);
 			}
 			else if (!strcmp(rec->key, NKEY_PASS))
 			{
@@ -8815,7 +8803,7 @@ CMD_OVERRIDE_FUNC(udb_override_nick)
 		if (forbid)
 		{
 			udb_send_service_notice(client, SKEY_NICKSERV, "This nickname is forbidden. Reason: %s",
-								forbid->data_str ? forbid->data_str : "No reason given");
+									forbid->data_str ? forbid->data_str : "No reason given");
 			return;
 		}
 	}
@@ -9523,8 +9511,16 @@ static int udb_channel_modes_key(const char *value, char *key_out, size_t key_ou
 	{
 		Cmode *handler;
 		int takes_parameter;
-		if (*modes == '+') { what = MODE_ADD; continue; }
-		if (*modes == '-') { what = MODE_DEL; continue; }
+		if (*modes == '+')
+		{
+			what = MODE_ADD;
+			continue;
+		}
+		if (*modes == '-')
+		{
+			what = MODE_DEL;
+			continue;
+		}
 		handler = find_channel_mode_handler(*modes);
 		if (!handler)
 			return 0;
@@ -9557,14 +9553,16 @@ static int udb_hook_can_join(Client *client, Channel *channel, const char *key, 
 	forbid_rec = udb_record_find(udb_ctx, CKEY_FORBID, chan_rec);
 	if (forbid_rec)
 	{
-		snprintf(errbuf, sizeof(errbuf), "%%s :%s", forbid_rec->data_str ? forbid_rec->data_str : "Channel is forbidden");
+		snprintf(errbuf, sizeof(errbuf), "%%s :%s",
+				 forbid_rec->data_str ? forbid_rec->data_str : "Channel is forbidden");
 		*errmsg = errbuf;
 		return ERR_FORBIDDENCHANNEL;
 	}
 	is_founder = udb_channel_is_identified_founder(client, chan_rec);
-	/* Native +k materializes after the first successful JOIN. This is only the
-	 * pre-materialization check; later joins remain entirely native. */
-	if (channel->users == 0 && !is_founder)
+	/* Native +k normally materializes after the first successful JOIN, but a
+	 * persistent empty channel can already have one.  Never let the persisted
+	 * C::modes key compete with the native mode when it is materialized. */
+	if (channel->users == 0 && !cm_getparameter(channel, 'k') && !is_founder)
 	{
 		UdbRecord *modes_rec = udb_record_find(udb_ctx, CKEY_MODES, chan_rec);
 		char configured_key[512];
@@ -10669,8 +10667,8 @@ static void udb_line_apply_record(UdbRecord *rec, int is_new)
 		Match *match;
 		time_t ban_time = 0;
 
-		if (!match_type_rec || !targets_rec || !action_rec || !match_type_rec->data_str ||
-			!targets_rec->data_str || !action_rec->data_str)
+		if (!match_type_rec || !targets_rec || !action_rec || !match_type_rec->data_str || !targets_rec->data_str ||
+			!action_rec->data_str)
 		{
 			udb_line_remove_owned(type, pattern);
 			return;
@@ -10691,7 +10689,7 @@ static void udb_line_apply_record(UdbRecord *rec, int is_new)
 		}
 		udb_line_remove_owned(type, pattern);
 		if (!tkl_add_spamfilter(TKL_SPAMF | TKL_GLOBAL, pattern, (unsigned short)target, action, match, pattern, NULL,
-							UDB_TKL_SET_BY, expires, TStime(), ban_time, reason, INPUT_CONVERSION_DEFAULT, 0, 0))
+								UDB_TKL_SET_BY, expires, TStime(), ban_time, reason, INPUT_CONVERSION_DEFAULT, 0, 0))
 		{
 			unreal_delete_match(match);
 			udb_log(ULOG_ERROR, "UDB_SPAMF_ADD_FAILED", NULL, "Failed to materialize spamfilter candidate: $pattern",
@@ -10799,7 +10797,7 @@ static void udb_lines_expiry_sweep(time_t now)
 		if (udb_select_propagator(udb_ctx, 1, &selected) && selected.peer && !pending->sent)
 		{
 			if (udb_send_db_to_one(selected.peer, ":%s DB %s EXP %s %lu", me.id, selected.peer->id, paths[i],
-							   (unsigned long)expires[i]))
+								   (unsigned long)expires[i]))
 			{
 				pending->sent = 1;
 				udb_log(ULOG_INFO, "UDB_K_EXP_REQUEST", selected.peer, "Requested authoritative expiry of $path",

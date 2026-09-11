@@ -35,7 +35,7 @@
 #define NKEY_PASS "pass"		   /* Password hash */
 #define NKEY_VHOST "vhost"		   /* Virtual host */
 #define NKEY_FORBID "forbid"	   /* Forbidden nick (value = reason) */
-#define NKEY_SUSPEND "suspend"     /* Suspended nick (value = reason) */
+#define NKEY_SUSPEND "suspend"	   /* Suspended nick (value = reason) */
 #define NKEY_OPER "oper"		   /* Operclass name string (e.g. "locop", "netadmin-with-override") */
 #define NKEY_CHALLENGE "challenge" /* Password hash method */
 #define NKEY_MODES "modes"		   /* Allowed oper modes */
@@ -43,13 +43,13 @@
 #define NKEY_SWHOIS "swhois"	   /* Custom SWHOIS line */
 
 /* Channel sub-records: C::<#chan>::<key> <value> */
-#define CKEY_FOUNDER "founder"	   /* Founder nick */
-#define CKEY_MODES "modes"		   /* Locked channel modes */
-#define CKEY_TOPIC "topic"		   /* Persistent topic */
-#define CKEY_ACCESS "access"	   /* Access list (has sub-records per nick) */
-#define CKEY_FORBID "forbid"	   /* Forbidden channel (value = reason) */
-#define CKEY_SUSPEND "suspend"     /* Suspended channel */
-#define CKEY_OPTIONS "options"	   /* Channel option flags (*N) */
+#define CKEY_FOUNDER "founder" /* Founder nick */
+#define CKEY_MODES "modes"	   /* Locked channel modes */
+#define CKEY_TOPIC "topic"	   /* Persistent topic */
+#define CKEY_ACCESS "access"   /* Access list (has sub-records per nick) */
+#define CKEY_FORBID "forbid"   /* Forbidden channel (value = reason) */
+#define CKEY_SUSPEND "suspend" /* Suspended channel */
+#define CKEY_OPTIONS "options" /* Channel option flags (*N) */
 
 /* IP sub-records: I::<ip|host>::<key> <value> */
 #define IKEY_CLONES "clones"   /* Max clones allowed (*N) */
@@ -73,11 +73,11 @@
 
 /* Line sub-records: K::<type>::<pattern>::<key> <value> */
 #define KKEY_MATCH_TYPE "match-type" /* Spamfilter match method: regex|simple */
-#define KKEY_TARGETS "targets"       /* Canonical Spamfilter target letters */
-#define KKEY_ACTION "action"         /* Dynamic Spamfilter action */
-#define KKEY_BAN_TIME "ban-time"     /* Duration of sanction emitted on match */
-#define KKEY_EXPIRES "expires"       /* Absolute Unix expiry timestamp */
-#define KKEY_REASON "reason"         /* Ban reason */
+#define KKEY_TARGETS "targets"		 /* Canonical Spamfilter target letters */
+#define KKEY_ACTION "action"		 /* Dynamic Spamfilter action */
+#define KKEY_BAN_TIME "ban-time"	 /* Duration of sanction emitted on match */
+#define KKEY_EXPIRES "expires"		 /* Absolute Unix expiry timestamp */
+#define KKEY_REASON "reason"		 /* Ban reason */
 
 /* Spamfilter pattern encoding: K::F::b64:<RFC 4648 base64>::... */
 #define UDB_SPAMFILTER_B64_PREFIX "b64:"

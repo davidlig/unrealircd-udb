@@ -503,6 +503,48 @@ def test_channel_mode_parameter_capacity_atomic(services, data_dir):
     print("PASS: channel modes accept 12 parameters and atomically reject 13")
 
 
+def test_dynamic_hash_resize_runtime(services, data_dir, process):
+    """Exercise the compiled copy-on-write index across the 1536/1537 boundary."""
+    profiles = 1537
+    db = data_dir / "udb_N.db"
+
+    for index in range(profiles):
+        services.send_ins(f"N::hash{index:04d}::forbid", "resize fixture")
+
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        # Each authorized mutation is logged by this harness; drain the pipe so
+        # diagnostics cannot stall the daemon while the burst is processed.
+        while select.select([process.stdout], [], [], 0)[0]:
+            os.read(process.stdout.fileno(), 65536)
+        content = db.read_text(encoding="ascii") if db.exists() else ""
+        if content.count("::forbid resize fixture") >= profiles:
+            break
+        time.sleep(0.1)
+    else:
+        raise AssertionError("1537 root profiles did not persist across the hash resize boundary")
+
+    for index in (0, 768, 1536):
+        require(f"hash{index:04d}::forbid resize fixture" in content,
+                f"root profile hash{index:04d} was lost during runtime rehash")
+
+    services.send_del("N::hash0768")
+    services.send_ins("N::hashnew::forbid", "post-rehash insert")
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        while select.select([process.stdout], [], [], 0)[0]:
+            os.read(process.stdout.fileno(), 65536)
+        content = db.read_text(encoding="ascii")
+        if "hash0768::" not in content and "hashnew::forbid post-rehash insert" in content:
+            break
+        time.sleep(0.1)
+    else:
+        raise AssertionError("runtime hash lookup/delete/insert did not converge after rehash")
+    require(content.count("::forbid resize fixture") == profiles - 1,
+            "runtime rehash retained a deleted profile or duplicated a root profile")
+    print("PASS: compiled UDB rehashed 1536->1537 roots and preserved lookup, DEL, and new INS behavior")
+
+
 def run_tests(ircd_bin, keep=False):
     tmpdir = tempfile.mkdtemp(prefix="udb-schema-test-")
     node = pathlib.Path(tmpdir)
@@ -658,6 +700,7 @@ def run_tests(ircd_bin, keep=False):
         test_block_k_canonical_profiles(services, data_dir)
         test_block_k_expiry_gc(services, data_dir, client_port)
         test_channel_mode_parameter_capacity_atomic(services, data_dir)
+        test_dynamic_hash_resize_runtime(services, data_dir, proc)
 
         # -------------------------------------------------------------
         # Test 6b: Spamfilter regex pattern length limits (3071, 3072, 3073 bytes)

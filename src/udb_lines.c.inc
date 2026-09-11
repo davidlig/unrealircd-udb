@@ -291,8 +291,8 @@ static void udb_line_apply_record(UdbRecord *rec, int is_new)
 		Match *match;
 		time_t ban_time = 0;
 
-		if (!match_type_rec || !targets_rec || !action_rec || !match_type_rec->data_str ||
-			!targets_rec->data_str || !action_rec->data_str)
+		if (!match_type_rec || !targets_rec || !action_rec || !match_type_rec->data_str || !targets_rec->data_str ||
+			!action_rec->data_str)
 		{
 			udb_line_remove_owned(type, pattern);
 			return;
@@ -313,7 +313,7 @@ static void udb_line_apply_record(UdbRecord *rec, int is_new)
 		}
 		udb_line_remove_owned(type, pattern);
 		if (!tkl_add_spamfilter(TKL_SPAMF | TKL_GLOBAL, pattern, (unsigned short)target, action, match, pattern, NULL,
-							UDB_TKL_SET_BY, expires, TStime(), ban_time, reason, INPUT_CONVERSION_DEFAULT, 0, 0))
+								UDB_TKL_SET_BY, expires, TStime(), ban_time, reason, INPUT_CONVERSION_DEFAULT, 0, 0))
 		{
 			unreal_delete_match(match);
 			udb_log(ULOG_ERROR, "UDB_SPAMF_ADD_FAILED", NULL, "Failed to materialize spamfilter candidate: $pattern",
@@ -421,7 +421,7 @@ static void udb_lines_expiry_sweep(time_t now)
 		if (udb_select_propagator(udb_ctx, 1, &selected) && selected.peer && !pending->sent)
 		{
 			if (udb_send_db_to_one(selected.peer, ":%s DB %s EXP %s %lu", me.id, selected.peer->id, paths[i],
-							   (unsigned long)expires[i]))
+								   (unsigned long)expires[i]))
 			{
 				pending->sent = 1;
 				udb_log(ULOG_INFO, "UDB_K_EXP_REQUEST", selected.peer, "Requested authoritative expiry of $path",

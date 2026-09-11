@@ -73,7 +73,9 @@ La implementación aplica, entre otros, estos límites:
 - `txid` de snapshot: **31 caracteres**;
 - patrón de spamfilter decodificado: **3072 bytes**;
 - cada registro debe caber también en una línea S2S de UnrealIRCd dejando un margen interno de 256 bytes;
-- hash de primer nivel: 2048 slots por bloque.
+- hash de primer nivel dimensionado dinámicamente por bloque, con un mínimo de
+  2048 buckets; los tamaños son potencias de dos y crecen con la carga de
+  perfiles raíz.
 
 No basta con que una ruta quepa en disco: debe cumplir además el límite S2S para poder ser sincronizada de forma segura.
 

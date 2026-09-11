@@ -244,11 +244,11 @@ static UdbRecord *udb_hash_find(UdbContext *ctx, int block_idx, const char *key)
  * ======================================================================== */
 static const char *udb_get_shared_subkey(const char *key)
 {
-	static const char *known_keys[] = {"pass",		 "vhost",	 "oper",	  "swhois",	   "snomasks",		 "modes",
-									   "access",	 "forbid",	 "suspend", "challenge", "founder",		 "topic",
-									   "options",	 "clones",	 "nolines",	  "host",	   "encryption_key", "suffix",
-									   "nickserv",	 "chanserv", "ipserv",	  "quit_ips",  "quit_clones",	 "flood",
-									   "propagator", "type",	 "action",	  "expires",   "reason",		 NULL};
+	static const char *known_keys[] = {"pass",		 "vhost",	 "oper",	"swhois",	 "snomasks",	   "modes",
+									   "access",	 "forbid",	 "suspend", "challenge", "founder",		   "topic",
+									   "options",	 "clones",	 "nolines", "host",		 "encryption_key", "suffix",
+									   "nickserv",	 "chanserv", "ipserv",	"quit_ips",	 "quit_clones",	   "flood",
+									   "propagator", "type",	 "action",	"expires",	 "reason",		   NULL};
 
 	for (int i = 0; known_keys[i]; i++)
 		if (!strcasecmp(known_keys[i], key))
@@ -274,8 +274,7 @@ static UdbRecord *udb_record_create(UdbRecord *parent)
  * general UDB tree case-insensitive, but make only K::F::<pattern> exact. */
 static int udb_record_key_equal(const UdbRecord *parent, const char *left, const char *right)
 {
-	if (parent && parent->parent && parent->parent->parent == NULL && parent->key &&
-		!strcmp(parent->key, "F"))
+	if (parent && parent->parent && parent->parent->parent == NULL && parent->key && !strcmp(parent->key, "F"))
 		return !strcmp(left, right);
 	return !strcasecmp(left, right);
 }

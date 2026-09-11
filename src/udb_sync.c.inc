@@ -169,8 +169,7 @@ static const char *udb_sync_hello_propagator(UdbPropagatorSelection *selected)
 	return "-";
 }
 
-static int udb_hello_peer_advertisement(Client *server, const char *propagator, const char *epoch,
-									int oclg_subscribed)
+static int udb_hello_peer_advertisement(Client *server, const char *propagator, const char *epoch, int oclg_subscribed)
 {
 	UdbHelloPeer *peer;
 	int authorizes_us;
@@ -193,8 +192,7 @@ static int udb_hello_peer_advertisement(Client *server, const char *propagator, 
 		 * after its HEL exchange has been acknowledged. */
 		peer->oclg_subscribed = 0;
 		udb_ocl_peer_instance_changed(server);
-		udb_log(ULOG_INFO, "UDB_HEL_INSTANCE_CHANGED", server,
-				"Direct peer announced a new UDB instance epoch $epoch",
+		udb_log(ULOG_INFO, "UDB_HEL_INSTANCE_CHANGED", server, "Direct peer announced a new UDB instance epoch $epoch",
 				log_data_string("epoch", epoch));
 	}
 	else if (subscription_changed)
@@ -657,7 +655,8 @@ static void udb_sync_hello_refresh_all(void)
 		{
 			UdbHelloPeer *hello = udb_hello_peer(server, 0);
 			if (udb_send_db_to_one(server, ":%s DB %s HEL 4 %s %s OCL", me.id, server->id, propagator,
-							   udb_ocl_epoch_value()) && hello)
+								   udb_ocl_epoch_value()) &&
+				hello)
 				hello->local_selection_sent = 1;
 		}
 	}

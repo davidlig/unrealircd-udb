@@ -141,10 +141,12 @@ jobs:
           python3 tests/test_propagator_validation.py
           python3 tests/test_convergence_degraded_stale.py
           python3 tests/test_bootstrap_readiness_and_convergence.py
-           python3 tests/test_hub_multihop_and_persistence.py
-           python3 tests/test_ocl_registry.py
-           python3 tests/test_ocl_rehash_replay.py
-           python3 tests/test_ocl_membership_multihop.py
+          python3 tests/test_hub_multihop_and_persistence.py
+          python3 tests/test_ocl_registry.py
+          python3 tests/test_ocl_rehash_replay.py
+          python3 tests/test_ocl_membership_multihop.py
+          python3 tests/test_hash_index_contract.py
+          python3 tests/test_post_review_corrections.py
 
       - name: Run Integration & Multi-Hop Test Suites
         run: |

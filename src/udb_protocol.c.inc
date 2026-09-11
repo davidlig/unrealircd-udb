@@ -229,8 +229,7 @@ CMD_FUNC(cmd_db)
 		}
 		/* OCL is part of the mandatory HEL 4 contract: a request without the
 		 * OCL token belongs to a legacy peer that can never be confirmed. */
-		if (parc == 5 || (parc == 6 && !strcasecmp(parv[5], "OCL")) ||
-			(parc >= 7 && strcasecmp(parv[6], "OCL")))
+		if (parc == 5 || (parc == 6 && !strcasecmp(parv[5], "OCL")) || (parc >= 7 && strcasecmp(parv[6], "OCL")))
 		{
 			if (parc == 5 || (parc >= 7 && strcasecmp(parv[6], "OCL")))
 			{
@@ -273,7 +272,7 @@ CMD_FUNC(cmd_db)
 				UdbPropagatorSelection selected;
 				const char *local_prop = udb_sync_hello_propagator(&selected);
 				udb_send_db_to_one(client, ":%s DB %s HEL 4 ACK %s %s OCL", me.id, client->id, local_prop,
-							   udb_ocl_epoch_value());
+								   udb_ocl_epoch_value());
 			}
 			udb_ocl_maybe_replay_to_peer(client);
 			/* A repeated authorized selection is also the explicit retry trigger. */
