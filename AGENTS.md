@@ -16,7 +16,7 @@ UDB 4.0.0 is a C module for UnrealIRCd 6.2.x. Canonical behavior lives under `sr
 - Inspect `git status --short` once before edits when shell access is available.
 - Make the smallest coherent diff. No unrelated refactors, renames, formatting, cleanup, or legacy compatibility unless explicitly requested.
 - Preserve unrelated working-tree changes. Never use destructive Git operations or commit/push/merge unless explicitly requested.
-- Edit canonical `src/` files, never `dist/udb.c`; regenerate the bundle only when canonical source changes require it.
+- Edit canonical `src/` files, never `dist/udb.c`; before regenerating the bundle, run `scripts/format-sources.sh`, then generate from the formatted canonical sources.
 - For documentation, treat `src/` as source of truth and tests as executable evidence. Keep `README.md`/`README_ES.md` and `doc/udb_technical_en.md`/`doc/udb_technical_es.md` semantically aligned.
 
 ## UDB correctness invariants

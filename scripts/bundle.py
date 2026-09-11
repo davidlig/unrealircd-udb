@@ -7,7 +7,7 @@ header, the internal header, and the ordered udb_*.c.inc implementation units
 referenced from src/udb.c, and produces dist/udb.c plus modules.list.
 
 The generator never mutates its inputs and never invokes a code formatter.
-Formatting is a separate, explicit step (scripts/format-sources) so that the
+Formatting is a separate, explicit step (scripts/format-sources.sh) so that the
 bundle output depends only on repository bytes.
 
 Usage:

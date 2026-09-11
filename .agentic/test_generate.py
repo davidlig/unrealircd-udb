@@ -78,6 +78,14 @@ class GeneratorContractTest(unittest.TestCase):
             with self.subTest(role=role_name):
                 self.assertIn("udb-operclasses", self.config["roles"][role_name]["skills"])
 
+    def test_bundle_release_formats_before_generation(self):
+        skill = generate.ROOT / ".agents" / "skills" / "udb-bundle-release" / "SKILL.md"
+        content = skill.read_text(encoding="utf-8")
+        self.assertLess(
+            content.index("scripts/format-sources.sh"),
+            content.index("python3 scripts/bundle.py"),
+        )
+
     def test_reviewer_is_read_only(self):
         ag_path = generate.AG_ROOT / "udb-reviewer" / "agent.md"
         ag_fm = generate.parse_frontmatter(self.expected[ag_path], ag_path)

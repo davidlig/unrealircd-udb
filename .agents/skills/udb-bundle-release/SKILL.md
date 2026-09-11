@@ -10,12 +10,13 @@ description: Keeps canonical UDB source, generated dist/udb.c, metadata, public 
 When canonical source changes affect the distribution:
 
 ```bash
+scripts/format-sources.sh
 python3 scripts/bundle.py
 python3 scripts/bundle.py --check
 git diff --check
 ```
 
-Formatting is separate (`scripts/format-sources`) and should run only when formatting is intended; regenerate afterward.
+Formatting is a mandatory pre-generation step. Inspect any canonical-source changes made by `scripts/format-sources.sh` before accepting the regenerated bundle.
 
 Update public documentation only when the change affects its surface: configuration, protocol/operator semantics, auth/privileges, limits, install/build, persistence/sync/OCL guarantees, diagnostics or distribution metadata.
 
