@@ -26,7 +26,6 @@ import pathlib
 import shutil
 import signal
 import socket
-import stat
 import subprocess
 import sys
 import tempfile
@@ -593,9 +592,10 @@ def test_suite():
 
         # -----------------------------------------------------------------
         # TEST 5: State file write failure simulation
-        # (the read-only directory must be in place before the daemon starts:
-        # a node that already went standalone READY on a writable directory
-        # legitimately stays READY)
+        # Reserve the temporary-state path before the daemon starts.
+        # Making the whole PERMDATADIR read-only also prevents UnrealIRCd from
+        # creating its own control socket, so that tests the daemon startup
+        # rather than UDB's persistence failure.
         # -----------------------------------------------------------------
         print("\n=== Running Test 5: State file write failure simulation ===")
         p5_ports = free_ports(3)
@@ -607,10 +607,13 @@ def test_suite():
             stop(p5)
             # Discard the artifacts of the first (writable) run so the restart
             # is genuinely fresh; otherwise the persisted READY marker would be
-            # promoted without touching the read-only directory.
+            # promoted without attempting a state write.
             for artifact in dbdir5.iterdir():
                 artifact.unlink()
-            os.chmod(dbdir5, stat.S_IREAD | stat.S_IEXEC)
+            # A directory at the temporary-file path makes the state writer's
+            # open(O_WRONLY|O_TRUNC) fail before commit while leaving
+            # PERMDATADIR writable for UnrealIRCd runtime files.
+            (dbdir5 / ".udb_state.tmp").mkdir()
 
             p5 = subprocess.Popen(bwrap_command(n5, ircd_bin, cfg5))
             wait_for_daemon(p5, "127.0.0.1", p5_ports[0])
@@ -625,7 +628,6 @@ def test_suite():
             c5.close()
             print("PASS: Test 5: Persistence write failure keeps node in NOT_READY")
         finally:
-            os.chmod(dbdir5, stat.S_IRWXU)
             stop(p5)
 
         # -----------------------------------------------------------------

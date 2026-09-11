@@ -220,7 +220,8 @@ def db_contains(db, record):
 
 
 def db_loaded_from(log, db):
-    return f"Loaded block {db.stem[-1]} from {db} (" in log_text(log)
+    runtime_db = RUNTIME_ROOT / "data" / db.name
+    return f"Loaded block {db.stem[-1]} from {runtime_db} (" in log_text(log)
 
 
 def mutator_insert_observed(receiver_log, db, record):

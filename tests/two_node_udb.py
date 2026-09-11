@@ -313,7 +313,8 @@ def db_loaded_from(log, db):
 
 
 def db_loaded_from_text(text, db):
-    return f"Loaded block {db.stem[-1]} from {db} (" in text
+    runtime_db = RUNTIME_ROOT / "data" / db.name
+    return f"Loaded block {db.stem[-1]} from {runtime_db} (" in text
 
 
 def mutator_insert_observed(b_log, b_db):
