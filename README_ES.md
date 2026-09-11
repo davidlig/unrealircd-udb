@@ -156,6 +156,8 @@ Si el nick está ocupado y se quiere recuperar:
 
 Si `N::access` existe, también debe coincidir la IP con sus CIDR autorizados.
 
+Un nick suspendido sigue exigiendo sus comprobaciones normales de `pass`/`access`. La autenticación correcta sólo se conserva para ese cliente local y ese nick: mientras exista `N::suspend`, UDB no publica account/`+r` ni aplica efectos del perfil. Al eliminar `suspend`, restaura automáticamente account, `+r` y los efectos únicamente si la autenticación conservada sigue siendo válida para la política sin cambios de `pass`/`challenge`/`access`; en ese caso no vuelve a pedir la contraseña.
+
 La clave de canal es exclusivamente el parámetro nativo `+k` de `C::<canal>::modes`, por ejemplo `+ntk secret`. Protege tanto el primer JOIN como los posteriores. Un fundador identificado recibe `+q` de UDB.
 
 ## Diagnóstico de operador

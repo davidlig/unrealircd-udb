@@ -295,6 +295,7 @@ static int udb_mutation_delete_local(UdbContext *ctx, UdbBlock *block, UdbRecord
 {
 	UdbRecord *candidate_rec = NULL;
 	UdbRecord *candidate_line = NULL;
+	UdbRecord *candidate_nick_profile = NULL;
 	UdbRecord *tree;
 	UdbHashIndex hash_index;
 	unsigned int record_count;
@@ -311,6 +312,9 @@ static int udb_mutation_delete_local(UdbContext *ctx, UdbBlock *block, UdbRecord
 	if (block->letter == 'K' && candidate_rec->parent && candidate_rec->parent->parent &&
 		candidate_rec->parent->parent != tree)
 		candidate_line = candidate_rec->parent;
+	if (block->letter == UDB_BLOCK_NICKS && candidate_rec->parent && candidate_rec->parent != tree &&
+		!strcmp(candidate_rec->key, NKEY_SUSPEND))
+		candidate_nick_profile = candidate_rec->parent;
 	udb_record_delete_tree(candidate_rec);
 	record_count = udb_record_count_tree(tree);
 	if (!udb_hash_prepare_tree(tree, &hash_index))
@@ -332,6 +336,8 @@ static int udb_mutation_delete_local(UdbContext *ctx, UdbBlock *block, UdbRecord
 	if (block->letter == 'K')
 		udb_lines_expiry_pending_clear_record(old_rec);
 	udb_block_replace_tree(ctx, block, tree, record_count, &hash_index);
+	if (candidate_nick_profile)
+		udb_apply_special_record(ctx, block, candidate_nick_profile, 1);
 	if (candidate_line)
 		udb_lines_apply_effect(ctx, block, candidate_line, 0);
 	if (block->letter == 'L')

@@ -145,7 +145,7 @@ En un reemplazo caliente del bloque N no se confía únicamente en `+r`: la cuen
 
 `N::forbid` es exclusivo: insertarlo elimina atómicamente todas las propiedades hermanas, y no se puede insertar otra hasta borrar `forbid`. El override normal de NICK muestra el motivo sin un 432 duplicado.
 
-Con `N::suspend`, la validación requerida de `pass`/`access` sigue siendo obligatoria antes de adoptar el nick. Tras superarla conserva el nick, pero no recibe account, `+r`, oper, vhost, modes, snomasks ni SWHOIS. Añadirlo a un usuario identificado retira esos efectos UDB conservando el nick; retirarlo renombra al ocupante y exige una nueva identificación.
+Con `N::suspend`, la validación requerida de `pass`/`access` sigue siendo obligatoria antes de adoptar el nick. Tras superarla conserva una prueba de autenticación local ligada al cliente y al perfil, pero no recibe account, `+r`, oper, vhost, modes, snomasks ni SWHOIS. Añadirlo a un usuario identificado conserva esa prueba, retira los efectos UDB y mantiene el nick. Al retirar `suspend`, UDB reaplica account, `+r` y los efectos normales sin otra contraseña sólo si el mismo cliente sigue ocupando el nick y la prueba conservada coincide con la política actual de `pass`/`challenge`/`access` y su comprobación de acceso. Cambiar cualquiera de esos campos, abandonar el nick o desconectar invalida la prueba.
 
 ### 4.2 Bloque C — Canales
 

@@ -156,6 +156,8 @@ To recover an occupied registered nick:
 
 When `N::access` exists, the client IP must also match an authorized CIDR.
 
+A suspended nick still requires its normal `pass`/`access` checks. Successful authentication is retained only for that local client and nick: while `N::suspend` exists UDB exposes no account/`+r` and applies no profile effects. Removing `suspend` restores account, `+r`, and the profile effects automatically only while the unchanged `pass`/`challenge`/`access` policy still validates that retained authentication; it never asks for the password again in that case.
+
 A channel key is exclusively the native `+k` parameter in `C::<channel>::modes`, for example `+ntk secret`. It protects the first JOIN as well as later joins. An identified founder receives UDB-owned `+q`.
 
 ## Operator diagnostics

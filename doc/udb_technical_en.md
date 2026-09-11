@@ -139,7 +139,7 @@ During a hot replacement of N, `+r` alone is not trusted: the current account mu
 
 `N::forbid` is exclusive: inserting it atomically removes all sibling profile properties, and no other property may be inserted until `forbid` is deleted. The normal NICK override reports its reason without a duplicate 432.
 
-With `N::suspend`, required `pass`/`access` validation still applies before adopting the nick. A successful adopter keeps the nick but receives no account, `+r`, oper, vhost, modes, snomasks or SWHOIS. Adding it to an identified user strips those UDB effects while retaining the nick; removing it renames the occupant and requires a new identification.
+With `N::suspend`, required `pass`/`access` validation still applies before adopting the nick. A successful adopter keeps a client-local, profile-bound authentication proof but receives no account, `+r`, oper, vhost, modes, snomasks or SWHOIS. Adding it to an identified user retains that proof while stripping those UDB effects and preserving the nick. Removing `suspend` reapplies account, `+r`, and the normal profile effects without another password only when the same client still occupies the nick and the retained proof matches the current `pass`/`challenge`/`access` policy and access check. Changing any of those policy fields, leaving the nick, or disconnecting invalidates the proof.
 
 ### 4.2 C block — Channels
 

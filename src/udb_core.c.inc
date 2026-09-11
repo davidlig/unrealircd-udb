@@ -1500,6 +1500,7 @@ static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSessi
 	 * installed so the in-flight session cannot be aborted and freed under us. */
 	udb_policy_notify_deferred = 1;
 	unsigned int real_count = udb_record_count_tree(session->tree);
+	udb_nick_suspend_auth_prepare_tree_replace(block, session->tree);
 	udb_block_reset(ctx, block);
 	udb_block_replace_tree(ctx, block, session->tree, real_count, &session->hash_index);
 	session->tree = NULL;
@@ -1511,6 +1512,7 @@ static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSessi
 	udb_sync_session_free(block);
 
 	udb_apply_tree_effects(ctx, block);
+	udb_nick_suspend_auth_prepare_tree_replace(block, NULL);
 	udb_policy_notify_deferred = 0;
 	udb_propagator_policy_flush(ctx);
 	if (block->letter == 'L')
