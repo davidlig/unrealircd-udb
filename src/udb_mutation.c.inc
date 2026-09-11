@@ -195,6 +195,7 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 		UdbRecord *old_rec;
 		UdbRecord *tree;
 		UdbRecord *rec = NULL;
+		UdbHashIndex hash_index;
 		int unchanged;
 
 		if (!udb_record_validate(block, path + 3, data))
@@ -232,9 +233,16 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 			udb_protocol_mutation_error(client, "INS", UDB_ERR_PARAMS, letter);
 			return;
 		}
+		if (!udb_hash_prepare_tree(tree, &hash_index))
+		{
+			udb_record_free_tree(tree);
+			udb_protocol_mutation_error(client, "INS", UDB_ERR_PARAMS, letter);
+			return;
+		}
 		UdbSnapshotResult snap_res = udb_file_write_snapshot(block, tree, udb_record_count_tree(tree));
 		if (snap_res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
 		{
+			udb_hash_dispose_prepared(&hash_index);
 			udb_record_free_tree(tree);
 			udb_handle_persistence_failure(ctx, direct_peer, block, "INS snapshot", 0);
 			udb_mutation_persist_error(client, "INS", letter);
@@ -257,7 +265,7 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 		}
 		if (block->letter == 'K')
 			udb_lines_expiry_pending_clear_record(old_rec ? old_rec : rec);
-		udb_block_replace_tree(ctx, block, tree, udb_record_count_tree(tree));
+		udb_block_replace_tree(ctx, block, tree, udb_record_count_tree(tree), &hash_index);
 		if (!unchanged)
 		{
 			udb_apply_special_record(ctx, block, rec, 1);
@@ -286,6 +294,7 @@ static int udb_mutation_delete_local(UdbContext *ctx, UdbBlock *block, UdbRecord
 	UdbRecord *candidate_rec = NULL;
 	UdbRecord *candidate_line = NULL;
 	UdbRecord *tree;
+	UdbHashIndex hash_index;
 	unsigned int record_count;
 	UdbSnapshotResult snap_res;
 
@@ -302,9 +311,15 @@ static int udb_mutation_delete_local(UdbContext *ctx, UdbBlock *block, UdbRecord
 		candidate_line = candidate_rec->parent;
 	udb_record_delete_tree(candidate_rec);
 	record_count = udb_record_count_tree(tree);
+	if (!udb_hash_prepare_tree(tree, &hash_index))
+	{
+		udb_record_free_tree(tree);
+		return 0;
+	}
 	snap_res = udb_file_write_snapshot(block, tree, record_count);
 	if (snap_res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
 	{
+		udb_hash_dispose_prepared(&hash_index);
 		udb_record_free_tree(tree);
 		udb_handle_persistence_failure(ctx, direct_peer, block, operation, 0);
 		return 0;
@@ -314,7 +329,7 @@ static int udb_mutation_delete_local(UdbContext *ctx, UdbBlock *block, UdbRecord
 	udb_remove_special_record(ctx, block, old_rec);
 	if (block->letter == 'K')
 		udb_lines_expiry_pending_clear_record(old_rec);
-	udb_block_replace_tree(ctx, block, tree, record_count);
+	udb_block_replace_tree(ctx, block, tree, record_count, &hash_index);
 	if (candidate_line)
 		udb_lines_apply_effect(ctx, block, candidate_line, 0);
 	if (block->letter == 'L')
@@ -474,11 +489,19 @@ static void udb_mutation_drp(UdbContext *ctx, Client *client, Client *direct_pee
 			return;
 		}
 		UdbRecord *tree = udb_record_clone_tree(block->tree, NULL, NULL);
+		UdbHashIndex hash_index;
 		while (tree->child)
 			udb_record_delete_tree(tree->child);
+		if (!udb_hash_prepare_tree(tree, &hash_index))
+		{
+			udb_record_free_tree(tree);
+			udb_protocol_mutation_error(client, "DRP", UDB_ERR_PARAMS, letter);
+			return;
+		}
 		UdbSnapshotResult snap_res = udb_file_write_snapshot(block, tree, 0);
 		if (snap_res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
 		{
+			udb_hash_dispose_prepared(&hash_index);
 			udb_record_free_tree(tree);
 			udb_handle_persistence_failure(ctx, direct_peer, block, "DRP snapshot", 0);
 			udb_mutation_persist_error(client, "DRP", letter);
@@ -486,7 +509,7 @@ static void udb_mutation_drp(UdbContext *ctx, Client *client, Client *direct_pee
 		}
 		/* Reset removes the old block's runtime effects only after persistence. */
 		udb_block_reset(ctx, block);
-		udb_block_replace_tree(ctx, block, tree, 0);
+		udb_block_replace_tree(ctx, block, tree, 0, &hash_index);
 		if (snap_res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
 		{
 			udb_handle_persistence_failure(ctx, direct_peer, block, "DRP snapshot", 1);

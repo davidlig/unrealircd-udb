@@ -33,21 +33,32 @@ static int udb_block_letter_to_index(char letter)
 	}
 }
 
-static void udb_hash_init(UdbContext *ctx)
+static void udb_hash_destroy(UdbContext *ctx);
+
+static int udb_hash_init(UdbContext *ctx)
 {
+	if (!ctx)
+		return 0;
 	for (int i = 0; i < UDB_NUM_BLOCKS; i++)
-		ctx->hash_table[i] = safe_alloc(sizeof(UdbRecord *) * UDB_HASH_SIZE);
+	{
+		ctx->hash[i].buckets = calloc(UDB_HASH_MIN_BUCKETS, sizeof(*ctx->hash[i].buckets));
+		if (!ctx->hash[i].buckets)
+		{
+			udb_hash_destroy(ctx);
+			return 0;
+		}
+		ctx->hash[i].bucket_count = UDB_HASH_MIN_BUCKETS;
+		ctx->hash[i].mask = UDB_HASH_MIN_BUCKETS - 1;
+	}
+	return 1;
 }
 
 static void udb_hash_destroy(UdbContext *ctx)
 {
 	for (int i = 0; i < UDB_NUM_BLOCKS; i++)
 	{
-		if (ctx->hash_table[i])
-		{
-			safe_free(ctx->hash_table[i]);
-			ctx->hash_table[i] = NULL;
-		}
+		free(ctx->hash[i].buckets);
+		memset(&ctx->hash[i], 0, sizeof(ctx->hash[i]));
 	}
 }
 
@@ -55,8 +66,10 @@ static void udb_hash_clear_block(UdbContext *ctx, int block_idx)
 {
 	if (block_idx < 0 || block_idx >= UDB_NUM_BLOCKS)
 		return;
-	safe_free(ctx->hash_table[block_idx]);
-	ctx->hash_table[block_idx] = safe_alloc(sizeof(UdbRecord *) * UDB_HASH_SIZE);
+	if (ctx->hash[block_idx].buckets)
+		memset(ctx->hash[block_idx].buckets, 0,
+			   ctx->hash[block_idx].bucket_count * sizeof(*ctx->hash[block_idx].buckets));
+	ctx->hash[block_idx].entries = 0;
 }
 
 static unsigned int udb_hash_str(const char *str)
@@ -70,22 +83,120 @@ static unsigned int udb_hash_str(const char *str)
 			c += ('a' - 'A');
 		hash = ((hash << 5) + hash) + c; // djb2
 	}
-	return hash & UDB_HASH_MASK;
+	return hash;
+}
+
+static size_t udb_hash_bucket(const char *key, size_t mask)
+{
+	return (size_t)udb_hash_str(key) & mask;
+}
+
+static void udb_hash_dispose_prepared(UdbHashIndex *index)
+{
+	if (!index)
+		return;
+	free(index->buckets);
+	memset(index, 0, sizeof(*index));
+}
+
+static int udb_hash_bucket_count_for_entries(size_t entries, size_t *bucket_count)
+{
+	size_t buckets = UDB_HASH_MIN_BUCKETS;
+
+	if (!bucket_count)
+		return 0;
+	while (entries > buckets - (buckets / UDB_HASH_LOAD_DENOMINATOR))
+	{
+		if (buckets > SIZE_MAX / 2)
+			return 0;
+		buckets *= 2;
+	}
+	if (buckets > SIZE_MAX / sizeof(UdbRecord *))
+		return 0;
+	*bucket_count = buckets;
+	return 1;
+}
+
+/* A prepared index is private to its candidate tree until explicitly published. */
+static int udb_hash_prepare_tree(UdbRecord *tree, UdbHashIndex *index)
+{
+	UdbRecord *rec;
+	size_t entries = 0;
+	size_t bucket_count;
+
+	if (!tree || !index)
+		return 0;
+	memset(index, 0, sizeof(*index));
+	for (rec = tree->child; rec; rec = rec->sibling)
+		entries++;
+	if (!udb_hash_bucket_count_for_entries(entries, &bucket_count))
+		return 0;
+	index->buckets = calloc(bucket_count, sizeof(*index->buckets));
+	if (!index->buckets)
+		return 0;
+	index->bucket_count = bucket_count;
+	index->mask = bucket_count - 1;
+	index->entries = entries;
+	for (rec = tree->child; rec; rec = rec->sibling)
+	{
+		size_t bucket = udb_hash_bucket(rec->key, index->mask);
+		rec->hash_next = index->buckets[bucket];
+		index->buckets[bucket] = rec;
+	}
+	return 1;
+}
+
+static void udb_hash_publish_prepared(UdbContext *ctx, int block_idx, UdbHashIndex *index)
+{
+	if (!ctx || !index || block_idx < 0 || block_idx >= UDB_NUM_BLOCKS)
+		return;
+	free(ctx->hash[block_idx].buckets);
+	ctx->hash[block_idx] = *index;
+	memset(index, 0, sizeof(*index));
 }
 
 static void udb_hash_insert_record(UdbContext *ctx, UdbRecord *rec, int block_idx, const char *key)
 {
-	unsigned int h = udb_hash_str(key);
+	UdbHashIndex prepared;
+	UdbHashIndex *index;
+	size_t bucket;
 
-	rec->hash_next = ctx->hash_table[block_idx][h];
-	ctx->hash_table[block_idx][h] = rec;
+	if (!ctx || !rec || !rec->parent || !key || block_idx < 0 || block_idx >= UDB_NUM_BLOCKS)
+		return;
+	index = &ctx->hash[block_idx];
+	if (!index->buckets ||
+		(index->entries + 1 > index->bucket_count - (index->bucket_count / UDB_HASH_LOAD_DENOMINATOR)))
+	{
+		/* rec is already linked below its root.  A failed allocation leaves the
+		 * active index usable and falls back to the current bucket array. */
+		if (udb_hash_prepare_tree(rec->parent, &prepared))
+		{
+			udb_hash_publish_prepared(ctx, block_idx, &prepared);
+			return;
+		}
+	}
+	if (!index->buckets || !index->bucket_count)
+		return;
+	bucket = udb_hash_bucket(key, index->mask);
+	rec->hash_next = index->buckets[bucket];
+	index->buckets[bucket] = rec;
+	index->entries++;
 }
 
 static int udb_hash_remove_record(UdbContext *ctx, UdbRecord *rec, int block_idx, const char *key)
 {
-	unsigned int h = udb_hash_str(key);
-	UdbRecord *curr = ctx->hash_table[block_idx][h];
+	UdbHashIndex *index;
+	size_t bucket;
+	UdbRecord *curr;
 	UdbRecord *prev = NULL;
+
+	if (!ctx || !rec || !key || block_idx < 0 || block_idx >= UDB_NUM_BLOCKS)
+		return 0;
+	index = &ctx->hash[block_idx];
+	if (!index->buckets || !index->bucket_count)
+		return 0;
+	bucket = udb_hash_bucket(key, index->mask);
+	curr = index->buckets[bucket];
 
 	while (curr)
 	{
@@ -94,7 +205,10 @@ static int udb_hash_remove_record(UdbContext *ctx, UdbRecord *rec, int block_idx
 			if (prev)
 				prev->hash_next = curr->hash_next;
 			else
-				ctx->hash_table[block_idx][h] = curr->hash_next;
+				index->buckets[bucket] = curr->hash_next;
+			curr->hash_next = NULL;
+			if (index->entries)
+				index->entries--;
 			return 1;
 		}
 		prev = curr;
@@ -105,13 +219,17 @@ static int udb_hash_remove_record(UdbContext *ctx, UdbRecord *rec, int block_idx
 
 static UdbRecord *udb_hash_find(UdbContext *ctx, int block_idx, const char *key)
 {
-	unsigned int h;
+	UdbHashIndex *index;
+	size_t bucket;
 	UdbRecord *curr;
 
-	if (!key)
+	if (!ctx || !key || block_idx < 0 || block_idx >= UDB_NUM_BLOCKS)
 		return NULL;
-	h = udb_hash_str(key);
-	curr = ctx->hash_table[block_idx][h];
+	index = &ctx->hash[block_idx];
+	if (!index->buckets || !index->bucket_count)
+		return NULL;
+	bucket = udb_hash_bucket(key, index->mask);
+	curr = index->buckets[bucket];
 	while (curr)
 	{
 		if (!strcasecmp(curr->key, key))

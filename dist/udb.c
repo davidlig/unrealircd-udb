@@ -186,8 +186,8 @@ module
 #define UDB_DEFAULT_MAX_STAGED_RECORDS 500000
 #define UDB_MIN_MAX_STAGED_RECORDS 1
 #define UDB_MAX_MAX_STAGED_RECORDS 10000000
-#define UDB_HASH_SIZE 2048
-#define UDB_HASH_MASK (UDB_HASH_SIZE - 1)
+#define UDB_HASH_MIN_BUCKETS 2048
+#define UDB_HASH_LOAD_DENOMINATOR 4
 #define UDB_PASSWORD_FAILURE_SLOTS 256
 #define UDB_TKL_MASK_COMPONENT_MAX 127
 #define UDB_LINE_EXPIRY_SWEEP_MAX 64
@@ -204,6 +204,14 @@ module
 typedef struct UdbRecord UdbRecord;
 typedef struct UdbBlock UdbBlock;
 typedef struct UdbSyncSession UdbSyncSession;
+
+typedef struct UdbHashIndex
+{
+	UdbRecord **buckets;
+	size_t bucket_count;
+	size_t mask;
+	size_t entries;
+} UdbHashIndex;
 
 typedef struct UdbPropagatorSelection
 {
@@ -270,6 +278,7 @@ typedef enum UdbBlockLoadState
 typedef struct UdbStartupCandidate
 {
 	UdbRecord *tree;
+	UdbHashIndex hash_index;
 	unsigned int record_count;
 	unsigned long checksum;
 	unsigned long generation;
@@ -314,6 +323,7 @@ struct UdbSyncSession
 	time_t deadline;
 	time_t absolute_deadline;
 	UdbRecord *tree;
+	UdbHashIndex hash_index;
 	size_t received_bytes;
 	unsigned int received_puts;
 	unsigned int record_count;
@@ -394,7 +404,7 @@ typedef struct UdbContext
 	UdbRecord *settings;
 	UdbRecord *links;
 	UdbRecord *lines;
-	UdbRecord **hash_table[UDB_NUM_BLOCKS];
+	UdbHashIndex hash[UDB_NUM_BLOCKS];
 	UdbStartupCandidate startup_candidates[UDB_NUM_BLOCKS];
 	char *startup_propagator_setting;
 	char *propagator_setting;
@@ -543,14 +553,18 @@ static int udb_n_tree_profiles_valid(UdbRecord *tree);
 static void udb_n_profile_canonicalize_forbid(UdbRecord *profile);
 static UdbRecord *udb_record_insert_path(UdbRecord *tree, const char *path, const char *data);
 static void udb_record_delete_tree(UdbRecord *rec);
-static void udb_hash_init(UdbContext *ctx);
+static int udb_hash_init(UdbContext *ctx);
 static void udb_hash_destroy(UdbContext *ctx);
+static int udb_hash_prepare_tree(UdbRecord *tree, UdbHashIndex *index);
+static void udb_hash_dispose_prepared(UdbHashIndex *index);
+static void udb_hash_publish_prepared(UdbContext *ctx, int block_idx, UdbHashIndex *index);
 static void udb_hash_insert_record(UdbContext *ctx, UdbRecord *rec, int block_idx, const char *key);
 static int udb_hash_remove_record(UdbContext *ctx, UdbRecord *rec, int block_idx, const char *key);
 static UdbRecord *udb_hash_find(UdbContext *ctx, int block_idx, const char *key);
 static UdbSnapshotResult udb_file_write_snapshot(UdbBlock *block, UdbRecord *tree, unsigned int record_count);
 static int udb_file_save_block(UdbContext *ctx, UdbBlock *block);
-static void udb_block_replace_tree(UdbContext *ctx, UdbBlock *block, UdbRecord *tree, unsigned int record_count);
+static void udb_block_replace_tree(UdbContext *ctx, UdbBlock *block, UdbRecord *tree, unsigned int record_count,
+							   UdbHashIndex *index);
 static int udb_file_load_block(UdbContext *ctx, UdbBlock *block);
 static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *line);
 static int udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbuf, size_t pathlen);
@@ -765,21 +779,32 @@ static int udb_block_letter_to_index(char letter)
 	}
 }
 
-static void udb_hash_init(UdbContext *ctx)
+static void udb_hash_destroy(UdbContext *ctx);
+
+static int udb_hash_init(UdbContext *ctx)
 {
+	if (!ctx)
+		return 0;
 	for (int i = 0; i < UDB_NUM_BLOCKS; i++)
-		ctx->hash_table[i] = safe_alloc(sizeof(UdbRecord *) * UDB_HASH_SIZE);
+	{
+		ctx->hash[i].buckets = calloc(UDB_HASH_MIN_BUCKETS, sizeof(*ctx->hash[i].buckets));
+		if (!ctx->hash[i].buckets)
+		{
+			udb_hash_destroy(ctx);
+			return 0;
+		}
+		ctx->hash[i].bucket_count = UDB_HASH_MIN_BUCKETS;
+		ctx->hash[i].mask = UDB_HASH_MIN_BUCKETS - 1;
+	}
+	return 1;
 }
 
 static void udb_hash_destroy(UdbContext *ctx)
 {
 	for (int i = 0; i < UDB_NUM_BLOCKS; i++)
 	{
-		if (ctx->hash_table[i])
-		{
-			safe_free(ctx->hash_table[i]);
-			ctx->hash_table[i] = NULL;
-		}
+		free(ctx->hash[i].buckets);
+		memset(&ctx->hash[i], 0, sizeof(ctx->hash[i]));
 	}
 }
 
@@ -787,8 +812,10 @@ static void udb_hash_clear_block(UdbContext *ctx, int block_idx)
 {
 	if (block_idx < 0 || block_idx >= UDB_NUM_BLOCKS)
 		return;
-	safe_free(ctx->hash_table[block_idx]);
-	ctx->hash_table[block_idx] = safe_alloc(sizeof(UdbRecord *) * UDB_HASH_SIZE);
+	if (ctx->hash[block_idx].buckets)
+		memset(ctx->hash[block_idx].buckets, 0,
+			   ctx->hash[block_idx].bucket_count * sizeof(*ctx->hash[block_idx].buckets));
+	ctx->hash[block_idx].entries = 0;
 }
 
 static unsigned int udb_hash_str(const char *str)
@@ -802,22 +829,120 @@ static unsigned int udb_hash_str(const char *str)
 			c += ('a' - 'A');
 		hash = ((hash << 5) + hash) + c; // djb2
 	}
-	return hash & UDB_HASH_MASK;
+	return hash;
+}
+
+static size_t udb_hash_bucket(const char *key, size_t mask)
+{
+	return (size_t)udb_hash_str(key) & mask;
+}
+
+static void udb_hash_dispose_prepared(UdbHashIndex *index)
+{
+	if (!index)
+		return;
+	free(index->buckets);
+	memset(index, 0, sizeof(*index));
+}
+
+static int udb_hash_bucket_count_for_entries(size_t entries, size_t *bucket_count)
+{
+	size_t buckets = UDB_HASH_MIN_BUCKETS;
+
+	if (!bucket_count)
+		return 0;
+	while (entries > buckets - (buckets / UDB_HASH_LOAD_DENOMINATOR))
+	{
+		if (buckets > SIZE_MAX / 2)
+			return 0;
+		buckets *= 2;
+	}
+	if (buckets > SIZE_MAX / sizeof(UdbRecord *))
+		return 0;
+	*bucket_count = buckets;
+	return 1;
+}
+
+/* A prepared index is private to its candidate tree until explicitly published. */
+static int udb_hash_prepare_tree(UdbRecord *tree, UdbHashIndex *index)
+{
+	UdbRecord *rec;
+	size_t entries = 0;
+	size_t bucket_count;
+
+	if (!tree || !index)
+		return 0;
+	memset(index, 0, sizeof(*index));
+	for (rec = tree->child; rec; rec = rec->sibling)
+		entries++;
+	if (!udb_hash_bucket_count_for_entries(entries, &bucket_count))
+		return 0;
+	index->buckets = calloc(bucket_count, sizeof(*index->buckets));
+	if (!index->buckets)
+		return 0;
+	index->bucket_count = bucket_count;
+	index->mask = bucket_count - 1;
+	index->entries = entries;
+	for (rec = tree->child; rec; rec = rec->sibling)
+	{
+		size_t bucket = udb_hash_bucket(rec->key, index->mask);
+		rec->hash_next = index->buckets[bucket];
+		index->buckets[bucket] = rec;
+	}
+	return 1;
+}
+
+static void udb_hash_publish_prepared(UdbContext *ctx, int block_idx, UdbHashIndex *index)
+{
+	if (!ctx || !index || block_idx < 0 || block_idx >= UDB_NUM_BLOCKS)
+		return;
+	free(ctx->hash[block_idx].buckets);
+	ctx->hash[block_idx] = *index;
+	memset(index, 0, sizeof(*index));
 }
 
 static void udb_hash_insert_record(UdbContext *ctx, UdbRecord *rec, int block_idx, const char *key)
 {
-	unsigned int h = udb_hash_str(key);
+	UdbHashIndex prepared;
+	UdbHashIndex *index;
+	size_t bucket;
 
-	rec->hash_next = ctx->hash_table[block_idx][h];
-	ctx->hash_table[block_idx][h] = rec;
+	if (!ctx || !rec || !rec->parent || !key || block_idx < 0 || block_idx >= UDB_NUM_BLOCKS)
+		return;
+	index = &ctx->hash[block_idx];
+	if (!index->buckets ||
+		(index->entries + 1 > index->bucket_count - (index->bucket_count / UDB_HASH_LOAD_DENOMINATOR)))
+	{
+		/* rec is already linked below its root.  A failed allocation leaves the
+		 * active index usable and falls back to the current bucket array. */
+		if (udb_hash_prepare_tree(rec->parent, &prepared))
+		{
+			udb_hash_publish_prepared(ctx, block_idx, &prepared);
+			return;
+		}
+	}
+	if (!index->buckets || !index->bucket_count)
+		return;
+	bucket = udb_hash_bucket(key, index->mask);
+	rec->hash_next = index->buckets[bucket];
+	index->buckets[bucket] = rec;
+	index->entries++;
 }
 
 static int udb_hash_remove_record(UdbContext *ctx, UdbRecord *rec, int block_idx, const char *key)
 {
-	unsigned int h = udb_hash_str(key);
-	UdbRecord *curr = ctx->hash_table[block_idx][h];
+	UdbHashIndex *index;
+	size_t bucket;
+	UdbRecord *curr;
 	UdbRecord *prev = NULL;
+
+	if (!ctx || !rec || !key || block_idx < 0 || block_idx >= UDB_NUM_BLOCKS)
+		return 0;
+	index = &ctx->hash[block_idx];
+	if (!index->buckets || !index->bucket_count)
+		return 0;
+	bucket = udb_hash_bucket(key, index->mask);
+	curr = index->buckets[bucket];
 
 	while (curr)
 	{
@@ -826,7 +951,10 @@ static int udb_hash_remove_record(UdbContext *ctx, UdbRecord *rec, int block_idx
 			if (prev)
 				prev->hash_next = curr->hash_next;
 			else
-				ctx->hash_table[block_idx][h] = curr->hash_next;
+				index->buckets[bucket] = curr->hash_next;
+			curr->hash_next = NULL;
+			if (index->entries)
+				index->entries--;
 			return 1;
 		}
 		prev = curr;
@@ -837,13 +965,17 @@ static int udb_hash_remove_record(UdbContext *ctx, UdbRecord *rec, int block_idx
 
 static UdbRecord *udb_hash_find(UdbContext *ctx, int block_idx, const char *key)
 {
-	unsigned int h;
+	UdbHashIndex *index;
+	size_t bucket;
 	UdbRecord *curr;
 
-	if (!key)
+	if (!ctx || !key || block_idx < 0 || block_idx >= UDB_NUM_BLOCKS)
 		return NULL;
-	h = udb_hash_str(key);
-	curr = ctx->hash_table[block_idx][h];
+	index = &ctx->hash[block_idx];
+	if (!index->buckets || !index->bucket_count)
+		return NULL;
+	bucket = udb_hash_bucket(key, index->mask);
+	curr = index->buckets[bucket];
 	while (curr)
 	{
 		if (!strcasecmp(curr->key, key))
@@ -3022,23 +3154,26 @@ done:
 	return result;
 }
 
-static void udb_block_replace_tree(UdbContext *ctx, UdbBlock *block, UdbRecord *tree, unsigned int record_count)
+static void udb_block_replace_tree(UdbContext *ctx, UdbBlock *block, UdbRecord *tree, unsigned int record_count,
+							   UdbHashIndex *index)
 {
-	UdbRecord *rec;
 	struct stat st;
+	int block_idx;
+
+	if (!ctx || !block || !tree || !index || !index->buckets)
+		return;
+	block_idx = udb_block_letter_to_index(block->letter);
 
 	if (ctx->total_records >= block->record_count)
 		ctx->total_records -= block->record_count;
 	else
 		ctx->total_records = 0;
 	udb_record_free_tree(block->tree);
-	udb_hash_clear_block(ctx, udb_block_letter_to_index(block->letter));
+	udb_hash_publish_prepared(ctx, block_idx, index);
 	block->tree = tree;
 	block->record_count = record_count;
 	block->load_state = UDB_LOAD_SUCCESS;
 	ctx->total_records += record_count;
-	for (rec = tree->child; rec; rec = rec->sibling)
-		udb_hash_insert_record(ctx, rec, udb_block_letter_to_index(block->letter), rec->key);
 	udb_block_set_context_root(ctx, block);
 	if (!udb_compute_block_checksum(block, &block->checksum))
 	{
@@ -3059,6 +3194,7 @@ static UdbRecord *udb_record_insert(UdbContext *ctx, UdbBlock *block, UdbRecord 
 	{
 		UdbRecord *candidate_parent = NULL;
 		UdbRecord *candidate;
+		UdbHashIndex hash_index;
 		char value[32];
 
 		if (!parent)
@@ -3096,13 +3232,19 @@ static UdbRecord *udb_record_insert(UdbContext *ctx, UdbBlock *block, UdbRecord 
 			safe_strdup(rec->data_str, data_str);
 			rec->data_num = 0;
 		}
-		UdbSnapshotResult res = udb_file_write_snapshot(block, candidate, udb_record_count_tree(candidate));
-		if (res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
+		if (!udb_hash_prepare_tree(candidate, &hash_index))
 		{
 			udb_record_free_tree(candidate);
 			return NULL;
 		}
-		udb_block_replace_tree(ctx, block, candidate, udb_record_count_tree(candidate));
+		UdbSnapshotResult res = udb_file_write_snapshot(block, candidate, udb_record_count_tree(candidate));
+		if (res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
+		{
+			udb_hash_dispose_prepared(&hash_index);
+			udb_record_free_tree(candidate);
+			return NULL;
+		}
+		udb_block_replace_tree(ctx, block, candidate, udb_record_count_tree(candidate), &hash_index);
 		udb_apply_special_record(ctx, block, rec, 1);
 		if (res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
 			udb_mark_durability_uncertain(ctx, block, "record insert");
@@ -3181,6 +3323,7 @@ static UdbRecord *udb_record_delete(UdbContext *ctx, UdbBlock *block, UdbRecord 
 		UdbRecord *candidate_rec = NULL;
 		UdbRecord *candidate_line = NULL;
 		UdbRecord *candidate = udb_record_clone_tree(block->tree, rec, &candidate_rec);
+		UdbHashIndex hash_index;
 		if (!candidate_rec)
 		{
 			udb_record_free_tree(candidate);
@@ -3190,14 +3333,20 @@ static UdbRecord *udb_record_delete(UdbContext *ctx, UdbBlock *block, UdbRecord 
 			candidate_rec->parent->parent != candidate)
 			candidate_line = candidate_rec->parent;
 		udb_record_delete_tree(candidate_rec);
-		UdbSnapshotResult res = udb_file_write_snapshot(block, candidate, udb_record_count_tree(candidate));
-		if (res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
+		if (!udb_hash_prepare_tree(candidate, &hash_index))
 		{
 			udb_record_free_tree(candidate);
 			return rec;
 		}
+		UdbSnapshotResult res = udb_file_write_snapshot(block, candidate, udb_record_count_tree(candidate));
+		if (res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
+		{
+			udb_hash_dispose_prepared(&hash_index);
+			udb_record_free_tree(candidate);
+			return rec;
+		}
 		udb_remove_special_record(ctx, block, rec);
-		udb_block_replace_tree(ctx, block, candidate, udb_record_count_tree(candidate));
+		udb_block_replace_tree(ctx, block, candidate, udb_record_count_tree(candidate), &hash_index);
 		if (candidate_line)
 			udb_lines_apply_effect(ctx, block, candidate_line, 0);
 		if (res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
@@ -3520,6 +3669,7 @@ static void udb_sync_session_free(UdbBlock *block)
 	if (!block || !block->session)
 		return;
 	udb_record_free_tree(block->session->tree);
+	udb_hash_dispose_prepared(&block->session->hash_index);
 	safe_free(block->session);
 	block->session = NULL;
 	block->syncing_from = NULL;
@@ -3527,7 +3677,6 @@ static void udb_sync_session_free(UdbBlock *block)
 
 static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSession *session, unsigned long checksum)
 {
-	UdbRecord *rec;
 	struct stat st;
 
 	if (!block || !session || block->session != session)
@@ -3539,15 +3688,9 @@ static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSessi
 	udb_policy_notify_deferred = 1;
 	unsigned int real_count = udb_record_count_tree(session->tree);
 	udb_block_reset(ctx, block);
-	udb_record_free_tree(block->tree);
-	block->tree = session->tree;
+	udb_block_replace_tree(ctx, block, session->tree, real_count, &session->hash_index);
 	session->tree = NULL;
-	block->record_count = real_count;
 	block->load_state = real_count ? UDB_LOAD_SUCCESS : UDB_LOAD_EMPTY;
-	ctx->total_records += block->record_count;
-	for (rec = block->tree->child; rec; rec = rec->sibling)
-		udb_hash_insert_record(ctx, rec, udb_block_letter_to_index(block->letter), rec->key);
-	udb_block_set_context_root(ctx, block);
 	block->checksum = checksum;
 	block->modified_at = time(NULL);
 	if (stat(block->filepath, &st) == 0)
@@ -3727,6 +3870,7 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 	{
 		startup_candidate = &ctx->startup_candidates[udb_block_letter_to_index(block->letter)];
 		udb_record_free_tree(startup_candidate->tree);
+		udb_hash_dispose_prepared(&startup_candidate->hash_index);
 		memset(startup_candidate, 0, sizeof(*startup_candidate));
 	}
 
@@ -3880,6 +4024,12 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 
 	if (startup_candidate)
 	{
+		if (!udb_hash_prepare_tree(candidate, &startup_candidate->hash_index))
+		{
+			udb_record_free_tree(candidate);
+			startup_candidate->load_state = UDB_LOAD_FAILED;
+			return 0;
+		}
 		startup_candidate->tree = candidate;
 		startup_candidate->record_count = record_count;
 		startup_candidate->checksum = checksum;
@@ -3888,7 +4038,14 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 	}
 	else
 	{
-		udb_block_replace_tree(ctx, block, candidate, record_count);
+		UdbHashIndex hash_index;
+		if (!udb_hash_prepare_tree(candidate, &hash_index))
+		{
+			udb_record_free_tree(candidate);
+			block->load_state = UDB_LOAD_FAILED;
+			return 0;
+		}
+		udb_block_replace_tree(ctx, block, candidate, record_count, &hash_index);
 		block->checksum = checksum;
 		block->generation = generation_seen ? loaded_generation : 0;
 		udb_apply_tree_effects(ctx, block);
@@ -5126,10 +5283,17 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, unsigned
 	}
 
 	previous_generation = block->generation;
+	if (!udb_hash_prepare_tree(session->tree, &session->hash_index))
+	{
+		udb_sync_abort(block, "hash index allocation failure");
+		udb_sync_round_failure(block, peer, round_id, "staged hash index allocation failure");
+		return UDB_ERR_FATAL;
+	}
 	block->generation = udb_reconcile.generation;
 	UdbSnapshotResult snap_res = udb_file_write_snapshot(block, session->tree, session->record_count);
 	if (snap_res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
 	{
+		udb_hash_dispose_prepared(&session->hash_index);
 		block->generation = previous_generation;
 		udb_sync_abort(block, "digest or persistence failure");
 		udb_handle_persistence_failure(ctx, peer, block, "END snapshot", 0);
@@ -6881,6 +7045,7 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 		UdbRecord *old_rec;
 		UdbRecord *tree;
 		UdbRecord *rec = NULL;
+		UdbHashIndex hash_index;
 		int unchanged;
 
 		if (!udb_record_validate(block, path + 3, data))
@@ -6918,9 +7083,16 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 			udb_protocol_mutation_error(client, "INS", UDB_ERR_PARAMS, letter);
 			return;
 		}
+		if (!udb_hash_prepare_tree(tree, &hash_index))
+		{
+			udb_record_free_tree(tree);
+			udb_protocol_mutation_error(client, "INS", UDB_ERR_PARAMS, letter);
+			return;
+		}
 		UdbSnapshotResult snap_res = udb_file_write_snapshot(block, tree, udb_record_count_tree(tree));
 		if (snap_res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
 		{
+			udb_hash_dispose_prepared(&hash_index);
 			udb_record_free_tree(tree);
 			udb_handle_persistence_failure(ctx, direct_peer, block, "INS snapshot", 0);
 			udb_mutation_persist_error(client, "INS", letter);
@@ -6943,7 +7115,7 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 		}
 		if (block->letter == 'K')
 			udb_lines_expiry_pending_clear_record(old_rec ? old_rec : rec);
-		udb_block_replace_tree(ctx, block, tree, udb_record_count_tree(tree));
+		udb_block_replace_tree(ctx, block, tree, udb_record_count_tree(tree), &hash_index);
 		if (!unchanged)
 		{
 			udb_apply_special_record(ctx, block, rec, 1);
@@ -6972,6 +7144,7 @@ static int udb_mutation_delete_local(UdbContext *ctx, UdbBlock *block, UdbRecord
 	UdbRecord *candidate_rec = NULL;
 	UdbRecord *candidate_line = NULL;
 	UdbRecord *tree;
+	UdbHashIndex hash_index;
 	unsigned int record_count;
 	UdbSnapshotResult snap_res;
 
@@ -6988,9 +7161,15 @@ static int udb_mutation_delete_local(UdbContext *ctx, UdbBlock *block, UdbRecord
 		candidate_line = candidate_rec->parent;
 	udb_record_delete_tree(candidate_rec);
 	record_count = udb_record_count_tree(tree);
+	if (!udb_hash_prepare_tree(tree, &hash_index))
+	{
+		udb_record_free_tree(tree);
+		return 0;
+	}
 	snap_res = udb_file_write_snapshot(block, tree, record_count);
 	if (snap_res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
 	{
+		udb_hash_dispose_prepared(&hash_index);
 		udb_record_free_tree(tree);
 		udb_handle_persistence_failure(ctx, direct_peer, block, operation, 0);
 		return 0;
@@ -7000,7 +7179,7 @@ static int udb_mutation_delete_local(UdbContext *ctx, UdbBlock *block, UdbRecord
 	udb_remove_special_record(ctx, block, old_rec);
 	if (block->letter == 'K')
 		udb_lines_expiry_pending_clear_record(old_rec);
-	udb_block_replace_tree(ctx, block, tree, record_count);
+	udb_block_replace_tree(ctx, block, tree, record_count, &hash_index);
 	if (candidate_line)
 		udb_lines_apply_effect(ctx, block, candidate_line, 0);
 	if (block->letter == 'L')
@@ -7160,11 +7339,19 @@ static void udb_mutation_drp(UdbContext *ctx, Client *client, Client *direct_pee
 			return;
 		}
 		UdbRecord *tree = udb_record_clone_tree(block->tree, NULL, NULL);
+		UdbHashIndex hash_index;
 		while (tree->child)
 			udb_record_delete_tree(tree->child);
+		if (!udb_hash_prepare_tree(tree, &hash_index))
+		{
+			udb_record_free_tree(tree);
+			udb_protocol_mutation_error(client, "DRP", UDB_ERR_PARAMS, letter);
+			return;
+		}
 		UdbSnapshotResult snap_res = udb_file_write_snapshot(block, tree, 0);
 		if (snap_res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
 		{
+			udb_hash_dispose_prepared(&hash_index);
 			udb_record_free_tree(tree);
 			udb_handle_persistence_failure(ctx, direct_peer, block, "DRP snapshot", 0);
 			udb_mutation_persist_error(client, "DRP", letter);
@@ -7172,7 +7359,7 @@ static void udb_mutation_drp(UdbContext *ctx, Client *client, Client *direct_pee
 		}
 		/* Reset removes the old block's runtime effects only after persistence. */
 		udb_block_reset(ctx, block);
-		udb_block_replace_tree(ctx, block, tree, 0);
+		udb_block_replace_tree(ctx, block, tree, 0, &hash_index);
 		if (snap_res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
 		{
 			udb_handle_persistence_failure(ctx, direct_peer, block, "DRP snapshot", 1);
@@ -11197,6 +11384,7 @@ static void udb_startup_candidates_discard(UdbContext *ctx)
 	for (i = 0; i < UDB_NUM_BLOCKS; i++)
 	{
 		udb_record_free_tree(ctx->startup_candidates[i].tree);
+		udb_hash_dispose_prepared(&ctx->startup_candidates[i].hash_index);
 		memset(&ctx->startup_candidates[i], 0, sizeof(ctx->startup_candidates[i]));
 	}
 }
@@ -11233,13 +11421,12 @@ static int udb_startup_publish(UdbContext *ctx)
 	for (block = ctx->block_list; block; block = block->next)
 	{
 		UdbStartupCandidate *candidate = &ctx->startup_candidates[udb_block_letter_to_index(block->letter)];
-		UdbRecord *record;
 		struct stat st;
 
 		if (candidate->load_state != UDB_LOAD_SUCCESS || !candidate->tree)
 			return 0;
 		udb_record_free_tree(block->tree);
-		udb_hash_clear_block(ctx, udb_block_letter_to_index(block->letter));
+		udb_hash_publish_prepared(ctx, udb_block_letter_to_index(block->letter), &candidate->hash_index);
 		block->tree = candidate->tree;
 		block->record_count = candidate->record_count;
 		block->checksum = candidate->checksum;
@@ -11247,8 +11434,6 @@ static int udb_startup_publish(UdbContext *ctx)
 		block->load_state = UDB_LOAD_SUCCESS;
 		candidate->tree = NULL;
 		ctx->total_records += block->record_count;
-		for (record = block->tree->child; record; record = record->sibling)
-			udb_hash_insert_record(ctx, record, udb_block_letter_to_index(block->letter), record->key);
 		udb_block_set_context_root(ctx, block);
 		if (stat(block->filepath, &st) == 0)
 		{
@@ -11783,7 +11968,13 @@ static int udb_engine_init(void)
 	if (udb_cfg->max_staged_records == 0)
 		udb_cfg->max_staged_records = UDB_DEFAULT_MAX_STAGED_RECORDS;
 	udb_ctx = safe_alloc(sizeof(UdbContext));
-	udb_hash_init(udb_ctx);
+	if (!udb_hash_init(udb_ctx))
+	{
+		udb_log(ULOG_ERROR, "UDB_HASH_INIT_FAILED", NULL, "Cannot allocate UDB root hash indexes", NULL);
+		safe_free(udb_ctx);
+		udb_ctx = NULL;
+		return 0;
+	}
 	dir = PERMDATADIR;
 	if (!dir)
 		return 0;

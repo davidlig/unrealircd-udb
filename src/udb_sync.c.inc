@@ -925,10 +925,17 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, unsigned
 	}
 
 	previous_generation = block->generation;
+	if (!udb_hash_prepare_tree(session->tree, &session->hash_index))
+	{
+		udb_sync_abort(block, "hash index allocation failure");
+		udb_sync_round_failure(block, peer, round_id, "staged hash index allocation failure");
+		return UDB_ERR_FATAL;
+	}
 	block->generation = udb_reconcile.generation;
 	UdbSnapshotResult snap_res = udb_file_write_snapshot(block, session->tree, session->record_count);
 	if (snap_res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
 	{
+		udb_hash_dispose_prepared(&session->hash_index);
 		block->generation = previous_generation;
 		udb_sync_abort(block, "digest or persistence failure");
 		udb_handle_persistence_failure(ctx, peer, block, "END snapshot", 0);

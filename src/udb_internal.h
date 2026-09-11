@@ -42,8 +42,8 @@
 #define UDB_DEFAULT_MAX_STAGED_RECORDS 500000
 #define UDB_MIN_MAX_STAGED_RECORDS 1
 #define UDB_MAX_MAX_STAGED_RECORDS 10000000
-#define UDB_HASH_SIZE 2048
-#define UDB_HASH_MASK (UDB_HASH_SIZE - 1)
+#define UDB_HASH_MIN_BUCKETS 2048
+#define UDB_HASH_LOAD_DENOMINATOR 4
 #define UDB_PASSWORD_FAILURE_SLOTS 256
 #define UDB_TKL_MASK_COMPONENT_MAX 127
 #define UDB_LINE_EXPIRY_SWEEP_MAX 64
@@ -60,6 +60,14 @@
 typedef struct UdbRecord UdbRecord;
 typedef struct UdbBlock UdbBlock;
 typedef struct UdbSyncSession UdbSyncSession;
+
+typedef struct UdbHashIndex
+{
+	UdbRecord **buckets;
+	size_t bucket_count;
+	size_t mask;
+	size_t entries;
+} UdbHashIndex;
 
 typedef struct UdbPropagatorSelection
 {
@@ -126,6 +134,7 @@ typedef enum UdbBlockLoadState
 typedef struct UdbStartupCandidate
 {
 	UdbRecord *tree;
+	UdbHashIndex hash_index;
 	unsigned int record_count;
 	unsigned long checksum;
 	unsigned long generation;
@@ -170,6 +179,7 @@ struct UdbSyncSession
 	time_t deadline;
 	time_t absolute_deadline;
 	UdbRecord *tree;
+	UdbHashIndex hash_index;
 	size_t received_bytes;
 	unsigned int received_puts;
 	unsigned int record_count;
@@ -250,7 +260,7 @@ typedef struct UdbContext
 	UdbRecord *settings;
 	UdbRecord *links;
 	UdbRecord *lines;
-	UdbRecord **hash_table[UDB_NUM_BLOCKS];
+	UdbHashIndex hash[UDB_NUM_BLOCKS];
 	UdbStartupCandidate startup_candidates[UDB_NUM_BLOCKS];
 	char *startup_propagator_setting;
 	char *propagator_setting;
@@ -399,14 +409,18 @@ static int udb_n_tree_profiles_valid(UdbRecord *tree);
 static void udb_n_profile_canonicalize_forbid(UdbRecord *profile);
 static UdbRecord *udb_record_insert_path(UdbRecord *tree, const char *path, const char *data);
 static void udb_record_delete_tree(UdbRecord *rec);
-static void udb_hash_init(UdbContext *ctx);
+static int udb_hash_init(UdbContext *ctx);
 static void udb_hash_destroy(UdbContext *ctx);
+static int udb_hash_prepare_tree(UdbRecord *tree, UdbHashIndex *index);
+static void udb_hash_dispose_prepared(UdbHashIndex *index);
+static void udb_hash_publish_prepared(UdbContext *ctx, int block_idx, UdbHashIndex *index);
 static void udb_hash_insert_record(UdbContext *ctx, UdbRecord *rec, int block_idx, const char *key);
 static int udb_hash_remove_record(UdbContext *ctx, UdbRecord *rec, int block_idx, const char *key);
 static UdbRecord *udb_hash_find(UdbContext *ctx, int block_idx, const char *key);
 static UdbSnapshotResult udb_file_write_snapshot(UdbBlock *block, UdbRecord *tree, unsigned int record_count);
 static int udb_file_save_block(UdbContext *ctx, UdbBlock *block);
-static void udb_block_replace_tree(UdbContext *ctx, UdbBlock *block, UdbRecord *tree, unsigned int record_count);
+static void udb_block_replace_tree(UdbContext *ctx, UdbBlock *block, UdbRecord *tree, unsigned int record_count,
+							   UdbHashIndex *index);
 static int udb_file_load_block(UdbContext *ctx, UdbBlock *block);
 static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *line);
 static int udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbuf, size_t pathlen);

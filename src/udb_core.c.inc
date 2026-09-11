@@ -972,23 +972,26 @@ done:
 	return result;
 }
 
-static void udb_block_replace_tree(UdbContext *ctx, UdbBlock *block, UdbRecord *tree, unsigned int record_count)
+static void udb_block_replace_tree(UdbContext *ctx, UdbBlock *block, UdbRecord *tree, unsigned int record_count,
+							   UdbHashIndex *index)
 {
-	UdbRecord *rec;
 	struct stat st;
+	int block_idx;
+
+	if (!ctx || !block || !tree || !index || !index->buckets)
+		return;
+	block_idx = udb_block_letter_to_index(block->letter);
 
 	if (ctx->total_records >= block->record_count)
 		ctx->total_records -= block->record_count;
 	else
 		ctx->total_records = 0;
 	udb_record_free_tree(block->tree);
-	udb_hash_clear_block(ctx, udb_block_letter_to_index(block->letter));
+	udb_hash_publish_prepared(ctx, block_idx, index);
 	block->tree = tree;
 	block->record_count = record_count;
 	block->load_state = UDB_LOAD_SUCCESS;
 	ctx->total_records += record_count;
-	for (rec = tree->child; rec; rec = rec->sibling)
-		udb_hash_insert_record(ctx, rec, udb_block_letter_to_index(block->letter), rec->key);
 	udb_block_set_context_root(ctx, block);
 	if (!udb_compute_block_checksum(block, &block->checksum))
 	{
@@ -1009,6 +1012,7 @@ static UdbRecord *udb_record_insert(UdbContext *ctx, UdbBlock *block, UdbRecord 
 	{
 		UdbRecord *candidate_parent = NULL;
 		UdbRecord *candidate;
+		UdbHashIndex hash_index;
 		char value[32];
 
 		if (!parent)
@@ -1046,13 +1050,19 @@ static UdbRecord *udb_record_insert(UdbContext *ctx, UdbBlock *block, UdbRecord 
 			safe_strdup(rec->data_str, data_str);
 			rec->data_num = 0;
 		}
-		UdbSnapshotResult res = udb_file_write_snapshot(block, candidate, udb_record_count_tree(candidate));
-		if (res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
+		if (!udb_hash_prepare_tree(candidate, &hash_index))
 		{
 			udb_record_free_tree(candidate);
 			return NULL;
 		}
-		udb_block_replace_tree(ctx, block, candidate, udb_record_count_tree(candidate));
+		UdbSnapshotResult res = udb_file_write_snapshot(block, candidate, udb_record_count_tree(candidate));
+		if (res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
+		{
+			udb_hash_dispose_prepared(&hash_index);
+			udb_record_free_tree(candidate);
+			return NULL;
+		}
+		udb_block_replace_tree(ctx, block, candidate, udb_record_count_tree(candidate), &hash_index);
 		udb_apply_special_record(ctx, block, rec, 1);
 		if (res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
 			udb_mark_durability_uncertain(ctx, block, "record insert");
@@ -1131,6 +1141,7 @@ static UdbRecord *udb_record_delete(UdbContext *ctx, UdbBlock *block, UdbRecord 
 		UdbRecord *candidate_rec = NULL;
 		UdbRecord *candidate_line = NULL;
 		UdbRecord *candidate = udb_record_clone_tree(block->tree, rec, &candidate_rec);
+		UdbHashIndex hash_index;
 		if (!candidate_rec)
 		{
 			udb_record_free_tree(candidate);
@@ -1140,14 +1151,20 @@ static UdbRecord *udb_record_delete(UdbContext *ctx, UdbBlock *block, UdbRecord 
 			candidate_rec->parent->parent != candidate)
 			candidate_line = candidate_rec->parent;
 		udb_record_delete_tree(candidate_rec);
-		UdbSnapshotResult res = udb_file_write_snapshot(block, candidate, udb_record_count_tree(candidate));
-		if (res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
+		if (!udb_hash_prepare_tree(candidate, &hash_index))
 		{
 			udb_record_free_tree(candidate);
 			return rec;
 		}
+		UdbSnapshotResult res = udb_file_write_snapshot(block, candidate, udb_record_count_tree(candidate));
+		if (res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
+		{
+			udb_hash_dispose_prepared(&hash_index);
+			udb_record_free_tree(candidate);
+			return rec;
+		}
 		udb_remove_special_record(ctx, block, rec);
-		udb_block_replace_tree(ctx, block, candidate, udb_record_count_tree(candidate));
+		udb_block_replace_tree(ctx, block, candidate, udb_record_count_tree(candidate), &hash_index);
 		if (candidate_line)
 			udb_lines_apply_effect(ctx, block, candidate_line, 0);
 		if (res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
@@ -1470,6 +1487,7 @@ static void udb_sync_session_free(UdbBlock *block)
 	if (!block || !block->session)
 		return;
 	udb_record_free_tree(block->session->tree);
+	udb_hash_dispose_prepared(&block->session->hash_index);
 	safe_free(block->session);
 	block->session = NULL;
 	block->syncing_from = NULL;
@@ -1477,7 +1495,6 @@ static void udb_sync_session_free(UdbBlock *block)
 
 static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSession *session, unsigned long checksum)
 {
-	UdbRecord *rec;
 	struct stat st;
 
 	if (!block || !session || block->session != session)
@@ -1489,15 +1506,9 @@ static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSessi
 	udb_policy_notify_deferred = 1;
 	unsigned int real_count = udb_record_count_tree(session->tree);
 	udb_block_reset(ctx, block);
-	udb_record_free_tree(block->tree);
-	block->tree = session->tree;
+	udb_block_replace_tree(ctx, block, session->tree, real_count, &session->hash_index);
 	session->tree = NULL;
-	block->record_count = real_count;
 	block->load_state = real_count ? UDB_LOAD_SUCCESS : UDB_LOAD_EMPTY;
-	ctx->total_records += block->record_count;
-	for (rec = block->tree->child; rec; rec = rec->sibling)
-		udb_hash_insert_record(ctx, rec, udb_block_letter_to_index(block->letter), rec->key);
-	udb_block_set_context_root(ctx, block);
 	block->checksum = checksum;
 	block->modified_at = time(NULL);
 	if (stat(block->filepath, &st) == 0)
@@ -1677,6 +1688,7 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 	{
 		startup_candidate = &ctx->startup_candidates[udb_block_letter_to_index(block->letter)];
 		udb_record_free_tree(startup_candidate->tree);
+		udb_hash_dispose_prepared(&startup_candidate->hash_index);
 		memset(startup_candidate, 0, sizeof(*startup_candidate));
 	}
 
@@ -1830,6 +1842,12 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 
 	if (startup_candidate)
 	{
+		if (!udb_hash_prepare_tree(candidate, &startup_candidate->hash_index))
+		{
+			udb_record_free_tree(candidate);
+			startup_candidate->load_state = UDB_LOAD_FAILED;
+			return 0;
+		}
 		startup_candidate->tree = candidate;
 		startup_candidate->record_count = record_count;
 		startup_candidate->checksum = checksum;
@@ -1838,7 +1856,14 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 	}
 	else
 	{
-		udb_block_replace_tree(ctx, block, candidate, record_count);
+		UdbHashIndex hash_index;
+		if (!udb_hash_prepare_tree(candidate, &hash_index))
+		{
+			udb_record_free_tree(candidate);
+			block->load_state = UDB_LOAD_FAILED;
+			return 0;
+		}
+		udb_block_replace_tree(ctx, block, candidate, record_count, &hash_index);
 		block->checksum = checksum;
 		block->generation = generation_seen ? loaded_generation : 0;
 		udb_apply_tree_effects(ctx, block);

@@ -155,6 +155,7 @@ static void udb_startup_candidates_discard(UdbContext *ctx)
 	for (i = 0; i < UDB_NUM_BLOCKS; i++)
 	{
 		udb_record_free_tree(ctx->startup_candidates[i].tree);
+		udb_hash_dispose_prepared(&ctx->startup_candidates[i].hash_index);
 		memset(&ctx->startup_candidates[i], 0, sizeof(ctx->startup_candidates[i]));
 	}
 }
@@ -191,13 +192,12 @@ static int udb_startup_publish(UdbContext *ctx)
 	for (block = ctx->block_list; block; block = block->next)
 	{
 		UdbStartupCandidate *candidate = &ctx->startup_candidates[udb_block_letter_to_index(block->letter)];
-		UdbRecord *record;
 		struct stat st;
 
 		if (candidate->load_state != UDB_LOAD_SUCCESS || !candidate->tree)
 			return 0;
 		udb_record_free_tree(block->tree);
-		udb_hash_clear_block(ctx, udb_block_letter_to_index(block->letter));
+		udb_hash_publish_prepared(ctx, udb_block_letter_to_index(block->letter), &candidate->hash_index);
 		block->tree = candidate->tree;
 		block->record_count = candidate->record_count;
 		block->checksum = candidate->checksum;
@@ -205,8 +205,6 @@ static int udb_startup_publish(UdbContext *ctx)
 		block->load_state = UDB_LOAD_SUCCESS;
 		candidate->tree = NULL;
 		ctx->total_records += block->record_count;
-		for (record = block->tree->child; record; record = record->sibling)
-			udb_hash_insert_record(ctx, record, udb_block_letter_to_index(block->letter), record->key);
 		udb_block_set_context_root(ctx, block);
 		if (stat(block->filepath, &st) == 0)
 		{
@@ -741,7 +739,13 @@ static int udb_engine_init(void)
 	if (udb_cfg->max_staged_records == 0)
 		udb_cfg->max_staged_records = UDB_DEFAULT_MAX_STAGED_RECORDS;
 	udb_ctx = safe_alloc(sizeof(UdbContext));
-	udb_hash_init(udb_ctx);
+	if (!udb_hash_init(udb_ctx))
+	{
+		udb_log(ULOG_ERROR, "UDB_HASH_INIT_FAILED", NULL, "Cannot allocate UDB root hash indexes", NULL);
+		safe_free(udb_ctx);
+		udb_ctx = NULL;
+		return 0;
+	}
 	dir = PERMDATADIR;
 	if (!dir)
 		return 0;
