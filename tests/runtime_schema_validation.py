@@ -83,9 +83,9 @@ set {{
     help-channel "#help";
     cloak-keys {{ "{CLOAK_KEYS[0]}"; "{CLOAK_KEYS[1]}"; "{CLOAK_KEYS[2]}"; }}
 }}
-class clients {{ pingfreq 60; maxclients 20; sendq 1M; recvq 8000; }}
+class clients {{ pingfreq 60; maxclients 100; sendq 1M; recvq 8000; }}
 class servers {{ pingfreq 60; connfreq 6; maxclients 4; sendq 20M; }}
-allow {{ mask "127.0.0.1"; class clients; maxperip 20; }}
+allow {{ mask "127.0.0.1"; class clients; maxperip 100; }}
 listen {{ ip "127.0.0.1"; port {client_port}; }}
 listen {{ ip "127.0.0.1"; port {server_port}; options {{ serversonly; }} }}
 listen {{ ip "127.0.0.1"; port {tls_port}; options {{ tls; }} }}

@@ -433,7 +433,7 @@ static int udb_snomasks_record_valid(const char *value)
 	{
 		if (*c == '+' || *c == '-')
 			continue;
-		if (!isalpha((unsigned char)*c))
+		if (!isalpha((unsigned char)*c) || !is_valid_snomask(*c))
 			return 0;
 		letters++;
 	}

@@ -164,6 +164,7 @@ jobs:
           python3 tests/runtime_channel_modes_ins.py
           python3 tests/runtime_channel_nick.py
           python3 tests/runtime_nick_auth.py
+          python3 tests/test_block_n_differential.py
           python3 tests/runtime_debug_notices.py
           python3 tests/runtime_lock_modes.py
           python3 tests/runtime_schema_validation.py

@@ -219,6 +219,27 @@ def read_snomask(services, client, nick, description, timeout=10):
     return ""
 
 
+def read_oper_state(services, client, nick, description="get oper state", timeout=10):
+    start = len(client.lines)
+    services.send(f"UDBTEST GETOPER {nick}")
+    client.wait_for(lambda line: "UDBTEST OPER=" in line, description, start=start, timeout=timeout)
+    for line in reversed(client.lines[start:]):
+        if "UDBTEST OPER=" in line:
+            parts = line.split("UDBTEST ", 1)[1].strip().split()
+            data = {}
+            for part in parts:
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    data[k] = v
+            return {
+                "oper": data.get("OPER") == "1",
+                "operclass": data.get("OPERCLASS"),
+                "opercount": int(data.get("OPERCOUNT", 0)),
+                "operlist": int(data.get("OPERLIST", 0)),
+            }
+    raise AssertionError(f"Could not parse oper state from lines: {client.lines[start:]!r}")
+
+
 def authenticate(client, nick, password, description="authentication", timeout=20):
     client.request(f"NICK {nick}:{password}", lambda line: f" NICK :{nick}" in line, description,
                    timeout=timeout)
@@ -229,6 +250,7 @@ def run_tests(ircd, module, keep=False):
     global _services
     root = pathlib.Path(tempfile.mkdtemp(prefix="udb-nick-auth-"))
     process = None
+    stdout_handle = None
     services = None
     clients = []
     try:
@@ -243,14 +265,31 @@ def run_tests(ircd, module, keep=False):
                      node / "modules" / "third" / "udb.so", node / "runtime-data",
                      extra_modules=("third/udb_test_state",))
         with config.open("a", encoding="ascii") as handle:
+            handle.write(f'include "{RUNTIME_ROOT}/conf/operclass.default.conf";\n')
+            handle.write('oper testoper {\n'
+                         '    mask *;\n'
+                         '    password "operpass";\n'
+                         '    operclass locop;\n'
+                         '    class clients;\n'
+                         '};\n')
+            handle.write('oper netadminoper {\n'
+                         '    mask *;\n'
+                         '    password "netadminpass";\n'
+                         '    operclass netadmin;\n'
+                         '    class clients;\n'
+                         '};\n')
             handle.write("set { anti-flood { known-users { nick-flood 20:60; } "
                          "unknown-users { nick-flood 20:60; } } }\n")
         run_configtest(node, ircd, config)
-        process = subprocess.Popen(bwrap_command(node, ircd, config), stdout=subprocess.PIPE,
+        stdout_path = node / "logs" / "ircd.stdout"
+        stdout_handle = stdout_path.open("w", encoding="utf-8")
+        process = subprocess.Popen(bwrap_command(node, ircd, config), stdout=stdout_handle,
                                    stderr=subprocess.STDOUT, text=True)
         time.sleep(1)
         if process.poll() is not None:
-            output, _ = process.communicate()
+            stdout_handle.close()
+            with stdout_path.open("r", encoding="utf-8", errors="replace") as h:
+                output = h.read()
             raise RuntimeError(f"ircd exited immediately:\n{output}")
         services = FakeServicesServer("127.0.0.1", server_port)
         _services = services
@@ -1014,7 +1053,7 @@ def run_tests(ircd, module, keep=False):
         value = read_snomask(services, sown, "sown", "snomask revoked")
         require(value == "", f"suspend kept a UDB-owned snomask: {value!r}")
 
-        add_effect_profile(services, "sext", "sextsecret", (("snomasks", "c"),))
+        add_effect_profile(services, "sext", "sextsecret", (("snomasks", "+c-k"),))
         sext = IrcClient("127.0.0.1", client_port, "sext-client")
         clients.append(sext)
         set_external_snomask(services, "sext-client", "k")
@@ -1070,6 +1109,118 @@ def run_tests(ircd, module, keep=False):
                        "snomask absent suspend notice", start=start, timeout=15)
         value = read_snomask(services, snone, "snone", "snomask absent revoked")
         require("k" in value, f"a profile without snomasks removed external state: {value!r}")
+
+        # Y1: relative snomask expression +c-k with external k -> result c
+        add_effect_profile(services, "srel1", "srel1secret", (("snomasks", "+c-k"),))
+        srel1 = IrcClient("127.0.0.1", client_port, "srel1-client")
+        clients.append(srel1)
+        set_external_snomask(services, "srel1-client", "k")
+        time.sleep(0.3)
+        srel1.request("NICK srel1:srel1secret", lambda line: " NICK :srel1" in line, "snomask +c-k identification")
+        wait_for_mode(srel1, "srel1", "+r", "snomask +c-k +r")
+        val = read_snomask(services, srel1, "srel1", "snomask +c-k applied")
+        require("c" in val and "k" not in val, f"+c-k on external k did not result in c only: {val!r}")
+        start = len(srel1.lines)
+        services.send_ins("N::srel1::suspend", "manual review")
+        srel1.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                       "snomask +c-k suspend notice", start=start, timeout=15)
+        val = read_snomask(services, srel1, "srel1", "snomask +c-k revoked")
+        require("k" in val and "c" not in val, f"suspend did not restore external k: {val!r}")
+
+        # Y2: relative snomask expression -k with external ck -> result c
+        add_effect_profile(services, "srel2", "srel2secret", (("snomasks", "-k"),))
+        srel2 = IrcClient("127.0.0.1", client_port, "srel2-client")
+        clients.append(srel2)
+        set_external_snomask(services, "srel2-client", "ck")
+        time.sleep(0.3)
+        srel2.request("NICK srel2:srel2secret", lambda line: " NICK :srel2" in line, "snomask -k identification")
+        wait_for_mode(srel2, "srel2", "+r", "snomask -k +r")
+        val = read_snomask(services, srel2, "srel2", "snomask -k applied")
+        require("c" in val and "k" not in val, f"-k on external ck did not result in c only: {val!r}")
+        start = len(srel2.lines)
+        services.send_ins("N::srel2::suspend", "manual review")
+        srel2.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                       "snomask -k suspend notice", start=start, timeout=15)
+        val = read_snomask(services, srel2, "srel2", "snomask -k revoked")
+        require("c" in val and "k" in val, f"suspend did not restore external ck: {val!r}")
+
+        # Y3: relative snomask expression +c with no initial snomasks -> result c
+        add_effect_profile(services, "srel3", "srel3secret", (("snomasks", "+c"),))
+        srel3 = IrcClient("127.0.0.1", client_port, "srel3-client")
+        clients.append(srel3)
+        authenticate(srel3, "srel3", "srel3secret", "snomask +c identification")
+        val = read_snomask(services, srel3, "srel3", "snomask +c applied")
+        require("c" in val, f"+c did not apply c: {val!r}")
+        start = len(srel3.lines)
+        services.send_ins("N::srel3::suspend", "manual review")
+        srel3.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                       "snomask +c suspend notice", start=start, timeout=15)
+        val = read_snomask(services, srel3, "srel3", "snomask +c revoked")
+        require(val == "", f"suspend kept UDB snomask +c: {val!r}")
+
+        # Y4: external oper with different operclass: UDB must not touch it
+        add_effect_profile(services, "opdiff", "opdiffsecret", (("oper", "netadmin"),))
+        opdiff = IrcClient("127.0.0.1", client_port, "opdiff-client")
+        clients.append(opdiff)
+        opdiff.request("OPER testoper operpass", lambda line: " 381 " in line, "external oper login")
+        st_before = read_oper_state(services, opdiff, "opdiff-client", "external oper state before auth")
+        require(st_before["oper"] and st_before["operclass"] == "locop",
+                f"external oper did not become locop: {st_before!r}")
+        opdiff.request("NICK opdiff:opdiffsecret", lambda line: " NICK :opdiff" in line, "oper diff identification")
+        wait_for_mode(opdiff, "opdiff", "+r", "oper diff +r")
+        st_after = read_oper_state(services, opdiff, "opdiff", "oper state after auth")
+        require(st_after["oper"] and st_after["operclass"] == "locop",
+                f"UDB hijacked external oper or altered operclass: {st_after!r}")
+        start = len(opdiff.lines)
+        services.send_ins("N::opdiff::suspend", "manual review")
+        opdiff.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                        "oper diff suspend notice", start=start, timeout=15)
+        st_susp = read_oper_state(services, opdiff, "opdiff", "oper state after suspend")
+        require(st_susp["oper"] and st_susp["operclass"] == "locop",
+                f"suspend de-opered external oper: {st_susp!r}")
+
+        # Y5: external oper with same operclass: UDB must not claim ownership
+        add_effect_profile(services, "opsame", "opsamesecret", (("oper", "locop"),))
+        opsame = IrcClient("127.0.0.1", client_port, "opsame-client")
+        clients.append(opsame)
+        opsame.request("OPER testoper operpass", lambda line: " 381 " in line, "external oper same login")
+        opsame.request("NICK opsame:opsamesecret", lambda line: " NICK :opsame" in line, "oper same identification")
+        wait_for_mode(opsame, "opsame", "+r", "oper same +r")
+        start = len(opsame.lines)
+        services.send_ins("N::opsame::suspend", "manual review")
+        opsame.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                        "oper same suspend notice", start=start, timeout=15)
+        st_same = read_oper_state(services, opsame, "opsame", "oper state after suspend same")
+        require(st_same["oper"] and st_same["operclass"] == "locop",
+                f"suspend de-opered matching external oper: {st_same!r}")
+
+        # Y6: UDB-granted oper and clean revocation
+        add_effect_profile(services, "opudb", "opudbsecret", (("oper", "locop"),))
+        opudb = IrcClient("127.0.0.1", client_port, "opudb-client")
+        clients.append(opudb)
+        st_start = read_oper_state(services, opudb, "opudb-client", "opudb initial")
+        require(not st_start["oper"], f"opudb was already oper: {st_start!r}")
+        count_before = st_start["opercount"]
+        authenticate(opudb, "opudb", "opudbsecret", "opudb identification")
+        wait_for_mode(opudb, "opudb", "+o", "opudb +o")
+        st_grant = read_oper_state(services, opudb, "opudb", "opudb granted")
+        require(st_grant["oper"] and st_grant["operclass"] == "locop",
+                f"UDB did not grant locop: {st_grant!r}")
+        require(st_grant["opercount"] == count_before + 1,
+                f"opercount not incremented: before={count_before} grant={st_grant['opercount']}")
+        require(st_grant["operlist"] == 1,
+                f"operlist duplicate or missing: {st_grant['operlist']}")
+        start = len(opudb.lines)
+        services.send_ins("N::opudb::suspend", "manual review")
+        opudb.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                       "opudb suspend notice", start=start, timeout=15)
+        st_rev = read_oper_state(services, opudb, "opudb", "opudb revoked")
+        require(not st_rev["oper"] and st_rev["operclass"] == "-",
+                f"suspend did not revoke UDB oper: {st_rev!r}")
+        require(st_rev["opercount"] == count_before,
+                f"opercount not restored: before={count_before} rev={st_rev['opercount']}")
+        require(st_rev["operlist"] == 0,
+                f"operlist entry left after deoper: {st_rev['operlist']}")
 
         # Z: external account/+r during an active identity never recreates auth,
         # and identity revocation clears the public projection it owned.
@@ -1213,6 +1364,8 @@ def run_tests(ircd, module, keep=False):
             services.close()
         if process:
             stop(process)
+        if stdout_handle:
+            stdout_handle.close()
         if not keep:
             shutil.rmtree(root, ignore_errors=True)
 

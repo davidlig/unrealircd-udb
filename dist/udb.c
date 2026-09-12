@@ -2619,7 +2619,7 @@ static int udb_snomasks_record_valid(const char *value)
 	{
 		if (*c == '+' || *c == '-')
 			continue;
-		if (!isalpha((unsigned char)*c))
+		if (!isalpha((unsigned char)*c) || !is_valid_snomask(*c))
 			return 0;
 		letters++;
 	}
@@ -8139,6 +8139,7 @@ struct UdbNickEffects
 	int snomask_owned;
 	char *previous_snomask;
 	char *applied_snomask;
+	char *applied_snomask_expr;
 	int swhois_owned;
 };
 
@@ -8479,6 +8480,7 @@ static void udb_nick_effects_free(ModData *m)
 		return;
 	safe_free(fx->previous_snomask);
 	safe_free(fx->applied_snomask);
+	safe_free(fx->applied_snomask_expr);
 	safe_free(fx);
 	m->ptr = NULL;
 }
@@ -8541,22 +8543,6 @@ static void udb_nick_effects_revoke_modes(Client *client)
 
 /* UnrealIRCd stores snomasks as a sorted, de-duplicated letter set. Canonical
  * form lets us compare a configured value with the live value without churn. */
-static char *udb_nick_snomask_canonical(const char *value)
-{
-	char *canonical = NULL;
-	const char *p;
-
-	if (!value)
-		return NULL;
-	for (p = value; *p; p++)
-	{
-		if (*p == '+' || *p == '-' || !isalpha((unsigned char)*p))
-			continue;
-		addlettertodynamicstringsorted(&canonical, *p);
-	}
-	return canonical;
-}
-
 static void udb_nick_snomask_materialize(Client *client, const char *value)
 {
 	long old_umodes = client->umodes & ALL_UMODES;
@@ -8578,13 +8564,33 @@ static void udb_nick_snomask_materialize(Client *client, const char *value)
 		send_umode_out(client, 1, old_umodes);
 }
 
+static void udb_nick_snomask_apply_expression(Client *client, const char *expr)
+{
+	long old_umodes = client->umodes & ALL_UMODES;
+
+	if (expr && *expr)
+		set_snomask(client, expr);
+	if (client->user->snomask && *client->user->snomask)
+	{
+		client->umodes |= UMODE_SERVNOTICE;
+		if (MyUser(client))
+			sendnumeric(client, RPL_SNOMASK, client->user->snomask);
+	}
+	else
+	{
+		client->umodes &= ~UMODE_SERVNOTICE;
+	}
+	if ((client->umodes & ALL_UMODES) != old_umodes)
+		send_umode_out(client, 1, old_umodes);
+}
+
 /* The previous value is preserved so revocation can restore an external
  * snomask source; a value another source changed while UDB owned it is never
  * overwritten on revoke. */
 static void udb_nick_effects_apply_snomasks(Client *client, UdbRecord *snomask_rec)
 {
 	UdbNickEffects *fx;
-	char *desired;
+	const char *expr;
 	const char *current;
 
 	if (!client || !client->user || !snomask_rec || BadPtr(snomask_rec->data_str) || !MyUser(client))
@@ -8592,18 +8598,16 @@ static void udb_nick_effects_apply_snomasks(Client *client, UdbRecord *snomask_r
 	fx = udb_nick_effects_ensure(client);
 	if (!fx)
 		return;
-	desired = udb_nick_snomask_canonical(snomask_rec->data_str);
-	if (!desired)
-		return;
+	expr = snomask_rec->data_str;
 	current = client->user->snomask ? client->user->snomask : "";
 
-	if (!strcmp(current, desired) &&
-		(!fx->snomask_owned || (fx->applied_snomask && !strcmp(fx->applied_snomask, desired))))
+	if (fx->snomask_owned && fx->applied_snomask_expr && !strcmp(fx->applied_snomask_expr, expr))
 	{
-		/* Already materialized, either externally or by UDB itself. */
-		safe_free(desired);
-		return;
+		const char *applied = fx->applied_snomask ? fx->applied_snomask : "";
+		if (!strcmp(current, applied))
+			return;
 	}
+
 	if (fx->snomask_owned)
 	{
 		/* The profile changed its desired value: release the old ownership
@@ -8611,35 +8615,38 @@ static void udb_nick_effects_apply_snomasks(Client *client, UdbRecord *snomask_r
 		udb_nick_effects_revoke_snomasks(client);
 		fx = udb_nick_effects_ensure(client);
 		if (!fx)
-		{
-			safe_free(desired);
 			return;
-		}
 	}
+
 	safe_free(fx->previous_snomask);
 	fx->previous_snomask = client->user->snomask ? strdup(client->user->snomask) : NULL;
-	udb_nick_snomask_materialize(client, desired);
+	udb_nick_snomask_apply_expression(client, expr);
 	safe_free(fx->applied_snomask);
-	fx->applied_snomask = udb_nick_snomask_canonical(client->user->snomask);
+	fx->applied_snomask = client->user->snomask ? strdup(client->user->snomask) : NULL;
+	safe_free(fx->applied_snomask_expr);
+	fx->applied_snomask_expr = strdup(expr);
 	fx->snomask_owned = 1;
-	safe_free(desired);
 }
 
 static void udb_nick_effects_revoke_snomasks(Client *client)
 {
 	UdbNickEffects *fx = udb_nick_effects_get(client);
 	const char *current;
+	const char *applied;
 
 	if (!fx || !fx->snomask_owned)
 		return;
 	current = client->user && client->user->snomask ? client->user->snomask : "";
-	if (fx->applied_snomask && !strcmp(current, fx->applied_snomask))
+	applied = fx->applied_snomask ? fx->applied_snomask : "";
+	if (!strcmp(current, applied))
 		udb_nick_snomask_materialize(client, fx->previous_snomask ? fx->previous_snomask : "");
 	/* Otherwise another source changed the value: preserve it. */
 	safe_free(fx->previous_snomask);
 	safe_free(fx->applied_snomask);
+	safe_free(fx->applied_snomask_expr);
 	fx->previous_snomask = NULL;
 	fx->applied_snomask = NULL;
+	fx->applied_snomask_expr = NULL;
 	fx->snomask_owned = 0;
 }
 
@@ -8834,12 +8841,22 @@ static void udb_nick_remove_vhost(Client *client)
 	userhost_changed(client);
 }
 
+static int udb_oper_owned(Client *client)
+{
+	if (!client || !udb_nick_oper_owned_md)
+		return 0;
+	return moddata_local_client(client, udb_nick_oper_owned_md).i ? 1 : 0;
+}
+
 static void udb_nick_grant_oper(Client *client, UdbRecord *nick_rec, UdbRecord *oper_rec)
 {
+	const char *operclass;
+	char *saved_vhost;
+
 	if (!client || !oper_rec)
 		return;
 
-	const char *operclass = oper_rec->data_str;
+	operclass = oper_rec->data_str;
 	if (BadPtr(operclass))
 		return;
 
@@ -8851,7 +8868,13 @@ static void udb_nick_grant_oper(Client *client, UdbRecord *nick_rec, UdbRecord *
 		return;
 	}
 
-	if (IsOper(client))
+	if (IsOper(client) && !udb_oper_owned(client))
+	{
+		/* external oper: do not touch */
+		return;
+	}
+
+	if (udb_oper_owned(client))
 	{
 		const char *curr_class = get_operclass(client);
 		if (curr_class && !strcmp(curr_class, operclass))
@@ -8859,17 +8882,30 @@ static void udb_nick_grant_oper(Client *client, UdbRecord *nick_rec, UdbRecord *
 		udb_nick_revoke_oper(client);
 	}
 
-	make_oper(client, "UDB", operclass, NULL, 0, NULL, NULL, NULL);
-	if (IsOper(client) && udb_nick_oper_owned_md)
-		moddata_local_client(client, udb_nick_oper_owned_md).i = 1;
+	if (!IsOper(client))
+	{
+		saved_vhost = (client->user && client->user->virthost) ? strdup(client->user->virthost) : NULL;
+		make_oper(client, "UDB", operclass, NULL, UMODE_OPER, "", NULL, "0");
+		if (saved_vhost)
+		{
+			if (!client->user->virthost || strcmp(client->user->virthost, saved_vhost))
+				safe_strdup(client->user->virthost, saved_vhost);
+			safe_free(saved_vhost);
+		}
+		else if (client->user && client->user->virthost)
+		{
+			safe_free(client->user->virthost);
+		}
+		if (IsOper(client) && udb_nick_oper_owned_md)
+			moddata_local_client(client, udb_nick_oper_owned_md).i = 1;
+	}
 }
 
 static void udb_nick_revoke_oper(Client *client)
 {
 	long old_umodes;
 
-	if (!client || !MyUser(client) || !udb_nick_oper_owned_md ||
-		!moddata_local_client(client, udb_nick_oper_owned_md).i)
+	if (!client || !MyUser(client) || !udb_oper_owned(client))
 		return;
 
 	if (!IsOper(client))
@@ -8881,14 +8917,24 @@ static void udb_nick_revoke_oper(Client *client)
 
 	old_umodes = client->umodes & ALL_UMODES;
 	client->umodes &= ~UMODE_OPER;
+	if (client->umodes & UMODE_HIDEOPER)
+	{
+		client->umodes &= ~UMODE_HIDEOPER;
+	}
+	else if (irccounts.operators > 0)
+	{
+		irccounts.operators--;
+	}
+
 	if (MyUser(client) && !list_empty(&client->special_node))
 	{
 		list_del(&client->special_node);
 		INIT_LIST_HEAD(&client->special_node);
 	}
-	if (irccounts.operators > 0)
-		irccounts.operators--;
-	remove_oper_privileges(client, 0);
+	if (MyUser(client))
+		RunHook(HOOKTYPE_LOCAL_OPER, client, 0, NULL, NULL);
+	remove_oper_modes(client);
+	swhois_delete(client, "oper", "*", &me, NULL);
 	moddata_local_client(client, udb_nick_oper_owned_md).i = 0;
 	send_umode_out(client, 1, old_umodes);
 }

@@ -100,7 +100,7 @@ Claves admitidas:
 | `suspend` | texto | Con `pass`, permite el nick tras autenticar pero no asigna account/`+r` ni efectos UDB; sin `pass`, no conserva autenticación. |
 | `oper` | texto | Nombre de operclass local a conceder. |
 | `modes` | texto | Modos de usuario válidos; `o` está expresamente prohibido aquí. |
-| `snomasks` | texto | Snomasks a aplicar. |
+| `snomasks` | texto | Expresión de snomasks a aplicar (relativa `+...`, `-...` o mixta `+c-k`; letras sueltas se tratan como adición relativa `+...`). |
 | `swhois` | texto | SWHOIS administrado por UDB. |
 
 Contraseñas aceptadas:
@@ -164,9 +164,9 @@ Ownership por efecto:
 
 - **Modos**: UDB registra sólo los bits que cambió de 0 a 1. La revocación limpia exactamente esos bits, así que un modo que ya estaba activo antes de autenticar (y que también figura en `N::modes`) sobrevive. Un bit que UDB activó se posee hasta el fin de la identidad aunque otra fuente vuelva a activar el mismo bit; UnrealIRCd no tiene referencia por fuente para un bit global de modo. Es una limitación conocida y documentada.
 - **Vhost**: si el vhost deseado ya está activo, UDB no reclama nada. En caso contrario registra el valor aplicado. Al revocar sólo lo retira mientras el vhost actual siga siendo el aplicado; un reemplazo de otra fuente se preserva.
-- **Snomasks**: UDB guarda la máscara previa y la aplicada. Al revocar restaura la previa sólo mientras la actual siga siendo la aplicada; si no, preserva el valor externo.
+- **Snomasks**: `N::snomasks` admite expresiones relativas (`+...`, `-...` o mixtas `+c-k`, así como letras sueltas tratadas como adición relativa `+...`). UDB las valida con los caracteres de snomask de UnrealIRCd y las aplica mediante la interfaz nativa `set_snomask()`. Registra la expresión aplicada y el estado previo en `UdbNickEffects`. Al revocar (o reconciliar el perfil), UDB calcula y aplica la expresión inversa (`+` pasa a `-` y `-` pasa a `+`), o restaura la máscara previa, sin borrar snomasks configuradas externamente. Los snomasks modificados externamente durante la sesión se preservan.
 - **SWHOIS**: UDB posee únicamente las entradas con owner `udb`.
-- **Oper**: se conserva el marcador existente `udb_nick_oper_owned`.
+- **Oper**: UDB respeta estrictamente el estado de oper externo: si el usuario ya es operador (`IsOper(client)`), UDB nunca lo reemplaza, degrada ni asume su propiedad. UDB sólo concede la `operclass` configurada si el cliente no era oper, marcándolo con `udb_oper_owned`. La concesión evita los efectos secundarios por defecto de oper (como modos, snomasks o vhost por defecto de oper) manteniendo el ownership aislado y limpio. En la revocación, suspensión, borrado de perfil o cambio de nick, UDB sólo retira el oper si era de propiedad UDB (`udb_oper_owned`); un oper externo nunca se toca. Al revocar un oper propio, UDB limpia el estado de oper, decrementa contadores de oper y ejecuta los hooks de limpieza de oper de UnrealIRCd sin vaciar snomasks ni otros estados no relacionados.
 
 La revocación de identidad se limita a `account`, `+r` y el marcador de identidad, y sólo actúa cuando UDB posee una identidad. La revocación de efectos se limita al estado registrado en el marcador de ownership. Un perfil passless nunca crea marcador de ownership, así que "passless nunca aplica ni retira" surge del modelo en lugar de ramas especiales.
 
