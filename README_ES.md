@@ -27,7 +27,8 @@ UDB **no es un NickServ/ChanServ de registro interactivo**. Normalmente una auto
 - Snapshots atómicos mediante fichero temporal, `fsync`, `rename` y `fsync` del directorio.
 - Estado durable `.udb_state`: un READY sólo es válido cuando los seis bloques pertenecen a la misma generación.
 - Protocolo **HEL 4** obligatorio entre peers UDB, con capacidad **OCL** obligatoria.
-- Reconciliación `INF → RES → BEGIN/PUT/END → ACK` con checksum, límites y timeouts de inactividad/absoluto.
+- Reconciliación `INF → RES → BEGIN/PUT/END → ACK` con manifiestos canónicos de estado SHA-256, límites de staging y timeouts de inactividad/absoluto.
+- Freshness autoritativo (Política A): el propagador seleccionado es la autoridad; los timestamps locales del sistema de archivos (`mtime`) nunca anulan el estado de la red ni deciden propiedad de registros.
 - Autoridad/propagador seleccionada únicamente entre peers directamente enlazados.
 - Failover ordenado mediante `S::propagator`.
 - Estado `READY/BOOTSTRAPPING` separado de salud `OK/DEGRADED/STALE`.

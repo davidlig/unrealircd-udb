@@ -21,13 +21,7 @@ creates its test-only arm file following staged-sync settlement. It then waits
 three seconds, emits an `INS` as the configured propagator, holds it for three
 seconds, and emits its matching `DEL`.
 
-The harness seeds divergent `N` and `K` blocks with exactly equal mtimes, starts
-node B and then node A, and waits for both logs to report a linked and synced
-S2S connection. B's immutable SID (`0B1`) sorts above A's (`0A1`), so it is the
-defined winner. The harness requires one `RES` per divergent block, followed by `BEGIN`, `PUT`,
-`END`, and `ACK`, and verifies B's `N` block plus nested `K` line commit in A.
-A `PASS` therefore proves real module loading, negotiated UDB capability,
-deterministic equal-timestamp resolution, and no reciprocal snapshot exchange.
+The harness seeds divergent `N` and `K` blocks: node A is configured as the authoritative propagator holding the winning records, while node B holds divergent records with a newer filesystem `mtime` (+3600 s) and a higher SID (`0B1` > `0A1`). Under Policy A (authority precedence), neither timestamp nor SID may win: node B must import node A's blocks because node A is the selected authority. The harness requires one `RES` per divergent block, followed by `BEGIN`, `PUT`, `END`, and `ACK`, and verifies node B imports and commits node A's `N` and `K` records. A `PASS` therefore proves real module loading, negotiated UDB capability, authoritative snapshot convergence over local timestamps/SIDs, and no reciprocal snapshot exchange.
 It additionally requires both nodes to log loading their seeded N/K blocks from
 their configured temporary database directories. Node B must receive the fixture
 `INS` and `DEL`, persist the inserted record before deletion, and persist its

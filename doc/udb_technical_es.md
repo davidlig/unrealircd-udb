@@ -16,7 +16,7 @@ UDB no implementa un servicio de registro autónomo para crear cuentas o canales
 
 1. `udb_store.c.inc`: árbol de registros, rutas y persistencia.
 2. `udb_config.c.inc`: `udb {}`, bloque S y opciones L.
-3. `udb_core.c.inc`: validación, esquemas, checksums y operaciones del árbol.
+3. `udb_core.c.inc`: validación, esquemas, manifiestos de estado SHA-256 y operaciones del árbol.
 4. `udb_services.c.inc`: resolución de fuentes NickServ/ChanServ/IpServ.
 5. `udb_effects.c.inc`: aplicación y retirada de efectos en runtime.
 6. `udb_sync.c.inc`: HEL, autoridad, reconciliación y snapshots staged.
@@ -567,12 +567,29 @@ Si cambia la política, UDB cancela sesiones/peticiones pertenecientes a otra fu
 
 Esto evita que un nodo ya autoritativo adopte accidentalmente la base de un vecino sólo por estar conectado.
 
-### 8.3 Política de freshness (Política A — Precedencia de la autoridad seleccionada)
+### 8.3 Semántica de freshness y rollback (Política A — Autoridad absoluta)
 
-UDB aplica precedencia determinista de autoridad (**Política A**):
-- El snapshot y el stream de mutaciones secuenciadas del propagador autoritativo seleccionado prevalecen incondicionalmente.
-- Los tiempos de modificación del sistema de archivos (`mtime`) y los relojes locales de pared son estrictamente informativos y nunca deciden propiedad ni anulan el estado autoritativo.
-- Ante divergencia en la red, los nodos reconcilian hacia la autoridad seleccionada independientemente de comparaciones de timestamps locales.
+UDB opera bajo un modelo de autoridad explícito y determinista (**Política A — Prevalencia del propagador seleccionado**):
+
+1. **Precedencia absoluta de la autoridad**:
+   - El propagador autoritativo seleccionado es la única fuente de verdad para el estado de la base de datos replicada.
+   - Durante la reconciliación, cuando un snapshot autoritativo anuncia un digest SHA-256 canónico divergente, el nodo receptor descarga, verifica y confirma incondicionalmente el snapshot de la autoridad, reemplazando el estado de su bloque local.
+   - Las mutaciones en vivo originadas por el propagador autoritativo con secuencia estrictamente consecutiva (`seq == expected_seq`) se aplican directamente sobre el estado confirmado.
+
+2. **Semántica de rollback y sobrescritura**:
+   - Dado que el estado de la autoridad seleccionada es vinculante, si el dataset de la autoridad contiene menos registros, elimina claves o refleja un estado lógico anterior al que posee una copia local divergente del follower, el follower adopta el estado de la autoridad y descarta su divergencia local.
+   - Este "rollback" hacia la perspectiva de la autoridad es intencionado y esencial para mantener convergencia determinista en toda la red. Un nodo follower nunca rechaza ni falla un snapshot autoritativo alegando una supuesta "mayor frescura local".
+   - En UDB no existe el concepto ambiguo de "gana el timestamp más reciente" (LWW / Last-Write-Wins basado en reloj de pared) ni resolución de conflictos multi-master. Los relojes locales jamás se consultan para dirimir conflictos.
+
+3. **Carácter informativo de `mtime` y timestamps de reloj**:
+   - Los tiempos de modificación del sistema de archivos (`st_mtime`) y los campos de timestamp en el protocolo (`modified_at` en `INF` u `OPT`) son metadatos puramente de diagnóstico para observabilidad del operador (por ejemplo, en consultas `/DBQ <bloque>`).
+   - `mtime` nunca se compara para dirimir registros en conflicto, determinar propiedad del bloque ni seleccionar qué datos prevalecen.
+   - El desfase de reloj entre servidores, diferencias horarias o alteraciones de fecha en disco (e.g. `touch`) no alteran en modo alguno la sincronización, la aceptación de snapshots ni la convergencia.
+
+4. **Desempates y fronteras en modo standalone**:
+   - Los SIDs e identificadores de servidor nunca anulan una relación de autoridad configurada. Si el nodo A está configurado para seguir al nodo B, el estado de B prevalece siempre, independientemente del orden léxico de los SIDs (`SID(A) > SID(B)` no tiene efecto).
+   - En despliegues sin política explícita, el primer peer directo confirmado durante el bootstrap se fija como dueño exclusivo de bootstrap. Al alcanzar `READY`, el nodo sin política se blinda como autoridad standalone y rechaza imports remotos entrantes, evitando que un vecino recién enlazado sobreescriba accidentalmente sus datos.
+
 
 ## 9. Reconciliación de snapshots
 
@@ -834,7 +851,7 @@ La generación OCLG sólo cambia cuando cambia efectivamente la vista o su estad
 /DBQ STATUS
 ```
 
-Consultar sólo un bloque devuelve metadatos (registros, tamaño, mtime, checksum y estado de sincronización). Una ruta devuelve su valor o sus hijos inmediatos.
+Consultar sólo un bloque devuelve metadatos (registros, tamaño, mtime, digest SHA-256 y estado de sincronización). Una ruta devuelve su valor o sus hijos inmediatos.
 
 #### Advertencia de redacción de secretos
 
@@ -850,7 +867,7 @@ La implementación aplica varias reglas de fail-closed:
 
 - no publica candidatos de arranque parcialmente válidos;
 - no acepta snapshots de una fuente que no sea la autoridad de esa ronda;
-- no aplica un snapshot staged antes de validar checksum y persistencia;
+- no aplica un snapshot staged antes de validar el digest canónico SHA-256 y la persistencia;
 - las mutaciones se validan contra el esquema antes de commit;
 - las escrituras de fichero usan temporales exclusivos y permisos `0600`;
 - no sigue symlinks en temporales cuando `O_NOFOLLOW` está disponible;
@@ -858,7 +875,7 @@ La implementación aplica varias reglas de fail-closed:
 - un error de durabilidad después de rename retira READY;
 - HEL/OCL incompatibles pueden cerrar el enlace, evitando una red mixta silenciosamente inconsistente.
 
-No se recomienda editar `udb_*.db` con el daemon activo. Además de no actualizar el árbol en memoria, una edición manual puede romper generación, esquema, checksum lógico, límites S2S o el conjunto protegido por `.udb_state`.
+No se recomienda editar `udb_*.db` con el daemon activo. Además de no actualizar el árbol en memoria, una edición manual puede romper generación, esquema, digests canónicos, límites S2S o el conjunto protegido por `.udb_state`.
 
 ## 16. Rehash y cambios de política
 
@@ -904,10 +921,14 @@ END <round> <block> <txid> <sha256> [<watermark_seq>]
 ACK <round> <block> <txid> <sha256> [<watermark_seq>]
 ERR <subcmd> <code> <round/correlation> <block>
 
-INS <Block::path> <value>
-DEL <Block::path>
-DRP <block>
-OPT <block> [mtime]
+INS <epoch> <seq> <Block::path> <value>
+DEL <epoch> <seq> <Block::path>
+DRP <epoch> <seq> <block>
+OPT <epoch> <seq> <block> [mtime]
+EXP <path> <expected-expires>
+
+MANIFEST REQ <round> <block> <sha256> <count>
+MANIFEST ACK <round> <block> <sha256> <count>
 
 OCL BEGIN <originSID> <epoch> <gen> <count> <digest>
 OCL ITEM  <originSID> <epoch> <gen> <operclass> <digest>
@@ -925,7 +946,7 @@ Para diagnosticar un nodo:
 1. comprobar `/UDB STATUS`;
 2. verificar el propagador seleccionado y que sea un enlace directo con HEL 4 confirmado;
 3. revisar si la base está READY o en bootstrap/recovery;
-4. usar `/DBQ N`, `/DBQ C`, etc. para comparar checksums y metadatos;
+4. usar `/DBQ N`, `/DBQ C`, etc. para comparar digests SHA-256 y metadatos;
 5. usar `/UDB OPERCLASSES` para detectar inventarios OCL ausentes;
 6. usar `/UDB OPERCLASS <name>` para detectar diferencias de definición/herencia/ACL;
 7. revisar eventos `udb` de UnrealIRCd, especialmente HEL, persistencia, staged sync, READY y OCL;

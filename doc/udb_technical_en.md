@@ -16,7 +16,7 @@ UDB does not implement an autonomous IRC registration service that creates accou
 
 1. `udb_store.c.inc`: record tree, paths, persistence.
 2. `udb_config.c.inc`: `udb {}`, S settings, L options.
-3. `udb_core.c.inc`: validation, schemas, checksums, tree operations.
+3. `udb_core.c.inc`: validation, schemas, SHA-256 state manifests, tree operations.
 4. `udb_services.c.inc`: NickServ/ChanServ/IpServ source resolution.
 5. `udb_effects.c.inc`: runtime effect application/removal.
 6. `udb_sync.c.inc`: HEL, authority, reconciliation, staged snapshots.
@@ -561,12 +561,29 @@ A policy change aborts sessions/pending requests owned by a now-invalid source a
 
 This prevents an already authoritative node from accidentally adopting a neighbor's database merely because the link exists.
 
-### 8.3 Freshness policy (Policy A — Authoritative propagator precedence)
+### 8.3 Freshness and rollback semantics (Policy A — Absolute authority)
 
-UDB enforces deterministic authority precedence (**Policy A**):
-- The snapshot and sequenced mutation stream from the selected authoritative propagator win unconditionally.
-- Filesystem modification times (`mtime`) and local wall-clock timestamps are strictly informational and never determine record ownership or override authoritative state.
-- In case of network divergence, nodes reconcile toward the selected authority regardless of local timestamp comparisons.
+UDB operates under an explicit, deterministic authority model (**Policy A — Selected propagator wins**):
+
+1. **Absolute authority precedence**:
+   - The selected authoritative propagator is the single source of truth for the replicated database state.
+   - During reconciliation, when an authoritative snapshot advertises a divergent canonical SHA-256 digest, the receiver unconditionally pulls, verifies, and commits the authority's snapshot, replacing its local block state.
+   - Live mutations originating from the authoritative propagator with strictly sequential sequence numbers (`seq == expected_seq`) are applied directly on top of the committed state.
+
+2. **Rollback and overwrite semantics**:
+   - Because the selected authority's state is authoritative, if the authority's dataset contains fewer records, deletes keys, or reflects an earlier logical state than a follower's uncommitted or divergent local copy, the follower accepts the authority's state and discards its local divergence.
+   - This "rollback" to the authority's view is intentional and fundamental to maintaining deterministic network-wide convergence. Followers never refuse or fail an authoritative snapshot on the basis of perceived local freshness.
+   - There is no ambiguous "newest timestamp wins" (LWW / Last-Write-Wins based on wall clock) or multi-master conflict resolution in UDB. Local timestamps are never evaluated for conflict resolution.
+
+3. **Informational role of `mtime` and wall-clock timestamps**:
+   - Filesystem modification times (`st_mtime`) and packet timestamp fields (`modified_at` in `INF` or `OPT`) are strictly diagnostic metadata intended for administrative visibility (e.g. operator `/DBQ <block>` queries).
+   - `mtime` is never compared to resolve conflicting records, determine block ownership, or select which node's data survives.
+   - Node clock skew, timezone differences, or artificial timestamp modifications (e.g. `touch`) have zero impact on synchronization, snapshot acceptance, or convergence.
+
+4. **Tie-breaking and standalone boundaries**:
+   - SIDs and peer identifiers never override an established authority relationship. If Node A is configured to follow Node B, Node B's state always wins, regardless of lexical SID ordering (`SID(A) > SID(B)` has no effect).
+   - In policy-free deployments, the first directly connected peer confirmed during bootstrap becomes the exclusive bootstrap owner. Once `READY`, a policy-free node seals itself as a standalone authority and rejects incoming remote imports, preventing accidental state clobbering by newly linked neighbors.
+
 
 ## 9. Snapshot reconciliation
 
@@ -828,7 +845,7 @@ OCLG generation changes only when the effective view or READY/INCOMPLETE state c
 /DBQ STATUS
 ```
 
-A block-only query returns metadata such as record count, file size, mtime, checksum and sync marker. A path query returns its value or immediate children.
+A block-only query returns metadata such as record count, file size, mtime, SHA-256 digest and sync marker. A path query returns its value or immediate children.
 
 #### Secret-redaction warning
 
@@ -844,7 +861,7 @@ The implementation follows several fail-closed rules:
 
 - partially valid startup candidates are never published;
 - snapshots are not accepted from a source that does not own the current authority round;
-- staged data is not applied before checksum validation and persistence;
+- staged data is not applied before canonical SHA-256 digest validation and persistence;
 - mutations are schema-validated before commit;
 - temporary files use exclusive creation and mode `0600`;
 - `O_NOFOLLOW` is used for temporary snapshots where available;
@@ -852,7 +869,7 @@ The implementation follows several fail-closed rules:
 - durability uncertainty after rename revokes READY;
 - incompatible HEL/OCL can close a server link rather than silently form a mixed inconsistent network.
 
-Editing `udb_*.db` while the daemon is live is not recommended. Apart from bypassing the in-memory tree, manual edits can break generation invariants, schema, logical checksums, S2S size constraints, or the `.udb_state` generation set.
+Editing `udb_*.db` while the daemon is live is not recommended. Apart from bypassing the in-memory tree, manual edits can break generation invariants, schema, canonical digests, S2S size constraints, or the `.udb_state` generation set.
 
 ## 16. Rehash and policy changes
 
@@ -898,10 +915,14 @@ END <round> <block> <txid> <sha256> [<watermark_seq>]
 ACK <round> <block> <txid> <sha256> [<watermark_seq>]
 ERR <subcmd> <code> <round/correlation> <block>
 
-INS <Block::path> <value>
-DEL <Block::path>
-DRP <block>
-OPT <block> [mtime]
+INS <epoch> <seq> <Block::path> <value>
+DEL <epoch> <seq> <Block::path>
+DRP <epoch> <seq> <block>
+OPT <epoch> <seq> <block> [mtime]
+EXP <path> <expected-expires>
+
+MANIFEST REQ <round> <block> <sha256> <count>
+MANIFEST ACK <round> <block> <sha256> <count>
 
 OCL BEGIN <originSID> <epoch> <gen> <count> <digest>
 OCL ITEM  <originSID> <epoch> <gen> <operclass> <digest>
@@ -919,7 +940,7 @@ To diagnose a node:
 1. check `/UDB STATUS`;
 2. verify the selected propagator is a direct peer with confirmed HEL 4;
 3. determine whether the database is READY or in bootstrap/recovery;
-4. use `/DBQ N`, `/DBQ C`, etc. to compare checksums and metadata;
+4. use `/DBQ N`, `/DBQ C`, etc. to compare SHA-256 digests and metadata;
 5. use `/UDB OPERCLASSES` to identify missing OCL inventories;
 6. use `/UDB OPERCLASS <name>` to identify definition/inheritance/ACL mismatches;
 7. inspect UnrealIRCd `udb` events, especially HEL, persistence, staged sync, READY, and OCL events;

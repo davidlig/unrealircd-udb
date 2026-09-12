@@ -27,7 +27,8 @@ UDB is **not an interactive NickServ/ChanServ registration service**. A selected
 - Atomic snapshots using a temporary file, `fsync`, `rename`, and parent-directory `fsync`.
 - Durable `.udb_state`: READY is valid only when all six blocks belong to one generation.
 - Mandatory **HEL 4** negotiation and mandatory **OCL** capability between UDB peers.
-- `INF → RES → BEGIN/PUT/END → ACK` reconciliation with checksums, staging caps, inactivity and absolute timeouts.
+- `INF → RES → BEGIN/PUT/END → ACK` reconciliation with canonical SHA-256 state manifests, staging caps, inactivity and absolute timeouts.
+- Authoritative freshness (Policy A): selected propagator is authoritative; local filesystem timestamps (`mtime`) never override network state or decide record ownership.
 - Propagator/authority selection only from directly linked peers.
 - Ordered failover through distributed `S::propagator`.
 - Separate `READY/BOOTSTRAPPING` readiness and `OK/DEGRADED/STALE` sync health.
