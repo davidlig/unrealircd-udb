@@ -192,6 +192,14 @@ static int udb_hello_peer_advertisement(Client *server, const char *propagator, 
 		 * after its HEL exchange has been acknowledged. */
 		peer->oclg_subscribed = 0;
 		udb_ocl_peer_instance_changed(server);
+		if (udb_ctx && udb_is_propagator(udb_ctx, server))
+		{
+			udb_ctx->last_applied_seq = 0;
+			udb_ctx->authority_epoch_known = 0;
+			udb_sync_status = UDB_SYNC_DEGRADED;
+			if (!udb_degraded_since)
+				udb_degraded_since = time(NULL);
+		}
 		udb_log(ULOG_INFO, "UDB_HEL_INSTANCE_CHANGED", server, "Direct peer announced a new UDB instance epoch $epoch",
 				log_data_string("epoch", epoch));
 	}
@@ -524,6 +532,9 @@ static int udb_reconcile_check(UdbContext *ctx)
 	udb_degraded_since = 0;
 	udb_bootstrap_peer = NULL;
 
+	if (udb_reconcile.watermark_seq > ctx->last_applied_seq)
+		ctx->last_applied_seq = udb_reconcile.watermark_seq;
+
 	udb_reconcile_reset();
 	udb_reconcile.retry_count = 0;
 	udb_reconcile.next_retry_at = 0;
@@ -739,7 +750,8 @@ static void udb_propagator_policy_flush(UdbContext *ctx)
 	udb_propagator_policy_changed(ctx);
 }
 
-static int udb_sync_begin(UdbBlock *block, Client *peer, unsigned long round_id, const char *txid)
+static int udb_sync_begin(UdbBlock *block, Client *peer, unsigned long round_id, const char *txid,
+						  uint64_t watermark_seq)
 {
 	UdbSyncSession *session;
 	int inact =
@@ -786,6 +798,9 @@ static int udb_sync_begin(UdbBlock *block, Client *peer, unsigned long round_id,
 	session->received_puts = 0;
 	session->received_bytes = 0;
 	session->record_count = 0;
+	session->watermark_seq = watermark_seq;
+	if (watermark_seq > udb_reconcile.watermark_seq)
+		udb_reconcile.watermark_seq = watermark_seq;
 	block->session = session;
 	block->syncing_from = peer;
 	udb_block_clear_pending(block);
@@ -871,7 +886,7 @@ static int udb_sync_put(UdbBlock *block, Client *peer, unsigned long round_id, c
 }
 
 static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, unsigned long round_id, const char *txid,
-						const char *checksum, unsigned long *digest)
+						const char *checksum, unsigned long *digest, uint64_t watermark_seq)
 {
 	UdbSyncSession *session = block ? block->session : NULL;
 	unsigned long received_digest;
@@ -887,6 +902,8 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, unsigned
 		}
 		return UDB_ERR_NO_SYNC;
 	}
+	if (watermark_seq > udb_reconcile.watermark_seq)
+		udb_reconcile.watermark_seq = watermark_seq;
 	time_t now = time(NULL);
 	if (now >= session->deadline)
 	{
@@ -1039,13 +1056,16 @@ static int udb_sync_send_stage(Client *server, UdbBlock *block, unsigned long ro
 	char pathbuf[UDB_RECORD_PATH_MAX + 1] = "";
 	UdbRecord *rec;
 	int success = 1;
+	uint64_t watermark =
+		udb_ctx ? (udb_ctx->current_seq > udb_ctx->last_applied_seq ? udb_ctx->current_seq : udb_ctx->last_applied_seq)
+				: 0;
 
 	/* HEL confirms protocol support; snapshots require the selected data source. */
 	if (!udb_peer_authorizes_us(server) || !block)
 		return 0;
 	snprintf(txid, sizeof(txid), "%08lx", ++udb_sync_txid);
-	if (!udb_send_db_to_one(server, ":%s DB %s BEGIN %lu %c %s %08lX", me.id, server->id, round_id, block->letter, txid,
-							block->checksum))
+	if (!udb_send_db_to_one(server, ":%s DB %s BEGIN %lu %c %s %08lX %" PRIu64, me.id, server->id, round_id,
+							block->letter, txid, block->checksum, watermark))
 	{
 		udb_log(ULOG_ERROR, "UDB_SYNC_SEND_FAILED", server, "Failed to send staged sync BEGIN for block $block",
 				log_data_string("block", (char[]){block->letter, '\0'}));
@@ -1071,8 +1091,8 @@ static int udb_sync_send_stage(Client *server, UdbBlock *block, unsigned long ro
 						   block->letter);
 		return 0;
 	}
-	if (!udb_send_db_to_one(server, ":%s DB %s END %lu %c %s %08lX", me.id, server->id, round_id, block->letter, txid,
-							block->checksum))
+	if (!udb_send_db_to_one(server, ":%s DB %s END %lu %c %s %08lX %" PRIu64, me.id, server->id, round_id,
+							block->letter, txid, block->checksum, watermark))
 	{
 		udb_log(ULOG_ERROR, "UDB_SYNC_SEND_FAILED", server, "Failed to send staged sync END for block $block",
 				log_data_string("block", (char[]){block->letter, '\0'}));

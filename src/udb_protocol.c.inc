@@ -143,14 +143,17 @@ static int udb_sync_to_server(Client *server)
 	UdbBlock *block = udb_ctx->block_list;
 	static unsigned long round_sequence = 0;
 	unsigned long round_id = (unsigned long)time(NULL) + ++round_sequence;
+	uint64_t watermark =
+		udb_ctx ? (udb_ctx->current_seq > udb_ctx->last_applied_seq ? udb_ctx->current_seq : udb_ctx->last_applied_seq)
+				: 0;
 	if (!round_id)
 		round_id = ++round_sequence;
 	if (!udb_has_hello(server))
 		return 0;
 	while (block)
 	{
-		if (!udb_send_db_to_one(server, ":%s DB %s INF %lu %c %lX %lu", me.id, server->id, round_id, block->letter,
-								block->checksum, (unsigned long)block->modified_at))
+		if (!udb_send_db_to_one(server, ":%s DB %s INF %lu %c %lX %lu %" PRIu64, me.id, server->id, round_id,
+								block->letter, block->checksum, (unsigned long)block->modified_at, watermark))
 			return 0;
 		block = block->next;
 	}
@@ -300,13 +303,16 @@ CMD_FUNC(cmd_db)
 		{
 			UdbBlock *block;
 			unsigned long round_id = 0;
-			if (parc != 7 || !udb_strtoul_strict(parv[3], &round_id) || !round_id || client != direct_peer ||
+			uint64_t watermark_seq = 0;
+			if (parc < 7 || !udb_strtoul_strict(parv[3], &round_id) || !round_id || client != direct_peer ||
 				is_broadcast || !is_for_me || !udb_has_staged_sync(direct_peer))
 			{
 				if (round_id)
 					udb_protocol_round_error(client, subcmd, UDB_ERR_PARAMS, round_id, parc > 4 ? *parv[4] : '0');
 				return;
 			}
+			if (parc >= 8)
+				udb_strtoull_strict(parv[7], (unsigned long long *)&watermark_seq);
 			if (!udb_is_authorized_sync_source(ctx, direct_peer))
 			{
 				udb_protocol_round_error(client, "BEGIN", UDB_ERR_FORBIDDEN, round_id, parv[4] ? *parv[4] : '0');
@@ -331,7 +337,7 @@ CMD_FUNC(cmd_db)
 					udb_protocol_round_error(client, "BEGIN", UDB_ERR_NO_SYNC, round_id, parv[4] ? *parv[4] : '0');
 					return;
 				}
-				int error = udb_sync_begin(block, direct_peer, round_id, parv[5]);
+				int error = udb_sync_begin(block, direct_peer, round_id, parv[5], watermark_seq);
 				if (error)
 				{
 					udb_protocol_round_error(client, "BEGIN", error, round_id, parv[4] ? *parv[4] : '0');
@@ -402,13 +408,16 @@ CMD_FUNC(cmd_db)
 			unsigned long digest;
 			int error;
 			unsigned long round_id = 0;
-			if (parc != 7 || !udb_strtoul_strict(parv[3], &round_id) || !round_id || client != direct_peer ||
+			uint64_t watermark_seq = 0;
+			if (parc < 7 || !udb_strtoul_strict(parv[3], &round_id) || !round_id || client != direct_peer ||
 				is_broadcast || !is_for_me || !udb_has_staged_sync(direct_peer))
 			{
 				if (round_id)
 					udb_protocol_round_error(client, subcmd, UDB_ERR_PARAMS, round_id, parc > 4 ? *parv[4] : '0');
 				return;
 			}
+			if (parc >= 8)
+				udb_strtoull_strict(parv[7], (unsigned long long *)&watermark_seq);
 			if (!udb_is_authorized_sync_source(ctx, direct_peer))
 			{
 				udb_protocol_round_error(client, "END", UDB_ERR_FORBIDDEN, round_id, parv[4] ? *parv[4] : '0');
@@ -424,14 +433,14 @@ CMD_FUNC(cmd_db)
 			if (is_for_me)
 			{
 				unsigned long session_round = block->session ? block->session->round_id : 0;
-				error = udb_sync_end(ctx, block, direct_peer, round_id, parv[5], parv[6], &digest);
+				error = udb_sync_end(ctx, block, direct_peer, round_id, parv[5], parv[6], &digest, watermark_seq);
 				if (error)
 				{
 					udb_protocol_round_error(client, "END", error, round_id, parv[4] ? *parv[4] : '0');
 					return;
 				}
-				udb_send_db_to_one(client, ":%s DB %s ACK %lu %c %s %08lX", me.id, client->id, round_id, *parv[4],
-								   parv[5], digest);
+				udb_send_db_to_one(client, ":%s DB %s ACK %lu %c %s %08lX %" PRIu64, me.id, client->id, round_id,
+								   *parv[4], parv[5], digest, watermark_seq);
 				udb_reconcile_record_end(direct_peer, block->letter, session_round);
 				if (udb_reconcile_check(ctx))
 					udb_offer_reconciliation_to_downstreams();
@@ -501,7 +510,8 @@ CMD_FUNC(cmd_db)
 		if (!strcasecmp(subcmd, "INF"))
 		{
 			unsigned long round_id = 0;
-			if (parc != 7 || !udb_strtoul_strict(parv[3], &round_id) || !round_id)
+			uint64_t watermark_seq = 0;
+			if (parc < 7 || !udb_strtoul_strict(parv[3], &round_id) || !round_id)
 			{
 				if (round_id)
 					udb_protocol_round_error(client, subcmd, UDB_ERR_PARAMS, round_id, parc > 4 ? *parv[4] : '0');
@@ -523,6 +533,8 @@ CMD_FUNC(cmd_db)
 				udb_protocol_round_error(client, "INF", UDB_ERR_PARAMS, round_id, letter);
 				return;
 			}
+			if (parc >= 8)
+				udb_strtoull_strict(parv[7], (unsigned long long *)&watermark_seq);
 			(void)remote_ts;
 
 			if (client == direct_peer && is_for_me && udb_is_authorized_sync_source(ctx, direct_peer))
@@ -530,6 +542,8 @@ CMD_FUNC(cmd_db)
 				udb_reconcile_record_inf(direct_peer, round_id, letter, crc32);
 				if (!udb_reconcile.active || udb_reconcile.round_id != round_id)
 					return;
+				if (watermark_seq > udb_reconcile.watermark_seq)
+					udb_reconcile.watermark_seq = watermark_seq;
 				if (crc32 != block->checksum)
 				{
 					if (udb_send_db_to_one(client, ":%s DB %s RES %lu %c", me.id, client->id, round_id, letter))
@@ -550,12 +564,14 @@ CMD_FUNC(cmd_db)
 		/* Reconciliation inventory is hop-by-hop and is never forwarded. */
 		else if (!strcasecmp(subcmd, "INS"))
 		{
-			if (parc < 5)
+			uint64_t seq = 0;
+			if (parc < 7 || !udb_hello_epoch_valid(parv[3]) ||
+				!udb_strtoull_strict(parv[4], (unsigned long long *)&seq) || seq == 0)
 			{
 				udb_protocol_mutation_error(client, subcmd, UDB_ERR_PARAMS, '0');
 				return;
 			}
-			udb_mutation_ins(ctx, client, direct_peer, target, parv[3], parv[4], is_for_me, is_broadcast);
+			udb_mutation_ins(ctx, client, direct_peer, target, parv[3], seq, parv[5], parv[6], is_for_me, is_broadcast);
 		}
 		break;
 
@@ -604,28 +620,40 @@ CMD_FUNC(cmd_db)
 	case 'D':
 		if (!strcasecmp(subcmd, "DEL"))
 		{
-			if (parc < 4)
+			uint64_t seq = 0;
+			if (parc < 6 || !udb_hello_epoch_valid(parv[3]) ||
+				!udb_strtoull_strict(parv[4], (unsigned long long *)&seq) || seq == 0)
 			{
 				udb_protocol_mutation_error(client, subcmd, UDB_ERR_PARAMS, '0');
 				return;
 			}
-			udb_mutation_del(ctx, client, direct_peer, target, parv[3], is_for_me, is_broadcast);
+			udb_mutation_del(ctx, client, direct_peer, target, parv[3], seq, parv[5], is_for_me, is_broadcast);
 		}
 		else if (!strcasecmp(subcmd, "DRP"))
 		{
-			if (parc < 4)
+			uint64_t seq = 0;
+			if (parc < 6 || !udb_hello_epoch_valid(parv[3]) ||
+				!udb_strtoull_strict(parv[4], (unsigned long long *)&seq) || seq == 0 || !parv[5] || !*parv[5])
+			{
+				udb_protocol_mutation_error(client, subcmd, UDB_ERR_PARAMS, '0');
 				return;
-			udb_mutation_drp(ctx, client, direct_peer, target, *parv[3], is_for_me, is_broadcast);
+			}
+			udb_mutation_drp(ctx, client, direct_peer, target, parv[3], seq, *parv[5], is_for_me, is_broadcast);
 		}
 		break;
 
 	case 'O':
 		if (!strcasecmp(subcmd, "OPT"))
 		{
-			if (parc < 4)
+			uint64_t seq = 0;
+			if (parc < 6 || !udb_hello_epoch_valid(parv[3]) ||
+				!udb_strtoull_strict(parv[4], (unsigned long long *)&seq) || seq == 0 || !parv[5] || !*parv[5])
+			{
+				udb_protocol_mutation_error(client, subcmd, UDB_ERR_PARAMS, '0');
 				return;
-			udb_mutation_opt(ctx, client, direct_peer, target, *parv[3], parc >= 5 ? parv[4] : NULL, is_for_me,
-							 is_broadcast);
+			}
+			udb_mutation_opt(ctx, client, direct_peer, target, parv[3], seq, *parv[5], parc >= 7 ? parv[6] : NULL,
+							 is_for_me, is_broadcast);
 		}
 		else if (!strcasecmp(subcmd, "OCL"))
 		{

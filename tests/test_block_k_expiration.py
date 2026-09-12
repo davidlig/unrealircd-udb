@@ -35,7 +35,7 @@ class BlockKExpiryContractTest(unittest.TestCase):
         self.assertIn("udb_mutation_expire_local", self.lines)
         self.assertIn("udb_mutation_delete_local", self.mutation)
         self.assertIn("udb_file_write_snapshot", self.mutation)
-        self.assertIn('":%s DB * DEL %s"', self.mutation)
+        self.assertIn('":%s DB * DEL %s %" PRIu64 " %s"', self.mutation)
         self.assertIn("udb_peer_authorizes_us(direct_peer)", self.mutation)
 
     def test_exp_is_compare_and_delete_and_not_broadcast(self):

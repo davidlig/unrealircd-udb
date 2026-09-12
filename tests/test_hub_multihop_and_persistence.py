@@ -552,7 +552,7 @@ def test_suite():
             oper6.wait_for(lambda l: "Selected direct source: hub6.test" in l, "Leaf direct authority", timeout=3.0)
 
             # Services broadcasts mutation INS
-            services6.send("DB * INS N::dave::vhost dave.org")
+            services6.send("DB * INS 0000000000000001 1 N::dave::vhost dave.org")
             time.sleep(0.5)
 
             # Oper on Leaf queries the exact record value via DBQ
@@ -610,7 +610,7 @@ def test_suite():
                                      "ERR BEGIN 6 from evil peer")
             assert " ERR BEGIN 6" in err_evil, f"Expected ERR BEGIN 6, got: {err_evil}"
 
-            evil.send("DB * INS N::evil::vhost evil.net")
+            evil.send("DB * INS 0000000000000001 1 N::evil::vhost evil.net")
             time.sleep(0.3)
 
             evil.close()

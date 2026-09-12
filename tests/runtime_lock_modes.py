@@ -252,10 +252,12 @@ class FakeServicesServer:
         raise AssertionError(f"services: did not receive {description}; lines={self.lines[start:]!r}")
 
     def send_ins(self, path, data):
-        self.send(f"DB * INS {path} :{data}")
+        self.seq = getattr(self, "seq", 0) + 1
+        self.send(f"DB * INS 0000000000000001 {self.seq} {path} :{data}")
 
     def send_del(self, path):
-        self.send(f"DB * DEL {path}")
+        self.seq = getattr(self, "seq", 0) + 1
+        self.send(f"DB * DEL 0000000000000001 {self.seq} {path}")
 
     def send_uid(self, nick, username="services", hostname="services.test"):
         self.uid_counter += 1

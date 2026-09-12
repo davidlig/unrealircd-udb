@@ -16,9 +16,11 @@
 
 #include "unrealircd.h"
 #include <errno.h>
+#include <inttypes.h>
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
 #include <openssl/sha.h>
+#include <stdint.h>
 
 #define UDB_BLOCK_PATH_MAX 1024
 #define UDB_RECORD_PATH_MAX 8192
@@ -183,6 +185,7 @@ struct UdbSyncSession
 	size_t received_bytes;
 	unsigned int received_puts;
 	unsigned int record_count;
+	uint64_t watermark_seq;
 };
 
 typedef struct UdbPasswordFailure
@@ -274,6 +277,10 @@ typedef struct UdbContext
 	int block_count;
 	int total_records;
 	int startup_loading;
+	uint64_t current_seq;
+	uint64_t last_applied_seq;
+	char authority_epoch[UDB_OCL_EPOCH_LEN + 1];
+	int authority_epoch_known;
 } UdbContext;
 
 static UdbContext *udb_ctx = NULL;
@@ -336,6 +343,7 @@ typedef struct UdbReconcileState
 	time_t last_activity;
 	time_t deadline;
 	time_t absolute_deadline;
+	uint64_t watermark_seq;
 } UdbReconcileState;
 
 static UdbReconcileState udb_reconcile = {0};
@@ -459,11 +467,12 @@ static void udb_reconcile_record_res(Client *peer, unsigned long round_id, char 
 static void udb_reconcile_record_end(Client *peer, char letter, unsigned long round_id);
 static int udb_reconcile_check(UdbContext *ctx);
 static int udb_is_authorized_sync_source(UdbContext *ctx, Client *direct_peer);
-static int udb_sync_begin(UdbBlock *block, Client *peer, unsigned long round_id, const char *txid);
+static int udb_sync_begin(UdbBlock *block, Client *peer, unsigned long round_id, const char *txid,
+						  uint64_t watermark_seq);
 static int udb_sync_put(UdbBlock *block, Client *peer, unsigned long round_id, const char *txid, const char *path,
 						const char *data);
 static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, unsigned long round_id, const char *txid,
-						const char *checksum, unsigned long *digest);
+						const char *checksum, unsigned long *digest, uint64_t watermark_seq);
 static void udb_sync_ack(Client *peer, const char *block);
 static int udb_sync_send_tree(Client *server, UdbRecord *rec, int depth, char *pathbuf, size_t pathlen,
 							  unsigned long round_id, char letter, const char *txid);
@@ -486,14 +495,16 @@ static void udb_query_send_status(Client *client);
 static int udb_send_db_to_confirmed_servers(Client *except, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static int udb_sendto_confirmed_servers(Client *except, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void udb_protocol_mutation_error(Client *client, const char *subcmd, int error, char letter);
-static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, const char *path,
-							 const char *data, int is_for_me, int is_broadcast);
-static void udb_mutation_del(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, const char *path,
-							 int is_for_me, int is_broadcast);
-static void udb_mutation_drp(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, char letter,
-							 int is_for_me, int is_broadcast);
-static void udb_mutation_opt(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, char letter,
-							 const char *modified_at, int is_for_me, int is_broadcast);
+static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_peer, const char *target,
+							 const char *epoch, uint64_t seq, const char *path, const char *data, int is_for_me,
+							 int is_broadcast);
+static void udb_mutation_del(UdbContext *ctx, Client *client, Client *direct_peer, const char *target,
+							 const char *epoch, uint64_t seq, const char *path, int is_for_me, int is_broadcast);
+static void udb_mutation_drp(UdbContext *ctx, Client *client, Client *direct_peer, const char *target,
+							 const char *epoch, uint64_t seq, char letter, int is_for_me, int is_broadcast);
+static void udb_mutation_opt(UdbContext *ctx, Client *client, Client *direct_peer, const char *target,
+							 const char *epoch, uint64_t seq, char letter, const char *modified_at, int is_for_me,
+							 int is_broadcast);
 static void udb_mutation_exp(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, const char *path,
 							 time_t expected_expires, int is_for_me, int is_broadcast);
 static int udb_mutation_expire_local(UdbContext *ctx, const char *path, time_t expected_expires);

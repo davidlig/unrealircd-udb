@@ -129,11 +129,13 @@ class MockServices:
         self.sock.sendall((command + "\r\n").encode("ascii"))
 
     def send_ins(self, path, data):
+        self.seq = getattr(self, "seq", 0) + 1
         val = f":{data}" if " " in str(data) and not str(data).startswith(":") else str(data)
-        self.send(f"DB {self.ircd_sid} INS {path} {val}")
+        self.send(f"DB {self.ircd_sid} INS 0000000000000001 {self.seq} {path} {val}")
 
     def send_del(self, path):
-        self.send(f"DB {self.ircd_sid} DEL {path}")
+        self.seq = getattr(self, "seq", 0) + 1
+        self.send(f"DB {self.ircd_sid} DEL 0000000000000001 {self.seq} {path}")
 
     def receive(self, deadline):
         while time.monotonic() < deadline:

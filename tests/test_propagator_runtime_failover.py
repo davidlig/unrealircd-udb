@@ -198,7 +198,8 @@ class MockServices:
         self.sock.sendall((command + "\r\n").encode("utf-8"))
 
     def send_ins(self, path, value):
-        self.send(f"DB * INS {path} :{value}")
+        self.seq = getattr(self, "seq", 0) + 1
+        self.send(f"DB * INS 0000000000000001 {self.seq} {path} :{value}")
 
     def send_snapshot(self, records, txid):
         checksum = tree_checksum(records)

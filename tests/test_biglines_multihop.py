@@ -152,8 +152,9 @@ class MockPropagator:
         self.sock.sendall((command + "\r\n").encode("ascii"))
 
     def send_ins(self, path, data):
+        self.seq = getattr(self, "seq", 0) + 1
         val = f":{data}" if " " in str(data) and not str(data).startswith(":") else str(data)
-        self.send(f"DB * INS {path} {val}")
+        self.send(f"DB * INS 0000000000000001 {self.seq} {path} {val}")
 
     def receive(self, deadline):
         while time.monotonic() < deadline:
