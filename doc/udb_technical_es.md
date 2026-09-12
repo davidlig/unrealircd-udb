@@ -640,6 +640,7 @@ INS <Block::path> <value>
 DEL <Block::path>
 DRP <block>
 OPT <block> [modified_at]
+EXP <path> <expected-expires>
 ```
 
 Semántica:
@@ -648,6 +649,7 @@ Semántica:
 - `DEL`: elimina una ruta; borrar una ruta inexistente es idempotente.
 - `DRP`: vacía un bloque completo, persistiendo primero el snapshot vacío.
 - `OPT`: fuerza guardado/actualización del bloque y puede propagar `modified_at`.
+- `EXP`: solicitud compare-and-delete punto a punto de una línea K expirada enviada por followers a su autoridad directa seleccionada (`DB <target> EXP <path> <expected-expires>`). Si `expected-expires` coincide con el registro de la autoridad y ha vencido, la autoridad elimina el perfil localmente, persiste `udb_K.db` y difunde un `DEL` transaccional al resto de peers confirmados; si no coincide o es obsoleta, se ignora de forma segura sin error.
 
 Una mutación sólo se acepta desde el propagador remoto seleccionado. Se persiste antes de publicar los efectos runtime. Después de procesarla puede retransmitirse hop-by-hop a peers directos con HEL confirmado, excluyendo la dirección de entrada.
 

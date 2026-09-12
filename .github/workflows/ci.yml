@@ -150,6 +150,9 @@ jobs:
           python3 tests/test_hash_index_contract.py
           python3 tests/test_post_review_corrections.py
           python3 tests/test_block_n_ownership_model.py
+          python3 tests/test_block_k_expiration.py
+          python3 tests/test_block_k_schema.py
+          python3 tests/test_bundle_determinism.py
 
       - name: Run Integration & Multi-Hop Test Suites
         run: |
@@ -171,3 +174,4 @@ jobs:
           python3 tests/staged_runtime_effects.py
           python3 tests/three_node_udb.py
           python3 tests/two_node_udb.py
+          python3 tests/test_udb_consistency_closure.py

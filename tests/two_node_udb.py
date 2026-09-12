@@ -131,21 +131,22 @@ def bwrap_command(node, ircd, config, module, mutator=None, configtest=False, re
                 "--ro-bind", str(node / "modules" / "third"), str(RUNTIME_ROOT / "modules/third"),
                 "--dev-bind", "/dev", "/dev", "--proc", "/proc",
                 "--setenv", "UDB_TEST_MUTATOR_DIRECTORY", str(node / "runtime-data")]
+    runtime_data = RUNTIME_ROOT / "data"
     if rename_failure or fsync_failure or directory_fsync_failure or state_directory_fsync_failure:
         command.extend(("--setenv", "LD_PRELOAD", str(RENAME_FAIL_MODULE)))
     if rename_failure:
-        command.extend(("--setenv", "UDB_SNAPSHOT_RENAME_FAIL_TARGET",
-                        str(rename_failure_target or (node / "runtime-data" / "udb_N.db"))))
+        target = (runtime_data / rename_failure_target.name) if rename_failure_target else (runtime_data / "udb_N.db")
+        command.extend(("--setenv", "UDB_SNAPSHOT_RENAME_FAIL_TARGET", str(target)))
         if rename_failure_arm:
             command.extend(("--setenv", "UDB_SNAPSHOT_RENAME_FAIL_ARM",
-                            str(node / "runtime-data" / "udb-snapshot-rename-fail-go")))
+                            str(runtime_data / "udb-snapshot-rename-fail-go")))
     if fsync_failure:
-        command.extend(("--setenv", "UDB_SNAPSHOT_FSYNC_FAIL_TARGET", str(node / "runtime-data" / "udb_N.db.tmp")))
+        command.extend(("--setenv", "UDB_SNAPSHOT_FSYNC_FAIL_TARGET", str(runtime_data / "udb_N.db.tmp")))
     if directory_fsync_failure:
-        command.extend(("--setenv", "UDB_SNAPSHOT_DIR_FSYNC_FAIL_TARGET", str(node / "runtime-data")))
-        command.extend(("--setenv", "UDB_SNAPSHOT_DIR_FSYNC_FAIL_SNAPSHOT", str(node / "runtime-data" / "udb_N.db")))
+        command.extend(("--setenv", "UDB_SNAPSHOT_DIR_FSYNC_FAIL_TARGET", str(runtime_data)))
+        command.extend(("--setenv", "UDB_SNAPSHOT_DIR_FSYNC_FAIL_SNAPSHOT", str(runtime_data / "udb_N.db")))
     if state_directory_fsync_failure:
-        command.extend(("--setenv", "UDB_STATE_DIR_FSYNC_FAIL_TARGET", str(node / "runtime-data")))
+        command.extend(("--setenv", "UDB_STATE_DIR_FSYNC_FAIL_TARGET", str(runtime_data)))
     command.extend((str(ircd), "-f", str(config)))
     if configtest:
         command.append("-c")

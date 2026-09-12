@@ -60,3 +60,7 @@ def test_persistence_faults_do_not_acknowledge_health(fault: str) -> None:
 def test_runtime_effects_preserve_oper_ownership_during_staged_replacement() -> None:
     """The staged effects harness proves UDB-owned live-effect revocation."""
     run_harness("staged_runtime_effects.py")
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__]))

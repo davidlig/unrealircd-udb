@@ -40,10 +40,18 @@ class EnvironmentUnavailable(Exception):
     pass
 
 
-def free_port():
-    with socket.socket() as sock:
+def free_ports(count):
+    sockets = [socket.socket() for _ in range(count)]
+    for sock in sockets:
         sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+    ports = [sock.getsockname()[1] for sock in sockets]
+    for sock in sockets:
+        sock.close()
+    return ports
+
+
+def free_port():
+    return free_ports(1)[0]
 
 
 def sha256(password):
@@ -204,7 +212,8 @@ def test_node(ircd, module, enable_debug):
         # Configure Nick and Channel blocks
         seed_block(node / "runtime-data" / "udb_N.db", "N",
                    f"alice::pass sha256:{sha256('secret')}\n"
-                   "alice::oper netadmin\n")
+                   "alice::oper netadmin\n"
+                   "alice::snomasks +s\n")
         seed_block(node / "runtime-data" / "udb_C.db", "C",
                    "#test::founder alice\n"
                    "#test::modes +ntk chansecret\n")
@@ -219,7 +228,7 @@ def test_node(ircd, module, enable_debug):
             seed_block(node / "runtime-data" / f"udb_{letter}.db", letter)
         seed_ready_state(node / "runtime-data")
 
-        client_port, server_port, tls_port = free_port(), free_port(), free_port()
+        client_port, server_port, tls_port = free_ports(3)
         config = node / "unrealircd.conf"
         write_config(config, server_name, "0D1", client_port, server_port, tls_port, module, node / "runtime-data")
         run_configtest(node, ircd, config)

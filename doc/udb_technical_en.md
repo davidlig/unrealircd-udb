@@ -634,6 +634,7 @@ INS <Block::path> <value>
 DEL <Block::path>
 DRP <block>
 OPT <block> [modified_at]
+EXP <path> <expected-expires>
 ```
 
 Semantics:
@@ -642,6 +643,7 @@ Semantics:
 - `DEL`: delete a path; deleting a missing path is idempotent.
 - `DRP`: drop a complete block, first persisting the empty snapshot.
 - `OPT`: force block save/update and optionally relay `modified_at`.
+- `EXP`: point-to-point compare-and-delete request for an expired K line sent from followers to their selected direct authority (`DB <target> EXP <path> <expected-expires>`). If `expected-expires` matches the authority's record and has elapsed, the authority deletes the profile locally, persists `udb_K.db`, and broadcasts a transactional `DEL` across confirmed peers; stale requests are ignored without error.
 
 A mutation is accepted only from the selected remote propagator. Persistence happens before runtime publication. After processing, it may be relayed hop-by-hop to HEL-confirmed direct peers, excluding the incoming direction.
 
