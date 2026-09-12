@@ -101,6 +101,18 @@ static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
 				errors++;
 			}
 		}
+		else if (!strcmp(cep->name, "anti-entropy-interval"))
+		{
+			unsigned int val;
+			if (!cep->value ||
+				!udb_parse_uint_strict(cep->value, &val, UDB_MIN_ANTI_ENTROPY_INTERVAL, UDB_MAX_ANTI_ENTROPY_INTERVAL))
+			{
+				config_error("%s:%i: udb::anti-entropy-interval must be between %d and %d seconds (default %d)",
+							 cep->file->filename, cep->line_number, UDB_MIN_ANTI_ENTROPY_INTERVAL,
+							 UDB_MAX_ANTI_ENTROPY_INTERVAL, UDB_DEFAULT_ANTI_ENTROPY_INTERVAL);
+				errors++;
+			}
+		}
 		else
 		{
 			config_error("%s:%i: unknown directive udb::%s", cep->file->filename, cep->line_number, cep->name);
@@ -189,6 +201,12 @@ static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
 			if (udb_parse_uint_strict(cep->value, &val, 1, 604800))
 				udb_cfg->stale_timeout = (int)val;
 		}
+		else if (!strcmp(cep->name, "anti-entropy-interval"))
+		{
+			unsigned int val = 0;
+			if (udb_parse_uint_strict(cep->value, &val, UDB_MIN_ANTI_ENTROPY_INTERVAL, UDB_MAX_ANTI_ENTROPY_INTERVAL))
+				udb_cfg->anti_entropy_interval = (int)val;
+		}
 		else if (!strcmp(cep->name, "password-flood"))
 		{
 			udb_flood_valid(cep->value, &udb_cfg->flood_attempts, &udb_cfg->flood_period);
@@ -206,6 +224,8 @@ static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
 		udb_cfg->sync_absolute_timeout = UDB_SYNC_ABSOLUTE_TIMEOUT;
 	if (udb_cfg->stale_timeout == 0)
 		udb_cfg->stale_timeout = 300;
+	if (udb_cfg->anti_entropy_interval == 0)
+		udb_cfg->anti_entropy_interval = UDB_DEFAULT_ANTI_ENTROPY_INTERVAL;
 	if (udb_cfg->flood_attempts == 0)
 		udb_cfg->flood_attempts = 5;
 	if (udb_cfg->flood_period == 0)

@@ -182,6 +182,11 @@ module
 #define UDB_RECONCILE_RETRY_MAX 6
 #define UDB_RECONCILE_RETRY_BASE 2
 #define UDB_STATE_FORMAT 1
+#define UDB_DEFAULT_ANTI_ENTROPY_INTERVAL 300
+#define UDB_MIN_ANTI_ENTROPY_INTERVAL 1
+#define UDB_MAX_ANTI_ENTROPY_INTERVAL 86400
+#define UDB_ANTI_ENTROPY_TIMEOUT 10
+#define UDB_ANTI_ENTROPY_MIN_GAP 5
 #define UDB_DEFAULT_MAX_STAGED_BYTES (64 * 1024 * 1024) /* 64 MB */
 #define UDB_MIN_MAX_STAGED_BYTES 1024
 #define UDB_MAX_MAX_STAGED_BYTES (1024ULL * 1024 * 1024)
@@ -407,6 +412,7 @@ typedef struct UdbConfig
 	int sync_inactivity_timeout;
 	int sync_absolute_timeout;
 	int stale_timeout;
+	int anti_entropy_interval;
 } UdbConfig;
 
 typedef struct UdbContext
@@ -503,6 +509,21 @@ typedef struct UdbReconcileState
 } UdbReconcileState;
 
 static UdbReconcileState udb_reconcile = {0};
+
+typedef struct UdbAntiEntropyState
+{
+	unsigned long round_id;
+	int pending;
+	unsigned int acked_blocks;
+	unsigned int divergent_blocks;
+	time_t last_check;
+	time_t last_success;
+	time_t next_check_at;
+	time_t deadline;
+	unsigned int fail_count;
+} UdbAntiEntropyState;
+
+static UdbAntiEntropyState udb_anti_entropy = {0};
 
 /* While a staged commit is swapping a block tree (notably S), policy-change
  * notifications are deferred: the transient state between removing the old
@@ -635,6 +656,12 @@ static int udb_sync_send_tree(Client *server, UdbRecord *rec, int depth, char *p
 							  unsigned long round_id, char letter, const char *txid);
 static int udb_sync_send_stage(Client *server, UdbBlock *block, unsigned long round_id);
 static void udb_sync_server_quit(Client *client);
+static void udb_anti_entropy_schedule_next(time_t now);
+static void udb_anti_entropy_timer_check(time_t now);
+static void udb_anti_entropy_record_ack(Client *peer, unsigned long round_id, char letter, unsigned int remote_count,
+										const char *remote_sha, uint64_t watermark_seq);
+static void udb_anti_entropy_handle_err(Client *peer, unsigned long round_id, int errcode);
+static void udb_anti_entropy_peer_quit(Client *client);
 static int udb_send_db_to_one(Client *to, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static int udb_is_propagator(UdbContext *ctx, Client *server);
 static int udb_server_name_valid(const char *srv);
@@ -1819,6 +1846,18 @@ static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
 				errors++;
 			}
 		}
+		else if (!strcmp(cep->name, "anti-entropy-interval"))
+		{
+			unsigned int val;
+			if (!cep->value ||
+				!udb_parse_uint_strict(cep->value, &val, UDB_MIN_ANTI_ENTROPY_INTERVAL, UDB_MAX_ANTI_ENTROPY_INTERVAL))
+			{
+				config_error("%s:%i: udb::anti-entropy-interval must be between %d and %d seconds (default %d)",
+							 cep->file->filename, cep->line_number, UDB_MIN_ANTI_ENTROPY_INTERVAL,
+							 UDB_MAX_ANTI_ENTROPY_INTERVAL, UDB_DEFAULT_ANTI_ENTROPY_INTERVAL);
+				errors++;
+			}
+		}
 		else
 		{
 			config_error("%s:%i: unknown directive udb::%s", cep->file->filename, cep->line_number, cep->name);
@@ -1907,6 +1946,12 @@ static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
 			if (udb_parse_uint_strict(cep->value, &val, 1, 604800))
 				udb_cfg->stale_timeout = (int)val;
 		}
+		else if (!strcmp(cep->name, "anti-entropy-interval"))
+		{
+			unsigned int val = 0;
+			if (udb_parse_uint_strict(cep->value, &val, UDB_MIN_ANTI_ENTROPY_INTERVAL, UDB_MAX_ANTI_ENTROPY_INTERVAL))
+				udb_cfg->anti_entropy_interval = (int)val;
+		}
 		else if (!strcmp(cep->name, "password-flood"))
 		{
 			udb_flood_valid(cep->value, &udb_cfg->flood_attempts, &udb_cfg->flood_period);
@@ -1924,6 +1969,8 @@ static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
 		udb_cfg->sync_absolute_timeout = UDB_SYNC_ABSOLUTE_TIMEOUT;
 	if (udb_cfg->stale_timeout == 0)
 		udb_cfg->stale_timeout = 300;
+	if (udb_cfg->anti_entropy_interval == 0)
+		udb_cfg->anti_entropy_interval = UDB_DEFAULT_ANTI_ENTROPY_INTERVAL;
 	if (udb_cfg->flood_attempts == 0)
 		udb_cfg->flood_attempts = 5;
 	if (udb_cfg->flood_period == 0)
@@ -5510,6 +5557,175 @@ static int udb_sync_send_stage(Client *server, UdbBlock *block, unsigned long ro
 	return 1;
 }
 
+static time_t udb_anti_entropy_calc_interval(void)
+{
+	int base = (udb_cfg && udb_cfg->anti_entropy_interval > 0) ? udb_cfg->anti_entropy_interval
+															   : UDB_DEFAULT_ANTI_ENTROPY_INTERVAL;
+	int jitter_range = base / 10;
+	if (jitter_range > 0)
+	{
+		int delta = (rand() % (2 * jitter_range + 1)) - jitter_range;
+		int res = base + delta;
+		return res > 0 ? (time_t)res : 1;
+	}
+	return base > 0 ? (time_t)base : 1;
+}
+
+static void udb_anti_entropy_schedule_next(time_t now)
+{
+	udb_anti_entropy.next_check_at = now + udb_anti_entropy_calc_interval();
+}
+
+static void udb_anti_entropy_trigger(time_t now, Client *authority_peer)
+{
+	static unsigned long ae_round_sequence = 0;
+	unsigned long round_id = (unsigned long)now + ++ae_round_sequence;
+	if (!round_id)
+		round_id = ++ae_round_sequence;
+
+	udb_anti_entropy.round_id = round_id;
+	udb_anti_entropy.pending = 1;
+	udb_anti_entropy.acked_blocks = 0;
+	udb_anti_entropy.divergent_blocks = 0;
+	udb_anti_entropy.last_check = now;
+	udb_anti_entropy.deadline = now + UDB_ANTI_ENTROPY_TIMEOUT;
+
+	udb_send_db_to_one(authority_peer, ":%s DB %s MANIFEST REQ %lu", me.id, authority_peer->id, round_id);
+}
+
+static void udb_anti_entropy_timer_check(time_t now)
+{
+	if (!udb_ready || udb_sync_status != UDB_SYNC_OK)
+		return;
+
+	UdbPropagatorSelection selected;
+	if (!udb_select_propagator(udb_ctx, 1, &selected) || selected.is_local || !selected.peer ||
+		!udb_has_hello(selected.peer))
+		return;
+
+	if (udb_anti_entropy.pending)
+	{
+		if (now >= udb_anti_entropy.deadline)
+		{
+			udb_anti_entropy.pending = 0;
+			udb_anti_entropy.fail_count++;
+			unsigned int shift = udb_anti_entropy.fail_count > 4 ? 4 : udb_anti_entropy.fail_count;
+			time_t delay = (time_t)(UDB_ANTI_ENTROPY_MIN_GAP << shift);
+			udb_anti_entropy.next_check_at = now + delay;
+		}
+		return;
+	}
+
+	if (udb_reconcile.active || udb_has_active_sessions(udb_ctx) || udb_has_pending_requests(udb_ctx))
+		return;
+
+	if (udb_anti_entropy.next_check_at == 0)
+	{
+		udb_anti_entropy_schedule_next(now);
+		return;
+	}
+
+	int base_interval = (udb_cfg && udb_cfg->anti_entropy_interval > 0) ? udb_cfg->anti_entropy_interval
+																		: UDB_DEFAULT_ANTI_ENTROPY_INTERVAL;
+	time_t min_gap = (base_interval < UDB_ANTI_ENTROPY_MIN_GAP) ? (time_t)base_interval : UDB_ANTI_ENTROPY_MIN_GAP;
+	if (udb_anti_entropy.last_check && (now - udb_anti_entropy.last_check < min_gap))
+		return;
+
+	if (now >= udb_anti_entropy.next_check_at)
+	{
+		udb_anti_entropy_trigger(now, selected.peer);
+	}
+}
+
+static void udb_anti_entropy_record_ack(Client *peer, unsigned long round_id, char letter, unsigned int remote_count,
+										const char *remote_sha, uint64_t watermark_seq)
+{
+	if (!udb_anti_entropy.pending || udb_anti_entropy.round_id != round_id)
+		return;
+
+	unsigned int mask = udb_block_letter_to_mask(letter);
+	UdbBlock *block = udb_block_by_letter(udb_ctx, letter);
+	if (!mask || !block)
+		return;
+
+	if (udb_anti_entropy.acked_blocks & mask)
+		return;
+
+	udb_anti_entropy.acked_blocks |= mask;
+
+	if (block->record_count != remote_count || strcmp(block->sha256, remote_sha) != 0)
+	{
+		udb_anti_entropy.divergent_blocks |= mask;
+	}
+
+	if ((udb_anti_entropy.acked_blocks & UDB_ALL_BLOCKS_MASK) == UDB_ALL_BLOCKS_MASK)
+	{
+		time_t now = time(NULL);
+		udb_anti_entropy.pending = 0;
+
+		if (udb_anti_entropy.divergent_blocks == 0)
+		{
+			udb_anti_entropy.last_success = now;
+			udb_anti_entropy.fail_count = 0;
+			udb_anti_entropy_schedule_next(now);
+		}
+		else
+		{
+			udb_sync_mark_degraded(peer, "anti-entropy divergence detected");
+			udb_reconcile_start(peer, round_id);
+			udb_reconcile.divergent_blocks = udb_anti_entropy.divergent_blocks;
+			udb_reconcile.compared_blocks = UDB_ALL_BLOCKS_MASK;
+			udb_reconcile.completed_blocks = UDB_ALL_BLOCKS_MASK & ~udb_anti_entropy.divergent_blocks;
+			if (watermark_seq > udb_reconcile.watermark_seq)
+				udb_reconcile.watermark_seq = watermark_seq;
+
+			UdbBlock *b;
+			for (b = udb_ctx->block_list; b; b = b->next)
+			{
+				unsigned int bmask = udb_block_letter_to_mask(b->letter);
+				if (bmask & udb_anti_entropy.divergent_blocks)
+				{
+					if (udb_send_db_to_one(peer, ":%s DB %s RES %lu %c", me.id, peer->id, round_id, b->letter))
+					{
+						udb_reconcile_record_res(peer, round_id, b->letter);
+						b->pending_from = peer;
+						b->pending_deadline =
+							now + ((udb_cfg && udb_cfg->sync_inactivity_timeout > 0) ? udb_cfg->sync_inactivity_timeout
+																					 : UDB_SYNC_TIMEOUT);
+						b->pending_round_id = round_id;
+					}
+				}
+			}
+			udb_anti_entropy_schedule_next(now);
+		}
+	}
+}
+
+static void udb_anti_entropy_handle_err(Client *peer, unsigned long round_id, int errcode)
+{
+	if (udb_anti_entropy.pending && udb_anti_entropy.round_id == round_id)
+	{
+		time_t now = time(NULL);
+		udb_anti_entropy.pending = 0;
+		udb_anti_entropy.fail_count++;
+		unsigned int shift = udb_anti_entropy.fail_count > 4 ? 4 : udb_anti_entropy.fail_count;
+		time_t delay = (time_t)(UDB_ANTI_ENTROPY_MIN_GAP << shift);
+		udb_anti_entropy.next_check_at = now + delay;
+		(void)peer;
+		(void)errcode;
+	}
+}
+
+static void udb_anti_entropy_peer_quit(Client *client)
+{
+	(void)client;
+	if (udb_anti_entropy.pending)
+	{
+		udb_anti_entropy.pending = 0;
+		udb_anti_entropy.next_check_at = time(NULL) + UDB_ANTI_ENTROPY_MIN_GAP;
+	}
+}
+
 EVENT(udb_sync_timeout_event)
 {
 	UdbBlock *block;
@@ -5580,11 +5796,13 @@ EVENT(udb_sync_timeout_event)
 	}
 	udb_propagator_availability_refresh();
 	udb_sync_status_refresh();
+	udb_anti_entropy_timer_check(now);
 }
 
 static void udb_sync_server_quit(Client *client)
 {
 	udb_lines_expiry_peer_disconnected(client);
+	udb_anti_entropy_peer_quit(client);
 	UdbBlock *block;
 	UdbHelloPeer **peer;
 
@@ -7782,7 +8000,7 @@ static void udb_protocol_mutation_error(Client *client, const char *subcmd, int 
 static int udb_protocol_error_affects_reconciliation(const char *subcmd)
 {
 	return subcmd && (!strcasecmp(subcmd, "INF") || !strcasecmp(subcmd, "RES") || !strcasecmp(subcmd, "BEGIN") ||
-					  !strcasecmp(subcmd, "PUT") || !strcasecmp(subcmd, "END"));
+					  !strcasecmp(subcmd, "PUT") || !strcasecmp(subcmd, "END") || !strcasecmp(subcmd, "MANIFEST"));
 }
 
 static int udb_sync_to_server(Client *server)
@@ -8123,6 +8341,17 @@ CMD_FUNC(cmd_db)
 						log_data_client("client", client), log_data_string("cmd", parv[3]),
 						log_data_integer("errcode", (int)errcode));
 
+				if (!strcasecmp(parv[3], "MANIFEST"))
+				{
+					if (client == direct_peer && !is_broadcast && udb_anti_entropy.pending &&
+						udb_anti_entropy.round_id == error_round)
+					{
+						udb_anti_entropy_handle_err(direct_peer, error_round, (int)errcode);
+						if (!is_broadcast)
+							return;
+					}
+				}
+
 				eblock = udb_block_by_letter(ctx, *parv[6]);
 				active_authority_matches = client == direct_peer && !is_broadcast && eblock &&
 										   udb_protocol_error_affects_reconciliation(parv[3]) && udb_reconcile.active &&
@@ -8305,6 +8534,62 @@ CMD_FUNC(cmd_db)
 				return;
 			}
 			udb_mutation_drp(ctx, client, direct_peer, target, parv[3], seq, *parv[5], is_for_me, is_broadcast);
+		}
+		break;
+
+	case 'M':
+		if (!strcasecmp(subcmd, "MANIFEST"))
+		{
+			if (parc < 5)
+				return;
+			const char *action = parv[3];
+			unsigned long round_id = 0;
+			if (!udb_strtoul_strict(parv[4], &round_id) || !round_id)
+				return;
+
+			if (!strcasecmp(action, "REQ"))
+			{
+				if (parc != 5 || client != direct_peer || is_broadcast || !is_for_me || !udb_ready)
+				{
+					if (is_for_me && round_id)
+						udb_protocol_round_error(client, "MANIFEST", UDB_ERR_FORBIDDEN, round_id, '0');
+					return;
+				}
+				if (!udb_peer_authorizes_us(direct_peer))
+				{
+					udb_protocol_round_error(client, "MANIFEST", UDB_ERR_FORBIDDEN, round_id, '0');
+					return;
+				}
+				UdbBlock *b;
+				for (b = ctx->block_list; b; b = b->next)
+				{
+					udb_send_db_to_one(client, ":%s DB %s MANIFEST ACK %lu %c %u %s %" PRIu64, me.id, client->id,
+									   round_id, b->letter, b->record_count, b->sha256, ctx->last_applied_seq);
+				}
+				return;
+			}
+			else if (!strcasecmp(action, "ACK"))
+			{
+				if (parc < 9 || client != direct_peer || is_broadcast || !is_for_me)
+					return;
+				if (!udb_is_authorized_sync_source(ctx, direct_peer))
+					return;
+
+				char letter = *parv[5];
+				unsigned long remote_count = 0;
+				char remote_sha[UDB_SHA256_HEX_LEN + 1];
+				uint64_t watermark_seq = 0;
+
+				if (!udb_strtoul_strict(parv[6], &remote_count) || !udb_digest_parse(parv[7], remote_sha) ||
+					!udb_strtoull_strict(parv[8], (unsigned long long *)&watermark_seq))
+				{
+					return;
+				}
+
+				udb_anti_entropy_record_ack(direct_peer, round_id, letter, (unsigned int)remote_count, remote_sha,
+											watermark_seq);
+				return;
+			}
 		}
 		break;
 

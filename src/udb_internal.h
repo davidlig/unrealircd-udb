@@ -39,6 +39,11 @@
 #define UDB_RECONCILE_RETRY_MAX 6
 #define UDB_RECONCILE_RETRY_BASE 2
 #define UDB_STATE_FORMAT 1
+#define UDB_DEFAULT_ANTI_ENTROPY_INTERVAL 300
+#define UDB_MIN_ANTI_ENTROPY_INTERVAL 1
+#define UDB_MAX_ANTI_ENTROPY_INTERVAL 86400
+#define UDB_ANTI_ENTROPY_TIMEOUT 10
+#define UDB_ANTI_ENTROPY_MIN_GAP 5
 #define UDB_DEFAULT_MAX_STAGED_BYTES (64 * 1024 * 1024) /* 64 MB */
 #define UDB_MIN_MAX_STAGED_BYTES 1024
 #define UDB_MAX_MAX_STAGED_BYTES (1024ULL * 1024 * 1024)
@@ -264,6 +269,7 @@ typedef struct UdbConfig
 	int sync_inactivity_timeout;
 	int sync_absolute_timeout;
 	int stale_timeout;
+	int anti_entropy_interval;
 } UdbConfig;
 
 typedef struct UdbContext
@@ -360,6 +366,21 @@ typedef struct UdbReconcileState
 } UdbReconcileState;
 
 static UdbReconcileState udb_reconcile = {0};
+
+typedef struct UdbAntiEntropyState
+{
+	unsigned long round_id;
+	int pending;
+	unsigned int acked_blocks;
+	unsigned int divergent_blocks;
+	time_t last_check;
+	time_t last_success;
+	time_t next_check_at;
+	time_t deadline;
+	unsigned int fail_count;
+} UdbAntiEntropyState;
+
+static UdbAntiEntropyState udb_anti_entropy = {0};
 
 /* While a staged commit is swapping a block tree (notably S), policy-change
  * notifications are deferred: the transient state between removing the old
@@ -492,6 +513,12 @@ static int udb_sync_send_tree(Client *server, UdbRecord *rec, int depth, char *p
 							  unsigned long round_id, char letter, const char *txid);
 static int udb_sync_send_stage(Client *server, UdbBlock *block, unsigned long round_id);
 static void udb_sync_server_quit(Client *client);
+static void udb_anti_entropy_schedule_next(time_t now);
+static void udb_anti_entropy_timer_check(time_t now);
+static void udb_anti_entropy_record_ack(Client *peer, unsigned long round_id, char letter, unsigned int remote_count,
+										const char *remote_sha, uint64_t watermark_seq);
+static void udb_anti_entropy_handle_err(Client *peer, unsigned long round_id, int errcode);
+static void udb_anti_entropy_peer_quit(Client *client);
 static int udb_send_db_to_one(Client *to, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static int udb_is_propagator(UdbContext *ctx, Client *server);
 static int udb_server_name_valid(const char *srv);

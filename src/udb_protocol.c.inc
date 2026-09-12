@@ -135,7 +135,7 @@ static void udb_protocol_mutation_error(Client *client, const char *subcmd, int 
 static int udb_protocol_error_affects_reconciliation(const char *subcmd)
 {
 	return subcmd && (!strcasecmp(subcmd, "INF") || !strcasecmp(subcmd, "RES") || !strcasecmp(subcmd, "BEGIN") ||
-					  !strcasecmp(subcmd, "PUT") || !strcasecmp(subcmd, "END"));
+					  !strcasecmp(subcmd, "PUT") || !strcasecmp(subcmd, "END") || !strcasecmp(subcmd, "MANIFEST"));
 }
 
 static int udb_sync_to_server(Client *server)
@@ -476,6 +476,17 @@ CMD_FUNC(cmd_db)
 						log_data_client("client", client), log_data_string("cmd", parv[3]),
 						log_data_integer("errcode", (int)errcode));
 
+				if (!strcasecmp(parv[3], "MANIFEST"))
+				{
+					if (client == direct_peer && !is_broadcast && udb_anti_entropy.pending &&
+						udb_anti_entropy.round_id == error_round)
+					{
+						udb_anti_entropy_handle_err(direct_peer, error_round, (int)errcode);
+						if (!is_broadcast)
+							return;
+					}
+				}
+
 				eblock = udb_block_by_letter(ctx, *parv[6]);
 				active_authority_matches = client == direct_peer && !is_broadcast && eblock &&
 										   udb_protocol_error_affects_reconciliation(parv[3]) && udb_reconcile.active &&
@@ -658,6 +669,62 @@ CMD_FUNC(cmd_db)
 				return;
 			}
 			udb_mutation_drp(ctx, client, direct_peer, target, parv[3], seq, *parv[5], is_for_me, is_broadcast);
+		}
+		break;
+
+	case 'M':
+		if (!strcasecmp(subcmd, "MANIFEST"))
+		{
+			if (parc < 5)
+				return;
+			const char *action = parv[3];
+			unsigned long round_id = 0;
+			if (!udb_strtoul_strict(parv[4], &round_id) || !round_id)
+				return;
+
+			if (!strcasecmp(action, "REQ"))
+			{
+				if (parc != 5 || client != direct_peer || is_broadcast || !is_for_me || !udb_ready)
+				{
+					if (is_for_me && round_id)
+						udb_protocol_round_error(client, "MANIFEST", UDB_ERR_FORBIDDEN, round_id, '0');
+					return;
+				}
+				if (!udb_peer_authorizes_us(direct_peer))
+				{
+					udb_protocol_round_error(client, "MANIFEST", UDB_ERR_FORBIDDEN, round_id, '0');
+					return;
+				}
+				UdbBlock *b;
+				for (b = ctx->block_list; b; b = b->next)
+				{
+					udb_send_db_to_one(client, ":%s DB %s MANIFEST ACK %lu %c %u %s %" PRIu64, me.id, client->id,
+									   round_id, b->letter, b->record_count, b->sha256, ctx->last_applied_seq);
+				}
+				return;
+			}
+			else if (!strcasecmp(action, "ACK"))
+			{
+				if (parc < 9 || client != direct_peer || is_broadcast || !is_for_me)
+					return;
+				if (!udb_is_authorized_sync_source(ctx, direct_peer))
+					return;
+
+				char letter = *parv[5];
+				unsigned long remote_count = 0;
+				char remote_sha[UDB_SHA256_HEX_LEN + 1];
+				uint64_t watermark_seq = 0;
+
+				if (!udb_strtoul_strict(parv[6], &remote_count) || !udb_digest_parse(parv[7], remote_sha) ||
+					!udb_strtoull_strict(parv[8], (unsigned long long *)&watermark_seq))
+				{
+					return;
+				}
+
+				udb_anti_entropy_record_ack(direct_peer, round_id, letter, (unsigned int)remote_count, remote_sha,
+											watermark_seq);
+				return;
+			}
 		}
 		break;
 
