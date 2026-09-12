@@ -478,7 +478,7 @@ Cabecera de snapshot:
 ; Records: 42
 ```
 
-`Records` cuenta líneas lógicas persistidas, no nodos contenedor. El checksum no incluye estas cabeceras ni el orden de las líneas. Se calcula como CRC32 sobre las líneas lógicas `ruta valor\n`, ordenadas lexicográficamente. Un árbol vacío tiene checksum `0`.
+`Records` cuenta líneas lógicas persistidas, no nodos contenedor. El digest del manifiesto no incluye estas cabeceras ni el orden de las líneas. Se calcula como SHA-256 canónico sobre las líneas lógicas `ruta valor\n`, ordenadas lexicográficamente. Un árbol vacío tiene digest `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
 
 ### 6.1 Commit de un bloque
 
@@ -609,13 +609,13 @@ La autoridad ofrece `INF` para los **seis bloques**. El receptor sólo puede pas
 ### 9.1 Frames
 
 ```text
-INF   <round> <block> <sha256> <modified_at> <watermark_seq>
+INF   <round> <block> <sha256> <record_count> <modified_at> [<watermark_seq>]
 RES   <round> <block>
-BEGIN <round> <block> <txid> <sha256> <watermark_seq>
+BEGIN <round> <block> <txid> <sha256> [<watermark_seq>]
 PUT   <round> <block> <txid> <path> :<string>
 PUT   <round> <block> <txid> <path> *<number>
-END   <round> <block> <txid> <sha256> <watermark_seq>
-ACK   <round> <block> <txid> <sha256> <watermark_seq>
+END   <round> <block> <txid> <sha256> [<watermark_seq>]
+ACK   <round> <block> <txid> <sha256> [<watermark_seq>]
 ERR   <subcmd> <code> <round_or_seq> <block>
 ```
 
@@ -895,13 +895,13 @@ El flujo CI actual compila UnrealIRCd **6.2.6**, construye el módulo modular de
 HEL 4 <selector> <epoch> OCL [OCLG]
 HEL 4 ACK <selector> <epoch> OCL [OCLG]
 
-INF <round> <block> <checksum> <mtime>
+INF <round> <block> <sha256> <record_count> <mtime> [<watermark_seq>]
 RES <round> <block>
-BEGIN <round> <block> <txid> <checksum>
+BEGIN <round> <block> <txid> <sha256> [<watermark_seq>]
 PUT <round> <block> <txid> <path> :<string>
 PUT <round> <block> <txid> <path> *<number>
-END <round> <block> <txid> <checksum>
-ACK <round> <block> <txid> <digest>
+END <round> <block> <txid> <sha256> [<watermark_seq>]
+ACK <round> <block> <txid> <sha256> [<watermark_seq>]
 ERR <subcmd> <code> <round/correlation> <block>
 
 INS <Block::path> <value>

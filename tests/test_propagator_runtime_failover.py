@@ -27,6 +27,7 @@ Scenario:
 """
 
 import os
+import hashlib
 import pathlib
 import secrets
 import shutil
@@ -36,7 +37,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import zlib
 
 from udb_state_seed import seed_block, seed_ready_state
 
@@ -45,11 +45,12 @@ RUNTIME_ROOT = pathlib.Path(os.environ.get("UDB_TEST_IRCD_ROOT", pathlib.Path.ho
 DEFAULT_IRCD = RUNTIME_ROOT / "bin/unrealircd"
 CLOAK_KEYS = ("aB3" * 30, "cD4" * 30, "eF5" * 30)
 LINK_PASSWORD = "testfailoverpassword"
+EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 
 def tree_checksum(records):
-    lines = sorted(f"{path} {value}\n".encode("ascii") for path, value in records)
-    return f"{zlib.crc32(b''.join(lines)) & 0xFFFFFFFF:08X}"
+    lines = sorted(f"{path} {value}\n".encode("utf-8") for path, value in records)
+    return hashlib.sha256(b"".join(lines)).hexdigest()
 
 
 def free_ports(count):
@@ -184,9 +185,9 @@ class MockServices:
         self.wait_for(lambda line: " DB " in line and " HEL 4 " in line, f"{self.name} HEL response")
         self.send(f"DB {self.target_sid} HEL 4 ACK {self.name} 0000000000000001 OCL")
         for b in ('N', 'C', 'I', 'L', 'K'):
-            self.send(f"DB {self.target_sid} INF 1 {b} 00000000 0")
+            self.send(f"DB {self.target_sid} INF 1 {b} {EMPTY_SHA256} 0 0")
         s_crc = tree_checksum([("flood", "5:30"), ("propagator", "services-a.test,hub-a.test,services-b.test,hub-b.test")])
-        self.send(f"DB {self.target_sid} INF 1 S {s_crc} 1787720000")
+        self.send(f"DB {self.target_sid} INF 1 S {s_crc} 2 1787720000")
         time.sleep(0.2)
 
     def send_raw(self, command):
@@ -205,12 +206,12 @@ class MockServices:
         checksum = tree_checksum(records)
         start = len(self.lines)
         self.round_id += 1
-        self.send(f"DB {self.target_sid} INF {self.round_id} N {checksum} {int(time.time()) + 1000}")
+        self.send(f"DB {self.target_sid} INF {self.round_id} N {checksum} {len(records)} {int(time.time()) + 1000}")
         for block in ("C", "I", "L", "K"):
-            self.send(f"DB {self.target_sid} INF {self.round_id} {block} 00000000 0")
+            self.send(f"DB {self.target_sid} INF {self.round_id} {block} {EMPTY_SHA256} 0 0")
         s_crc = tree_checksum([("flood", "5:30"),
                                ("propagator", "services-a.test,hub-a.test,services-b.test,hub-b.test")])
-        self.send(f"DB {self.target_sid} INF {self.round_id} S {s_crc} 1787720000")
+        self.send(f"DB {self.target_sid} INF {self.round_id} S {s_crc} 2 1787720000")
         self.wait_for(lambda line: f" RES {self.round_id} N" in line,
                       f"RES for staged snapshot {txid}", start_idx=start)
         self.send(f"DB {self.target_sid} BEGIN {self.round_id} N {txid} {checksum}")

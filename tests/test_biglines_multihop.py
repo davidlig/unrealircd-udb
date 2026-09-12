@@ -24,6 +24,9 @@ SERVICES_NAME = "udb-svc.test"
 SERVICES_SID = "002"
 
 
+EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+
 class EnvironmentUnavailable(Exception):
     pass
 
@@ -144,7 +147,7 @@ class MockPropagator:
         self.send(f"DB {self.target_sid} HEL 4 ACK {prop} 0000000000000001 OCL")
         if send_inventory:
             for letter in ("N", "C", "I", "S", "L", "K"):
-                self.send(f"DB {self.target_sid} INF 1 {letter} 00000000 0")
+                self.send(f"DB {self.target_sid} INF 1 {letter} {EMPTY_SHA256} 0 0")
 
     def send(self, command):
         if not command.startswith(":"):

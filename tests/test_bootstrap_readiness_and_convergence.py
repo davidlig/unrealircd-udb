@@ -21,6 +21,7 @@ Covers:
   Test 15 - Pending RES timeout/current-round ERR retry while stale ERR is ignored
 """
 
+import hashlib
 import os
 import pathlib
 import shutil
@@ -30,7 +31,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import zlib
 
 from udb_state_seed import seed_block, seed_bootstrapping_state, seed_ready_state, wait_for_state
 
@@ -39,6 +39,8 @@ RUNTIME_ROOT = pathlib.Path(os.environ.get("UDB_TEST_IRCD_ROOT", pathlib.Path.ho
 DEFAULT_IRCD = RUNTIME_ROOT / "bin/unrealircd"
 CLOAK_KEYS = ("aB3" * 30, "cD4" * 30, "eF5" * 30)
 LINK_PASSWORD = "testlinkpassword"
+EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+DUMMY_MISMATCH_SHA256 = "f" * 64
 
 
 def free_ports(count):
@@ -179,7 +181,7 @@ class MockPeer:
             self.send(f"DB {self.target_sid} HEL 4 ACK {prop} 0000000000000001 OCL")
             if send_inf:
                 for b in ('N', 'C', 'I', 'S', 'L', 'K'):
-                    self.send(f"DB {self.target_sid} INF 1 {b} 00000000 0")
+                    self.send(f"DB {self.target_sid} INF 1 {b} {EMPTY_SHA256} 0 0")
 
     def send_raw(self, command):
         self.sock.sendall((command + "\r\n").encode("ascii"))
@@ -187,12 +189,12 @@ class MockPeer:
     def send_snapshots(self, snapshots, timestamp):
         self.round_id += 1
         for letter, txid, records, advertised_checksum, checksum in snapshots:
-            self.send(f"DB {self.target_sid} INF {self.round_id} {letter} {advertised_checksum} {timestamp}")
+            self.send(f"DB {self.target_sid} INF {self.round_id} {letter} {advertised_checksum} {len(records)} {timestamp}")
         for letter, txid, records, advertised_checksum, checksum in snapshots:
             self.wait_for(lambda l, letter=letter: f" RES {self.round_id} {letter}" in l,
                           f"RES for block {letter}")
         for letter, txid, records, advertised_checksum, checksum in snapshots:
-            self.send(f"DB {self.target_sid} BEGIN {self.round_id} {letter} {txid} 00000000")
+            self.send(f"DB {self.target_sid} BEGIN {self.round_id} {letter} {txid} {checksum}")
             for path, value in records:
                 self.send(f"DB {self.target_sid} PUT {self.round_id} {letter} {txid} {path} {value}")
             self.send(f"DB {self.target_sid} END {self.round_id} {letter} {txid} {checksum}")
@@ -354,12 +356,12 @@ def test_suite():
 
             peer_a = MockPeer("peer-a.test", "00A", "127.0.0.1", p1_ports[1], "001")
             nick_rec = "alice::vhost alice.net"
-            n_crc = zlib.crc32((nick_rec + "\n").encode("utf-8")) & 0xFFFFFFFF
-            peer_a.send(f"DB 001 INF 1 N {n_crc:08x} 1000")
+            n_sha = hashlib.sha256((nick_rec + "\n").encode("utf-8")).hexdigest()
+            peer_a.send(f"DB 001 INF 1 N {n_sha} 1 1000")
             peer_a.wait_for(lambda l: " RES 1 N" in l, "RES for block N")
-            peer_a.send("DB 001 BEGIN 1 N tx1 00000000")
+            peer_a.send(f"DB 001 BEGIN 1 N tx1 {n_sha}")
             peer_a.send(f"DB 001 PUT 1 N tx1 alice::vhost alice.net")
-            peer_a.send(f"DB 001 END 1 N tx1 {n_crc:08x}")
+            peer_a.send(f"DB 001 END 1 N tx1 {n_sha}")
             peer_a.wait_for(lambda l: " ACK 1 N " in l, "ACK for block N")
             peer_a.close()
 
@@ -382,8 +384,8 @@ def test_suite():
             # Complete the inventory and each staged transfer in order.  The
             # peer must advertise the real N checksum; an incorrect INF
             # checksum or an overlapping round correctly aborts the prior one.
-            snapshots = [("N", "tx2_N", [("alice::vhost", "alice.net")], f"{n_crc:08x}", f"{n_crc:08x}")]
-            snapshots += [(b, f"tx2_{b}", [], "deadbeef", "00000000") for b in ('C', 'I', 'S', 'L', 'K')]
+            snapshots = [("N", "tx2_N", [("alice::vhost", "alice.net")], n_sha, n_sha)]
+            snapshots += [(b, f"tx2_{b}", [], DUMMY_MISMATCH_SHA256, EMPTY_SHA256) for b in ('C', 'I', 'S', 'L', 'K')]
             peer_a2.send_snapshots(snapshots, sync_timestamp)
 
             assert wait_for_state(state_file, "STATE=READY"), ".udb_state must now be READY"
@@ -408,7 +410,7 @@ def test_suite():
         try:
             peer2 = MockPeer("peer-a.test", "00A", "127.0.0.1", p2_ports[1], "002")
             for b in ('N', 'C', 'I', 'S', 'L'):
-                peer2.send(f"DB 002 INF 1 {b} 00000000 0")
+                peer2.send(f"DB 002 INF 1 {b} {EMPTY_SHA256} 0 0")
             time.sleep(0.2)
             peer2.close()
             stop(p2)
@@ -642,19 +644,19 @@ def test_suite():
         try:
             prop6 = MockPeer("prop-a.test", "00P", "127.0.0.1", p6_ports[1], "006", propagator_advertised="prop-a.test")
             for b in ('N', 'C', 'I', 'S', 'L', 'K'):
-                prop6.send(f"DB 006 INF 1 {b} 00000000 0")
+                prop6.send(f"DB 006 INF 1 {b} {EMPTY_SHA256} 0 0")
             time.sleep(0.3)
 
-            prop6.send(f"DB 006 INF 2 N deadbeef {int(time.time()) + 1000}")
+            bob_rec = "bob::vhost bob.net"
+            bob_sha = hashlib.sha256((bob_rec + "\n").encode("utf-8")).hexdigest()
+            prop6.send(f"DB 006 INF 2 N {bob_sha} 1 {int(time.time()) + 1000}")
             for b in ('C', 'I', 'S', 'L', 'K'):
-                prop6.send(f"DB 006 INF 2 {b} 00000000 0")
+                prop6.send(f"DB 006 INF 2 {b} {EMPTY_SHA256} 0 0")
             time.sleep(0.2)
 
-            prop6.send("DB 006 BEGIN 2 N tx_round2 00000000")
+            prop6.send(f"DB 006 BEGIN 2 N tx_round2 {bob_sha}")
             prop6.send("DB 006 PUT 2 N tx_round2 bob::vhost bob.net")
-            bob_rec = "bob::vhost bob.net"
-            bob_crc = zlib.crc32((bob_rec + "\n").encode("utf-8")) & 0xFFFFFFFF
-            prop6.send(f"DB 006 END 2 N tx_round2 {bob_crc:08x}")
+            prop6.send(f"DB 006 END 2 N tx_round2 {bob_sha}")
             prop6.wait_for(lambda l: " ACK 2 N " in l, "ACK for block N round 2")
             prop6.close()
             print("PASS: Test 6: Re-divergence cleanly completed with fresh staging round")
@@ -686,24 +688,24 @@ def test_suite():
 
             prop_a = MockPeer("prop-a.test", "00A", "127.0.0.1", p7_ports[1], "007", propagator_advertised="prop-a.test")
             for b in ('N', 'C', 'I'):
-                prop_a.send(f"DB 007 INF 1 {b} 00000000 0")
+                prop_a.send(f"DB 007 INF 1 {b} {EMPTY_SHA256} 0 0")
             time.sleep(0.1)
             prop_a.close()
 
             prop_b = MockPeer("prop-b.test", "00B", "127.0.0.1", p7_ports[1], "007", propagator_advertised="prop-b.test")
             # The seeded S block carries the propagator list, so its canonical
             # checksum is non-zero; B must advertise the matching value.
-            s_crc7 = zlib.crc32(b"propagator prop-a.test,prop-b.test\n") & 0xFFFFFFFF
-            prop_b.send(f"DB 007 INF 2 S {s_crc7:08x} 0")
+            s_sha7 = hashlib.sha256(b"propagator prop-a.test,prop-b.test\n").hexdigest()
+            prop_b.send(f"DB 007 INF 2 S {s_sha7} 1 0")
             for b in ('L', 'K'):
-                prop_b.send(f"DB 007 INF 2 {b} 00000000 0")
+                prop_b.send(f"DB 007 INF 2 {b} {EMPTY_SHA256} 0 0")
             time.sleep(0.2)
 
             state_file7 = dbdir7 / ".udb_state"
             assert "STATE=READY" in state_file7.read_text(), "Valid persisted READY state was lost during authority switch!"
 
             for b in ('N', 'C', 'I'):
-                prop_b.send(f"DB 007 INF 2 {b} 00000000 0")
+                prop_b.send(f"DB 007 INF 2 {b} {EMPTY_SHA256} 0 0")
             assert wait_for_state(state_file7, "STATE=READY"), "State failed to become READY after full reconciliation from B"
             prop_b.close()
             print("PASS: Test 7: Authority switch resets round masks completely")
@@ -731,16 +733,16 @@ def test_suite():
 
             peer_a = MockPeer("peer-a.test", "00A", "127.0.0.1", p8_ports[1], "008")
             for b in ('N', 'C', 'I'):
-                peer_a.send(f"DB 008 INF 1 {b} 00000000 0")
+                peer_a.send(f"DB 008 INF 1 {b} {EMPTY_SHA256} 0 0")
             time.sleep(0.1)
             peer_a.close()
 
             peer_b = MockPeer("peer-b.test", "00B", "127.0.0.1", p8_ports[1], "008")
-            s_crc8 = zlib.crc32(b"propagator peer-a.test,peer-b.test\n") & 0xFFFFFFFF
+            s_sha8 = hashlib.sha256(b"propagator peer-a.test,peer-b.test\n").hexdigest()
             peer_b.round_id = 1
             snapshots8 = [("S", "tx8_S", [("propagator", "peer-a.test,peer-b.test")],
-                           f"{s_crc8:08x}", f"{s_crc8:08x}")]
-            snapshots8 += [(b, f"tx8_{b}", [], "deadbeef", "00000000")
+                           s_sha8, s_sha8)]
+            snapshots8 += [(b, f"tx8_{b}", [], DUMMY_MISMATCH_SHA256, EMPTY_SHA256)
                            for b in ('N', 'C', 'I', 'L', 'K')]
             peer_b.send_snapshots(snapshots8, int(time.time()) + 1000)
             state_file8 = dbdir8 / ".udb_state"
@@ -789,11 +791,11 @@ def test_suite():
             wait_for_daemon(p10, "127.0.0.1", p10_ports[1])
 
             peer_a = MockPeer("peer-a.test", "00A", "127.0.0.1", p10_ports[1], "010")
-            peer_a.send("DB 010 INF 1 N 00000000 0")
+            peer_a.send(f"DB 010 INF 1 N {EMPTY_SHA256} 0 0")
             peer_a.send("DB 010 HEL 4 ACK ? 0000000000000001 OCL")
 
             peer_b = MockPeer("peer-b.test", "00B", "127.0.0.1", p10_ports[1], "010")
-            peer_b.send("DB 010 BEGIN 1 N tx_b 00000000")
+            peer_b.send(f"DB 010 BEGIN 1 N tx_b {DUMMY_MISMATCH_SHA256}")
             err_b = peer_b.wait_for(lambda l: " ERR BEGIN 6" in l, "FORBIDDEN from concurrent peer B")
             assert err_b is not None, "Concurrent peer B was not rejected!"
             peer_b.close()
@@ -874,28 +876,28 @@ def test_suite():
         try:
             prop13 = MockPeer("prop13.test", "03P", "127.0.0.1", p13_ports[1], "013",
                               propagator_advertised="prop13.test")
-            prop13.send(f"DB 013 INF 1 N deadbeef {int(time.time()) + 1000}")
+            prop13.send(f"DB 013 INF 1 N {DUMMY_MISMATCH_SHA256} 1 {int(time.time()) + 1000}")
             prop13.wait_for(lambda line: " RES 1 N" in line, "RES for round 1 N")
-            prop13.send("DB 013 BEGIN 1 N stale_tx 00000000")
+            prop13.send(f"DB 013 BEGIN 1 N stale_tx {DUMMY_MISMATCH_SHA256}")
             prop13.send("DB 013 PUT 1 N stale_tx stale::vhost stale.example")
 
             # A newer inventory round aborts the old staged session.
-            prop13.send("DB 013 INF 2 C 00000000 0")
-            stale_crc = zlib.crc32(b"stale::vhost stale.example\n") & 0xFFFFFFFF
-            prop13.send(f"DB 013 END 1 N stale_tx {stale_crc:08x}")
+            prop13.send(f"DB 013 INF 2 C {EMPTY_SHA256} 0 0")
+            stale_sha = hashlib.sha256(b"stale::vhost stale.example\n").hexdigest()
+            prop13.send(f"DB 013 END 1 N stale_tx {stale_sha}")
             prop13.wait_for(lambda line: " ERR END 5 1 N" in line, "stale END rejection")
 
             # A late round-1 INF cannot contribute K to round 2.
-            prop13.send("DB 013 INF 1 K 00000000 0")
+            prop13.send(f"DB 013 INF 1 K {EMPTY_SHA256} 0 0")
             for block in ('I', 'S', 'L', 'K'):
                 if block != 'K':
-                    prop13.send(f"DB 013 INF 2 {block} 00000000 0")
+                    prop13.send(f"DB 013 INF 2 {block} {EMPTY_SHA256} 0 0")
             time.sleep(0.2)
             assert "STATE=READY" not in (dbdir13 / ".udb_state").read_text(), \
                 "Stale round-1 INF/END completed round 2"
 
-            prop13.send("DB 013 INF 2 K 00000000 0")
-            prop13.send("DB 013 INF 2 N 00000000 0")
+            prop13.send(f"DB 013 INF 2 K {EMPTY_SHA256} 0 0")
+            prop13.send(f"DB 013 INF 2 N {EMPTY_SHA256} 0 0")
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 if "STATE=READY" in (dbdir13 / ".udb_state").read_text():
@@ -930,7 +932,7 @@ def test_suite():
             peer14b.send("DB 014 HEL 4 primary14.test 0000000000000001 OCL")
             peer14b.wait_for(lambda line: " DB " in line and " INF " in line,
                              "inventory after ACK-before-selection")
-            peer14b.send("DB 014 INF N 00000000 0")
+            peer14b.send(f"DB 014 INF N {EMPTY_SHA256} 0 0")
             time.sleep(0.2)
             assert not any(" ERR INF " in line for line in peer14b.lines), \
                 "INF without a valid round ID produced an uncorrelated ERR"
@@ -951,13 +953,13 @@ def test_suite():
         try:
             prop15 = MockPeer("prop15.test", "05P", "127.0.0.1", p15_ports[1], "015",
                               propagator_advertised="prop15.test")
-            prop15.send(f"DB 015 INF 1 N deadbeef {int(time.time()) + 1000}")
+            prop15.send(f"DB 015 INF 1 N {DUMMY_MISMATCH_SHA256} 1 {int(time.time()) + 1000}")
             prop15.wait_for(lambda line: " RES 1 N" in line, "initial RES before timeout")
             prop15.clear()
             prop15.wait_for(lambda line: " HEL 4 prop15.test" in line,
                             "HEL retry after pending RES timeout", timeout=8.0)
 
-            prop15.send(f"DB 015 INF 2 N deadbeef {int(time.time()) + 1000}")
+            prop15.send(f"DB 015 INF 2 N {DUMMY_MISMATCH_SHA256} 1 {int(time.time()) + 1000}")
             prop15.wait_for(lambda line: " RES 2 N" in line, "RES before injected ERR")
             prop15.clear()
             for invalid_round in ("0", "+2", "2x"):
@@ -995,7 +997,7 @@ def test_suite():
             prop16a = MockPeer("prop-a.test", "00P", "127.0.0.1", p16_ports[1], "016",
                                propagator_advertised="prop-a.test")
             for b in ('N', 'C', 'I', 'S', 'L', 'K'):
-                prop16a.send(f"DB 016 INF 1 {b} 00000000 0")
+                prop16a.send(f"DB 016 INF 1 {b} {EMPTY_SHA256} 0 0")
             time.sleep(0.5)
             c16 = None
             retry_deadline = time.time() + 12
@@ -1015,9 +1017,9 @@ def test_suite():
 
             # Confirm divergence (N differs) but never answer the RES request,
             # so the node is left READY + DEGRADED with a pending recovery.
-            prop16a.send("DB 016 INF 2 N deadbeef 0")
+            prop16a.send(f"DB 016 INF 2 N {DUMMY_MISMATCH_SHA256} 1 0")
             for b in ('C', 'I', 'S', 'L', 'K'):
-                prop16a.send(f"DB 016 INF 2 {b} 00000000 0")
+                prop16a.send(f"DB 016 INF 2 {b} {EMPTY_SHA256} 0 0")
             prop16a.wait_for(lambda l: " DB " in l and " RES 2 N" in l, "RES for divergent block")
             prop16a.close()
             time.sleep(0.5)
@@ -1042,21 +1044,21 @@ def test_suite():
             # The returning authority re-detects the divergence and this time
             # completes recovery: DEGRADED -> OK via durable convergence.
             bob_rec = "bob::vhost bob.net"
-            bob_crc = zlib.crc32((bob_rec + "\n").encode("utf-8")) & 0xFFFFFFFF
+            bob_sha = hashlib.sha256((bob_rec + "\n").encode("utf-8")).hexdigest()
             prop16b = MockPeer("prop-a.test", "00P", "127.0.0.1", p16_ports[1], "016",
                                propagator_advertised="prop-a.test", autostart_hel=False)
             prop16b.send("DB 016 HEL 4 prop-a.test 0000000000000001 OCL")
             prop16b.wait_for(lambda l: " DB " in l and " HEL 4 " in l, "HEL response after restart")
             prop16b.send("DB 016 HEL 4 ACK prop-a.test 0000000000000001 OCL")
-            prop16b.send("DB 016 INF 1 N deadbeef 0")
+            prop16b.send(f"DB 016 INF 1 N {bob_sha} 1 0")
             for b in ('C', 'I', 'S', 'L', 'K'):
-                prop16b.send(f"DB 016 INF 1 {b} 00000000 0")
+                prop16b.send(f"DB 016 INF 1 {b} {EMPTY_SHA256} 0 0")
             prop16b.wait_for(lambda l: " DB " in l and " RES 1 N" in l, "RES after restart")
             c16b.send("UDB STATUS")
             c16b.wait_for(lambda l: "UDB synchronization: DEGRADED" in l, timeout=3)
-            prop16b.send("DB 016 BEGIN 1 N tx16 00000000")
+            prop16b.send(f"DB 016 BEGIN 1 N tx16 {bob_sha}")
             prop16b.send(f"DB 016 PUT 1 N tx16 {bob_rec}")
-            prop16b.send(f"DB 016 END 1 N tx16 {bob_crc:08x}")
+            prop16b.send(f"DB 016 END 1 N tx16 {bob_sha}")
             prop16b.wait_for(lambda l: " ACK 1 N tx16 " in l, "ACK for staged recovery")
             c16b.send("UDB STATUS")
             c16b.wait_for(lambda l: "UDB synchronization: OK" in l, timeout=3)

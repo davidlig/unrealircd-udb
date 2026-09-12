@@ -17,6 +17,7 @@
 #include "unrealircd.h"
 #include <errno.h>
 #include <inttypes.h>
+#include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
 #include <openssl/sha.h>
@@ -130,6 +131,18 @@ typedef enum UdbBlockLoadState
 	UDB_LOAD_FAILED
 } UdbBlockLoadState;
 
+#define UDB_SHA256_HEX_LEN 64
+#define UDB_EMPTY_SHA256 "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+typedef struct UdbManifest
+{
+	char letter;
+	unsigned int record_count;
+	char sha256[UDB_SHA256_HEX_LEN + 1];
+	time_t modified_at;
+	uint64_t watermark_seq;
+} UdbManifest;
+
 /* Startup files are parsed before their trees are allowed to affect runtime
  * state. The context flag keeps the loader side-effect-free until the full
  * six-block READY set has been accepted. */
@@ -138,7 +151,7 @@ typedef struct UdbStartupCandidate
 	UdbRecord *tree;
 	UdbHashIndex hash_index;
 	unsigned int record_count;
-	unsigned long checksum;
+	char sha256[UDB_SHA256_HEX_LEN + 1];
 	unsigned long generation;
 	UdbBlockLoadState load_state;
 } UdbStartupCandidate;
@@ -154,7 +167,7 @@ struct UdbBlock
 {
 	UdbRecord *tree;
 	UdbBlock *next;
-	unsigned long checksum;
+	char sha256[UDB_SHA256_HEX_LEN + 1];
 	char *filepath;
 	unsigned int id;
 	unsigned long filesize;
@@ -402,7 +415,7 @@ static unsigned long long udb_time_t_max_val(void);
 static int udb_parse_time_t(const char *s, time_t *out);
 static int udb_time_add(time_t base, unsigned long duration, time_t *result);
 static int udb_timestamp_parse(const char *s, time_t *out);
-static int udb_checksum_parse(const char *input, unsigned long *checksum);
+static int udb_digest_parse(const char *input, char out_hex[UDB_SHA256_HEX_LEN + 1]);
 static UdbRecord *udb_record_find(UdbContext *ctx, const char *key, UdbRecord *parent);
 static UdbRecord *udb_record_create(UdbRecord *parent);
 static UdbRecord *udb_record_insert(UdbContext *ctx, UdbBlock *block, UdbRecord *parent, const char *key,
@@ -432,11 +445,11 @@ static void udb_block_replace_tree(UdbContext *ctx, UdbBlock *block, UdbRecord *
 static int udb_file_load_block(UdbContext *ctx, UdbBlock *block);
 static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *line);
 static int udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbuf, size_t pathlen);
-static unsigned long udb_crc32(const char *data, size_t len);
-static int udb_compute_block_checksum(UdbBlock *block, unsigned long *checksum);
-static int udb_compute_tree_checksum(UdbRecord *tree, unsigned long *checksum);
+static int udb_compute_block_digest(UdbBlock *block, char out_hex[UDB_SHA256_HEX_LEN + 1]);
+static int udb_compute_tree_digest(UdbRecord *tree, char out_hex[UDB_SHA256_HEX_LEN + 1]);
+static void udb_block_get_manifest(UdbBlock *block, UdbManifest *manifest);
 static int udb_stage_parse_line(UdbBlock *block, UdbSyncSession *session, const char *line);
-static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSession *session, unsigned long checksum);
+static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSession *session, const char *sha256);
 static void udb_sync_session_free(UdbBlock *block);
 static int udb_block_letter_to_index(char letter);
 
@@ -462,7 +475,8 @@ static void udb_reconcile_reset(void);
 static void udb_reconcile_begin(Client *authority, unsigned long round_id);
 static void udb_reconcile_abort(UdbContext *ctx, const char *reason, int schedule_retry);
 static void udb_reconcile_start(Client *authority, unsigned long round_id);
-static void udb_reconcile_record_inf(Client *peer, unsigned long round_id, char letter, unsigned long crc32);
+static void udb_reconcile_record_inf(Client *peer, unsigned long round_id, char letter, const char *remote_sha,
+									 unsigned int remote_count);
 static void udb_reconcile_record_res(Client *peer, unsigned long round_id, char letter);
 static void udb_reconcile_record_end(Client *peer, char letter, unsigned long round_id);
 static int udb_reconcile_check(UdbContext *ctx);
@@ -472,7 +486,7 @@ static int udb_sync_begin(UdbBlock *block, Client *peer, unsigned long round_id,
 static int udb_sync_put(UdbBlock *block, Client *peer, unsigned long round_id, const char *txid, const char *path,
 						const char *data);
 static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, unsigned long round_id, const char *txid,
-						const char *checksum, unsigned long *digest, uint64_t watermark_seq);
+						const char *sha256, char out_digest[UDB_SHA256_HEX_LEN + 1], uint64_t watermark_seq);
 static void udb_sync_ack(Client *peer, const char *block);
 static int udb_sync_send_tree(Client *server, UdbRecord *rec, int depth, char *pathbuf, size_t pathlen,
 							  unsigned long round_id, char letter, const char *txid);

@@ -24,6 +24,9 @@ SERVICES_SID = "002"
 IRCD_SID = "001"
 LINK_PASSWORD = "udb-svc-link-password"
 
+EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+DUMMY_MISMATCH_SHA256 = "deadbeef" * 8
+
 
 class EnvironmentUnavailable(Exception):
     pass
@@ -140,9 +143,9 @@ class MockServices:
         val = f":{data}" if " " in str(data) and not str(data).startswith(":") else str(data)
         self.send(f"DB {self.ircd_sid} INS 0000000000000001 {self.seq} {path} {val}")
 
-    def send_begin(self, letter, txid, checksum):
+    def send_begin(self, letter, txid, checksum=EMPTY_SHA256):
         self.round_id += 1
-        self.send(f"DB {self.ircd_sid} INF {self.round_id} {letter} deadbeef {int(time.time()) + 1000}")
+        self.send(f"DB {self.ircd_sid} INF {self.round_id} {letter} {DUMMY_MISMATCH_SHA256} 1 {int(time.time()) + 1000}")
         self.wait_for(lambda line: f" RES {self.round_id} {letter}" in line,
                       f"RES for round {self.round_id} block {letter}")
         self.send(f"DB {self.ircd_sid} BEGIN {self.round_id} {letter} {txid} {checksum}")
@@ -151,7 +154,7 @@ class MockServices:
         val = f":{data}" if " " in str(data) and not str(data).startswith(":") else str(data)
         self.send(f"DB {self.ircd_sid} PUT {self.round_id} {letter} {txid} {path} {val}")
 
-    def send_end(self, letter, txid, checksum):
+    def send_end(self, letter, txid, checksum=EMPTY_SHA256):
         self.send(f"DB {self.ircd_sid} END {self.round_id} {letter} {txid} {checksum}")
 
     def receive(self, deadline):
@@ -301,7 +304,7 @@ def run_tests(ircd_bin, keep=False):
         # PUT 3: #chan1::forbid (adds 1 node under #chan1: forbid -> total 4 nodes = limit) <= 4 (OK)
         # PUT 4: #chan1::suspend (adds 1 node under #chan1: suspend -> total 5 nodes = limit + 1) -> ABORT
         # -------------------------------------------------------------
-        services.send_begin("C", "tx-rec-cap", "00000000")
+        services.send_begin("C", "tx-rec-cap", EMPTY_SHA256)
         # PUT 1: 2 nodes (limit - 2)
         services.send_put("C", "tx-rec-cap", "#chan1::topic", "Valid topic string")
         time.sleep(0.1)
@@ -331,7 +334,7 @@ def run_tests(ircd_bin, keep=False):
         # PUT 2: path "#c2::topic" (10 bytes) + data 590 bytes = 600 bytes (cumulative: 1200 = exact limit)
         # PUT 3: path "#c3::topic" (10 bytes) + data 1 byte = 11 bytes (cumulative: 1211 > limit) -> ABORT
         # -------------------------------------------------------------
-        services.send_begin("C", "tx-byte-cap", "00000000")
+        services.send_begin("C", "tx-byte-cap", EMPTY_SHA256)
         # PUT 1: 600 bytes
         services.send_put("C", "tx-byte-cap", "#c1::topic", "A" * 590)
         time.sleep(0.1)
@@ -354,7 +357,7 @@ def run_tests(ircd_bin, keep=False):
         # -------------------------------------------------------------
         daemon_logs.read_available()
         log_start = len(daemon_logs.lines)
-        services.send_begin("C", "tx-byte-round", "00000000")
+        services.send_begin("C", "tx-byte-round", EMPTY_SHA256)
         current_round = services.round_id
         services.send_put("C", "tx-byte-round", "#brc1::topic", "B" * 590)
         time.sleep(0.1)
@@ -364,8 +367,8 @@ def run_tests(ircd_bin, keep=False):
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " PUT " in l,
                           "byte-cap ERR for round-failure test")
         daemon_logs.wait_for_reconcile_abort(current_round, "staged byte limit exceeded", start=log_start)
-        services.send_begin("C", "tx-after-byte", "00000000")
-        services.send_end("C", "tx-after-byte", "00000000")
+        services.send_begin("C", "tx-after-byte", EMPTY_SHA256)
+        services.send_end("C", "tx-after-byte", EMPTY_SHA256)
         services.wait_for(lambda l: " DB " in l and " ACK " in l and " C " in l,
                           "ACK after byte-cap round failure proves recovery")
         print("PASS: byte-limit abort cancels reconciliation round immediately and recovers cleanly")
@@ -375,14 +378,14 @@ def run_tests(ircd_bin, keep=False):
         # -------------------------------------------------------------
         daemon_logs.read_available()
         log_start = len(daemon_logs.lines)
-        services.send_begin("N", "tx-parse-rnd", "00000000")
+        services.send_begin("N", "tx-parse-rnd", EMPTY_SHA256)
         current_round = services.round_id
         services.send_put("N", "tx-parse-rnd", "user1::challenge", "sha256")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " PUT " in l,
                           "removed challenge ERR for round-failure test")
         daemon_logs.wait_for_reconcile_abort(current_round, "invalid staged PUT payload", start=log_start)
-        services.send_begin("N", "tx-after-parse", "00000000")
-        services.send_end("N", "tx-after-parse", "00000000")
+        services.send_begin("N", "tx-after-parse", EMPTY_SHA256)
+        services.send_end("N", "tx-after-parse", EMPTY_SHA256)
         services.wait_for(lambda l: " DB " in l and " ACK " in l and " N " in l,
                           "ACK after parse-failure round proves recovery")
         print("PASS: removed N::challenge PUT cancels reconciliation round immediately and recovers cleanly")
@@ -392,16 +395,16 @@ def run_tests(ircd_bin, keep=False):
         # -------------------------------------------------------------
         daemon_logs.read_available()
         log_start = len(daemon_logs.lines)
-        services.send_begin("N", "tx-dgst-rnd", "00000000")
+        services.send_begin("N", "tx-dgst-rnd", EMPTY_SHA256)
         current_round = services.round_id
         services.send_put("N", "tx-dgst-rnd", "dgstuser::vhost", "test.host")
         time.sleep(0.1)
-        services.send_end("N", "tx-dgst-rnd", "DEADBEEF")
+        services.send_end("N", "tx-dgst-rnd", DUMMY_MISMATCH_SHA256)
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " END " in l,
                           "digest-mismatch ERR for round-failure test")
         daemon_logs.wait_for_reconcile_abort(current_round, "staged digest validation failure", start=log_start)
-        services.send_begin("N", "tx-after-dgst", "00000000")
-        services.send_end("N", "tx-after-dgst", "00000000")
+        services.send_begin("N", "tx-after-dgst", EMPTY_SHA256)
+        services.send_end("N", "tx-after-dgst", EMPTY_SHA256)
         services.wait_for(lambda l: " DB " in l and " ACK " in l and " N " in l,
                           "ACK after digest-mismatch round proves recovery")
         print("PASS: digest mismatch cancels reconciliation round immediately and recovers cleanly")
@@ -409,7 +412,7 @@ def run_tests(ircd_bin, keep=False):
         # -------------------------------------------------------------
         # Test 3: sync-inactivity-timeout (configured as 2 seconds)
         # -------------------------------------------------------------
-        services.send_begin("N", "tx-inact-to", "00000000")
+        services.send_begin("N", "tx-inact-to", EMPTY_SHA256)
         services.send_put("N", "tx-inact-to", "user1::vhost", "vhost1.test")
         time.sleep(3.0)  # Wait beyond 2s inactivity timeout (3s ensures deadline has strictly elapsed)
         # Next PUT will fail because session timed out and was destroyed
@@ -421,7 +424,7 @@ def run_tests(ircd_bin, keep=False):
         # -------------------------------------------------------------
         # Test 4: sync-absolute-timeout (configured as 4 seconds)
         # -------------------------------------------------------------
-        services.send_begin("N", "tx-abs-to", "00000000")
+        services.send_begin("N", "tx-abs-to", EMPTY_SHA256)
         # Keep sending PUT every 1s so inactivity timeout never fires, but absolute does at t=4s
         for i in range(3):
             time.sleep(1.0)
@@ -435,8 +438,8 @@ def run_tests(ircd_bin, keep=False):
         # -------------------------------------------------------------
         # Test 5: Clean staged sync commit after previous aborts
         # -------------------------------------------------------------
-        services.send_begin("N", "tx-valid-final", "00000000")
-        services.send_end("N", "tx-valid-final", "00000000")
+        services.send_begin("N", "tx-valid-final", EMPTY_SHA256)
+        services.send_end("N", "tx-valid-final", EMPTY_SHA256)
         services.wait_for(lambda l: " DB " in l and " ACK " in l and " N " in l,
                           "confirmation of ACK for staged-sync")
         print("PASS: Valid staged-sync session completed and acknowledged with ACK")

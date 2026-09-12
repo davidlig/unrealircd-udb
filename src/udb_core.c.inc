@@ -133,22 +133,20 @@ static int udb_timestamp_parse(const char *s, time_t *out)
 	return udb_parse_time_t(s, out);
 }
 
-static int udb_checksum_parse(const char *input, unsigned long *checksum)
+static int udb_digest_parse(const char *input, char out_hex[UDB_SHA256_HEX_LEN + 1])
 {
-	char *end;
-	const char *p;
-
-	if (!input || !*input || strlen(input) > 8)
+	if (!input || strlen(input) != UDB_SHA256_HEX_LEN)
 		return 0;
-	for (p = input; *p; p++)
-		if (!isxdigit((unsigned char)*p))
+	for (int i = 0; i < UDB_SHA256_HEX_LEN; i++)
+	{
+		unsigned char c = (unsigned char)input[i];
+		if (!isxdigit(c))
 			return 0;
-	errno = 0;
-	unsigned long val = strtoul(input, &end, 16);
-	if (errno == ERANGE || *end != '\0')
-		return 0;
-	if (checksum)
-		*checksum = val;
+		if (out_hex)
+			out_hex[i] = (char)tolower(c);
+	}
+	if (out_hex)
+		out_hex[UDB_SHA256_HEX_LEN] = '\0';
 	return 1;
 }
 
@@ -982,11 +980,10 @@ static void udb_block_replace_tree(UdbContext *ctx, UdbBlock *block, UdbRecord *
 	block->load_state = UDB_LOAD_SUCCESS;
 	ctx->total_records += record_count;
 	udb_block_set_context_root(ctx, block);
-	if (!udb_compute_block_checksum(block, &block->checksum))
+	if (!udb_compute_block_digest(block, block->sha256))
 	{
-		block->checksum = 0;
-		udb_log(ULOG_ERROR, "UDB_CHECKSUM_CALC_FAILED", NULL,
-				"Failed to compute checksum for block $block after commit",
+		strlcpy(block->sha256, UDB_EMPTY_SHA256, sizeof(block->sha256));
+		udb_log(ULOG_ERROR, "UDB_CHECKSUM_CALC_FAILED", NULL, "Failed to compute digest for block $block after commit",
 				log_data_string("block", (char[]){block->letter, '\0'}));
 	}
 	block->modified_at = time(NULL);
@@ -1206,29 +1203,8 @@ static UdbRecord *udb_record_delete(UdbContext *ctx, UdbBlock *block, UdbRecord 
 }
 
 /* ========================================================================
- * Checksum Operations
+ * SHA-256 Digest Operations and Manifest
  * ======================================================================== */
-static unsigned long udb_crc32_step(unsigned long crc, const char *data, size_t len)
-{
-	for (size_t i = 0; i < len; i++)
-	{
-		crc ^= (unsigned char)data[i];
-		for (int j = 0; j < 8; j++)
-		{
-			if (crc & 1)
-				crc = (crc >> 1) ^ 0xEDB88320UL;
-			else
-				crc >>= 1;
-		}
-	}
-	return crc;
-}
-
-static unsigned long udb_crc32(const char *data, size_t len)
-{
-	return udb_crc32_step(0xFFFFFFFFUL, data, len) ^ 0xFFFFFFFFUL;
-}
-
 typedef struct UdbDigestLine
 {
 	char *line;
@@ -1327,18 +1303,20 @@ static int udb_digest_line_cmp(const void *a, const void *b)
 }
 
 /* The digest covers sorted logical records, never save-time file headers/order. */
-static int udb_compute_tree_checksum(UdbRecord *tree, unsigned long *checksum)
+static int udb_compute_tree_digest(UdbRecord *tree, char out_hex[UDB_SHA256_HEX_LEN + 1])
 {
 	UdbDigestLine *lines = NULL;
 	UdbDigestLine *line;
 	UdbDigestLine **sorted;
-	unsigned long crc = 0xFFFFFFFFUL;
 	unsigned int count = 0;
 	unsigned int i = 0;
 	char pathbuf[UDB_RECORD_PATH_MAX + 1] = "";
+	EVP_MD_CTX *md_ctx;
+	unsigned char md[EVP_MAX_MD_SIZE];
+	unsigned int md_len = 0;
 
-	if (checksum)
-		*checksum = 0;
+	if (out_hex)
+		strlcpy(out_hex, UDB_EMPTY_SHA256, UDB_SHA256_HEX_LEN + 1);
 	if (!tree)
 		return 1;
 
@@ -1354,36 +1332,84 @@ static int udb_compute_tree_checksum(UdbRecord *tree, unsigned long *checksum)
 		count++;
 	if (count == 0)
 	{
-		if (checksum)
-			*checksum = 0;
+		if (out_hex)
+			strlcpy(out_hex, UDB_EMPTY_SHA256, UDB_SHA256_HEX_LEN + 1);
 		return 1;
 	}
 	sorted = safe_alloc(sizeof(*sorted) * count);
 	for (line = lines; line; line = line->next)
 		sorted[i++] = line;
 	qsort(sorted, count, sizeof(*sorted), udb_digest_line_cmp);
+
+	md_ctx = EVP_MD_CTX_new();
+	if (!md_ctx)
+	{
+		for (i = 0; i < count; i++)
+		{
+			safe_free(sorted[i]->line);
+			safe_free(sorted[i]);
+		}
+		safe_free(sorted);
+		return 0;
+	}
+
+	if (EVP_DigestInit_ex(md_ctx, EVP_sha256(), NULL) != 1)
+	{
+		EVP_MD_CTX_free(md_ctx);
+		for (i = 0; i < count; i++)
+		{
+			safe_free(sorted[i]->line);
+			safe_free(sorted[i]);
+		}
+		safe_free(sorted);
+		return 0;
+	}
+
 	for (i = 0; i < count; i++)
 	{
-		crc = udb_crc32_step(crc, sorted[i]->line, strlen(sorted[i]->line));
-		crc = udb_crc32_step(crc, "\n", 1);
+		EVP_DigestUpdate(md_ctx, sorted[i]->line, strlen(sorted[i]->line));
+		EVP_DigestUpdate(md_ctx, "\n", 1);
 		safe_free(sorted[i]->line);
 		safe_free(sorted[i]);
 	}
 	safe_free(sorted);
-	if (checksum)
-		*checksum = crc ^ 0xFFFFFFFFUL;
+	EVP_DigestFinal_ex(md_ctx, md, &md_len);
+	EVP_MD_CTX_free(md_ctx);
+
+	if (out_hex && md_len == 32)
+	{
+		for (int b = 0; b < 32; b++)
+			snprintf(out_hex + (b * 2), 3, "%02x", md[b]);
+		out_hex[UDB_SHA256_HEX_LEN] = '\0';
+	}
 	return 1;
 }
 
-static int udb_compute_block_checksum(UdbBlock *block, unsigned long *checksum)
+static int udb_compute_block_digest(UdbBlock *block, char out_hex[UDB_SHA256_HEX_LEN + 1])
 {
 	if (!block || !block->tree)
 	{
-		if (checksum)
-			*checksum = 0;
+		if (out_hex)
+			strlcpy(out_hex, UDB_EMPTY_SHA256, UDB_SHA256_HEX_LEN + 1);
 		return 1;
 	}
-	return udb_compute_tree_checksum(block->tree, checksum);
+	return udb_compute_tree_digest(block->tree, out_hex);
+}
+
+static void udb_block_get_manifest(UdbBlock *block, UdbManifest *manifest)
+{
+	if (!manifest)
+		return;
+	memset(manifest, 0, sizeof(*manifest));
+	if (!block)
+		return;
+	manifest->letter = block->letter;
+	manifest->record_count = block->record_count;
+	strlcpy(manifest->sha256, block->sha256, sizeof(manifest->sha256));
+	manifest->modified_at = block->modified_at;
+	manifest->watermark_seq =
+		udb_ctx ? (udb_ctx->current_seq > udb_ctx->last_applied_seq ? udb_ctx->current_seq : udb_ctx->last_applied_seq)
+				: 0;
 }
 
 static UdbRecord *udb_stage_find(UdbRecord *parent, const char *key)
@@ -1482,7 +1508,7 @@ static void udb_sync_session_free(UdbBlock *block)
 	block->syncing_from = NULL;
 }
 
-static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSession *session, unsigned long checksum)
+static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSession *session, const char *sha256)
 {
 	struct stat st;
 
@@ -1499,7 +1525,7 @@ static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSessi
 	udb_block_replace_tree(ctx, block, session->tree, real_count, &session->hash_index);
 	session->tree = NULL;
 	block->load_state = real_count ? UDB_LOAD_SUCCESS : UDB_LOAD_EMPTY;
-	block->checksum = checksum;
+	strlcpy(block->sha256, sha256 ? sha256 : UDB_EMPTY_SHA256, sizeof(block->sha256));
 	block->modified_at = time(NULL);
 	if (stat(block->filepath, &st) == 0)
 		block->filesize = st.st_size;
@@ -1694,7 +1720,7 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 			{
 				udb_block_reset(ctx, block);
 				block->load_state = UDB_LOAD_EMPTY;
-				block->checksum = 0;
+				strlcpy(block->sha256, UDB_EMPTY_SHA256, sizeof(block->sha256));
 				block->modified_at = 0;
 				block->filesize = 0;
 			}
@@ -1818,10 +1844,10 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 	}
 
 	unsigned int record_count = udb_record_count_tree(candidate);
-	unsigned long checksum = 0;
-	if (!udb_compute_tree_checksum(candidate, &checksum))
+	char sha256[UDB_SHA256_HEX_LEN + 1];
+	if (!udb_compute_tree_digest(candidate, sha256))
 	{
-		udb_log(ULOG_ERROR, "UDB_FILE_CHECKSUM_FAILED", NULL, "Failed to compute checksum for block $block file $file",
+		udb_log(ULOG_ERROR, "UDB_FILE_CHECKSUM_FAILED", NULL, "Failed to compute digest for block $block file $file",
 				log_data_string("block", (char[]){block->letter, '\0'}), log_data_string("file", block->filepath));
 		udb_record_free_tree(candidate);
 		if (startup_candidate)
@@ -1841,7 +1867,7 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 		}
 		startup_candidate->tree = candidate;
 		startup_candidate->record_count = record_count;
-		startup_candidate->checksum = checksum;
+		strlcpy(startup_candidate->sha256, sha256, sizeof(startup_candidate->sha256));
 		startup_candidate->generation = generation_seen ? loaded_generation : 0;
 		startup_candidate->load_state = UDB_LOAD_SUCCESS;
 	}
@@ -1855,7 +1881,7 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 			return 0;
 		}
 		udb_block_replace_tree(ctx, block, candidate, record_count, &hash_index);
-		block->checksum = checksum;
+		strlcpy(block->sha256, sha256, sizeof(block->sha256));
 		block->generation = generation_seen ? loaded_generation : 0;
 		udb_apply_tree_effects(ctx, block);
 		block->load_state = UDB_LOAD_SUCCESS;

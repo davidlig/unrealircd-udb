@@ -133,8 +133,8 @@ class MockServices:
         val = f":{data}" if " " in str(data) and not str(data).startswith(":") else str(data)
         self.send(f"DB {self.ircd_sid} INS 0000000000000001 {self.seq} {path} {val}")
 
-    def send_inf(self, letter, checksum, timestamp):
-        self.send(f"DB {self.ircd_sid} INF 1 {letter} {checksum} {timestamp}")
+    def send_inf(self, letter, checksum, timestamp, count=0):
+        self.send(f"DB {self.ircd_sid} INF 1 {letter} {checksum} {count} {timestamp}")
 
     def receive(self, deadline):
         while time.monotonic() < deadline:
@@ -213,38 +213,46 @@ def run_tests(ircd_bin, keep=False):
         # -------------------------------------------------------------
         # Test 1: INF frame with malformed/overflowing checksum or timestamp
         # -------------------------------------------------------------
+        valid_sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
         # Non-hex checksum
-        services.send_inf("N", "ZZZZZZZZ", "1787720000")
+        services.send_inf("N", "Z" * 64, "1787720000")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INF " in l,
                           "rejection of INF with non-hex checksum")
         print("PASS: INF with non-hex checksum was rejected with ERR INF")
 
+        # Wrong length checksum
+        services.send_inf("N", "deadbeef", "1787720000")
+        services.wait_for(lambda l: " DB " in l and " ERR " in l and " INF " in l,
+                          "rejection of INF with short checksum")
+        print("PASS: INF with short checksum was rejected with ERR INF")
+
         # Negative timestamp
-        services.send_inf("N", "A1B2C3D4", "-100")
+        services.send_inf("N", valid_sha, "-100")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INF " in l,
                           "rejection of INF with negative timestamp")
         print("PASS: INF with negative timestamp was rejected with ERR INF")
 
         # Leading plus in timestamp
-        services.send_inf("N", "A1B2C3D4", "+1787720000")
+        services.send_inf("N", valid_sha, "+1787720000")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INF " in l,
                           "rejection of INF with leading plus sign")
         print("PASS: INF with leading plus sign in timestamp was rejected with ERR INF")
 
         # Overflowing timestamp (exceeding signed 64-bit max: 9223372036854775807)
-        services.send_inf("N", "A1B2C3D4", "9223372036854775808")
+        services.send_inf("N", valid_sha, "9223372036854775808")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INF " in l,
                           "rejection of INF with INT64_MAX+1 timestamp")
         print("PASS: INF with INT64_MAX+1 timestamp was rejected with ERR INF")
 
         # ULLONG_MAX timestamp
-        services.send_inf("N", "A1B2C3D4", "18446744073709551615")
+        services.send_inf("N", valid_sha, "18446744073709551615")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INF " in l,
                           "rejection of INF with ULLONG_MAX timestamp")
         print("PASS: INF with ULLONG_MAX timestamp was rejected with ERR INF")
 
         # Huge overflowing timestamp
-        services.send_inf("N", "A1B2C3D4", "999999999999999999999999999999999999")
+        services.send_inf("N", valid_sha, "999999999999999999999999999999999999")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " INF " in l,
                           "rejection of INF with overflowing timestamp")
         print("PASS: INF with overflowing timestamp was rejected with ERR INF")

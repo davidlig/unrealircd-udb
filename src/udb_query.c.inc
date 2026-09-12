@@ -306,8 +306,8 @@ CMD_FUNC(cmd_dbq)
 	/* Query for block summary only (e.g. "/DBQ N") */
 	if (query_str[1] == '\0')
 	{
-		sendto_one(client, NULL, ":%s 339 %s :%c %u %lu %lu %lX %s", me.name, client->name, block->letter,
-				   block->record_count, block->filesize, (unsigned long)block->modified_at, block->checksum,
+		sendto_one(client, NULL, ":%s 339 %s :%c %u %lu %lu %s %s", me.name, client->name, block->letter,
+				   block->record_count, block->filesize, (unsigned long)block->modified_at, block->sha256,
 				   block->syncing_from ? "*" : "");
 		safe_free(query_str);
 		return;

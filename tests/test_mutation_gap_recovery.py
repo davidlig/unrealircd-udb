@@ -10,9 +10,11 @@ Phase 2 Test:
 5. Verifies subsequent sequenced mutations resume normally.
 """
 
+import hashlib
+import json
 import os
 import pathlib
-import select
+import re
 import shutil
 import signal
 import socket
@@ -20,7 +22,8 @@ import subprocess
 import sys
 import tempfile
 import time
-import zlib
+
+EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 RUNTIME_ROOT = pathlib.Path(os.environ.get("UDB_TEST_IRCD_ROOT", pathlib.Path.home() / "unrealircd"))
 DEFAULT_IRCD = RUNTIME_ROOT / "bin/unrealircd"
@@ -42,11 +45,11 @@ def free_ports(count):
 
 
 def compute_tree_checksum(records):
-    """Computes standard UDB tree CRC32 digest over sorted lines."""
+    """Computes standard UDB tree SHA-256 digest over sorted lines."""
     if not records:
-        return "00000000"
+        return EMPTY_SHA256
     lines = sorted([f"{p} {v}\n".encode("ascii") for p, v in records])
-    return f"{zlib.crc32(b''.join(lines)) & 0xFFFFFFFF:08X}"
+    return hashlib.sha256(b''.join(lines)).hexdigest()
 
 
 def write_config(path, name, sid, ports, dbdir, propagator=None):
@@ -168,8 +171,13 @@ class MockPeer:
         self.round_id += 1
         checksums = checksums or {}
         for letter in ('N', 'C', 'I', 'S', 'L', 'K'):
-            checksum, block_timestamp = checksums.get(letter, ("00000000", timestamp))
-            self.send(f"DB {self.target_sid} INF {self.round_id} {letter} {checksum} {block_timestamp} {watermark_seq}")
+            val = checksums.get(letter, (EMPTY_SHA256, 0, timestamp))
+            if len(val) == 3:
+                checksum, count, block_timestamp = val
+            else:
+                checksum, block_timestamp = val
+                count = 0
+            self.send(f"DB {self.target_sid} INF {self.round_id} {letter} {checksum} {count} {block_timestamp} {watermark_seq}")
 
     def send_begin(self, round_id, letter, txid, checksum, watermark_seq=0):
         self.send(f"DB {self.target_sid} BEGIN {round_id} {letter} {txid} {checksum} {watermark_seq}")
@@ -354,7 +362,7 @@ def main():
         crc_n = compute_tree_checksum(records_n)
         now = int(time.time())
         srv_start = len(services.lines)
-        services.send_inventory(checksums={'N': (crc_n, now)}, timestamp=now, watermark_seq=3)
+        services.send_inventory(checksums={'N': (crc_n, len(records_n), now)}, timestamp=now, watermark_seq=3)
 
         # Follower sees block N checksum mismatch and requests RES 2 N
         print("Waiting for follower RES request for block N...")

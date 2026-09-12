@@ -2,6 +2,7 @@
 """Integration tests for staged sync transaction ownership, TXID boundary enforcement, and cross-peer isolation."""
 
 import argparse
+import hashlib
 import os
 import pathlib
 import shutil
@@ -11,8 +12,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import zlib
-
 
 ROOT = pathlib.Path(__file__).resolve().parents[5]
 RUNTIME_ROOT = pathlib.Path(os.environ.get("UDB_TEST_IRCD_ROOT", pathlib.Path.home() / "unrealircd"))
@@ -25,6 +24,9 @@ SERVICES_B_NAME = "udb-svcb.test"
 SERVICES_B_SID = "00B"
 IRCD_SID = "001"
 LINK_PASSWORD = "udb-ownership-link-password"
+
+EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+DUMMY_MISMATCH_SHA256 = "deadbeef" * 8
 
 
 class EnvironmentUnavailable(Exception):
@@ -43,11 +45,11 @@ def free_port():
 
 
 def compute_tree_checksum(records):
-    """Computes standard UDB tree CRC32 digest over sorted lines."""
+    """Computes standard UDB tree SHA-256 digest over sorted lines."""
     if not records:
-        return "00000000"
+        return EMPTY_SHA256
     lines = sorted([f"{p} {v}\n".encode("ascii") for p, v in records])
-    return f"{zlib.crc32(b''.join(lines)) & 0xFFFFFFFF:08X}"
+    return hashlib.sha256(b''.join(lines)).hexdigest()
 
 
 def write_config(path, name, sid, client_port, server_port, tls_port, module, dbdir):
@@ -147,12 +149,15 @@ class MockPeer:
             command = ":" + self.sid + " " + command
         self.sock.sendall((command + "\r\n").encode("ascii"))
 
-    def send_begin(self, letter, txid, checksum="DEADBEEF", request=True):
+    def send_begin(self, letter, txid, checksum=None, count=1, request=True):
+        if checksum is None:
+            checksum = DUMMY_MISMATCH_SHA256
         if request:
             self.round_id += 1
             for inventory_letter in "NCISLK":
-                inventory_checksum = checksum if inventory_letter == letter else "00000000"
-                self.send(f"DB {self.ircd_sid} INF {self.round_id} {inventory_letter} {inventory_checksum} {int(time.time()) + 1000}")
+                inventory_checksum = checksum if inventory_letter == letter else EMPTY_SHA256
+                inventory_count = count if inventory_letter == letter else 0
+                self.send(f"DB {self.ircd_sid} INF {self.round_id} {inventory_letter} {inventory_checksum} {inventory_count} {int(time.time()) + 1000}")
             self.wait_for(lambda line: f" RES {self.round_id} {letter}" in line,
                           f"RES for round {self.round_id} block {letter}")
         self.send(f"DB {self.ircd_sid} BEGIN {self.round_id or 1} {letter} {txid} {checksum}")
@@ -258,7 +263,7 @@ def run_tests(ircd_bin, keep=False):
         chk_a = compute_tree_checksum(recs_a)
 
         start_a = len(peer_a.lines)
-        peer_a.send_begin("C", txid_max)
+        peer_a.send_begin("C", txid_max, checksum=chk_a, count=len(recs_a))
         peer_a.send_put("C", txid_max, recs_a[0][0], recs_a[0][1])
         peer_a.send_end("C", txid_max, chk_a)
         peer_a.wait_for(lambda l: " DB " in l and f" ACK {peer_a.round_id} C {txid_max} " in l,
@@ -281,7 +286,7 @@ def run_tests(ircd_bin, keep=False):
         recs_b2 = [("#chan_after_over::topic", "Clean topic")]
         chk_b2 = compute_tree_checksum(recs_b2)
         start_a = len(peer_a.lines)
-        peer_a.send_begin("C", "tx-valid-after-over")
+        peer_a.send_begin("C", "tx-valid-after-over", checksum=chk_b2, count=len(recs_b2))
         peer_a.send_put("C", "tx-valid-after-over", recs_b2[0][0], recs_b2[0][1])
         peer_a.send_end("C", "tx-valid-after-over", chk_b2)
         peer_a.wait_for(lambda l: " DB " in l and f" ACK {peer_a.round_id} C tx-valid-after-over " in l,
@@ -299,7 +304,7 @@ def run_tests(ircd_bin, keep=False):
         chk_c = compute_tree_checksum(recs_c)
 
         start_a = len(peer_a.lines)
-        peer_a.send_begin("C", txid_ca)
+        peer_a.send_begin("C", txid_ca, checksum=chk_c, count=len(recs_c))
         # Sending PUT with txid_cb against active session txid_ca should fail with ERR PUT 5 (UDB_ERR_NO_SYNC)
         peer_a.send_put("C", txid_cb, "#chan_c::topic", "Wrong TXID payload")
         peer_a.wait_for(lambda l: " DB " in l and f" ERR PUT 5 {peer_a.round_id} C" in l,
@@ -307,7 +312,7 @@ def run_tests(ircd_bin, keep=False):
 
         # But sending PUT with correct txid_ca succeeds
         start_a = len(peer_a.lines)
-        peer_a.send_begin("C", txid_ca) # Start fresh session after abort
+        peer_a.send_begin("C", txid_ca, checksum=chk_c, count=len(recs_c)) # Start fresh session after abort
         peer_a.send_put("C", txid_ca, recs_c[0][0], recs_c[0][1])
         peer_a.send_end("C", txid_ca, chk_c)
         peer_a.wait_for(lambda l: " DB " in l and f" ACK {peer_a.round_id} C {txid_ca} " in l,
@@ -324,7 +329,7 @@ def run_tests(ircd_bin, keep=False):
         start_a = len(peer_a.lines)
         start_b = len(peer_b.lines)
 
-        peer_a.send_begin("C", "tx-owner-a")
+        peer_a.send_begin("C", "tx-owner-a", checksum=chk_d, count=len(recs_d))
         time.sleep(0.1)
         peer_b.send_begin("C", "tx-competing-b", request=False)
 
@@ -350,7 +355,7 @@ def run_tests(ircd_bin, keep=False):
         start_a = len(peer_a.lines)
         start_b = len(peer_b.lines)
 
-        peer_a.send_begin("C", "tx-owner-e")
+        peer_a.send_begin("C", "tx-owner-e", checksum=chk_e, count=len(recs_e))
         time.sleep(0.1)
         peer_b.send_put("C", "tx-owner-e", "#chan_hijack::topic", "Malicious Injected Topic")
 
@@ -382,12 +387,12 @@ def run_tests(ircd_bin, keep=False):
         start_a = len(peer_a.lines)
         start_b = len(peer_b.lines)
 
-        peer_a.send_begin("C", "tx-owner-f")
+        peer_a.send_begin("C", "tx-owner-f", checksum=chk_f, count=len(recs_f))
         peer_a.send_put("C", "tx-owner-f", recs_f[0][0], recs_f[0][1])
         time.sleep(0.1)
 
         # Peer B attempts to send END on A's session
-        peer_b.send_end("C", "tx-owner-f", "00000000")
+        peer_b.send_end("C", "tx-owner-f", EMPTY_SHA256)
         peer_b.wait_for(lambda l: " DB " in l and
                         (" ERR END 5 1 C" in l or " ERR END 6 1 C" in l),
                         "rejection of foreign END with ERR END 5/6", start=start_b)
@@ -412,7 +417,7 @@ def run_tests(ircd_bin, keep=False):
         start_a = len(peer_a.lines)
         peer_a.send_begin("C", "tx-wrong-digest")
         peer_a.send_put("C", "tx-wrong-digest", "#chan_digest::topic", "digest-protected topic")
-        peer_a.send_end("C", "tx-wrong-digest", "deadbeef")
+        peer_a.send_end("C", "tx-wrong-digest", DUMMY_MISMATCH_SHA256)
         peer_a.wait_for(lambda l: " DB " in l and " ERR END " in l,
                         "rejection of staged END with incorrect digest", start=start_a)
         db_c = (data_dir / "udb_C.db").read_text(encoding="ascii")

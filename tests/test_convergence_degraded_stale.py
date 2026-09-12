@@ -22,6 +22,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import hashlib
 import sys
 import tempfile
 import time
@@ -33,6 +34,8 @@ RUNTIME_ROOT = pathlib.Path(os.environ.get("UDB_TEST_IRCD_ROOT", pathlib.Path.ho
 DEFAULT_IRCD = RUNTIME_ROOT / "bin/unrealircd"
 CLOAK_KEYS = ("aB3" * 30, "cD4" * 30, "eF5" * 30)
 LINK_PASSWORD = "testlinkpassword"
+EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+DUMMY_MISMATCH_SHA256 = "f" * 64
 
 
 def free_ports(count):
@@ -166,7 +169,7 @@ class MockPeer:
             self.send(f"DB {self.target_sid} HEL 4 ACK {prop} 0000000000000001 OCL")
             if send_inf:
                 for b in ('N', 'C', 'I', 'S', 'L', 'K'):
-                    self.send(f"DB {self.target_sid} INF 1 {b} 00000000 0")
+                    self.send(f"DB {self.target_sid} INF 1 {b} {EMPTY_SHA256} 0 0")
 
     def send_raw(self, command):
         self.sock.sendall((command + "\r\n").encode("ascii"))
@@ -283,9 +286,9 @@ def test_suite():
         time.sleep(0.3)
 
         # P2 starts a requested round and begins block N.
-        p2.send(f"DB 00A INF 2 N deadbeef {int(time.time()) + 1000}")
+        p2.send(f"DB 00A INF 2 N {DUMMY_MISMATCH_SHA256} 1 {int(time.time()) + 1000}")
         p2.wait_for(lambda l: " RES 2 N" in l, "RES N to P2")
-        p2.send("DB 00A BEGIN 2 N tx01 00000000")
+        p2.send(f"DB 00A BEGIN 2 N tx01 {DUMMY_MISMATCH_SHA256}")
         time.sleep(0.3)
 
         # Connect P1 with autostart_hel=False so we control handshake
@@ -302,14 +305,13 @@ def test_suite():
         print("PASS: P2 staged PUT was rejected after P1 confirmed HEL ACK")
 
         # P1 can immediately start a new requested round without error.
-        p1.send(f"DB 00A INF 2 N deadbeef {int(time.time()) + 1000}")
+        sha_a = hashlib.sha256(b"testuser::vhost test.vhost\n").hexdigest()
+        p1.send(f"DB 00A INF 2 N {sha_a} 1 {int(time.time()) + 1000}")
         p1.wait_for(lambda l: " RES 2 N" in l, "RES N to P1")
-        p1.send("DB 00A BEGIN 2 N tx02 00000000")
+        p1.send(f"DB 00A BEGIN 2 N tx02 {sha_a}")
         time.sleep(0.2)
         p1.send("DB 00A PUT 2 N tx02 testuser::vhost test.vhost")
-        import zlib
-        crc_a = f"{zlib.crc32(b'testuser::vhost test.vhost\n') & 0xFFFFFFFF:08X}"
-        p1.send(f"DB 00A END 2 N tx02 {crc_a}")
+        p1.send(f"DB 00A END 2 N tx02 {sha_a}")
         p1.wait_for(lambda l: " DB " in l and " ACK 2 N tx02 " in l, "ACK N to P1", timeout=5)
         print("PASS: P1 immediately started and completed staged BEGIN/PUT/END without timeout")
 
@@ -552,7 +554,7 @@ def test_suite():
         wait_for_daemon(procK, "127.0.0.1", portsK[0])
 
         record = "alice::vhost alice.net"
-        crc_record = zlib.crc32((record + "\n").encode("ascii")) & 0xFFFFFFFF
+        sha_record = hashlib.sha256((record + "\n").encode("utf-8")).hexdigest()
 
         # Bootstrap the empty node to READY + OK
         prop_k1 = MockPeer("prop.test", "001", "127.0.0.1", portsK[1], "00K", propagator_advertised="prop.test")
@@ -571,9 +573,9 @@ def test_suite():
         prop_k2.send("DB 00K HEL 4 prop.test 0000000000000001 OCL")
         prop_k2.wait_for(lambda l: " DB " in l and " HEL 4 " in l, "HEL response for divergent round")
         prop_k2.send("DB 00K HEL 4 ACK prop.test 0000000000000001 OCL")
-        prop_k2.send(f"DB 00K INF 1 N {crc_record:08x} 0")
+        prop_k2.send(f"DB 00K INF 1 N {sha_record} 1 0")
         for b in ('C', 'I', 'S', 'L', 'K'):
-            prop_k2.send(f"DB 00K INF 1 {b} 00000000 0")
+            prop_k2.send(f"DB 00K INF 1 {b} {EMPTY_SHA256} 0 0")
         prop_k2.wait_for(lambda l: " DB " in l and " RES 1 N" in l, "RES for divergent block")
         time.sleep(0.5)
 
@@ -597,13 +599,13 @@ def test_suite():
         prop_k3.send("DB 00K HEL 4 prop.test 0000000000000001 OCL")
         prop_k3.wait_for(lambda l: " DB " in l and " HEL 4 " in l, "HEL response for recovery round")
         prop_k3.send("DB 00K HEL 4 ACK prop.test 0000000000000001 OCL")
-        prop_k3.send(f"DB 00K INF 2 N {crc_record:08x} 0")
+        prop_k3.send(f"DB 00K INF 2 N {sha_record} 1 0")
         for b in ('C', 'I', 'S', 'L', 'K'):
-            prop_k3.send(f"DB 00K INF 2 {b} 00000000 0")
+            prop_k3.send(f"DB 00K INF 2 {b} {EMPTY_SHA256} 0 0")
         prop_k3.wait_for(lambda l: " DB " in l and " RES 2 N" in l, "RES for recovery block")
-        prop_k3.send("DB 00K BEGIN 2 N tx_k 00000000")
+        prop_k3.send(f"DB 00K BEGIN 2 N tx_k {sha_record}")
         prop_k3.send(f"DB 00K PUT 2 N tx_k {record}")
-        prop_k3.send(f"DB 00K END 2 N tx_k {crc_record:08x}")
+        prop_k3.send(f"DB 00K END 2 N tx_k {sha_record}")
         prop_k3.wait_for(lambda l: " ACK 2 N tx_k " in l, "ACK for staged recovery commit")
         time.sleep(0.5)
 
@@ -650,7 +652,7 @@ def test_suite():
         time.sleep(1.0)
         drip_deadline = time.time() + 5
         while time.time() < drip_deadline:
-            prop_l.send("DB 00L INF 1 N 00000000 0")
+            prop_l.send(f"DB 00L INF 1 N {EMPTY_SHA256} 0 0")
             time.sleep(0.8)
         assert node_log_contains(nodeL, "reconciliation absolute timeout", 8), \
             "A drip-fed reconciliation round must be bounded by the absolute deadline"
@@ -698,7 +700,7 @@ def test_suite():
         print("PASS: Test G: HubG advertised HEL 4 - with obsolete S::propagator")
 
         # new-a tries to send BEGIN -> must be rejected with UDB_ERR_FORBIDDEN (6)
-        new_a.send("DB 00G BEGIN 1 N tx01 00000000")
+        new_a.send(f"DB 00G BEGIN 1 N tx01 {DUMMY_MISMATCH_SHA256}")
         new_a.wait_for(lambda l: " DB " in l and " ERR BEGIN 6 1 N" in l, "ERR BEGIN 6 1 N")
         print("PASS: Test G: Unauthorized peer new-a could not initiate staged sync")
 
@@ -722,16 +724,16 @@ def test_suite():
         print("PASS: Test H: HubG selected new-a.test as authority after local config override + REHASH")
 
         # new-a can now successfully staged sync to HubG
-        new_a.send(f"DB 00G INF 1 N deadbeef {int(time.time()) + 1000}")
+        sha_h = hashlib.sha256(b"admin::vhost admin.vhost\n").hexdigest()
+        new_a.send(f"DB 00G INF 1 N {sha_h} 1 {int(time.time()) + 1000}")
         new_a.wait_for(lambda l: " RES 1 N" in l, "RES N from HubG")
-        new_a.send("DB 00G BEGIN 1 N tx02 00000000")
+        new_a.send(f"DB 00G BEGIN 1 N tx02 {sha_h}")
         time.sleep(0.2)
         new_a.send("DB 00G PUT 1 N tx02 admin::vhost admin.vhost")
-        crc_h = f"{zlib.crc32(b'admin::vhost admin.vhost\n') & 0xFFFFFFFF:08X}"
-        new_a.send(f"DB 00G END 1 N tx02 {crc_h}")
+        new_a.send(f"DB 00G END 1 N tx02 {sha_h}")
         new_a.wait_for(lambda l: " DB " in l and " ACK 1 N tx02 " in l, "ACK N from HubG", timeout=5)
         for block in ('C', 'I', 'S', 'L', 'K'):
-            new_a.send(f"DB 00G INF 1 {block} 00000000 0")
+            new_a.send(f"DB 00G INF 1 {block} {EMPTY_SHA256} 0 0")
         print("PASS: Test H: staged sync succeeded and node returned to OK")
 
         oper_g.close()

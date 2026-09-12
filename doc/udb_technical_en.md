@@ -472,7 +472,7 @@ Snapshot header:
 ; Records: 42
 ```
 
-`Records` counts persisted logical lines, not container nodes. The checksum excludes headers and file ordering. It is CRC32 over logical `path value\n` lines sorted lexicographically. An empty tree has checksum `0`.
+`Records` counts persisted logical lines, not container nodes. The manifest digest excludes headers and file ordering. It is canonical SHA-256 over logical `path value\n` lines sorted lexicographically. An empty tree has digest `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
 
 ### 6.1 Single-block commit
 
@@ -603,13 +603,13 @@ The authority advertises `INF` for **all six blocks**. The receiver may transiti
 ### 9.1 Frames
 
 ```text
-INF   <round> <block> <sha256> <modified_at> <watermark_seq>
+INF   <round> <block> <sha256> <record_count> <modified_at> [<watermark_seq>]
 RES   <round> <block>
-BEGIN <round> <block> <txid> <sha256> <watermark_seq>
+BEGIN <round> <block> <txid> <sha256> [<watermark_seq>]
 PUT   <round> <block> <txid> <path> :<string>
 PUT   <round> <block> <txid> <path> *<number>
-END   <round> <block> <txid> <sha256> <watermark_seq>
-ACK   <round> <block> <txid> <sha256> <watermark_seq>
+END   <round> <block> <txid> <sha256> [<watermark_seq>]
+ACK   <round> <block> <txid> <sha256> [<watermark_seq>]
 ERR   <subcmd> <code> <round_or_seq> <block>
 ```
 
@@ -889,13 +889,13 @@ Current CI builds **UnrealIRCd 6.2.6**, compiles the modular UDB source, checks 
 HEL 4 <selector> <epoch> OCL [OCLG]
 HEL 4 ACK <selector> <epoch> OCL [OCLG]
 
-INF <round> <block> <checksum> <mtime>
+INF <round> <block> <sha256> <record_count> <mtime> [<watermark_seq>]
 RES <round> <block>
-BEGIN <round> <block> <txid> <checksum>
+BEGIN <round> <block> <txid> <sha256> [<watermark_seq>]
 PUT <round> <block> <txid> <path> :<string>
 PUT <round> <block> <txid> <path> *<number>
-END <round> <block> <txid> <checksum>
-ACK <round> <block> <txid> <digest>
+END <round> <block> <txid> <sha256> [<watermark_seq>]
+ACK <round> <block> <txid> <sha256> [<watermark_seq>]
 ERR <subcmd> <code> <round/correlation> <block>
 
 INS <Block::path> <value>

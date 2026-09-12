@@ -17,6 +17,7 @@ Covers:
   Test HUB 8: Operator /UDB STATUS command verifies all fields (Readiness, Serving, Direct source, Authority).
 """
 
+import hashlib
 import os
 import pathlib
 import shutil
@@ -26,9 +27,10 @@ import subprocess
 import sys
 import tempfile
 import time
-import zlib
 
 from udb_state_seed import wait_for_state
+
+EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 ROOT = pathlib.Path(__file__).resolve().parents[5]
 RUNTIME_ROOT = pathlib.Path(os.environ.get("UDB_TEST_IRCD_ROOT", pathlib.Path.home() / "unrealircd"))
@@ -178,16 +180,22 @@ class MockPeer:
         self.round_id += 1
         checksums = checksums or {}
         for letter in ('N', 'C', 'I', 'S', 'L', 'K'):
-            checksum, block_timestamp = checksums.get(letter, ("00000000", timestamp))
-            self.send(f"DB {self.target_sid} INF {self.round_id} {letter} {checksum} {block_timestamp}")
+            val = checksums.get(letter, (EMPTY_SHA256, 0, timestamp))
+            if len(val) == 3:
+                checksum, count, block_timestamp = val
+            else:
+                checksum, block_timestamp = val
+                count = 0
+            self.send(f"DB {self.target_sid} INF {self.round_id} {letter} {checksum} {count} {block_timestamp}")
 
     def send_snapshot(self, letter, txid, records, checksum, timestamp=None):
         self.round_id += 1
         remote_timestamp = timestamp if timestamp is not None else int(time.time()) + 1000
-        self.send(f"DB {self.target_sid} INF {self.round_id} {letter} {checksum} {remote_timestamp}")
+        count = len(records)
+        self.send(f"DB {self.target_sid} INF {self.round_id} {letter} {checksum} {count} {remote_timestamp}")
         self.wait_for(lambda line: f" RES {self.round_id} {letter}" in line,
                       f"RES round {self.round_id} block {letter}")
-        self.send(f"DB {self.target_sid} BEGIN {self.round_id} {letter} {txid} 00000000")
+        self.send(f"DB {self.target_sid} BEGIN {self.round_id} {letter} {txid} {checksum}")
         for path, value in records:
             self.send(f"DB {self.target_sid} PUT {self.round_id} {letter} {txid} {path} :{value}")
         self.send(f"DB {self.target_sid} END {self.round_id} {letter} {txid} {checksum}")
@@ -423,10 +431,10 @@ def test_suite():
         try:
             # Services synchronizes a nick record to Hub3, then disconnects
             services3 = MockPeer("services.test", "00S", "127.0.0.1", p3_ports[1], "003", propagator_advertised="services.test")
-            crc_n = zlib.crc32(b"alice::vhost alice.hub\n") & 0xFFFFFFFF
-            services3.send_snapshot("N", "tx_init", [("alice::vhost", "alice.hub")], f"{crc_n:08x}")
+            crc_n = hashlib.sha256(b"alice::vhost alice.hub\n").hexdigest()
+            services3.send_snapshot("N", "tx_init", [("alice::vhost", "alice.hub")], crc_n)
             services3.wait_for(lambda l: f" ACK {services3.round_id} N tx_init " in l, "ACK N from Hub3")
-            services3.send_inventory({"N": (f"{crc_n:08x}", int(time.time()))})
+            services3.send_inventory({"N": (crc_n, 1, int(time.time()))})
             time.sleep(0.3)
             services3.close()
 
@@ -493,11 +501,11 @@ def test_suite():
             # Services reconnects with updated record
             services5_new = MockPeer("services.test", "00S", "127.0.0.1", p5_ports[1], "005", propagator_advertised="services.test")
             new_rec = "carol::vhost carol.org"
-            crc_new = zlib.crc32((new_rec + "\n").encode("utf-8")) & 0xFFFFFFFF
+            crc_new = hashlib.sha256((new_rec + "\n").encode("utf-8")).hexdigest()
             now_ts = int(time.time()) + 1000
-            services5_new.send_snapshot("N", "tx_upd", [("carol::vhost", "carol.org")], f"{crc_new:08x}", now_ts)
+            services5_new.send_snapshot("N", "tx_upd", [("carol::vhost", "carol.org")], crc_new, now_ts)
             services5_new.wait_for(lambda l: f" ACK {services5_new.round_id} N tx_upd " in l, "ACK N for update")
-            services5_new.send_inventory({"N": (f"{crc_new:08x}", now_ts)})
+            services5_new.send_inventory({"N": (crc_new, 1, now_ts)})
             time.sleep(0.3)
 
             oper5 = MockClient("127.0.0.1", p5_ports[0], "oper5")
@@ -605,7 +613,7 @@ def test_suite():
 
             # Evil peer connects and tries to inject staged sync / mutation
             evil = MockPeer("evil.test", "00E", "127.0.0.1", p7_ports[1], "007", propagator_advertised="evil.test")
-            evil.send("DB 007 BEGIN 1 N tx_evil 00000000")
+            evil.send(f"DB 007 BEGIN 1 N tx_evil {EMPTY_SHA256}")
             err_evil = evil.wait_for(lambda l: " DB " in l and " ERR BEGIN 6 1 N" in l,
                                      "ERR BEGIN 6 from evil peer")
             assert " ERR BEGIN 6" in err_evil, f"Expected ERR BEGIN 6, got: {err_evil}"
@@ -670,10 +678,10 @@ def test_suite():
             # A bootstraps B with a nick record
             services9 = MockPeer("services.test", "00S", "127.0.0.1", p9_hub_ports[1], "009",
                                  propagator_advertised="services.test")
-            crc_alice = zlib.crc32(b"alice::vhost alice.hub\n") & 0xFFFFFFFF
-            services9.send_snapshot("N", "tx_init", [("alice::vhost", "alice.hub")], f"{crc_alice:08x}")
+            crc_alice = hashlib.sha256(b"alice::vhost alice.hub\n").hexdigest()
+            services9.send_snapshot("N", "tx_init", [("alice::vhost", "alice.hub")], crc_alice)
             services9.wait_for(lambda l: f" ACK {services9.round_id} N tx_init " in l, "ACK N init from Hub")
-            services9.send_inventory({"N": (f"{crc_alice:08x}", int(time.time()))})
+            services9.send_inventory({"N": (crc_alice, 1, int(time.time()))})
             time.sleep(0.5)
 
             oper9_hub = MockClient("127.0.0.1", p9_hub_ports[0], "oper9_hub")
@@ -703,21 +711,21 @@ def test_suite():
             print("PASS: Test HUB 9: Hub stayed READY + OK with services offline")
 
             # A returns changed: B latches DEGRADED, then converges back to OK
-            crc_bob = zlib.crc32(b"bob::vhost bob.org\n") & 0xFFFFFFFF
+            crc_bob = hashlib.sha256(b"bob::vhost bob.org\n").hexdigest()
             services9b = MockPeer("services.test", "00S", "127.0.0.1", p9_hub_ports[1], "009",
                                   propagator_advertised="services.test", autostart_hel=False)
             services9b.send("DB 009 HEL 4 services.test 0000000000000001 OCL")
             services9b.wait_for(lambda l: " DB " in l and " HEL 4 " in l, "HEL response from Hub")
             services9b.send("DB 009 HEL 4 ACK services.test 0000000000000001 OCL")
-            services9b.send(f"DB 009 INF 1 N {crc_bob:08x} 0")
+            services9b.send(f"DB 009 INF 1 N {crc_bob} 1 0")
             for b in ('C', 'I', 'S', 'L', 'K'):
-                services9b.send(f"DB 009 INF 1 {b} 00000000 0")
+                services9b.send(f"DB 009 INF 1 {b} {EMPTY_SHA256} 0 0")
             services9b.wait_for(lambda l: " DB " in l and " RES 1 N" in l, "RES for changed block")
             oper9_hub.send("UDB STATUS")
             oper9_hub.wait_for(lambda l: "UDB synchronization: DEGRADED" in l, timeout=3.0)
-            services9b.send("DB 009 BEGIN 1 N tx9 00000000")
+            services9b.send(f"DB 009 BEGIN 1 N tx9 {crc_bob}")
             services9b.send("DB 009 PUT 1 N tx9 bob::vhost bob.org")
-            services9b.send(f"DB 009 END 1 N tx9 {crc_bob:08x}")
+            services9b.send(f"DB 009 END 1 N tx9 {crc_bob}")
             services9b.wait_for(lambda l: " ACK 1 N tx9 " in l, "ACK for staged recovery commit")
             oper9_hub.send("UDB STATUS")
             oper9_hub.wait_for(lambda l: "UDB synchronization: OK" in l, timeout=3.0)

@@ -98,17 +98,19 @@ EVENT(udb_test_mutator_event)
 			mutator_state = -1;
 			return;
 		}
-		/* Each END targets an empty staged tree, whose valid digest is zero. */
-		sendto_one(mutator_peer, NULL, ":%s DB %s INF 9001 N FFFFFFFF 2147483647", me.id, mutator_peer->id);
-		sendto_one(mutator_peer, NULL, ":%s DB %s BEGIN 9001 N empty 00000000", me.id, mutator_peer->id);
+		/* Each END targets an empty staged tree, whose valid digest is empty sha256. */
+		const char *f_sha = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+		const char *z_sha = "0000000000000000000000000000000000000000000000000000000000000000";
+		sendto_one(mutator_peer, NULL, ":%s DB %s INF 9001 N %s 0 2147483647", me.id, mutator_peer->id, f_sha);
+		sendto_one(mutator_peer, NULL, ":%s DB %s BEGIN 9001 N empty %s", me.id, mutator_peer->id, z_sha);
 		sendto_one(mutator_peer, NULL, ":%s DB %s END 9001 N empty :", me.id, mutator_peer->id);
-		sendto_one(mutator_peer, NULL, ":%s DB %s INF 9002 N FFFFFFFF 2147483647", me.id, mutator_peer->id);
-		sendto_one(mutator_peer, NULL, ":%s DB %s BEGIN 9002 N partial 00000000", me.id, mutator_peer->id);
+		sendto_one(mutator_peer, NULL, ":%s DB %s INF 9002 N %s 0 2147483647", me.id, mutator_peer->id, f_sha);
+		sendto_one(mutator_peer, NULL, ":%s DB %s BEGIN 9002 N partial %s", me.id, mutator_peer->id, z_sha);
 		sendto_one(mutator_peer, NULL, ":%s DB %s END 9002 N partial 0badg", me.id, mutator_peer->id);
-		sendto_one(mutator_peer, NULL, ":%s DB %s INF 9003 N FFFFFFFF 2147483647", me.id, mutator_peer->id);
-		sendto_one(mutator_peer, NULL, ":%s DB %s BEGIN 9003 N overflow 00000000", me.id, mutator_peer->id);
+		sendto_one(mutator_peer, NULL, ":%s DB %s INF 9003 N %s 0 2147483647", me.id, mutator_peer->id, f_sha);
+		sendto_one(mutator_peer, NULL, ":%s DB %s BEGIN 9003 N overflow %s", me.id, mutator_peer->id, z_sha);
 		sendto_one(mutator_peer, NULL,
-		           ":%s DB %s END 9003 N overflow FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF", me.id,
+		           ":%s DB %s END 9003 N overflow ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff00", me.id,
 		           mutator_peer->id);
 		mutator_state = 2;
 		unreal_log(ULOG_INFO, "udb-test-mutator", "UDB_TEST_MUTATOR", mutator_peer,

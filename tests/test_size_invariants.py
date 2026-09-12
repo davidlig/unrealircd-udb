@@ -25,6 +25,9 @@ IRCD_SID = "001"
 LINK_PASSWORD = "udb-svc-link-password"
 
 
+EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+
 class EnvironmentUnavailable(Exception):
     pass
 
@@ -124,7 +127,7 @@ class MockServices:
         self.wait_for(lambda line: " DB " in line and " HEL 4 " in line, "UDB HEL response")
         self.send(f"DB {self.ircd_sid} HEL 4 ACK ? 0000000000000001 OCL")
         for b in ('N', 'C', 'I', 'S', 'L', 'K'):
-            self.send(f"DB {self.ircd_sid} INF 1 {b} 00000000 0")
+            self.send(f"DB {self.ircd_sid} INF 1 {b} {EMPTY_SHA256} 0 0")
         time.sleep(0.2)
 
     def send(self, command):
@@ -171,7 +174,7 @@ class MockServices:
         self.send(f"DB {self.ircd_sid} RES 1 {letter}")
         begin_line = self.wait_for(lambda l: " DB " in l and f" BEGIN 1 {letter} " in l, f"BEGIN {letter} frame", start=start_idx, timeout=5)
         end_line = self.wait_for(lambda l: " DB " in l and f" END 1 {letter} " in l, f"END {letter} frame", start=start_idx, timeout=5)
-        checksum = end_line.strip().split()[-1]
+        checksum = end_line.strip().split()[7]
         records = {}
         for l in self.lines[start_idx:]:
             if " DB " in l and f" PUT 1 {letter} " in l:

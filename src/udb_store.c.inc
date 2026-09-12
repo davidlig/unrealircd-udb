@@ -918,10 +918,10 @@ static int udb_file_save_block(UdbContext *ctx, UdbBlock *block)
 	if (res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
 		return 0;
 	(void)ctx;
-	if (!udb_compute_block_checksum(block, &block->checksum))
+	if (!udb_compute_block_digest(block, block->sha256))
 	{
-		block->checksum = 0;
-		udb_log(ULOG_ERROR, "UDB_CHECKSUM_CALC_FAILED", NULL, "Failed to compute checksum for block $block after save",
+		strlcpy(block->sha256, UDB_EMPTY_SHA256, sizeof(block->sha256));
+		udb_log(ULOG_ERROR, "UDB_CHECKSUM_CALC_FAILED", NULL, "Failed to compute digest for block $block after save",
 				log_data_string("block", (char[]){block->letter, '\0'}));
 	}
 	block->modified_at = time(NULL);

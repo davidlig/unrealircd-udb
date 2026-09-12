@@ -437,7 +437,8 @@ static void udb_sync_mark_degraded(Client *peer, const char *reason)
 			log_data_string("reason", reason ? reason : "unknown"));
 }
 
-static void udb_reconcile_record_inf(Client *peer, unsigned long round_id, char letter, unsigned long remote_crc)
+static void udb_reconcile_record_inf(Client *peer, unsigned long round_id, char letter, const char *remote_sha,
+									 unsigned int remote_count)
 {
 	unsigned int mask = udb_block_letter_to_mask(letter);
 	UdbBlock *block = udb_block_by_letter(udb_ctx, letter);
@@ -454,11 +455,12 @@ static void udb_reconcile_record_inf(Client *peer, unsigned long round_id, char 
 		((udb_cfg && udb_cfg->sync_inactivity_timeout > 0) ? udb_cfg->sync_inactivity_timeout : UDB_SYNC_TIMEOUT);
 	udb_reconcile.compared_blocks |= mask;
 
-	if (remote_crc != block->checksum)
+	(void)remote_count;
+	if (!remote_sha || strcmp(remote_sha, block->sha256) != 0)
 	{
 		udb_reconcile.divergent_blocks |= mask;
 		udb_reconcile.completed_blocks &= ~mask;
-		udb_sync_mark_degraded(peer, "inventory checksum mismatch");
+		udb_sync_mark_degraded(peer, "inventory manifest mismatch");
 	}
 	else
 	{
@@ -886,10 +888,11 @@ static int udb_sync_put(UdbBlock *block, Client *peer, unsigned long round_id, c
 }
 
 static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, unsigned long round_id, const char *txid,
-						const char *checksum, unsigned long *digest, uint64_t watermark_seq)
+						const char *sha256, char out_digest[UDB_SHA256_HEX_LEN + 1], uint64_t watermark_seq)
 {
 	UdbSyncSession *session = block ? block->session : NULL;
-	unsigned long received_digest;
+	char received_digest[UDB_SHA256_HEX_LEN + 1];
+	char computed_digest[UDB_SHA256_HEX_LEN + 1];
 	unsigned long previous_generation;
 	char profile_failure_reason[96];
 
@@ -927,18 +930,20 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, unsigned
 		udb_sync_round_failure(block, peer, round_id, profile_failure_reason);
 		return UDB_ERR_PARAMS;
 	}
-	if (!udb_compute_tree_checksum(session->tree, digest))
+	if (!udb_compute_tree_digest(session->tree, computed_digest))
 	{
 		udb_sync_abort(block, "digest calculation failure");
 		udb_sync_round_failure(block, peer, round_id, "staged digest calculation failure");
 		return UDB_ERR_FATAL;
 	}
-	if (!udb_checksum_parse(checksum, &received_digest) || *digest != received_digest)
+	if (!udb_digest_parse(sha256, received_digest) || strcmp(computed_digest, received_digest) != 0)
 	{
 		udb_sync_abort(block, "digest validation failure");
 		udb_sync_round_failure(block, peer, round_id, "staged digest validation failure");
 		return UDB_ERR_FATAL;
 	}
+	if (out_digest)
+		strlcpy(out_digest, computed_digest, UDB_SHA256_HEX_LEN + 1);
 
 	previous_generation = block->generation;
 	if (!udb_hash_prepare_tree(session->tree, &session->hash_index))
@@ -957,7 +962,7 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, unsigned
 		udb_handle_persistence_failure(ctx, peer, block, "END snapshot", 0);
 		return UDB_ERR_FATAL;
 	}
-	if (!udb_block_commit_stage(ctx, block, session, *digest))
+	if (!udb_block_commit_stage(ctx, block, session, computed_digest))
 	{
 		block->generation = previous_generation;
 		udb_sync_abort(block, "staged commit failure");
@@ -1064,8 +1069,8 @@ static int udb_sync_send_stage(Client *server, UdbBlock *block, unsigned long ro
 	if (!udb_peer_authorizes_us(server) || !block)
 		return 0;
 	snprintf(txid, sizeof(txid), "%08lx", ++udb_sync_txid);
-	if (!udb_send_db_to_one(server, ":%s DB %s BEGIN %lu %c %s %08lX %" PRIu64, me.id, server->id, round_id,
-							block->letter, txid, block->checksum, watermark))
+	if (!udb_send_db_to_one(server, ":%s DB %s BEGIN %lu %c %s %s %" PRIu64, me.id, server->id, round_id, block->letter,
+							txid, block->sha256, watermark))
 	{
 		udb_log(ULOG_ERROR, "UDB_SYNC_SEND_FAILED", server, "Failed to send staged sync BEGIN for block $block",
 				log_data_string("block", (char[]){block->letter, '\0'}));
@@ -1091,8 +1096,8 @@ static int udb_sync_send_stage(Client *server, UdbBlock *block, unsigned long ro
 						   block->letter);
 		return 0;
 	}
-	if (!udb_send_db_to_one(server, ":%s DB %s END %lu %c %s %08lX %" PRIu64, me.id, server->id, round_id,
-							block->letter, txid, block->checksum, watermark))
+	if (!udb_send_db_to_one(server, ":%s DB %s END %lu %c %s %s %" PRIu64, me.id, server->id, round_id, block->letter,
+							txid, block->sha256, watermark))
 	{
 		udb_log(ULOG_ERROR, "UDB_SYNC_SEND_FAILED", server, "Failed to send staged sync END for block $block",
 				log_data_string("block", (char[]){block->letter, '\0'}));

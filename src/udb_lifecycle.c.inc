@@ -200,7 +200,7 @@ static int udb_startup_publish(UdbContext *ctx)
 		udb_hash_publish_prepared(ctx, udb_block_letter_to_index(block->letter), &candidate->hash_index);
 		block->tree = candidate->tree;
 		block->record_count = candidate->record_count;
-		block->checksum = candidate->checksum;
+		strlcpy(block->sha256, candidate->sha256, sizeof(block->sha256));
 		block->generation = candidate->generation;
 		block->load_state = UDB_LOAD_SUCCESS;
 		candidate->tree = NULL;
@@ -810,7 +810,7 @@ static int udb_engine_init(void)
 		if (candidate->load_state == UDB_LOAD_EMPTY)
 		{
 			startup_block->load_state = UDB_LOAD_EMPTY;
-			startup_block->checksum = 0;
+			strlcpy(startup_block->sha256, UDB_EMPTY_SHA256, sizeof(startup_block->sha256));
 			startup_block->generation = 0;
 		}
 	}
@@ -870,7 +870,7 @@ static int udb_engine_init(void)
 		for (startup_block = udb_ctx->block_list; startup_block; startup_block = startup_block->next)
 		{
 			startup_block->load_state = UDB_LOAD_EMPTY;
-			startup_block->checksum = 0;
+			strlcpy(startup_block->sha256, UDB_EMPTY_SHA256, sizeof(startup_block->sha256));
 		}
 		if (udb_transition_to_ready(udb_ctx, time(NULL)))
 		{

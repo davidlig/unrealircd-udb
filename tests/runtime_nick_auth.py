@@ -12,6 +12,7 @@ Semantics under test:
 import argparse
 import hashlib
 import os
+import hashlib
 import pathlib
 import shutil
 import socket
@@ -19,7 +20,8 @@ import subprocess
 import sys
 import tempfile
 import time
-import zlib
+
+EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 from runtime_schema_validation import (
     DEFAULT_IRCD,
@@ -143,17 +145,20 @@ class RegistrationClient(IrcClient):
 
 
 def tree_checksum(records):
+    if not records:
+        return EMPTY_SHA256
     lines = sorted(f"{path} {value}\n".encode("ascii") for path, value in records)
-    return f"{zlib.crc32(b''.join(lines)) & 0xFFFFFFFF:08X}"
+    return hashlib.sha256(b''.join(lines)).hexdigest()
 
 
 def replace_n_tree(services, round_id, txid, records):
     checksum = tree_checksum(records)
     start = len(services.lines)
-    services.send(f"DB {services.ircd_sid} INF {round_id} N {checksum} {int(time.time()) + 1000 + round_id}")
+    count = len(records)
+    services.send(f"DB {services.ircd_sid} INF {round_id} N {checksum} {count} {int(time.time()) + 1000 + round_id}")
     services.wait_for(lambda line: f" RES {round_id} N" in line,
                       f"N snapshot request for {txid}", start=start)
-    services.send(f"DB {services.ircd_sid} BEGIN {round_id} N {txid} 00000000")
+    services.send(f"DB {services.ircd_sid} BEGIN {round_id} N {txid} {checksum}")
     for path, value in records:
         services.send(f"DB {services.ircd_sid} PUT {round_id} N {txid} {path} :{value}")
     services.send(f"DB {services.ircd_sid} END {round_id} N {txid} {checksum}")
