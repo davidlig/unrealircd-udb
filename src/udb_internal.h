@@ -505,7 +505,6 @@ typedef enum
 } UdbNickApplyReason;
 
 static void udb_nick_apply(Client *client, UdbRecord *nick_rec, UdbNickApplyReason reason);
-static void udb_nick_strip(Client *client, UdbRecord *nick_rec);
 static void udb_nick_identity_clear(Client *client);
 static void udb_nick_pending_auth_clear(Client *client);
 static void udb_nick_prepare_tree_replace(UdbBlock *block, UdbRecord *candidate_tree);
@@ -514,12 +513,9 @@ static void udb_nick_remove_record(UdbBlock *block, UdbRecord *rec);
 static void udb_nick_revoke_oper(Client *client);
 static int udb_check_password(const char *pass, UdbRecord *profile_rec, Client *client);
 static int udb_nick_access_allowed(Client *client, UdbRecord *nick_rec);
-static void udb_nick_set_vhost(Client *client, UdbRecord *vhost_rec);
+static void udb_nick_set_vhost(Client *client, const char *vhost);
 static void udb_nick_remove_vhost(Client *client);
 static void udb_nick_grant_oper(Client *client, UdbRecord *nick_rec, UdbRecord *oper_rec);
-static void udb_nick_set_modes(Client *client, UdbRecord *nick_rec, UdbRecord *mode_rec, const char *modes);
-static void udb_nick_set_swhois(Client *client, UdbRecord *nick_rec, UdbRecord *swhois_rec);
-static void udb_nick_set_snomasks(Client *client, UdbRecord *nick_rec, UdbRecord *snomask_rec);
 static void udb_channel_apply_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new);
 static void udb_channel_remove_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
 static int udb_channels_load(ModuleInfo *modinfo);

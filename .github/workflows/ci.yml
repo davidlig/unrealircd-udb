@@ -118,6 +118,8 @@ jobs:
           cp src/modules/third/udb/src/udb.so "$UDB_TEST_IRCD_ROOT/modules/third/"
           make custommodule MODULEFILE=udb/tests/udb_test_mutator
           cp src/modules/third/udb/tests/udb_test_mutator.so "$UDB_TEST_IRCD_ROOT/modules/third/"
+          make custommodule MODULEFILE=udb/tests/udb_test_state
+          cp src/modules/third/udb/tests/udb_test_state.so "$UDB_TEST_IRCD_ROOT/modules/third/"
           if [ "${{ matrix.profile }}" = "asan" ]; then
             nm -D "$GITHUB_WORKSPACE/src/udb.so" > "$RUNNER_TEMP/udb-symbols.txt"
             grep -q '__asan_' "$RUNNER_TEMP/udb-symbols.txt"
@@ -147,6 +149,7 @@ jobs:
           python3 tests/test_ocl_membership_multihop.py
           python3 tests/test_hash_index_contract.py
           python3 tests/test_post_review_corrections.py
+          python3 tests/test_block_n_ownership_model.py
 
       - name: Run Integration & Multi-Hop Test Suites
         run: |

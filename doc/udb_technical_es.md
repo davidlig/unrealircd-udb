@@ -148,6 +148,32 @@ En un perfil normal con `N::pass`, una autenticación correcta asigna `account=<
 En un reemplazo caliente del bloque N no se confía ni en el account ni en `+r`: la continuidad exige una identidad UDB activa cuyo digest de `pass`/`access` coincida con el perfil candidato y cuyo acceso siga permitiendo al cliente. De lo contrario UDB retira los efectos que realmente poseía y, si existe contraseña, renombra al ocupante actual del nick.
 
 
+#### Estado runtime y ownership del bloque N
+
+El bloque N separa tres planos y nunca infiere uno desde otro:
+
+| Plano | Significado | Dónde vive |
+|---|---|---|
+| Autenticación | El cliente demostró `pass` + `access` para un nick | Credencial pendiente de un solo uso, consumida por el cambio de nick confirmado |
+| Identidad | El cliente posee ahora la identidad del perfil y su proyección pública (`account=<nick>`, `+r`) | Marcador `UdbNickIdentity` |
+| Ownership de efectos | Exactamente qué estado runtime (`vhost`, modos, snomasks, SWHOIS, oper) cambió UDB | Marcador `UdbNickEffects` |
+
+Los records del perfil son **estado deseado**: lo que UDB quiere ahora. El marcador de ownership es **estado aplicado**: lo que UDB cambió realmente. La limpieza nunca lee el perfil para decidir qué retirar: el árbol no puede describir el pasado porque otra fuente pudo reemplazar un valor que UDB aplicó antes.
+
+Ownership por efecto:
+
+- **Modos**: UDB registra sólo los bits que cambió de 0 a 1. La revocación limpia exactamente esos bits, así que un modo que ya estaba activo antes de autenticar (y que también figura en `N::modes`) sobrevive. Un bit que UDB activó se posee hasta el fin de la identidad aunque otra fuente vuelva a activar el mismo bit; UnrealIRCd no tiene referencia por fuente para un bit global de modo. Es una limitación conocida y documentada.
+- **Vhost**: si el vhost deseado ya está activo, UDB no reclama nada. En caso contrario registra el valor aplicado. Al revocar sólo lo retira mientras el vhost actual siga siendo el aplicado; un reemplazo de otra fuente se preserva.
+- **Snomasks**: UDB guarda la máscara previa y la aplicada. Al revocar restaura la previa sólo mientras la actual siga siendo la aplicada; si no, preserva el valor externo.
+- **SWHOIS**: UDB posee únicamente las entradas con owner `udb`.
+- **Oper**: se conserva el marcador existente `udb_nick_oper_owned`.
+
+La revocación de identidad se limita a `account`, `+r` y el marcador de identidad, y sólo actúa cuando UDB posee una identidad. La revocación de efectos se limita al estado registrado en el marcador de ownership. Un perfil passless nunca crea marcador de ownership, así que "passless nunca aplica ni retira" surge del modelo en lugar de ramas especiales.
+
+Las mutaciones en caliente (`INS`/`DEL`/`UPDATE`) y los snapshots completos de N usan el mismo reconciliador: retirar efectos poseídos que ya no se desean, preservar efectos externos que UDB nunca poseyó, aplicar los efectos deseados que faltan y registrar exactamente lo que cambió. Un snapshot con política `pass`/`access` equivalente conserva la identidad y reconcilia efectos; un cambio de política, un `suspend` nuevo, una eliminación o una denegación de acceso revocan identidad y efectos. `INS suspend` revoca efectos e identidad pero mantiene el nick; retirar `suspend` nunca restaura la identidad.
+
+Un `account`/`+r` externo nunca autentica. Mientras hay identidad UDB activa, un cambio externo de esos valores invalida la representación pública pero no puede recrear autenticación; al revocar la identidad se fija `account=*` y se retira `+r`. Cuando UDB nunca poseyó identidad, el `account`/`+r` externo no se toca.
+
 `N::forbid` es exclusivo: insertarlo elimina atómicamente todas las propiedades hermanas, y no se puede insertar otra hasta borrar `forbid`. El override normal de NICK muestra el motivo sin un 432 duplicado.
 
 Con `N::suspend` y `pass`, la validación requerida de `pass`/`access` sigue siendo obligatoria antes de adoptar el nick. El adoptante mantiene el nick pero no recibe account, `+r`, oper, vhost, modes, snomasks ni SWHOIS, y no conserva identidad alguna: `suspend` destruye cualquier identidad UDB activa. Añadirlo a un usuario identificado retira esos efectos UDB y mantiene el nick. Al retirar `suspend` de un perfil con `pass`, UDB nunca restaura la identidad: el ocupante actual se renombra y debe autenticarse de nuevo con `/NICK nick:Password`. Un perfil suspendido sin `pass` no tiene identidad, por lo que quitar `suspend` nunca identifica a su ocupante. Account/`+r` por sí solos no pueden crear identidad. UDB no añade ni retira el `+S` de propiedad externa.

@@ -1,0 +1,67 @@
+/* Test-only external runtime state fixture for the isolated UDB harnesses.
+ *
+ * Block N ownership tests need an external source for state no stock service
+ * command can change (snomasks). Commands are server-only and never part of
+ * the production module.
+ */
+#include "unrealircd.h"
+
+ModuleHeader MOD_HEADER = {
+    "third/udb_test_state",
+    "1.0",
+    "UDB test-only external runtime state fixture",
+    "UnrealIRCd UDB tests",
+    "unrealircd-6"};
+
+static void udb_test_state_report_snomask(Client *target)
+{
+	sendto_one(target, NULL, ":%s NOTICE %s :UDBTEST SNOMASK=%s", me.name, target->name,
+	           target->user && target->user->snomask ? target->user->snomask : "-");
+}
+
+CMD_FUNC(cmd_udbtest)
+{
+	Client *target;
+
+	if (parc < 2)
+		return;
+	if (!strcasecmp(parv[1], "SNOMASK") && parc >= 4)
+	{
+		target = find_user(parv[2], NULL);
+		if (!target || !IsUser(target) || !target->user)
+			return;
+		set_snomask(target, NULL);
+		if (strcmp(parv[3], "-"))
+			set_snomask(target, parv[3]);
+		if (target->user->snomask && *target->user->snomask)
+			target->umodes |= UMODE_SERVNOTICE;
+		else
+			target->umodes &= ~UMODE_SERVNOTICE;
+		udb_test_state_report_snomask(target);
+		return;
+	}
+	if (!strcasecmp(parv[1], "GETSNOMASK") && parc >= 3)
+	{
+		target = find_user(parv[2], NULL);
+		if (!target || !IsUser(target) || !target->user)
+			return;
+		udb_test_state_report_snomask(target);
+		return;
+	}
+}
+
+MOD_INIT()
+{
+	CommandAdd(modinfo->handle, "UDBTEST", cmd_udbtest, MAXPARA, CMD_SERVER);
+	return MOD_SUCCESS;
+}
+
+MOD_LOAD()
+{
+	return MOD_SUCCESS;
+}
+
+MOD_UNLOAD()
+{
+	return MOD_SUCCESS;
+}

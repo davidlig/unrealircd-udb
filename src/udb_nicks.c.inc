@@ -38,9 +38,27 @@ struct UdbNickPendingAuth
 	char policy_digest[65];
 };
 
+/* Runtime effect ownership marker. It records exactly which runtime state UDB
+ * changed for the current nick. Profile records describe desired state and can
+ * never be used to reconstruct what UDB applied in the past: external sources
+ * may have replaced a value UDB once set. */
+typedef struct UdbNickEffects UdbNickEffects;
+struct UdbNickEffects
+{
+	char nick[NICKLEN + 1];
+	long modes_added;
+	int vhost_owned;
+	char applied_vhost[HOSTLEN + 1];
+	int snomask_owned;
+	char *previous_snomask;
+	char *applied_snomask;
+	int swhois_owned;
+};
+
 static ModDataInfo *udb_nick_password_cache_md = NULL;
 static ModDataInfo *udb_nick_identity_md = NULL;
 static ModDataInfo *udb_nick_pending_auth_md = NULL;
+static ModDataInfo *udb_nick_effects_md = NULL;
 static ModDataInfo *udb_nick_oper_owned_md = NULL;
 /* Only set during a synchronous N-tree replacement; never retained per client. */
 static UdbRecord *udb_nick_replacement_tree = NULL;
@@ -237,18 +255,31 @@ static int udb_nick_identity_valid(Client *client, UdbRecord *nick_rec)
 	return 1;
 }
 
-/* True while UDB owns the runtime effects currently applied for this nick.
- * The marker may outlive a policy digest change until the apply path revokes
- * it, which is what lets pass/access changes strip UDB effects before the
- * forced rename. */
-static int udb_nick_identity_owned(Client *client, const char *nick)
+static int udb_nick_identity_present(Client *client)
 {
-	UdbNickIdentity *identity;
-
-	if (!client || !nick || !udb_nick_identity_md)
+	if (!client || !MyUser(client) || !udb_nick_identity_md)
 		return 0;
-	identity = moddata_local_client(client, udb_nick_identity_md).ptr;
-	return identity && !strcasecmp(identity->nick, nick) && !strcasecmp(client->name, nick);
+	return moddata_local_client(client, udb_nick_identity_md).ptr != NULL;
+}
+
+/* Identity revocation removes only the public projection UDB materialized:
+ * account, +r and the identity marker. It never touches effects, and it leaves
+ * externally supplied account/+r alone when UDB never held an identity. */
+static void udb_nick_revoke_identity(Client *client)
+{
+	long old_umodes;
+
+	if (!client || !MyUser(client))
+		return;
+	if (!udb_nick_identity_present(client))
+		return;
+	if (client->user)
+		strlcpy(client->user->account, "*", sizeof(client->user->account));
+	old_umodes = client->umodes & ALL_UMODES;
+	client->umodes &= ~UMODE_REGNICK;
+	if ((client->umodes & ALL_UMODES) != old_umodes)
+		send_umode_out(client, 1, old_umodes);
+	udb_nick_identity_clear(client);
 }
 
 static void udb_nick_pending_auth_free(ModData *m)
@@ -330,18 +361,342 @@ static void udb_nick_pending_auth_expire(Client *client, const char *requested_n
 		udb_nick_pending_auth_clear(client);
 }
 
-static void udb_nick_set_vhost(Client *client, UdbRecord *vhost_rec)
+static UdbNickEffects *udb_nick_effects_get(Client *client)
 {
-	if (!client || !client->user || !vhost_rec || !vhost_rec->data_str)
+	if (!client || !MyUser(client) || !udb_nick_effects_md)
+		return NULL;
+	return moddata_local_client(client, udb_nick_effects_md).ptr;
+}
+
+static UdbNickEffects *udb_nick_effects_ensure(Client *client)
+{
+	UdbNickEffects *fx;
+
+	if (!client || !MyUser(client) || !udb_nick_effects_md)
+		return NULL;
+	fx = moddata_local_client(client, udb_nick_effects_md).ptr;
+	if (!fx)
+	{
+		fx = safe_alloc(sizeof(*fx));
+		moddata_local_client(client, udb_nick_effects_md).ptr = fx;
+	}
+	strlcpy(fx->nick, client->name, sizeof(fx->nick));
+	return fx;
+}
+
+static void udb_nick_effects_free(ModData *m)
+{
+	UdbNickEffects *fx = m ? m->ptr : NULL;
+
+	if (!fx)
+		return;
+	safe_free(fx->previous_snomask);
+	safe_free(fx->applied_snomask);
+	safe_free(fx);
+	m->ptr = NULL;
+}
+
+static void udb_nick_effects_clear(Client *client)
+{
+	if (!client || !MyUser(client) || !udb_nick_effects_md)
+		return;
+	if (moddata_local_client(client, udb_nick_effects_md).ptr)
+	{
+		udb_nick_effects_free(&moddata_local_client(client, udb_nick_effects_md));
+		moddata_local_client(client, udb_nick_effects_md).ptr = NULL;
+	}
+}
+
+static void udb_nick_effects_revoke_modes(Client *client);
+static void udb_nick_effects_revoke_vhost(Client *client);
+static void udb_nick_effects_revoke_snomasks(Client *client);
+static void udb_nick_effects_revoke_swhois(Client *client);
+
+/* Ownership of a user mode is exactly the set of bits UDB changed from 0 to 1.
+ * Bits that were already active belong to another source and must survive
+ * every revoke, even when the profile also lists them. */
+static void udb_nick_effects_apply_modes(Client *client, UdbRecord *mode_rec)
+{
+	UdbNickEffects *fx;
+	long desired;
+	long old_umodes;
+	long removed;
+	long added;
+
+	if (!client || !mode_rec || BadPtr(mode_rec->data_str) || !MyUser(client))
+		return;
+	fx = udb_nick_effects_ensure(client);
+	if (!fx)
+		return;
+	desired = set_usermode(mode_rec->data_str) & ~UMODE_OPER;
+	old_umodes = client->umodes & ALL_UMODES;
+	removed = fx->modes_added & ~desired;
+	added = desired & ~old_umodes;
+	client->umodes = (client->umodes & ~removed) | desired;
+	if ((client->umodes & ALL_UMODES) != old_umodes)
+		send_umode_out(client, 1, old_umodes);
+	fx->modes_added = (fx->modes_added & desired) | added;
+}
+
+static void udb_nick_effects_revoke_modes(Client *client)
+{
+	UdbNickEffects *fx = udb_nick_effects_get(client);
+	long old_umodes;
+
+	if (!fx || !fx->modes_added)
+		return;
+	old_umodes = client->umodes & ALL_UMODES;
+	client->umodes &= ~fx->modes_added;
+	fx->modes_added = 0;
+	if ((client->umodes & ALL_UMODES) != old_umodes)
+		send_umode_out(client, 1, old_umodes);
+}
+
+/* UnrealIRCd stores snomasks as a sorted, de-duplicated letter set. Canonical
+ * form lets us compare a configured value with the live value without churn. */
+static char *udb_nick_snomask_canonical(const char *value)
+{
+	char *canonical = NULL;
+	const char *p;
+
+	if (!value)
+		return NULL;
+	for (p = value; *p; p++)
+	{
+		if (*p == '+' || *p == '-' || !isalpha((unsigned char)*p))
+			continue;
+		addlettertodynamicstringsorted(&canonical, *p);
+	}
+	return canonical;
+}
+
+static void udb_nick_snomask_materialize(Client *client, const char *value)
+{
+	long old_umodes = client->umodes & ALL_UMODES;
+
+	set_snomask(client, NULL);
+	if (value && *value)
+		set_snomask(client, value);
+	if (client->user->snomask && *client->user->snomask)
+	{
+		client->umodes |= UMODE_SERVNOTICE;
+		if (MyUser(client))
+			sendnumeric(client, RPL_SNOMASK, client->user->snomask);
+	}
+	else
+	{
+		client->umodes &= ~UMODE_SERVNOTICE;
+	}
+	if ((client->umodes & ALL_UMODES) != old_umodes)
+		send_umode_out(client, 1, old_umodes);
+}
+
+/* The previous value is preserved so revocation can restore an external
+ * snomask source; a value another source changed while UDB owned it is never
+ * overwritten on revoke. */
+static void udb_nick_effects_apply_snomasks(Client *client, UdbRecord *snomask_rec)
+{
+	UdbNickEffects *fx;
+	char *desired;
+	const char *current;
+
+	if (!client || !client->user || !snomask_rec || BadPtr(snomask_rec->data_str) || !MyUser(client))
+		return;
+	fx = udb_nick_effects_ensure(client);
+	if (!fx)
+		return;
+	desired = udb_nick_snomask_canonical(snomask_rec->data_str);
+	if (!desired)
+		return;
+	current = client->user->snomask ? client->user->snomask : "";
+
+	if (!strcmp(current, desired) &&
+		(!fx->snomask_owned || (fx->applied_snomask && !strcmp(fx->applied_snomask, desired))))
+	{
+		/* Already materialized, either externally or by UDB itself. */
+		safe_free(desired);
+		return;
+	}
+	if (fx->snomask_owned)
+	{
+		/* The profile changed its desired value: release the old ownership
+		 * first so an external replacement is preserved, not destroyed. */
+		udb_nick_effects_revoke_snomasks(client);
+		fx = udb_nick_effects_ensure(client);
+		if (!fx)
+		{
+			safe_free(desired);
+			return;
+		}
+	}
+	safe_free(fx->previous_snomask);
+	fx->previous_snomask = client->user->snomask ? strdup(client->user->snomask) : NULL;
+	udb_nick_snomask_materialize(client, desired);
+	safe_free(fx->applied_snomask);
+	fx->applied_snomask = udb_nick_snomask_canonical(client->user->snomask);
+	fx->snomask_owned = 1;
+	safe_free(desired);
+}
+
+static void udb_nick_effects_revoke_snomasks(Client *client)
+{
+	UdbNickEffects *fx = udb_nick_effects_get(client);
+	const char *current;
+
+	if (!fx || !fx->snomask_owned)
+		return;
+	current = client->user && client->user->snomask ? client->user->snomask : "";
+	if (fx->applied_snomask && !strcmp(current, fx->applied_snomask))
+		udb_nick_snomask_materialize(client, fx->previous_snomask ? fx->previous_snomask : "");
+	/* Otherwise another source changed the value: preserve it. */
+	safe_free(fx->previous_snomask);
+	safe_free(fx->applied_snomask);
+	fx->previous_snomask = NULL;
+	fx->applied_snomask = NULL;
+	fx->snomask_owned = 0;
+}
+
+static void udb_nick_effects_apply_vhost(Client *client, UdbRecord *vhost_rec)
+{
+	UdbNickEffects *fx;
+	const char *desired;
+
+	if (!client || !client->user || !vhost_rec || BadPtr(vhost_rec->data_str) || !MyUser(client))
+		return;
+	fx = udb_nick_effects_ensure(client);
+	if (!fx)
+		return;
+	desired = vhost_rec->data_str;
+
+	if (fx->vhost_owned && !strcmp(fx->applied_vhost, desired))
+	{
+		/* Still materialized as UDB left it: nothing to do. If an external
+		 * source replaced it, the profile still desires this value, so fall
+		 * through and reassert it. */
+		if (client->user->virthost && !strcmp(client->user->virthost, desired))
+			return;
+	}
+	else if (!fx->vhost_owned && client->user->virthost && !strcmp(client->user->virthost, desired) &&
+			 IsHidden(client) && IsSetHost(client))
+	{
+		/* Desired vhost already active without a UDB mutation: no claim. */
+		return;
+	}
+	else if (fx->vhost_owned)
+	{
+		/* The profile changed its desired vhost: release the old value first,
+		 * preserving it only when it is still the UDB-applied one. */
+		udb_nick_effects_revoke_vhost(client);
+		fx = udb_nick_effects_ensure(client);
+		if (!fx)
+			return;
+	}
+
+	udb_nick_set_vhost(client, desired);
+	fx->vhost_owned = 1;
+	strlcpy(fx->applied_vhost, desired, sizeof(fx->applied_vhost));
+}
+
+static void udb_nick_effects_revoke_vhost(Client *client)
+{
+	UdbNickEffects *fx = udb_nick_effects_get(client);
+
+	if (!fx || !fx->vhost_owned)
+		return;
+	if (client->user && client->user->virthost && fx->applied_vhost[0] &&
+		!strcmp(client->user->virthost, fx->applied_vhost))
+		udb_nick_remove_vhost(client);
+	/* An external replacement is preserved. */
+	fx->vhost_owned = 0;
+	fx->applied_vhost[0] = '\0';
+}
+
+static void udb_nick_effects_apply_swhois(Client *client, UdbRecord *swhois_rec)
+{
+	UdbNickEffects *fx;
+
+	if (!client || !client->user || !swhois_rec || BadPtr(swhois_rec->data_str) || !MyUser(client))
+		return;
+	fx = udb_nick_effects_ensure(client);
+	if (!fx)
+		return;
+	swhois_delete(client, "udb", "*", &me, NULL);
+	swhois_add(client, "udb", 100, swhois_rec->data_str, &me, NULL);
+	fx->swhois_owned = 1;
+}
+
+static void udb_nick_effects_revoke_swhois(Client *client)
+{
+	UdbNickEffects *fx = udb_nick_effects_get(client);
+
+	if (!fx || !fx->swhois_owned)
+		return;
+	swhois_delete(client, "udb", "*", &me, NULL);
+	fx->swhois_owned = 0;
+}
+
+/* Revocation uses only runtime ownership metadata; it never inspects the
+ * current profile to decide what UDB may remove. */
+static void udb_nick_revoke_effects(Client *client)
+{
+	if (!client || !MyUser(client))
+		return;
+	udb_nick_revoke_oper(client);
+	udb_nick_effects_revoke_modes(client);
+	udb_nick_effects_revoke_vhost(client);
+	udb_nick_effects_revoke_swhois(client);
+	udb_nick_effects_revoke_snomasks(client);
+	udb_nick_effects_clear(client);
+}
+
+/* Desired state comes from the profile; owned state comes from UdbNickEffects.
+ * Reconcile removes owned effects no longer desired, preserves external state
+ * UDB never owned, and records exactly what UDB changes. */
+static void udb_nick_reconcile_effects(Client *client, UdbRecord *nick_rec)
+{
+	UdbRecord *effect_rec;
+
+	if (!client || !MyUser(client) || !nick_rec)
 		return;
 
-	/* If the vhost is already active and set to this exact value, nothing to do */
-	if (client->user->virthost && !strcmp(client->user->virthost, vhost_rec->data_str) && IsHidden(client) &&
-		IsSetHost(client))
+	effect_rec = udb_record_find(udb_ctx, NKEY_VHOST, nick_rec);
+	if (effect_rec && effect_rec->data_str)
+		udb_nick_effects_apply_vhost(client, effect_rec);
+	else
+		udb_nick_effects_revoke_vhost(client);
+
+	effect_rec = udb_record_find(udb_ctx, NKEY_OPER, nick_rec);
+	if (effect_rec)
+		udb_nick_grant_oper(client, nick_rec, effect_rec);
+	else
+		udb_nick_revoke_oper(client);
+
+	effect_rec = udb_record_find(udb_ctx, NKEY_MODES, nick_rec);
+	if (effect_rec && effect_rec->data_str)
+		udb_nick_effects_apply_modes(client, effect_rec);
+	else
+		udb_nick_effects_revoke_modes(client);
+
+	effect_rec = udb_record_find(udb_ctx, NKEY_SWHOIS, nick_rec);
+	if (effect_rec && effect_rec->data_str)
+		udb_nick_effects_apply_swhois(client, effect_rec);
+	else
+		udb_nick_effects_revoke_swhois(client);
+
+	effect_rec = udb_record_find(udb_ctx, NKEY_SNOMASKS, nick_rec);
+	if (effect_rec && effect_rec->data_str)
+		udb_nick_effects_apply_snomasks(client, effect_rec);
+	else
+		udb_nick_effects_revoke_snomasks(client);
+}
+
+static void udb_nick_set_vhost(Client *client, const char *vhost)
+{
+	if (!client || !client->user || !vhost || !*vhost)
 		return;
 
 	userhost_save_current(client);
-	safe_strdup(client->user->virthost, vhost_rec->data_str);
+	safe_strdup(client->user->virthost, vhost);
 	client->umodes |= UMODE_HIDE;
 	client->umodes |= UMODE_SETHOST;
 
@@ -426,9 +781,16 @@ static void udb_nick_revoke_oper(Client *client)
 {
 	long old_umodes;
 
-	if (!client || !IsOper(client) || !udb_nick_oper_owned_md ||
+	if (!client || !MyUser(client) || !udb_nick_oper_owned_md ||
 		!moddata_local_client(client, udb_nick_oper_owned_md).i)
 		return;
+
+	if (!IsOper(client))
+	{
+		/* Oper status was removed elsewhere: UDB keeps no claim over it. */
+		moddata_local_client(client, udb_nick_oper_owned_md).i = 0;
+		return;
+	}
 
 	old_umodes = client->umodes & ALL_UMODES;
 	client->umodes &= ~UMODE_OPER;
@@ -441,47 +803,6 @@ static void udb_nick_revoke_oper(Client *client)
 		irccounts.operators--;
 	remove_oper_privileges(client, 0);
 	moddata_local_client(client, udb_nick_oper_owned_md).i = 0;
-	send_umode_out(client, 1, old_umodes);
-}
-
-static void udb_nick_set_modes(Client *client, UdbRecord *nick_rec, UdbRecord *mode_rec, const char *modes)
-{
-	if (!modes)
-		return;
-	long m = set_usermode(modes);
-	long old_umodes = client->umodes & ALL_UMODES;
-	/* Oper status is controlled exclusively by N::oper. */
-	client->umodes |= m & ~UMODE_OPER;
-	send_umode_out(client, 1, old_umodes);
-}
-
-static void udb_nick_set_swhois(Client *client, UdbRecord *nick_rec, UdbRecord *swhois_rec)
-{
-	if (!client || !client->user || !swhois_rec || !swhois_rec->data_str)
-		return;
-	swhois_delete(client, "udb", "*", &me, NULL);
-	swhois_add(client, "udb", 100, swhois_rec->data_str, &me, NULL);
-}
-
-static void udb_nick_set_snomasks(Client *client, UdbRecord *nick_rec, UdbRecord *snomask_rec)
-{
-	if (!client || !client->user || !snomask_rec || !snomask_rec->data_str)
-		return;
-
-	long old_umodes = client->umodes & ALL_UMODES;
-	set_snomask(client, snomask_rec->data_str);
-
-	if (client->user->snomask && *client->user->snomask)
-	{
-		client->umodes |= UMODE_SERVNOTICE;
-		if (MyUser(client))
-			sendnumeric(client, RPL_SNOMASK, client->user->snomask);
-	}
-	else
-	{
-		client->umodes &= ~UMODE_SERVNOTICE;
-	}
-
 	send_umode_out(client, 1, old_umodes);
 }
 
@@ -526,7 +847,6 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, UdbNickApplyReas
 	UdbRecord *forbid;
 	UdbRecord *pass_rec;
 	UdbRecord *suspend;
-	UdbRecord *effect_rec;
 	char notice[UDB_RECORD_VALUE_MAX + 64];
 
 	if (!client || !nick_rec)
@@ -535,9 +855,8 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, UdbNickApplyReas
 	if (forbid)
 	{
 		/* A forbid always wins: revoke UDB-owned state before the rename. */
-		if (udb_nick_identity_owned(client, nick_rec->key))
-			udb_nick_strip(client, nick_rec);
-		udb_nick_identity_clear(client);
+		udb_nick_revoke_effects(client);
+		udb_nick_revoke_identity(client);
 		snprintf(notice, sizeof(notice), "This nickname is forbidden. Reason: %s",
 				 forbid->data_str ? forbid->data_str : "No reason given");
 		udb_nick_force_rename_with_notice(client, nick_rec->key, notice, 0);
@@ -551,20 +870,20 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, UdbNickApplyReas
 	if (!udb_nick_access_allowed(client, nick_rec))
 	{
 		udb_nick_password_cache_clear(client);
-		if (udb_nick_identity_owned(client, nick_rec->key))
-			udb_nick_strip(client, nick_rec);
-		udb_nick_identity_clear(client);
+		udb_nick_revoke_effects(client);
+		udb_nick_revoke_identity(client);
 		snprintf(notice, sizeof(notice), "Access to %s is not permitted from your IP address.", nick_rec->key);
 		udb_nick_force_rename_with_notice(client, nick_rec->key, notice, 0);
 		return;
 	}
 
 	/* A profile without a credential controls only nick use. It can never turn
-	 * a matching nick, account or +r into UDB identity or profile effects. */
+	 * a matching nick, account or +r into UDB identity or profile effects, and
+	 * it never creates an ownership marker of its own. */
 	if (!pass_rec)
 	{
 		udb_nick_password_cache_clear(client);
-		udb_nick_identity_clear(client);
+		udb_nick_revoke_identity(client);
 		if (suspend)
 			udb_send_service_notice(client, SKEY_NICKSERV, "This nickname is suspended. Reason: %s",
 									suspend->data_str ? suspend->data_str : "No reason given");
@@ -575,9 +894,8 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, UdbNickApplyReas
 	 * authentication: the nick may stay occupied but no auth survives it. */
 	if (reason == UDB_NICK_APPLY_REFRESH && suspend)
 	{
-		if (udb_nick_identity_owned(client, nick_rec->key))
-			udb_nick_strip(client, nick_rec);
-		udb_nick_identity_clear(client);
+		udb_nick_revoke_effects(client);
+		udb_nick_revoke_identity(client);
 		udb_send_service_notice(client, SKEY_NICKSERV, "This nickname is suspended. Reason: %s",
 								suspend->data_str ? suspend->data_str : "No reason given");
 		return;
@@ -588,95 +906,39 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, UdbNickApplyReas
 	 * change invalidates the digest, so both are renamed away. */
 	if (!udb_nick_identity_valid(client, nick_rec))
 	{
-		if (udb_nick_identity_owned(client, nick_rec->key))
-			udb_nick_strip(client, nick_rec);
-		udb_nick_identity_clear(client);
+		udb_nick_revoke_effects(client);
+		udb_nick_revoke_identity(client);
 		udb_nick_force_rename(client, nick_rec->key);
 		return;
 	}
 
 	/* Adoption of a suspended profile validates pass/access but materializes
-	 * nothing: no identity, account/+r or effects, and no strip of state UDB
+	 * nothing: no identity, account/+r or effects, and no revoke of state UDB
 	 * never applied. */
 	if (reason == UDB_NICK_APPLY_ADOPT && suspend)
 	{
-		udb_nick_identity_clear(client);
+		udb_nick_revoke_identity(client);
 		udb_send_service_notice(client, SKEY_NICKSERV, "This nickname is suspended. Reason: %s",
 								suspend->data_str ? suspend->data_str : "No reason given");
 		return;
 	}
 
+	/* Materialize the public identity projection before its effects, then let
+	 * the reconciler decide effect-by-effect against runtime ownership. */
 	if (client->user)
 		strlcpy(client->user->account, nick_rec->key, sizeof(client->user->account));
 
 	long old_umodes = client->umodes & ALL_UMODES;
 	client->umodes |= UMODE_REGNICK;
-	send_umode_out(client, 1, old_umodes);
+	if ((client->umodes & ALL_UMODES) != old_umodes)
+		send_umode_out(client, 1, old_umodes);
 
-	effect_rec = udb_record_find(udb_ctx, NKEY_VHOST, nick_rec);
-	if (effect_rec)
-		udb_nick_set_vhost(client, effect_rec);
-	effect_rec = udb_record_find(udb_ctx, NKEY_OPER, nick_rec);
-	if (effect_rec)
-		udb_nick_grant_oper(client, nick_rec, effect_rec);
-	effect_rec = udb_record_find(udb_ctx, NKEY_MODES, nick_rec);
-	if (effect_rec && effect_rec->data_str)
-		udb_nick_set_modes(client, nick_rec, effect_rec, effect_rec->data_str);
-	effect_rec = udb_record_find(udb_ctx, NKEY_SWHOIS, nick_rec);
-	if (effect_rec)
-		udb_nick_set_swhois(client, nick_rec, effect_rec);
-	effect_rec = udb_record_find(udb_ctx, NKEY_SNOMASKS, nick_rec);
-	if (effect_rec)
-		udb_nick_set_snomasks(client, nick_rec, effect_rec);
+	udb_nick_reconcile_effects(client, nick_rec);
 }
 
-static void udb_nick_strip(Client *client, UdbRecord *nick_rec)
-{
-	UdbRecord *vhost_rec;
-	UdbRecord *snomask_rec;
-
-	if (!client)
-		return;
-
-	if (client->user)
-	{
-		strlcpy(client->user->account, "*", sizeof(client->user->account));
-	}
-
-	udb_nick_revoke_oper(client);
-
-	long old_umodes = client->umodes & ALL_UMODES;
-	if (nick_rec)
-	{
-		UdbRecord *mode_rec = udb_record_find(udb_ctx, NKEY_MODES, nick_rec);
-		if (mode_rec && mode_rec->data_str)
-			client->umodes &= ~(set_usermode(mode_rec->data_str) & ~UMODE_OPER);
-	}
-	client->umodes &= ~UMODE_REGNICK;
-	send_umode_out(client, 1, old_umodes);
-
-	/* UDB only removes effects its active profile had actually applied. An
-	 * absent vhost or snomask record means UDB never owned that state, so
-	 * externally supplied values must survive the strip. */
-	vhost_rec = nick_rec ? udb_record_find(udb_ctx, NKEY_VHOST, nick_rec) : NULL;
-	snomask_rec = nick_rec ? udb_record_find(udb_ctx, NKEY_SNOMASKS, nick_rec) : NULL;
-
-	if (snomask_rec)
-		set_snomask(client, NULL);
-
-	if (vhost_rec)
-		udb_nick_remove_vhost(client);
-
-	if (nick_rec)
-	{
-		UdbRecord *swhois_rec = udb_record_find(udb_ctx, NKEY_SWHOIS, nick_rec);
-		if (swhois_rec && swhois_rec->data_str)
-		{
-			swhois_delete(client, "udb", "*", &me, NULL);
-		}
-	}
-}
-
+/* Common DEL/removal primitive for a child record. Effect removal is expressed
+ * through the ownership marker, never through the record being deleted; the
+ * candidate profile is reapplied right after this by the common transaction. */
 static void udb_nick_remove_record(UdbBlock *block, UdbRecord *rec)
 {
 	if (rec->parent != block->tree)
@@ -689,65 +951,32 @@ static void udb_nick_remove_record(UdbBlock *block, UdbRecord *rec)
 			{
 				/* Removing the credential revokes UDB identity/effects while
 				 * leaving externally supplied state untouched. */
-				if (udb_nick_identity_owned(client, nick_rec->key))
-					udb_nick_strip(client, nick_rec);
-				udb_nick_identity_clear(client);
+				udb_nick_revoke_effects(client);
+				udb_nick_revoke_identity(client);
 				udb_nick_pending_auth_clear(client);
 			}
-			else if (!strcmp(rec->key, NKEY_ACCESS))
+			else if (!strcmp(rec->key, NKEY_VHOST))
 			{
-				/* The candidate profile is reapplied after this old tree is
-				 * retired; the policy digest change revokes the identity. */
+				udb_nick_effects_revoke_vhost(client);
 			}
-			else if (udb_nick_identity_owned(client, nick_rec->key))
+			else if (!strcmp(rec->key, NKEY_OPER))
 			{
-				if (!strcmp(rec->key, NKEY_VHOST))
-				{
-					udb_nick_remove_vhost(client);
-				}
-				else if (!strcmp(rec->key, NKEY_OPER))
-				{
-					udb_nick_revoke_oper(client);
-				}
-				else if (!strcmp(rec->key, NKEY_SWHOIS))
-				{
-					swhois_delete(client, "udb", "*", &me, NULL);
-				}
-				else if (!strcmp(rec->key, NKEY_MODES))
-				{
-					long old_umodes = client->umodes & ALL_UMODES;
-					if (rec->data_str)
-						client->umodes &= ~(set_usermode(rec->data_str) & ~UMODE_OPER);
-					UdbRecord *oper_rec = udb_record_find(udb_ctx, NKEY_OPER, nick_rec);
-					if (oper_rec && IsOper(client))
-						client->umodes |= OPER_MODES;
-					send_umode_out(client, 1, old_umodes);
-				}
-				else if (!strcmp(rec->key, NKEY_SNOMASKS))
-				{
-					long old_umodes = client->umodes & ALL_UMODES;
-					set_snomask(client, NULL);
-					UdbRecord *oper_rec = udb_record_find(udb_ctx, NKEY_OPER, nick_rec);
-					if (oper_rec && IsOper(client))
-					{
-						set_snomask(client, OPER_SNOMASK);
-						if (client->user->snomask && *client->user->snomask)
-						{
-							client->umodes |= UMODE_SERVNOTICE;
-							sendnumeric(client, RPL_SNOMASK, client->user->snomask);
-						}
-					}
-					else
-					{
-						client->umodes &= ~UMODE_SERVNOTICE;
-					}
-					send_umode_out(client, 1, old_umodes);
-				}
-				else if (!strcmp(rec->key, NKEY_SUSPEND))
-				{
-					/* The candidate profile is reapplied after this old tree is retired. */
-				}
+				udb_nick_revoke_oper(client);
 			}
+			else if (!strcmp(rec->key, NKEY_SWHOIS))
+			{
+				udb_nick_effects_revoke_swhois(client);
+			}
+			else if (!strcmp(rec->key, NKEY_MODES))
+			{
+				udb_nick_effects_revoke_modes(client);
+			}
+			else if (!strcmp(rec->key, NKEY_SNOMASKS))
+			{
+				udb_nick_effects_revoke_snomasks(client);
+			}
+			/* NKEY_ACCESS and NKEY_SUSPEND are policy markers: the candidate
+			 * reapply revokes identity when the policy no longer matches. */
 		}
 	}
 	else
@@ -761,16 +990,18 @@ static void udb_nick_remove_record(UdbBlock *block, UdbRecord *rec)
 			 * candidate with the same pass/access policy, without forbid or
 			 * suspend, and with a still-permitted access check. A deleted
 			 * profile, a changed policy or a normal->suspend transition
-			 * revokes it; UDB only removes effects it actually owned. */
+			 * revokes it. Equivalent candidates keep both markers and the
+			 * candidate reapply reconciles effects. */
 			int keep_identity = candidate && !udb_record_find(udb_ctx, NKEY_FORBID, candidate) &&
 								!udb_record_find(udb_ctx, NKEY_SUSPEND, candidate) &&
 								udb_nick_identity_valid(client, candidate);
 
 			udb_nick_pending_auth_clear(client);
-			if (udb_nick_identity_owned(client, rec->key))
-				udb_nick_strip(client, rec);
 			if (!keep_identity)
-				udb_nick_identity_clear(client);
+			{
+				udb_nick_revoke_effects(client);
+				udb_nick_revoke_identity(client);
+			}
 		}
 	}
 }
@@ -1230,12 +1461,11 @@ static int udb_hook_nick_change(Client *client, MessageTag *mtags, const char *n
 
 	if (old_rec && old_rec != new_rec)
 	{
-		/* UDB owns runtime effects only while the identity marker for the old
-		 * nick is present. A dormant/passless/suspended profile must never
+		/* Leaving a profile revokes exactly the runtime state UDB owns. A
+		 * dormant/passless/suspended profile owns nothing and must never
 		 * revoke externally supplied state on departure. */
-		if (udb_nick_identity_owned(client, old_rec->key))
-			udb_nick_strip(client, old_rec);
-		udb_nick_identity_clear(client);
+		udb_nick_revoke_effects(client);
+		udb_nick_revoke_identity(client);
 		udb_nick_password_cache_clear(client);
 		/* The pending credential for the destination nick survives here; only
 		 * a confirmed POST_NICKCHANGE may consume it. */
@@ -1311,6 +1541,11 @@ int udb_nicks_init(ModuleInfo *modinfo)
 	mreq.type = MODDATATYPE_LOCAL_CLIENT;
 	mreq.free = udb_nick_pending_auth_free;
 	udb_nick_pending_auth_md = ModDataAdd(modinfo->handle, mreq);
+	memset(&mreq, 0, sizeof(mreq));
+	mreq.name = "udb_nick_effects";
+	mreq.type = MODDATATYPE_LOCAL_CLIENT;
+	mreq.free = udb_nick_effects_free;
+	udb_nick_effects_md = ModDataAdd(modinfo->handle, mreq);
 	memset(&mreq, 0, sizeof(mreq));
 	mreq.name = "udb_nick_oper_owned";
 	mreq.type = MODDATATYPE_LOCAL_CLIENT;

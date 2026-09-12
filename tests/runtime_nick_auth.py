@@ -27,6 +27,7 @@ from runtime_schema_validation import (
     FakeServicesServer,
     IRCD_SID,
     IrcClient as BaseIrcClient,
+    REPO_ROOT,
     RUNTIME_ROOT,
     bwrap_command,
     find_module_path,
@@ -41,6 +42,23 @@ from runtime_schema_validation import (
 # Fake services can exempt test clients from UnrealIRCd fake lag; without it a
 # long script of NICK commands accumulates parsing lag and stalls responses.
 _services = None
+
+STATE_SOURCE = pathlib.Path(__file__).resolve().parent / "udb_test_state.c"
+STATE_MODULE = STATE_SOURCE.with_suffix(".so")
+
+
+def build_state_module():
+    if STATE_MODULE.is_file() and STATE_MODULE.stat().st_mtime >= STATE_SOURCE.stat().st_mtime:
+        return STATE_MODULE
+    src_root = pathlib.Path(os.environ.get("UNREALIRCD_SRC_ROOT",
+                                           REPO_ROOT.parents[3] if len(REPO_ROOT.parents) > 3 and
+                                           (REPO_ROOT.parents[3] / "Makefile").is_file() else REPO_ROOT))
+    result = subprocess.run(["make", "custommodule", "MODULEFILE=udb/tests/udb_test_state"], cwd=src_root,
+                            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+    if result.returncode or not STATE_MODULE.is_file():
+        raise RuntimeError(f"test state module build failed:\n{result.stdout}")
+    print(f"PASS: built test-only state fixture {STATE_MODULE.name}")
+    return STATE_MODULE
 
 
 class IrcClient(BaseIrcClient):
@@ -88,7 +106,8 @@ def has_usermode(client, nick, mode, timeout=15):
     start = len(client.lines)
     client.send(f"MODE {nick}")
     lines = client.wait_for(lambda line: " 221 " in line, f"{nick} modes", start=start, timeout=timeout)
-    return any(mode in line.rsplit(" ", 1)[-1].lstrip(":") for line in lines)
+    mode_strings = [line.rsplit(" ", 1)[-1].lstrip(":") for line in lines if " 221 " in line]
+    return any(mode in value for value in mode_strings)
 
 
 def assert_unidentified(client, nick, description, timeout=15):
@@ -175,6 +194,37 @@ def free_guest(client, description, start=0, timeout=20):
     return current_nick(client)
 
 
+def add_effect_profile(services, nick, password, effects=(), suspended=False):
+    services.send_ins(f"N::{nick}::pass", "sha256:" + sha256(password))
+    services.send_ins(f"N::{nick}::access", "127.0.0.0/8")
+    for path, value in effects:
+        services.send_ins(f"N::{nick}::{path}", value)
+    if suspended:
+        services.send_ins(f"N::{nick}::suspend", "manual review")
+    time.sleep(0.25)
+
+
+def set_external_snomask(services, nick, mask):
+    services.send(f"UDBTEST SNOMASK {nick} {mask}")
+
+
+def read_snomask(services, client, nick, description, timeout=10):
+    start = len(client.lines)
+    services.send(f"UDBTEST GETSNOMASK {nick}")
+    client.wait_for(lambda line: "UDBTEST SNOMASK=" in line, description, start=start, timeout=timeout)
+    for line in reversed(client.lines[start:]):
+        if "UDBTEST SNOMASK=" in line:
+            value = line.split("UDBTEST SNOMASK=", 1)[1].strip()
+            return "" if value == "-" else value
+    return ""
+
+
+def authenticate(client, nick, password, description="authentication", timeout=20):
+    client.request(f"NICK {nick}:{password}", lambda line: f" NICK :{nick}" in line, description,
+                   timeout=timeout)
+    wait_for_mode(client, nick, "+r", description + " +r", timeout=15)
+
+
 def run_tests(ircd, module, keep=False):
     global _services
     root = pathlib.Path(tempfile.mkdtemp(prefix="udb-nick-auth-"))
@@ -186,10 +236,12 @@ def run_tests(ircd, module, keep=False):
         for path in (node / "runtime-data", node / "tmp", node / "modules" / "third"):
             path.mkdir(parents=True, exist_ok=True)
         shutil.copy2(module, node / "modules" / "third" / "udb.so")
+        shutil.copy2(build_state_module(), node / "modules" / "third" / "udb_test_state.so")
         client_port, server_port, tls_port = free_port(), free_port(), free_port()
         config = node / "unrealircd.conf"
         write_config(config, "ircd.test", IRCD_SID, client_port, server_port, tls_port,
-                     node / "modules" / "third" / "udb.so", node / "runtime-data")
+                     node / "modules" / "third" / "udb.so", node / "runtime-data",
+                     extra_modules=("third/udb_test_state",))
         with config.open("a", encoding="ascii") as handle:
             handle.write("set { anti-flood { known-users { nick-flood 20:60; } "
                          "unknown-users { nick-flood 20:60; } } }\n")
@@ -811,7 +863,349 @@ def run_tests(ircd, module, keep=False):
         free_guest(firstheld, "first NICK suspended DEL rename", start=start)
         assert_unidentified(firstheld, current_nick(firstheld), "first NICK unsuspended holder")
 
-        print("PASS: identity, suspend revocation, snapshots, SVSNICK and one-shot nick auth")
+        # W: exact mode ownership. UDB records only the bits it changed 0->1.
+        add_effect_profile(services, "modeown", "modeownsecret")
+        modeown = IrcClient("127.0.0.1", client_port, "modeown-client")
+        clients.append(modeown)
+        authenticate(modeown, "modeown", "modeownsecret", "mode owner identification")
+        services.send_ins("N::modeown::modes", "+S")
+        wait_for_mode(modeown, "modeown", "+S", "UDB-added +S")
+        start = len(modeown.lines)
+        services.send_ins("N::modeown::suspend", "manual review")
+        modeown.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                         "mode owner suspend notice", start=start, timeout=15)
+        require(not has_usermode(modeown, "modeown", "S", timeout=15),
+                "suspend kept a mode UDB itself added")
+        require(current_nick(modeown) == "modeown", "mode owner suspend renamed the holder")
+
+        add_effect_profile(services, "modeext", "modeextsecret", (("modes", "+S"),))
+        modeext = IrcClient("127.0.0.1", client_port, "modeext-client")
+        clients.append(modeext)
+        services.send("SVS2MODE modeext-client +S")
+        wait_for_mode(modeext, "modeext-client", "+S", "external +S before mode auth")
+        modeext.request("NICK modeext:modeextsecret", lambda line: " NICK :modeext" in line,
+                        "mode external owner identification")
+        wait_for_mode(modeext, "modeext", "+r", "mode external owner +r")
+        start = len(modeext.lines)
+        services.send_ins("N::modeext::suspend", "manual review")
+        modeext.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                         "mode external suspend notice", start=start, timeout=15)
+        require(has_usermode(modeext, "modeext", "S", timeout=15),
+                "suspend removed an externally owned mode listed by the profile")
+
+        add_effect_profile(services, "modegone", "modegonesecret", (("modes", "+S"),))
+        modegone = IrcClient("127.0.0.1", client_port, "modegone-client")
+        clients.append(modegone)
+        authenticate(modegone, "modegone", "modegonesecret", "mode gone identification")
+        wait_for_mode(modegone, "modegone", "+S", "mode gone +S")
+        services.send("SVS2MODE modegone -S")
+        wait_for_mode(modegone, "modegone", "-S", "external +S removal")
+        start = len(modegone.lines)
+        services.send_ins("N::modegone::suspend", "manual review")
+        modegone.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                          "mode gone suspend notice", start=start, timeout=15)
+        require(not has_usermode(modegone, "modegone", "S", timeout=15),
+                "revoking an externally removed mode failed")
+
+        add_effect_profile(services, "modedel", "modedelsecret", (("modes", "+S"),))
+        modedel = IrcClient("127.0.0.1", client_port, "modedel-client")
+        clients.append(modedel)
+        authenticate(modedel, "modedel", "modedelsecret", "mode delete identification")
+        wait_for_mode(modedel, "modedel", "+S", "mode delete +S")
+        services.send_del("N::modedel::modes")
+        wait_for_mode(modedel, "modedel", "-S", "hot modes deletion")
+        require(has_usermode(modedel, "modedel", "r", timeout=15),
+                "hot modes deletion revoked identity")
+
+        # X: exact vhost ownership. UDB only removes a vhost while the current
+        # value is still the one it applied.
+        add_effect_profile(services, "vown", "vownsecret", (("vhost", "vown.test"),))
+        vown = IrcClient("127.0.0.1", client_port, "vown-client")
+        clients.append(vown)
+        authenticate(vown, "vown", "vownsecret", "vhost owner identification")
+        vown_whois = request(vown, "WHOIS vown", lambda line: " 318 " in line, "vhost owner WHOIS", timeout=15)
+        require(any("vown.test" in line for line in vown_whois), f"vhost was not applied: {vown_whois!r}")
+        start = len(vown.lines)
+        services.send_ins("N::vown::suspend", "manual review")
+        vown.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                      "vhost owner suspend notice", start=start, timeout=15)
+        vown_whois = request(vown, "WHOIS vown", lambda line: " 318 " in line, "vhost owner revoked WHOIS",
+                             timeout=15)
+        require(not any("vown.test" in line for line in vown_whois),
+                f"suspend kept the UDB-owned vhost: {vown_whois!r}")
+        require(current_nick(vown) == "vown", "vhost owner suspend renamed the holder")
+
+        add_effect_profile(services, "vext", "vextsecret", (("vhost", "vext.test"),))
+        vext = IrcClient("127.0.0.1", client_port, "vext-external")
+        clients.append(vext)
+        services.send("CHGHOST vext-external vext.test")
+        vext.wait_for(lambda line: " 396 " in line and "vext.test" in line,
+                      "external vhost equal to profile value", timeout=15)
+        vext.request("NICK vext:vextsecret", lambda line: " NICK :vext" in line, "vhost match identification")
+        wait_for_mode(vext, "vext", "+r", "vhost match +r")
+        start = len(vext.lines)
+        services.send_ins("N::vext::suspend", "manual review")
+        vext.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                      "vhost match suspend notice", start=start, timeout=15)
+        vext_whois = request(vext, "WHOIS vext", lambda line: " 318 " in line, "vhost match WHOIS", timeout=15)
+        require(any("vext.test" in line for line in vext_whois),
+                f"suspend removed an externally supplied matching vhost: {vext_whois!r}")
+
+        add_effect_profile(services, "vover", "voversecret", (("vhost", "vover.test"),))
+        vover = IrcClient("127.0.0.1", client_port, "vover-client")
+        clients.append(vover)
+        authenticate(vover, "vover", "voversecret", "vhost override identification")
+        services.send("CHGHOST vover vover-ext.test")
+        vover.wait_for(lambda line: " 396 " in line and "vover-ext.test" in line,
+                       "external vhost override", timeout=15)
+        start = len(vover.lines)
+        services.send_ins("N::vover::suspend", "manual review")
+        vover.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                       "vhost override suspend notice", start=start, timeout=15)
+        vover_whois = request(vover, "WHOIS vover", lambda line: " 318 " in line, "vhost override WHOIS",
+                              timeout=15)
+        require(any("vover-ext.test" in line for line in vover_whois) and
+                not any("vover.test" in line and "vover-ext.test" not in line for line in vover_whois),
+                f"suspend replaced an externally overridden vhost: {vover_whois!r}")
+
+        add_effect_profile(services, "vhot", "vhotsecret", (("vhost", "vhot-a.test"),))
+        vhot = IrcClient("127.0.0.1", client_port, "vhot-client")
+        clients.append(vhot)
+        authenticate(vhot, "vhot", "vhotsecret", "vhost hot identification")
+        services.send_ins("N::vhot::vhost", "vhot-b.test")
+        time.sleep(0.4)
+        vhot_whois = request(vhot, "WHOIS vhot", lambda line: " 318 " in line, "vhost hot WHOIS", timeout=15)
+        require(any("vhot-b.test" in line for line in vhot_whois) and
+                not any("vhot-a.test" in line for line in vhot_whois),
+                f"hot vhost update did not replace the owned value: {vhot_whois!r}")
+        start = len(vhot.lines)
+        services.send_ins("N::vhot::suspend", "manual review")
+        vhot.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                      "vhost hot suspend notice", start=start, timeout=15)
+        vhot_whois = request(vhot, "WHOIS vhot", lambda line: " 318 " in line, "vhost hot revoked WHOIS",
+                             timeout=15)
+        require(not any("vhot-b.test" in line for line in vhot_whois),
+                f"suspend kept a replaced-but-still-owned vhost: {vhot_whois!r}")
+
+        add_effect_profile(services, "vmix", "vmixsecret")
+        vmix = IrcClient("127.0.0.1", client_port, "vmix-external")
+        clients.append(vmix)
+        services.send("CHGHOST vmix-external vmix-ext.test")
+        vmix.wait_for(lambda line: " 396 " in line and "vmix-ext.test" in line,
+                      "external vhost before explicit profile vhost", timeout=15)
+        services.send_ins("N::vmix::vhost", "vmix-udb.test")
+        vmix.request("NICK vmix:vmixsecret", lambda line: " NICK :vmix" in line, "vhost mix identification")
+        wait_for_mode(vmix, "vmix", "+r", "vhost mix +r")
+        vmix_whois = request(vmix, "WHOIS vmix", lambda line: " 318 " in line, "vhost mix WHOIS", timeout=15)
+        require(any("vmix-udb.test" in line for line in vmix_whois),
+                f"hot profile vhost was not applied over external state: {vmix_whois!r}")
+
+        # Y: snomask ownership with restore/preserve semantics.
+        add_effect_profile(services, "sown", "sownsecret", (("snomasks", "c"),))
+        sown = IrcClient("127.0.0.1", client_port, "sown-client")
+        clients.append(sown)
+        authenticate(sown, "sown", "sownsecret", "snomask owner identification")
+        value = read_snomask(services, sown, "sown", "snomask applied")
+        require("c" in value, f"UDB snomask was not applied: {value!r}")
+        start = len(sown.lines)
+        services.send_ins("N::sown::suspend", "manual review")
+        sown.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                      "snomask owner suspend notice", start=start, timeout=15)
+        value = read_snomask(services, sown, "sown", "snomask revoked")
+        require(value == "", f"suspend kept a UDB-owned snomask: {value!r}")
+
+        add_effect_profile(services, "sext", "sextsecret", (("snomasks", "c"),))
+        sext = IrcClient("127.0.0.1", client_port, "sext-client")
+        clients.append(sext)
+        set_external_snomask(services, "sext-client", "k")
+        time.sleep(0.3)
+        sext.request("NICK sext:sextsecret", lambda line: " NICK :sext" in line, "snomask restore identification")
+        wait_for_mode(sext, "sext", "+r", "snomask restore +r")
+        value = read_snomask(services, sext, "sext", "snomask restore applied")
+        require("c" in value and "k" not in value, f"UDB snomask did not replace external state: {value!r}")
+        start = len(sext.lines)
+        services.send_ins("N::sext::suspend", "manual review")
+        sext.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                      "snomask restore suspend notice", start=start, timeout=15)
+        value = read_snomask(services, sext, "sext", "snomask restored external")
+        require("k" in value and "c" not in value, f"suspend did not restore the external snomask: {value!r}")
+
+        add_effect_profile(services, "ssame", "ssamesecret", (("snomasks", "c"),))
+        ssame = IrcClient("127.0.0.1", client_port, "ssame-client")
+        clients.append(ssame)
+        set_external_snomask(services, "ssame-client", "c")
+        time.sleep(0.3)
+        ssame.request("NICK ssame:ssamesecret", lambda line: " NICK :ssame" in line, "snomask same identification")
+        wait_for_mode(ssame, "ssame", "+r", "snomask same +r")
+        start = len(ssame.lines)
+        services.send_ins("N::ssame::suspend", "manual review")
+        ssame.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                       "snomask same suspend notice", start=start, timeout=15)
+        value = read_snomask(services, ssame, "ssame", "snomask same revoked")
+        require("c" in value, f"suspend removed an externally supplied matching snomask: {value!r}")
+
+        add_effect_profile(services, "sover", "soversecret", (("snomasks", "c"),))
+        sover = IrcClient("127.0.0.1", client_port, "sover-client")
+        clients.append(sover)
+        authenticate(sover, "sover", "soversecret", "snomask override identification")
+        set_external_snomask(services, "sover", "k")
+        time.sleep(0.3)
+        start = len(sover.lines)
+        services.send_ins("N::sover::suspend", "manual review")
+        sover.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                       "snomask override suspend notice", start=start, timeout=15)
+        value = read_snomask(services, sover, "sover", "snomask override revoked")
+        require("k" in value and "c" not in value, f"suspend overwrote an external snomask: {value!r}")
+
+        add_effect_profile(services, "snone", "snonessecret")
+        snone = IrcClient("127.0.0.1", client_port, "snone-client")
+        clients.append(snone)
+        set_external_snomask(services, "snone-client", "k")
+        time.sleep(0.3)
+        snone.request("NICK snone:snonessecret", lambda line: " NICK :snone" in line, "snomask absent identification")
+        wait_for_mode(snone, "snone", "+r", "snomask absent +r")
+        start = len(snone.lines)
+        services.send_ins("N::snone::suspend", "manual review")
+        snone.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                       "snomask absent suspend notice", start=start, timeout=15)
+        value = read_snomask(services, snone, "snone", "snomask absent revoked")
+        require("k" in value, f"a profile without snomasks removed external state: {value!r}")
+
+        # Z: external account/+r during an active identity never recreates auth,
+        # and identity revocation clears the public projection it owned.
+        add_effect_profile(services, "acctci", "acctcisecret")
+        acctci = IrcClient("127.0.0.1", client_port, "acctci-client")
+        clients.append(acctci)
+        authenticate(acctci, "acctci", "acctcisecret", "external account during identity")
+        services.send("SVSLOGIN * acctci other")
+        services.send("SVS2MODE acctci -r")
+        time.sleep(0.3)
+        start = len(acctci.lines)
+        services.send_ins("N::acctci::suspend", "manual review")
+        acctci.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                        "external account suspend notice", start=start, timeout=15)
+        require(not has_usermode(acctci, "acctci", "r", timeout=15),
+                "external account state survived identity revocation")
+        acctci_whois = request(acctci, "WHOIS acctci", lambda line: " 318 " in line,
+                               "external account revoked WHOIS", timeout=15)
+        require(not any(" 330 " in line and "other" in line for line in acctci_whois),
+                f"external account was not cleared on revoke: {acctci_whois!r}")
+        start = len(acctci.lines)
+        services.send_del("N::acctci::suspend")
+        free_guest(acctci, "external account unsuspend rename", start=start)
+        authenticate(acctci, "acctci", "acctcisecret", "external account reauthentication")
+        acctci_whois = request(acctci, "WHOIS acctci", lambda line: " 318 " in line,
+                               "external account reauth WHOIS", timeout=15)
+        require(any(" 330 " in line and "acctci" in line for line in acctci_whois),
+                f"explicit reauthentication did not restore the account: {acctci_whois!r}")
+
+        # AA1: auth -> external vhost -> suspend -> unsuspend -> reauth.
+        add_effect_profile(services, "seqone", "seqonesecret", (("vhost", "seqone-a.test"),))
+        seqone = IrcClient("127.0.0.1", client_port, "seqone-client")
+        clients.append(seqone)
+        authenticate(seqone, "seqone", "seqonesecret", "sequence one identification")
+        services.send("CHGHOST seqone seq-ext.test")
+        seqone.wait_for(lambda line: " 396 " in line and "seq-ext.test" in line,
+                        "sequence one external vhost", timeout=15)
+        start = len(seqone.lines)
+        services.send_ins("N::seqone::suspend", "manual review")
+        seqone.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                        "sequence one suspend notice", start=start, timeout=15)
+        seqone_whois = request(seqone, "WHOIS seqone", lambda line: " 318 " in line,
+                               "sequence one suspended WHOIS", timeout=15)
+        require(any("seq-ext.test" in line for line in seqone_whois) and
+                not any("seqone-a.test" in line for line in seqone_whois),
+                f"sequence one suspend did not preserve the external vhost: {seqone_whois!r}")
+        start = len(seqone.lines)
+        services.send_del("N::seqone::suspend")
+        free_guest(seqone, "sequence one unsuspend rename", start=start)
+        authenticate(seqone, "seqone", "seqonesecret", "sequence one reauthentication")
+        seqone_whois = request(seqone, "WHOIS seqone", lambda line: " 318 " in line,
+                               "sequence one reauth WHOIS", timeout=15)
+        require(any("seqone-a.test" in line for line in seqone_whois),
+                f"sequence one reauthentication did not reapply the profile: {seqone_whois!r}")
+
+        # AA2: auth -> external +S -> modes update -> suspend keeps the external
+        # bit and revokes only the newly added one.
+        add_effect_profile(services, "seqmode", "seqmodesecret", (("modes", "+S"),))
+        seqmode = IrcClient("127.0.0.1", client_port, "seqmode-client")
+        clients.append(seqmode)
+        services.send("SVS2MODE seqmode-client +S")
+        wait_for_mode(seqmode, "seqmode-client", "+S", "sequence modes external +S")
+        seqmode.request("NICK seqmode:seqmodesecret", lambda line: " NICK :seqmode" in line,
+                        "sequence modes identification")
+        wait_for_mode(seqmode, "seqmode", "+r", "sequence modes +r")
+        services.send_ins("N::seqmode::modes", "+SD")
+        wait_for_mode(seqmode, "seqmode", "+D", "sequence modes update")
+        start = len(seqmode.lines)
+        services.send_ins("N::seqmode::suspend", "manual review")
+        seqmode.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                         "sequence modes suspend notice", start=start, timeout=15)
+        require(has_usermode(seqmode, "seqmode", "S", timeout=15),
+                "sequence modes suspend removed the external bit")
+        require(not has_usermode(seqmode, "seqmode", "D", timeout=15),
+                "sequence modes suspend kept the UDB-added bit")
+
+        # AA3: failed NICK -> SVSNICK -> policy mutation never authenticates.
+        add_effect_profile(services, "seqfail", "seqfailsecret")
+        seqfail = IrcClient("127.0.0.1", client_port, "seqfail-guest")
+        clients.append(seqfail)
+        denied = seqfail.request("NICK seqfail:wrong", lambda line: any(code in line for code in (" 432 ", " 433 ")),
+                                 "sequence failed credential")
+        require(any("password" in line.lower() for line in denied),
+                f"sequence failed credential was not denied: {denied!r}")
+        services.send(f"SVSNICK seqfail-guest seqfail {int(time.time())}")
+        free_guest(seqfail, "sequence forced rename")
+        guest = current_nick(seqfail)
+        services.send_ins("N::seqfail::suspend", "manual review")
+        services.send_del("N::seqfail::suspend")
+        time.sleep(0.5)
+        require(not has_usermode(seqfail, guest, "r", timeout=15),
+                "sequence policy mutation authenticated a forced rename")
+
+        for client in clients:
+            client.close()
+        clients.clear()
+        time.sleep(0.4)
+
+        # AB: snapshot effects update -> external override -> profile delete.
+        # External state must survive the deletion while UDB-owned state and
+        # identity are revoked.
+        add_effect_profile(services, "snapseq", "snapseqsecret",
+                           (("vhost", "snapseq-a.test"), ("modes", "+S")))
+        snapseq = IrcClient("127.0.0.1", client_port, "snapseq-client")
+        clients.append(snapseq)
+        authenticate(snapseq, "snapseq", "snapseqsecret", "ownership sequence identification")
+        snap_records = [("snapseq::pass", "sha256:" + sha256("snapseqsecret")),
+                        ("snapseq::access", "127.0.0.0/8"),
+                        ("snapseq::vhost", "snapseq-b.test"),
+                        ("snapseq::modes", "+S")]
+        replace_n_tree(services, 120, "ownership-sequence-a", snap_records)
+        wait_for_db_records(n_db, ("snapseq::vhost snapseq-b.test",))
+        time.sleep(0.3)
+        require(has_usermode(snapseq, "snapseq", "r", timeout=15),
+                "equivalent ownership snapshot revoked identity")
+        snapseq_whois = request(snapseq, "WHOIS snapseq", lambda line: " 318 " in line,
+                                "ownership sequence WHOIS", timeout=15)
+        require(any("snapseq-b.test" in line for line in snapseq_whois),
+                f"ownership sequence snapshot did not update the vhost: {snapseq_whois!r}")
+        services.send("CHGHOST snapseq external-seq.test")
+        snapseq.wait_for(lambda line: " 396 " in line and "external-seq.test" in line,
+                         "ownership sequence external override", timeout=15)
+        replace_n_tree(services, 121, "ownership-sequence-b", [("other::access", "127.0.0.0/8")])
+        wait_for_db_records(n_db, ("other::access 127.0.0.0/8",), ("snapseq::pass", "snapseq::vhost"))
+        time.sleep(0.3)
+        require(current_nick(snapseq) == "snapseq", "ownership sequence deletion renamed the holder")
+        require(not has_usermode(snapseq, "snapseq", "r", timeout=15),
+                "ownership sequence deletion kept identity")
+        require(not has_usermode(snapseq, "snapseq", "S", timeout=15),
+                "ownership sequence deletion kept a UDB-owned mode")
+        snapseq_whois = request(snapseq, "WHOIS snapseq", lambda line: " 318 " in line,
+                                "ownership sequence deleted WHOIS", timeout=15)
+        require(any("external-seq.test" in line for line in snapseq_whois),
+                f"ownership sequence deletion removed external vhost state: {snapseq_whois!r}")
+
+        print("PASS: identity, effects ownership, suspend revocation, snapshots, SVSNICK and one-shot nick auth")
     finally:
         for client in clients:
             client.close()

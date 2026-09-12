@@ -62,7 +62,8 @@ def free_port():
         return sock.getsockname()[1]
 
 
-def write_config(path, name, sid, client_port, server_port, tls_port, module, dbdir):
+def write_config(path, name, sid, client_port, server_port, tls_port, module, dbdir, extra_modules=()):
+    extra_load = "".join(f'loadmodule "{entry}";\n' for entry in extra_modules)
     path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
 include "{RUNTIME_ROOT}/conf/snomasks.default.conf";
 blacklist-module "geoip_classic";
@@ -98,7 +99,7 @@ ulines {{
 }}
 loadmodule "cloak_sha256";
 loadmodule "third/udb";
-udb {{
+{extra_load}udb {{
     propagator "{SERVICES_NAME}";
 }}
 ''', encoding="ascii")
