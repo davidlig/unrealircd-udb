@@ -597,6 +597,17 @@ def run_tests(ircd_bin, keep=False):
                           "rejection of unknown key testinvalidkey in Block C")
         print("PASS: INS of unknown key testinvalidkey in Block C was rejected with correlated ERR INS 2")
 
+        for path in ("N::removedchallenge::challenge", "N::removedsuspend::suspended",
+                     f"C::{CHANNEL}::pass", f"C::{CHANNEL}::challenge", f"C::{CHANNEL}::suspended"):
+            start = len(services.lines)
+            services.send_ins(path, "sha256")
+            services.wait_for(lambda line: " DB " in line and " ERR INS " in line,
+                              f"rejection of removed schema key {path}", start=start)
+        services.send_ins("N::acceptsuspend::suspend", "manual review")
+        time.sleep(0.15)
+        require("acceptsuspend::suspend manual review" in (data_dir / "udb_N.db").read_text(encoding="ascii"),
+                "N::suspend was not accepted by the replacement schema")
+
         # `forbid` is canonical and exclusive: an INS atomically drops siblings
         # and future sibling inserts are rejected until forbid is deleted.
         services.send_ins("N::forbidtest::pass", "sha256:" + "ab" * 32)

@@ -141,22 +141,24 @@ See [doc/udb_technical_en.md](doc/udb_technical_en.md) for the complete grammar 
 
 ## User-facing behavior
 
-For a registered nick:
+Only a profile containing `N::pass` is password-protected and can establish UDB identity:
 
 ```text
 /NICK alice:Password
 ```
 
-To recover an occupied registered nick:
+To recover an occupied password-protected nick:
 
 ```text
 /NICK alice!Password
 /GHOST alice Password
 ```
 
-When `N::access` exists, the client IP must also match an authorized CIDR.
+Without `N::pass`, a profile is not an identity: its nick may be used when `forbid` and `access` allow it, but it grants neither `account=<nick>` nor `+r`, vhost, oper, modes, snomasks, or SWHOIS. Those configured effects are dormant: UDB neither applies them nor treats them as negative policy that removes equivalent state supplied by another source, including when a dormant record is deleted or a full N snapshot replaces or removes the profile. `N::access` restricts nick use (and authentication when `pass` exists); matching it is never authentication. Password/recovery syntax has no ownership meaning for a profile without `pass`.
 
-A suspended nick still requires its normal `pass`/`access` checks. Successful authentication is retained only for that local client and nick: while `N::suspend` exists UDB exposes no account/`+r` and applies no profile effects. Removing `suspend` restores account, `+r`, and the profile effects automatically only while the unchanged `pass`/`challenge`/`access` policy still validates that retained authentication; it never asks for the password again in that case.
+A `/NICK nick:Password` credential is one-shot and only applies to that attempt: the account, `+r`, and profile effects materialize only once the nick change is effective, and a rejected change (`433`, Q-line, nick-change limits) leaves the current nick's active UDB identity untouched. Initial registration follows the same rule, and a credential from a failed attempt is never reused by a later forced rename. When a formerly passless profile gains its first `N::pass`, `account`/`+r` from another source are not accepted as its authentication. A service-forced nick change (`SVSNICK`) is never UDB authentication: a protected nick reached without a valid active identity is safely renamed away.
+
+A suspended password-protected nick still requires its normal `pass`/`access` checks before it can be adopted. `N::pass` supports the `argon2id`, `sha256`, and `crypt` types, selected by its own prefix (`argon2id:`, `sha256:`, or `crypt:`). Successful authentication is bound to the active nick only: while `N::suspend` exists UDB exposes no account/`+r`, applies no profile effects, and retains no authentication whatsoever. Removing `suspend` from a profile with `pass` renames the current holder, who must authenticate again with `/NICK nick:Password`; a profile without `pass` has no identity to revoke, so removing its `suspend` never identifies its holder. Account/`+r` alone cannot create identity. UDB neither adds nor removes externally owned `+S`.
 
 A channel key is exclusively the native `+k` parameter in `C::<channel>::modes`, for example `+ntk secret`. It protects the first JOIN as well as later joins. An identified founder receives UDB-owned `+q`.
 
@@ -176,7 +178,7 @@ Start with `/UDB STATUS`: it reports readiness, sync health, recovery state, sel
 
 ### Current DBQ warning
 
-The implementation redacts `N::*::pass`, `N::*::challenge`, and `S::encryption_key`.
+The implementation redacts `N::*::pass` and `S::encryption_key`.
 
 ## Development
 

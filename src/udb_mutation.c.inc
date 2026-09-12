@@ -197,6 +197,7 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 		UdbRecord *rec = NULL;
 		UdbHashIndex hash_index;
 		int unchanged;
+		int nick_pass_added;
 
 		if (!udb_record_validate(block, path + 3, data))
 		{
@@ -216,6 +217,8 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 		}
 		tree = udb_record_clone_tree(block->tree, old_rec, &rec);
 		rec = udb_record_insert_path(tree, path + 3, data);
+		nick_pass_added = rec && block->letter == UDB_BLOCK_NICKS && rec->parent && rec->parent != tree &&
+						  !strcmp(rec->key, NKEY_PASS) && !old_rec;
 		if (rec && block->letter == UDB_BLOCK_NICKS && rec->parent && rec->parent != tree)
 		{
 			if (!strcmp(rec->key, NKEY_FORBID))
@@ -268,6 +271,21 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 		if (block->letter == 'K')
 			udb_lines_expiry_pending_clear_record(old_rec ? old_rec : rec);
 		udb_block_replace_tree(ctx, block, tree, udb_record_count_tree(tree), &hash_index);
+		/* A newly added credential cannot inherit identity from an earlier
+		 * passless profile, a matching nick, or externally residual account/+r.
+		 * The following apply sees no identity marker and renames the holder.
+		 * A passless profile never applied runtime effects, so it must not
+		 * revoke externally supplied state either. */
+		if (nick_pass_added)
+		{
+			Client *profile_client = find_user(rec->parent->key, NULL);
+
+			if (profile_client && MyUser(profile_client))
+			{
+				udb_nick_identity_clear(profile_client);
+				udb_nick_pending_auth_clear(profile_client);
+			}
+		}
 		if (!unchanged)
 		{
 			udb_apply_special_record(ctx, block, rec, 1);
@@ -312,8 +330,7 @@ static int udb_mutation_delete_local(UdbContext *ctx, UdbBlock *block, UdbRecord
 	if (block->letter == 'K' && candidate_rec->parent && candidate_rec->parent->parent &&
 		candidate_rec->parent->parent != tree)
 		candidate_line = candidate_rec->parent;
-	if (block->letter == UDB_BLOCK_NICKS && candidate_rec->parent && candidate_rec->parent != tree &&
-		!strcmp(candidate_rec->key, NKEY_SUSPEND))
+	if (block->letter == UDB_BLOCK_NICKS && candidate_rec->parent && candidate_rec->parent != tree)
 		candidate_nick_profile = candidate_rec->parent;
 	udb_record_delete_tree(candidate_rec);
 	record_count = udb_record_count_tree(tree);

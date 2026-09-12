@@ -1,6 +1,6 @@
 # UDB 4 — Documentación técnica
 
-> Documento reconstruido desde la implementación actual de `davidlig/unrealircd-udb`, rama `main`, commit `75d017117d934f9dcb64dbeabe99d1888b72dcab`, revisado el 10 de septiembre de 2026. El código, no las versiones anteriores de esta documentación, se ha utilizado como fuente de verdad.
+> Documento reconstruido desde la implementación actual de `davidlig/unrealircd-udb` en la rama `main` y revisado el 11 de septiembre de 2026. El código, no las versiones anteriores de esta documentación, se ha utilizado como fuente de verdad.
 
 ## 1. Alcance
 
@@ -93,12 +93,11 @@ Claves admitidas:
 
 | Clave | Tipo | Efecto actual |
 |---|---|---|
-| `access` | texto | Lista de CIDR separada por comas/espacios desde la que se permite usar el nick. Si falta, no restringe por IP. |
-| `pass` | texto | Hash de contraseña. |
-| `challenge` | texto | Fuerza el tipo de autenticación: `argon2id`, `sha256` o `crypt`. |
+| `access` | texto | Lista de CIDR separada por comas/espacios desde la que se permite usar el nick; nunca es identidad. Si falta, no restringe por IP. |
+| `pass` | texto | Hash de contraseña y única credencial que puede establecer identidad UDB. |
 | `vhost` | texto | Vhost aplicado al usuario identificado. |
 | `forbid` | texto | Impide el uso del nick; en hot-sync puede forzar renombre. |
-| `suspend` | texto | Permite el nick tras autenticar si hay `pass`, pero no asigna account/`+r` ni efectos UDB. |
+| `suspend` | texto | Con `pass`, permite el nick tras autenticar pero no asigna account/`+r` ni efectos UDB; sin `pass`, no conserva autenticación. |
 | `oper` | texto | Nombre de operclass local a conceder. |
 | `modes` | texto | Modos de usuario válidos; `o` está expresamente prohibido aquí. |
 | `snomasks` | texto | Snomasks a aplicar. |
@@ -112,40 +111,46 @@ sha256:<64 hex>
 crypt:<hash>
 ```
 
-También se reconoce un `$argon2id$...` sin prefijo si no hay `challenge`. En SHA-256 se compara el SHA-256 hexadecimal de la contraseña enviada.
+Los tipos admitidos por `N::pass` son `argon2id`, `sha256` y `crypt`; su prefijo selecciona el algoritmo de autenticación. En SHA-256 se compara el SHA-256 hexadecimal de la contraseña enviada.
 
 El control de fallos de contraseña usa una tabla de 256 entradas indexada conceptualmente por perfil/IP. El valor por defecto es `5:60` y puede configurarse con `udb::password-flood` o sustituirse en runtime mediante `S::flood`.
 
 #### Uso del nick
 
-Para un nick registrado:
+La existencia de un perfil N no identifica a su ocupante. Un perfil sin `N::pass` no está protegido por contraseña: el nick puede usarse si `forbid` y `access` lo permiten, pero nunca concede `account=<nick>`, `+r`, vhost, operclass, modos, SWHOIS ni snomasks. Esos registros configurados siguen siendo válidos e inactivos hasta que el perfil tenga `pass` y el usuario se autentique correctamente. Mientras están dormidos, UDB no los trata como política negativa ni retira estado equivalente aportado por otra fuente, tampoco cuando se borra un registro dormido o un snapshot completo de N reemplaza o elimina el perfil.
+
+Para un nick registrado, el cambio se autentica con:
 
 ```text
 /NICK alice:Password
 ```
 
-autentica el cambio normal. Si el nick está ocupado:
+La validación de contraseña es un paso de preflight. Una credencial válida sólo queda ligada al cambio de nick pendiente: la cuenta, `+r` y los efectos del perfil se activan cuando el cambio se confirma, y ninguna credencial pendiente publica identidad por sí sola. La contraseña enviada es de un solo uso y nunca pasa a ser estado de sesión. Si el cambio falla (`433`, Q-line, límites de cambio de nick, colisión), la identidad UDB activa del nick actual no cambia. La credencial pendiente se descarta cuando cambia la política `pass`/`access` del destino, desaparece el perfil o comienza otro intento, y una credencial de un intento que no estableció el nick nunca puede reutilizarse por un rename forzado posterior. El registro inicial sigue la misma regla, así que un primer `/NICK alice:Password` activa la misma identidad que un cambio de nick posterior. Cuando un perfil antes passless recibe su primer `N::pass`, el `account`/`+r` aportado por otra fuente nunca se acepta como su credencial: sólo una autenticación UDB real autoriza identidad y efectos del perfil.
+
+Un cambio de nick forzado por servicios no sustituye la autenticación UDB: si el perfil contiene `pass`, UDB sólo materializa identidad y efectos cuando existe una identidad activa válida generada por su propio flujo de autenticación. Un cambio forzado hacia un nick protegido sin ella se renombra de forma segura.
+
+Si el nick está ocupado:
 
 ```text
 /NICK alice!Password
 ```
 
-valida contraseña + `access` y expulsa al ocupante antes de tomar el nick. También existe:
+valida contraseña + `access` y expulsa al ocupante antes de tomar el nick; sólo se aplica a un perfil con `pass`. También existe:
 
 ```text
 /GHOST alice Password
 ```
 
-Si el perfil contiene `access`, la contraseña correcta **no basta**: la IP del cliente debe coincidir con al menos uno de los CIDR configurados.
+Si el perfil contiene `access`, la contraseña correcta **no basta**: la IP del cliente debe coincidir con al menos uno de los CIDR configurados. Sin `pass`, `access` sólo restringe el uso del nick; no autentica ni permite ownership de recovery/ghost.
 
-Al identificar correctamente el nick, UDB asigna `account=<nick>` y `+r`; después aplica suspensión, vhost, operclass, modos, SWHOIS y snomasks. Cuando el usuario abandona el perfil, UDB retira el estado que posee, incluido el oper concedido por UDB.
+En un perfil normal con `N::pass`, una autenticación correcta asigna `account=<nick>` y `+r` y habilita vhost, operclass, modos, SWHOIS y snomasks. Cuando el usuario abandona el perfil, UDB retira el estado que posee, incluido el oper concedido por UDB. Al borrar `pass`, retira inmediatamente identidad/efectos UDB; ni coincidir con el nick ni un account/`+r` residual sustituyen una autenticación por contraseña.
 
-En un reemplazo caliente del bloque N no se confía únicamente en `+r`: la cuenta actual debe coincidir con el perfil. De lo contrario no se aplican vhosts/opers del perfil y, si existe contraseña, el ocupante puede ser renombrado.
+En un reemplazo caliente del bloque N no se confía ni en el account ni en `+r`: la continuidad exige una identidad UDB activa cuyo digest de `pass`/`access` coincida con el perfil candidato y cuyo acceso siga permitiendo al cliente. De lo contrario UDB retira los efectos que realmente poseía y, si existe contraseña, renombra al ocupante actual del nick.
 
 
 `N::forbid` es exclusivo: insertarlo elimina atómicamente todas las propiedades hermanas, y no se puede insertar otra hasta borrar `forbid`. El override normal de NICK muestra el motivo sin un 432 duplicado.
 
-Con `N::suspend`, la validación requerida de `pass`/`access` sigue siendo obligatoria antes de adoptar el nick. Tras superarla conserva una prueba de autenticación local ligada al cliente y al perfil, pero no recibe account, `+r`, oper, vhost, modes, snomasks ni SWHOIS. Añadirlo a un usuario identificado conserva esa prueba, retira los efectos UDB y mantiene el nick. Al retirar `suspend`, UDB reaplica account, `+r` y los efectos normales sin otra contraseña sólo si el mismo cliente sigue ocupando el nick y la prueba conservada coincide con la política actual de `pass`/`challenge`/`access` y su comprobación de acceso. Cambiar cualquiera de esos campos, abandonar el nick o desconectar invalida la prueba.
+Con `N::suspend` y `pass`, la validación requerida de `pass`/`access` sigue siendo obligatoria antes de adoptar el nick. El adoptante mantiene el nick pero no recibe account, `+r`, oper, vhost, modes, snomasks ni SWHOIS, y no conserva identidad alguna: `suspend` destruye cualquier identidad UDB activa. Añadirlo a un usuario identificado retira esos efectos UDB y mantiene el nick. Al retirar `suspend` de un perfil con `pass`, UDB nunca restaura la identidad: el ocupante actual se renombra y debe autenticarse de nuevo con `/NICK nick:Password`. Un perfil suspendido sin `pass` no tiene identidad, por lo que quitar `suspend` nunca identifica a su ocupante. Account/`+r` por sí solos no pueden crear identidad. UDB no añade ni retira el `+S` de propiedad externa.
 
 ### 4.2 Bloque C — Canales
 
@@ -744,7 +749,6 @@ Consultar sólo un bloque devuelve metadatos (registros, tamaño, mtime, checksu
 El código actual de `udb_query_is_secret()` oculta explícitamente:
 
 - `N::*::pass`;
-- `N::*::challenge`;
 - `S::encryption_key`.
 
 

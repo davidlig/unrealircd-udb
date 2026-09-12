@@ -250,6 +250,59 @@ def exercise(host, port):
         require(any("registered" in line.lower() or "password" in line.lower() for line in rejected_nick),
                 f"invalid nick credentials not rejected by UDB: {rejected_nick!r}")
 
+        # A profile without pass governs nick use only. Its effect records are
+        # dormant, and access is a use restriction rather than authentication.
+        bob.send("MODE bob +i")
+        time.sleep(0.1)
+        before_open_modes = bob.request("MODE bob", lambda line: " 221 " in line,
+                                        "external +i confirmation")
+        require(any("+i" in line for line in before_open_modes),
+                f"external +i was not established before passless profile: {before_open_modes!r}")
+        bob.request("NICK open", lambda line: " NICK :open" in line, "open unprotected profile")
+        open_modes = bob.request("MODE open", lambda line: " 221 " in line, "open profile modes")
+        require(any("+i" in line for line in open_modes) and not any("+r" in line for line in open_modes),
+                f"passless profile removed external +i or granted UDB identity: {open_modes!r}")
+        open_whois = bob.request("WHOIS open", lambda line: " 318 " in line, "open profile WHOIS")
+        require(not any("open.test" in line or "Open profile" in line for line in open_whois),
+                f"passless profile applied UDB effects: {open_whois!r}")
+
+        # `!Password` must not turn arbitrary text into a ghost/recovery proof
+        # when the profile has no credential.
+        denied_recovery = alice.request("NICK open!whatever",
+                                        lambda line: any(code in line for code in (" 432 ", " 433 ", " 437 ")),
+                                        "passless nick recovery rejection")
+        require(not any("Ghosting open" in line for line in denied_recovery),
+                f"passless nick accepted privileged recovery: {denied_recovery!r}")
+        bob.wait_for(lambda line: " NICK :open" in line, "passless nick holder remains connected")
+
+        bob.request("NICK limited", lambda line: " NICK :limited" in line, "access-authorized passless profile")
+        limited_modes = bob.request("MODE limited", lambda line: " 221 " in line, "limited profile modes")
+        require(not any("+r" in line for line in limited_modes),
+                f"access authorized a passless identity: {limited_modes!r}")
+        limited_whois = bob.request("WHOIS limited", lambda line: " 318 " in line, "limited profile WHOIS")
+        require(not any("limited.test" in line for line in limited_whois),
+                f"access-authorized passless profile applied vhost: {limited_whois!r}")
+
+        blocked = bob.request("NICK blocked", lambda line: any(code in line for code in (" 432 ", " 433 ", " 437 ")),
+                              "access-denied passless profile")
+        require(any("access" in line.lower() or "ip address" in line.lower() for line in blocked) and
+                not any("requires a password" in line.lower() for line in blocked),
+                f"passless access denial used password wording: {blocked!r}")
+
+        suspended_client = IrcClient(host, port, "suspended-client")
+        clients.append(suspended_client)
+        suspended_client.request("NICK openhold", lambda line: " NICK :openhold" in line,
+                                 "suspended passless profile")
+        suspended_client.wait_for(lambda line: "This nickname is suspended. Reason: open maintenance" in line,
+                                  "passless suspension reason")
+        openhold_modes = suspended_client.request("MODE openhold", lambda line: " 221 ", "passless suspended modes")
+        require(not any("+r" in line for line in openhold_modes),
+                f"passless suspended profile granted UDB identity: {openhold_modes!r}")
+        openhold_whois = suspended_client.request("WHOIS openhold", lambda line: " 318 " in line,
+                                                  "passless suspended WHOIS")
+        require(not any("openhold.test" in line for line in openhold_whois),
+                f"passless suspended profile applied vhost: {openhold_whois!r}")
+
         # The NICK override owns the normal forbid path: it gives one reason
         # NOTICE and does not delegate to the hook that would create a 432.
         start = len(bob.lines)
@@ -265,34 +318,34 @@ def exercise(host, port):
         # A suspended profile still requires its password. Once authenticated it
         # keeps the nick but deliberately has no UDB identity/effects.
         for command in ("NICK suspended", "NICK suspended:wrong"):
-            rejected_suspend = bob.request(command,
-                                           lambda line: any(code in line for code in (" 432 ", " 433 ", " 437 ")),
-                                           "rejection of unauthenticated suspended nick")
+            rejected_suspend = suspended_client.request(command,
+                                                        lambda line: any(code in line for code in (" 432 ", " 433 ", " 437 ")),
+                                                        "rejection of unauthenticated suspended nick")
             require(any("password" in line.lower() or "registered" in line.lower()
                         for line in rejected_suspend),
                     f"suspended nick bypassed password validation: {rejected_suspend!r}")
-        bob.request("NICK suspended:holdsecret", lambda line: " NICK :suspended" in line,
-                    "authenticated suspended nick")
-        bob.wait_for(lambda line: "This nickname is suspended. Reason: pending review" in line,
-                     "suspension reason")
-        mode_lines = bob.request("MODE suspended", lambda line: " 221 " in line,
-                                 "suspended user mode reply")
+        suspended_client.request("NICK suspended:holdsecret", lambda line: " NICK :suspended" in line,
+                                 "authenticated suspended nick")
+        suspended_client.wait_for(lambda line: "This nickname is suspended. Reason: pending review" in line,
+                                  "suspension reason")
+        mode_lines = suspended_client.request("MODE suspended", lambda line: " 221 " in line,
+                                              "suspended user mode reply")
         require(not any("+r" in line for line in mode_lines),
                 f"suspended nick received UDB identity: {mode_lines!r}")
         require(not any("S" in line.split(" :", 1)[-1] for line in mode_lines),
                 f"suspended nick implicitly received +S: {mode_lines!r}")
-        suspended_whois = bob.request("WHOIS suspended", lambda line: " 318 " in line,
-                                      "suspended WHOIS")
+        suspended_whois = suspended_client.request("WHOIS suspended", lambda line: " 318 " in line,
+                                                   "suspended WHOIS")
         require(not any("suspended.test" in line for line in suspended_whois),
                 f"suspended nick received its UDB vhost: {suspended_whois!r}")
 
         for command in ("JOIN #firstkey", "JOIN #firstkey wrong"):
-            rejected_join = bob.request(command, lambda line: " 475 " in line,
-                                        "rejection of first JOIN with invalid channel key")
+            rejected_join = suspended_client.request(command, lambda line: " 475 " in line,
+                                                     "rejection of first JOIN with invalid channel key")
             require(any(" 475 " in line for line in rejected_join),
                     f"first JOIN key was not rejected: {rejected_join!r}")
-        bob.request("JOIN #firstkey firstsecret", lambda line: " 366 " in line, "first keyed JOIN")
-        bob.request("JOIN #vault chansecret", lambda line: " 366 " in line, "end of keyed JOIN")
+        suspended_client.request("JOIN #firstkey firstsecret", lambda line: " 366 " in line, "first keyed JOIN")
+        suspended_client.request("JOIN #vault chansecret", lambda line: " 366 " in line, "end of keyed JOIN")
 
         alice.request("NICK alice2", lambda line: " NICK :alice2" in line, "nick change")
         mode_reply = alice.wait_for(lambda line: " MODE alice2 " in line and "-r" in line,
@@ -338,12 +391,19 @@ def main():
         shutil.copy2(args.module, third_modules / "udb.so")
         seed_block(data / "udb_N.db", "N",
                    f"alice::pass sha256:{sha256('secret')}\n"
-                   "alice::challenge sha256\n"
                    "alice::access 127.0.0.0/8\n"
                    "alice::vhost alice.test\n"
                    f"reserved::forbid reserved for testing\n"
+                   "open::vhost open.test\n"
+                   "open::modes +i\n"
+                   "open::swhois Open profile\n"
+                   "limited::access 127.0.0.0/8\n"
+                   "limited::vhost limited.test\n"
+                   "blocked::access 192.0.2.0/24\n"
+                   "openhold::access 127.0.0.0/8\n"
+                   "openhold::suspend open maintenance\n"
+                   "openhold::vhost openhold.test\n"
                    f"suspended::pass sha256:{sha256('holdsecret')}\n"
-                   "suspended::challenge sha256\n"
                    "suspended::access 127.0.0.0/8\n"
                    "suspended::suspend pending review\n"
                    "suspended::vhost suspended.test\n")

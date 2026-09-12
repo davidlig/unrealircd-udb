@@ -19,7 +19,7 @@ static int udb_apply_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord 
 		Client *client = find_user(nick_rec->key, NULL);
 		if (client && MyUser(client))
 		{
-			udb_nick_apply(client, nick_rec, is_new);
+			udb_nick_apply(client, nick_rec, is_new ? UDB_NICK_APPLY_REFRESH : UDB_NICK_APPLY_ADOPT);
 		}
 	}
 	else if (block->letter == 'C')

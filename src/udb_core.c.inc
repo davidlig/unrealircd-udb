@@ -473,11 +473,6 @@ static int udb_password_hash_valid(const char *value)
 	return 1;
 }
 
-static int udb_challenge_valid(const char *value)
-{
-	return value && (!strcasecmp(value, "argon2id") || !strcasecmp(value, "sha256") || !strcasecmp(value, "crypt"));
-}
-
 static int udb_vhost_valid(const char *value)
 {
 	return value && *value && strlen(value) <= HOSTLEN && !strpbrk(value, " \t\r\n");
@@ -713,7 +708,6 @@ static const UdbKeyDescriptor udb_schema_n_subkeys[] = {
 	{NKEY_FORBID, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL},
 	{NKEY_SUSPEND, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL},
 	{NKEY_OPER, UDB_VAL_STRING, udb_oper_record_valid, 0, NULL},
-	{NKEY_CHALLENGE, UDB_VAL_STRING, udb_challenge_valid, 0, NULL},
 	{NKEY_MODES, UDB_VAL_STRING, udb_user_modes_record_valid, 0, NULL},
 	{NKEY_SNOMASKS, UDB_VAL_STRING, udb_snomasks_record_valid, 0, NULL},
 	{NKEY_SWHOIS, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL}};
@@ -1500,7 +1494,7 @@ static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSessi
 	 * installed so the in-flight session cannot be aborted and freed under us. */
 	udb_policy_notify_deferred = 1;
 	unsigned int real_count = udb_record_count_tree(session->tree);
-	udb_nick_suspend_auth_prepare_tree_replace(block, session->tree);
+	udb_nick_prepare_tree_replace(block, session->tree);
 	udb_block_reset(ctx, block);
 	udb_block_replace_tree(ctx, block, session->tree, real_count, &session->hash_index);
 	session->tree = NULL;
@@ -1512,7 +1506,7 @@ static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSessi
 	udb_sync_session_free(block);
 
 	udb_apply_tree_effects(ctx, block);
-	udb_nick_suspend_auth_prepare_tree_replace(block, NULL);
+	udb_nick_finish_tree_replace();
 	udb_policy_notify_deferred = 0;
 	udb_propagator_policy_flush(ctx);
 	if (block->letter == 'L')

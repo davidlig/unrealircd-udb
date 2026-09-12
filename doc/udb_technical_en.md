@@ -1,6 +1,6 @@
 # UDB 4 — Technical documentation
 
-> This document was rebuilt from the current implementation of `davidlig/unrealircd-udb`, `main` branch, commit `75d017117d934f9dcb64dbeabe99d1888b72dcab`, reviewed on September 10, 2026. The code, not previous versions of this documentation, was used as the source of truth.
+> This document was rebuilt from the current implementation of `davidlig/unrealircd-udb` on the `main` branch and reviewed on September 11, 2026. The code, not previous versions of this documentation, was used as the source of truth.
 
 ## 1. Scope
 
@@ -92,12 +92,11 @@ Allowed keys:
 
 | Key | Type | Current runtime effect |
 |---|---|---|
-| `access` | string | Comma/space separated CIDRs from which the nick may be used. Missing means no IP restriction. |
-| `pass` | string | Password hash. |
-| `challenge` | string | Forces auth type: `argon2id`, `sha256`, or `crypt`. |
+| `access` | string | Comma/space separated CIDRs from which the nick may be used; it is never identity. Missing means no IP restriction. |
+| `pass` | string | Password hash and the only credential that can establish UDB identity. |
 | `vhost` | string | Vhost applied to an identified user. |
 | `forbid` | string | Prevents nick use; hot sync may force a rename. |
-| `suspend` | string | Allows the nick after required `pass` authentication, but grants no account/`+r` or UDB effects. |
+| `suspend` | string | With `pass`, allows the nick after authentication but grants no account/`+r` or UDB effects; without `pass`, it retains no authentication. |
 | `oper` | string | Local operclass name to grant. |
 | `modes` | string | Valid user modes; `o` is explicitly forbidden here. |
 | `snomasks` | string | Snomasks to apply. |
@@ -111,11 +110,13 @@ sha256:<64 hex>
 crypt:<hash>
 ```
 
-A raw `$argon2id$...` is also recognized when no `challenge` is set. SHA-256 compares the hexadecimal SHA-256 of the supplied password.
+The supported `N::pass` types are `argon2id`, `sha256`, and `crypt`; its prefix selects the authentication algorithm. SHA-256 compares the hexadecimal SHA-256 of the supplied password.
 
 Password failure throttling uses 256 slots conceptually keyed by profile/IP. The default is `5:60`; it can be configured with `udb::password-flood` and overridden at runtime by `S::flood`.
 
 #### Using a registered nick
+
+The existence of an N profile does not identify its holder. A profile without `N::pass` is not password-protected: its nick may be used when `forbid` and `access` permit it, but it never grants `account=<nick>`, `+r`, vhost, operclass, modes, SWHOIS, or snomasks. Those configured records remain valid and dormant until the profile has `pass` and the user successfully authenticates. While dormant, UDB does not treat them as negative policy and does not remove equivalent state supplied by another source, including when a dormant record is deleted or a full N snapshot replaces or removes the profile.
 
 Normal authentication:
 
@@ -123,23 +124,27 @@ Normal authentication:
 /NICK alice:Password
 ```
 
-Forced collision recovery:
+Password validation is a preflight step. A valid credential is bound to the pending nick change only: the account, `+r`, and profile effects become active after the change is confirmed, and no pending credential ever publishes identity by itself. The supplied password is one-shot and never becomes session state. If the change fails (`433`, Q-line, nick-change limits, collision), the current nick's active UDB identity is unchanged. The pending credential is discarded when the destination `pass`/`access` policy changes, the profile disappears, or another attempt starts, and a credential from an attempt that did not establish the nick can never be reused by a later forced rename. Initial registration follows the same rule, so a first `/NICK alice:Password` activates the same identity as a later nick change. When a formerly passless profile gains its first `N::pass`, `account`/`+r` supplied by another source are never accepted as its credential: only a real UDB authentication authorizes identity and profile effects.
+
+A service-forced nick change is not UDB authentication: when a profile has `pass`, UDB materializes identity and effects only when a valid active identity exists from its own authentication flow. A forced change onto a protected nick without it is safely renamed away.
+
+Forced collision recovery (only for a profile with `pass`):
 
 ```text
 /NICK alice!Password
 /GHOST alice Password
 ```
 
-If the profile has `access`, a valid password is **not sufficient**: the client IP must match at least one configured CIDR.
+If the profile has `access`, a valid password is **not sufficient**: the client IP must match at least one configured CIDR. Without `pass`, `access` is only a nick-use restriction; it neither authenticates nor enables recovery/ghost ownership.
 
-On successful identification UDB sets `account=<nick>` and `+r`, then applies suspension, vhost, operclass, modes, SWHOIS, and snomasks. Leaving the profile removes UDB-owned state, including an oper grant owned by UDB.
+For a normal profile with `N::pass`, successful authentication sets `account=<nick>` and `+r` and enables vhost, operclass, modes, SWHOIS, and snomasks. Leaving the profile removes UDB-owned state, including an oper grant owned by UDB. Removing `pass` immediately removes UDB identity/effects; an already matching nick or residual account/`+r` cannot replace a password authentication.
 
-During a hot replacement of N, `+r` alone is not trusted: the current account must match the profile. Otherwise profile vhosts/opers are not applied and, when a password record exists, the current nick holder may be renamed.
+During a hot replacement of N, neither account nor `+r` is trusted: continuity requires an active UDB identity whose bound `pass`/`access` digest matches the candidate profile and whose access still permits the client. Otherwise UDB removes the effects it actually owned and, when a password record exists, renames the current nick holder.
 
 
 `N::forbid` is exclusive: inserting it atomically removes all sibling profile properties, and no other property may be inserted until `forbid` is deleted. The normal NICK override reports its reason without a duplicate 432.
 
-With `N::suspend`, required `pass`/`access` validation still applies before adopting the nick. A successful adopter keeps a client-local, profile-bound authentication proof but receives no account, `+r`, oper, vhost, modes, snomasks or SWHOIS. Adding it to an identified user retains that proof while stripping those UDB effects and preserving the nick. Removing `suspend` reapplies account, `+r`, and the normal profile effects without another password only when the same client still occupies the nick and the retained proof matches the current `pass`/`challenge`/`access` policy and access check. Changing any of those policy fields, leaving the nick, or disconnecting invalidates the proof.
+With `N::suspend` and `pass`, required `pass`/`access` validation still applies before adopting the nick. A successful adopter keeps the nick but receives no account, `+r`, oper, vhost, modes, snomasks or SWHOIS, and retains no identity: `suspend` destroys any active UDB identity. Adding it to an identified user strips those UDB effects and preserves the nick. Removing `suspend` from a profile with `pass` never restores identity: the current holder is renamed and must authenticate again with `/NICK nick:Password`. A suspended profile without `pass` has no identity, so removing `suspend` never identifies its holder. Account/`+r` alone cannot create identity. UDB neither adds nor removes externally owned `+S`.
 
 ### 4.2 C block — Channels
 
@@ -738,7 +743,6 @@ A block-only query returns metadata such as record count, file size, mtime, chec
 Current `udb_query_is_secret()` explicitly hides:
 
 - `N::*::pass`;
-- `N::*::challenge`;
 - `S::encryption_key`.
 
 

@@ -31,16 +31,15 @@
  * ======================================================================== */
 
 /* Nick sub-records: N::<nick>::<key> <value> */
-#define NKEY_ACCESS "access"	   /* IP/CIDR access restriction */
-#define NKEY_PASS "pass"		   /* Password hash */
-#define NKEY_VHOST "vhost"		   /* Virtual host */
-#define NKEY_FORBID "forbid"	   /* Forbidden nick (value = reason) */
-#define NKEY_SUSPEND "suspend"	   /* Suspended nick (value = reason) */
-#define NKEY_OPER "oper"		   /* Operclass name string (e.g. "locop", "netadmin-with-override") */
-#define NKEY_CHALLENGE "challenge" /* Password hash method */
-#define NKEY_MODES "modes"		   /* Allowed oper modes */
-#define NKEY_SNOMASKS "snomasks"   /* Allowed snomasks */
-#define NKEY_SWHOIS "swhois"	   /* Custom SWHOIS line */
+#define NKEY_ACCESS "access"	 /* IP/CIDR access restriction */
+#define NKEY_PASS "pass"		 /* Password hash */
+#define NKEY_VHOST "vhost"		 /* Virtual host */
+#define NKEY_FORBID "forbid"	 /* Forbidden nick (value = reason) */
+#define NKEY_SUSPEND "suspend"	 /* Suspended nick (value = reason) */
+#define NKEY_OPER "oper"		 /* Operclass name string (e.g. "locop", "netadmin-with-override") */
+#define NKEY_MODES "modes"		 /* Allowed oper modes */
+#define NKEY_SNOMASKS "snomasks" /* Allowed snomasks */
+#define NKEY_SWHOIS "swhois"	 /* Custom SWHOIS line */
 
 /* Channel sub-records: C::<#chan>::<key> <value> */
 #define CKEY_FOUNDER "founder" /* Founder nick */

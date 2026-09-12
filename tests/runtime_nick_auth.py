@@ -1,0 +1,727 @@
+#!/usr/bin/env python3
+"""Runtime contract for active UDB identity, suspend revocation and one-shot nick auth.
+
+Semantics under test:
+
+  authentication -> active UDB identity + effects
+  INS suspend    -> revoke identity/effects, keep the nick
+  DEL suspend    -> Guest rename for protected profiles (reauth required)
+  SVSNICK        -> never authentication: protected nicks are renamed away
+"""
+
+import argparse
+import hashlib
+import os
+import pathlib
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import zlib
+
+from runtime_schema_validation import (
+    DEFAULT_IRCD,
+    EnvironmentUnavailable,
+    FakeServicesServer,
+    IRCD_SID,
+    IrcClient as BaseIrcClient,
+    RUNTIME_ROOT,
+    bwrap_command,
+    find_module_path,
+    free_port,
+    run_configtest,
+    skip,
+    stop,
+    write_config,
+)
+
+
+# Fake services can exempt test clients from UnrealIRCd fake lag; without it a
+# long script of NICK commands accumulates parsing lag and stalls responses.
+_services = None
+
+
+class IrcClient(BaseIrcClient):
+    def __init__(self, host, port, nick):
+        super().__init__(host, port, nick)
+        if _services is not None:
+            _services.send(f"SVSNOLAG + {self.nick}")
+
+    def request(self, command, terminator, description, timeout=20):
+        start = len(self.lines)
+        self.send(command)
+        return self.wait_for(terminator, description, start=start, timeout=timeout)
+
+
+def require(condition, message):
+    if not condition:
+        raise AssertionError(message)
+
+
+def sha256(value):
+    return hashlib.sha256(value.encode("ascii")).hexdigest()
+
+
+def wait_for_mode(client, nick, required, description, start=0, timeout=15):
+    lines = client.wait_for(lambda line: f" MODE {nick} " in line and required in line,
+                            description, start=start, timeout=timeout)
+    require(any(required in line for line in lines), f"{description}: {lines!r}")
+
+
+def request(client, command, terminator, description, timeout=20):
+    start = len(client.lines)
+    client.send(command)
+    return client.wait_for(terminator, description, start=start, timeout=timeout)
+
+
+def current_nick(client):
+    nick = client.nick
+    for line in client.lines:
+        if " NICK :" in line:
+            nick = line.split(" NICK :", 1)[1].split(" ", 1)[0]
+    return nick
+
+
+def has_usermode(client, nick, mode, timeout=15):
+    start = len(client.lines)
+    client.send(f"MODE {nick}")
+    lines = client.wait_for(lambda line: " 221 " in line, f"{nick} modes", start=start, timeout=timeout)
+    return any(mode in line.rsplit(" ", 1)[-1].lstrip(":") for line in lines)
+
+
+def assert_unidentified(client, nick, description, timeout=15):
+    start = len(client.lines)
+    client.send(f"MODE {nick}")
+    modes = client.wait_for(lambda line: " 221 " in line, description, start=start, timeout=timeout)
+    require(not any("+r" in line for line in modes), f"{description}: +r leaked: {modes!r}")
+    start = len(client.lines)
+    client.send(f"WHOIS {nick}")
+    whois = client.wait_for(lambda line: " 318 " in line, description + " WHOIS", start=start, timeout=timeout)
+    require(not any(f"{nick}.test" in line for line in whois), f"{description}: vhost leaked: {whois!r}")
+
+
+class RegistrationClient(IrcClient):
+    """Initial registration whose first NICK carries the one-shot credential."""
+
+    def __init__(self, host, port, nick, password=None, user_first=False):
+        self.nick = nick
+        self.sock = socket.create_connection((host, port), timeout=3)
+        self.sock.settimeout(0.25)
+        self.lines = []
+        self.buffer = ""
+        credential = f"{nick}:{password}" if password else nick
+        if user_first:
+            self.send(f"USER {nick} 0 * :{nick}")
+            self.send(f"NICK {credential}")
+        else:
+            self.send(f"NICK {credential}")
+            self.send(f"USER {nick} 0 * :{nick}")
+        self.wait_for(lambda line: " 001 " in line, "welcome", timeout=20)
+        if _services is not None:
+            _services.send(f"SVSNOLAG + {self.nick}")
+
+
+def tree_checksum(records):
+    lines = sorted(f"{path} {value}\n".encode("ascii") for path, value in records)
+    return f"{zlib.crc32(b''.join(lines)) & 0xFFFFFFFF:08X}"
+
+
+def replace_n_tree(services, round_id, txid, records):
+    checksum = tree_checksum(records)
+    start = len(services.lines)
+    services.send(f"DB {services.ircd_sid} INF {round_id} N {checksum} {int(time.time()) + 1000 + round_id}")
+    services.wait_for(lambda line: f" RES {round_id} N" in line,
+                      f"N snapshot request for {txid}", start=start)
+    services.send(f"DB {services.ircd_sid} BEGIN {round_id} N {txid} 00000000")
+    for path, value in records:
+        services.send(f"DB {services.ircd_sid} PUT {round_id} N {txid} {path} :{value}")
+    services.send(f"DB {services.ircd_sid} END {round_id} N {txid} {checksum}")
+
+
+def wait_for_db_records(path, present, absent=(), timeout=5):
+    deadline = time.monotonic() + timeout
+    content = ""
+    while time.monotonic() < deadline:
+        content = path.read_text(encoding="ascii") if path.exists() else ""
+        if all(record in content for record in present) and all(record not in content for record in absent):
+            return content
+        time.sleep(0.05)
+    raise AssertionError(f"snapshot did not persist expected N records: {content!r}")
+
+
+def add_profile(services, nick, password, suspended=True):
+    services.send_ins(f"N::{nick}::pass", "sha256:" + sha256(password))
+    services.send_ins(f"N::{nick}::access", "127.0.0.0/8")
+    services.send_ins(f"N::{nick}::vhost", f"{nick}.test")
+    if suspended:
+        services.send_ins(f"N::{nick}::suspend", "manual review")
+    time.sleep(0.25)
+
+
+def adopt_suspended(host, port, nick, password):
+    client = IrcClient(host, port, nick + "-client")
+    request(client, f"NICK {nick}:{password}", lambda line: f" NICK :{nick}" in line,
+            "authenticated suspended nick", timeout=20)
+    client.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                    "suspension reason", timeout=20)
+    assert_unidentified(client, nick, "suspended authenticated client")
+    return client
+
+
+def free_guest(client, description, start=0, timeout=20):
+    client.wait_for(lambda line: " NICK :Guest" in line, description, start=start, timeout=timeout)
+    return current_nick(client)
+
+
+def run_tests(ircd, module, keep=False):
+    global _services
+    root = pathlib.Path(tempfile.mkdtemp(prefix="udb-nick-auth-"))
+    process = None
+    services = None
+    clients = []
+    try:
+        node = root / "node"
+        for path in (node / "runtime-data", node / "tmp", node / "modules" / "third"):
+            path.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(module, node / "modules" / "third" / "udb.so")
+        client_port, server_port, tls_port = free_port(), free_port(), free_port()
+        config = node / "unrealircd.conf"
+        write_config(config, "ircd.test", IRCD_SID, client_port, server_port, tls_port,
+                     node / "modules" / "third" / "udb.so", node / "runtime-data")
+        with config.open("a", encoding="ascii") as handle:
+            handle.write("set { anti-flood { known-users { nick-flood 20:60; } "
+                         "unknown-users { nick-flood 20:60; } } }\n")
+        run_configtest(node, ircd, config)
+        process = subprocess.Popen(bwrap_command(node, ircd, config), stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, text=True)
+        time.sleep(1)
+        if process.poll() is not None:
+            output, _ = process.communicate()
+            raise RuntimeError(f"ircd exited immediately:\n{output}")
+        services = FakeServicesServer("127.0.0.1", server_port)
+        _services = services
+
+        # A: authentication creates active identity and effects.
+        add_profile(services, "owner", "ownersecret", suspended=False)
+        owner = IrcClient("127.0.0.1", client_port, "owner-client")
+        clients.append(owner)
+        owner.request("NICK owner:ownersecret", lambda line: " NICK :owner" in line, "owner identification")
+        wait_for_mode(owner, "owner", "+r", "owner +r")
+        whois = owner.request("WHOIS owner", lambda line: " 318 " in line, "owner WHOIS")
+        require(any("owner.test" in line for line in whois), f"authentication did not apply vhost: {whois!r}")
+
+        # B: INS suspend revokes identity/effects and keeps the nick.
+        start = len(owner.lines)
+        services.send_ins("N::owner::suspend", "manual review")
+        owner.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                       "hot suspend notice", start=start)
+        require(current_nick(owner) == "owner", "hot suspend renamed the holder")
+        assert_unidentified(owner, "owner", "hot suspended owner")
+
+        # C: DEL suspend does not restore anything: protected profiles are renamed.
+        start = len(owner.lines)
+        services.send_del("N::owner::suspend")
+        guest = free_guest(owner, "unsuspend rename", start=start)
+        require(guest != "owner", "DEL suspend kept the unauthenticated holder on the nick")
+        assert_unidentified(owner, guest, "unsuspended holder")
+
+        # D: explicit re-authentication recovers the profile from scratch.
+        start = len(owner.lines)
+        owner.request("NICK owner:ownersecret", lambda line: " NICK :owner" in line, "owner reauthentication")
+        wait_for_mode(owner, "owner", "+r", "owner reauth +r", start=start, timeout=15)
+        whois = request(owner, "WHOIS owner", lambda line: " 318 " in line, "owner reauth WHOIS", timeout=20)
+        require(any("owner.test" in line for line in whois), f"reauth did not restore vhost: {whois!r}")
+
+        # E: suspended adoption validates the credential, keeps no identity, and
+        # DEL suspend renames the holder. A wrong password is denied.
+        add_profile(services, "held", "heldsecret")
+        held = adopt_suspended("127.0.0.1", client_port, "held", "heldsecret")
+        clients.append(held)
+        wrongpass = IrcClient("127.0.0.1", client_port, "wrongpass")
+        clients.append(wrongpass)
+        denied = wrongpass.request("NICK held:wrong", lambda line: any(code in line for code in (" 432 ", " 433 ", " 437 ")),
+                                   "suspended wrong password rejection")
+        require(any("password" in line.lower() for line in denied), f"wrong password not denied: {denied!r}")
+        start = len(held.lines)
+        services.send_del("N::held::suspend")
+        free_guest(held, "suspended DEL rename", start=start)
+        assert_unidentified(held, current_nick(held), "suspended DEL holder")
+
+        # F: a passless suspended profile has no identity to revoke; DEL suspend
+        # keeps the nick while access allows it.
+        services.send_ins("N::openhold::access", "127.0.0.0/8")
+        services.send_ins("N::openhold::suspend", "manual review")
+        time.sleep(0.25)
+        openhold = IrcClient("127.0.0.1", client_port, "openhold-client")
+        clients.append(openhold)
+        openhold.request("NICK openhold", lambda line: " NICK :openhold" in line, "passless suspended nick")
+        openhold.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                          "passless suspension reason")
+        assert_unidentified(openhold, "openhold", "passless suspended profile")
+        start = len(openhold.lines)
+        services.send_del("N::openhold::suspend")
+        openhold.receive(time.monotonic() + 0.6)
+        require(current_nick(openhold) == "openhold", "passless DEL suspend renamed the holder")
+        assert_unidentified(openhold, "openhold", "passless unsuspended profile")
+
+        # G: passless effects stay inert: dormant modes/vhosts never override or
+        # remove externally owned state.
+        services.send_ins("N::opens::access", "127.0.0.0/8")
+        services.send_ins("N::opens::modes", "+S")
+        services.send_ins("N::opens::vhost", "opens.test")
+        time.sleep(0.2)
+        external = IrcClient("127.0.0.1", client_port, "external-mode")
+        clients.append(external)
+        services.send("SVS2MODE external-mode +S")
+        wait_for_mode(external, "external-mode", "+S", "external +S assignment")
+        services.send("CHGHOST external-mode external-owned.test")
+        external.wait_for(lambda line: " 396 " in line and "external-owned.test" in line,
+                          "external vhost assignment", timeout=10)
+        external.request("NICK opens", lambda line: " NICK :opens" in line, "passless +S profile")
+        opens_modes = external.request("MODE opens", lambda line: " 221 " in line, "passless +S modes")
+        require(any("S" in line.split(" :", 1)[-1] for line in opens_modes),
+                f"passless profile removed externally assigned +S: {opens_modes!r}")
+        opens_whois = external.request("WHOIS opens", lambda line: " 318 " in line, "passless external vhost")
+        require(any("external-owned.test" in line for line in opens_whois) and
+                not any("opens.test" in line for line in opens_whois),
+                f"passless profile replaced or removed external vhost: {opens_whois!r}")
+
+        # H: a hot effect update keeps active identity and refreshes effects.
+        add_profile(services, "hotctrl", "hotctrlsecret", suspended=False)
+        hotctrl = IrcClient("127.0.0.1", client_port, "hotctrl-client")
+        clients.append(hotctrl)
+        hotctrl.request("NICK hotctrl:hotctrlsecret", lambda line: " NICK :hotctrl" in line,
+                        "hot control identification")
+        wait_for_mode(hotctrl, "hotctrl", "+r", "hot control +r", timeout=10)
+        services.send_ins("N::hotctrl::vhost", "hotctrl-updated.test")
+        time.sleep(0.4)
+        require(has_usermode(hotctrl, "hotctrl", "r", timeout=15), "hot effect update lost identity")
+        hotctrl_whois = request(hotctrl, "WHOIS hotctrl", lambda line: " 318 " in line,
+                                "hot control vhost", timeout=15)
+        require(any("hotctrl-updated.test" in line for line in hotctrl_whois),
+                f"hot effect update did not refresh effects: {hotctrl_whois!r}")
+
+        # I: changing pass or access invalidates identity; UDB strips owned
+        # effects and renames even when the new access CIDR still permits.
+        add_profile(services, "passchg", "oldsecret", suspended=False)
+        passchg = IrcClient("127.0.0.1", client_port, "passchg-client")
+        clients.append(passchg)
+        passchg.request("NICK passchg:oldsecret", lambda line: " NICK :passchg" in line, "pass change source")
+        wait_for_mode(passchg, "passchg", "+r", "pass change +r")
+        start = len(passchg.lines)
+        services.send_ins("N::passchg::pass", "sha256:" + sha256("newsecret"))
+        free_guest(passchg, "pass change rename", start=start)
+        assert_unidentified(passchg, current_nick(passchg), "pass changed holder")
+
+        add_profile(services, "acctchg", "acctsecret", suspended=False)
+        acctchg = IrcClient("127.0.0.1", client_port, "acctchg-client")
+        clients.append(acctchg)
+        acctchg.request("NICK acctchg:acctsecret", lambda line: " NICK :acctchg" in line, "access change source")
+        wait_for_mode(acctchg, "acctchg", "+r", "access change +r")
+        start = len(acctchg.lines)
+        services.send_ins("N::acctchg::access", "127.0.0.0/9")
+        free_guest(acctchg, "access change rename", start=start)
+        assert_unidentified(acctchg, current_nick(acctchg), "access changed holder")
+
+        # I2: deleting the access record goes through the same candidate
+        # reapply and revokes identity.
+        add_profile(services, "acctdel", "acctdelsecret", suspended=False)
+        acctdel = IrcClient("127.0.0.1", client_port, "acctdel-client")
+        clients.append(acctdel)
+        acctdel.request("NICK acctdel:acctdelsecret", lambda line: " NICK :acctdel" in line,
+                        "access delete source")
+        wait_for_mode(acctdel, "acctdel", "+r", "access delete +r")
+        start = len(acctdel.lines)
+        services.send_del("N::acctdel::access")
+        free_guest(acctdel, "access delete rename", start=start)
+        assert_unidentified(acctdel, current_nick(acctdel), "access deleted holder")
+
+        # I3: deleting a non-policy effect keeps identity and only removes that
+        # effect; the remaining profile still validates against the digest.
+        add_profile(services, "effectdel", "effectdelsecret", suspended=False)
+        effectdel = IrcClient("127.0.0.1", client_port, "effectdel-client")
+        clients.append(effectdel)
+        effectdel.request("NICK effectdel:effectdelsecret", lambda line: " NICK :effectdel" in line,
+                          "effect delete source")
+        wait_for_mode(effectdel, "effectdel", "+r", "effect delete +r")
+        services.send_del("N::effectdel::vhost")
+        time.sleep(0.4)
+        effectdel.receive(time.monotonic() + 0.3)
+        require(has_usermode(effectdel, "effectdel", "r", timeout=15),
+                "deleting a non-policy effect revoked identity")
+        effect_whois = request(effectdel, "WHOIS effectdel", lambda line: " 318 " in line,
+                               "effect delete WHOIS", timeout=15)
+        require(not any("effectdel.test" in line for line in effect_whois),
+                f"deleted vhost was not removed: {effect_whois!r}")
+
+        # J: passless -> pass never auto-identifies its holder; after explicit
+        # auth, DEL pass revokes identity but keeps the nick under access.
+        services.send_ins("N::hotpass::access", "127.0.0.0/8")
+        services.send_ins("N::hotpass::vhost", "hotpass.test")
+        time.sleep(0.2)
+        hotpass = IrcClient("127.0.0.1", client_port, "hotpass-client")
+        clients.append(hotpass)
+        hotpass.request("NICK hotpass", lambda line: " NICK :hotpass" in line, "passless hotpass nick")
+        assert_unidentified(hotpass, "hotpass", "initial passless hotpass profile")
+        start = len(hotpass.lines)
+        services.send_ins("N::hotpass::pass", "sha256:" + sha256("hotsecret"))
+        free_guest(hotpass, "passless to pass rename", start=start)
+        hotpass.request("NICK hotpass:hotsecret", lambda line: " NICK :hotpass" in line,
+                        "explicit hotpass authentication")
+        wait_for_mode(hotpass, "hotpass", "+r", "hotpass explicit +r", timeout=10)
+        start = len(hotpass.lines)
+        services.send_del("N::hotpass::pass")
+        wait_for_mode(hotpass, "hotpass", "-r", "hot pass deletion", start=start)
+        require(current_nick(hotpass) == "hotpass", "DEL pass renamed the holder")
+        assert_unidentified(hotpass, "hotpass", "DEL pass holder")
+
+        # K: external account/+r is never UDB identity; the passless->pass
+        # transition renames the holder, and explicit auth recovers it.
+        services.send_ins("N::extacct::access", "127.0.0.0/8")
+        services.send_ins("N::extacct::vhost", "extacct.udb")
+        time.sleep(0.2)
+        extacct = IrcClient("127.0.0.1", client_port, "extacct")
+        clients.append(extacct)
+        services.send("SVSLOGIN * extacct extacct")
+        services.send("SVS2MODE extacct +r")
+        wait_for_mode(extacct, "extacct", "+r", "external account identity")
+        ext_login = request(extacct, "WHOIS extacct", lambda line: " 318 " in line,
+                            "external account state", timeout=15)
+        require(any(" 330 " in line and "extacct" in line for line in ext_login),
+                f"external account was not established: {ext_login!r}")
+        start = len(extacct.lines)
+        services.send_ins("N::extacct::pass", "sha256:" + sha256("extacctsecret"))
+        guest = free_guest(extacct, "external account rename", start=start)
+        ext_whois = extacct.request(f"WHOIS {guest}", lambda line: " 318 " in line, "external-account WHOIS")
+        require(not any("extacct.udb" in line for line in ext_whois),
+                f"INS pass applied UDB identity from external account: {ext_whois!r}")
+        extacct.request("NICK extacct:extacctsecret", lambda line: " NICK :extacct" in line,
+                        "explicit extacct authentication")
+        wait_for_mode(extacct, "extacct", "+r", "explicit extacct +r", timeout=10)
+        ext_whois = extacct.request("WHOIS extacct", lambda line: " 318 " in line, "explicit extacct vhost")
+        require(any("extacct.udb" in line for line in ext_whois),
+                f"explicit authentication did not apply protected profile: {ext_whois!r}")
+
+        for client in clients:
+            client.close()
+        clients.clear()
+        time.sleep(0.4)
+
+        n_db = node / "runtime-data" / "udb_N.db"
+
+        # L: an equivalent snapshot policy keeps active identity and refreshes
+        # effects without requiring reauthentication.
+        add_profile(services, "snapowner", "snapownersecret", suspended=False)
+        snapowner = IrcClient("127.0.0.1", client_port, "snapowner-client")
+        clients.append(snapowner)
+        snapowner.request("NICK snapowner:snapownersecret", lambda line: " NICK :snapowner" in line,
+                          "snapshot owner identification")
+        wait_for_mode(snapowner, "snapowner", "+r", "snapshot owner +r")
+        snap_a = [("snapowner::pass", "sha256:" + sha256("snapownersecret")),
+                  ("snapowner::access", "127.0.0.0/8"),
+                  ("snapowner::vhost", "snapowner-replaced.test")]
+        replace_n_tree(services, 101, "nick-equivalent-a", snap_a)
+        wait_for_db_records(n_db, ("snapowner::vhost snapowner-replaced.test",))
+        time.sleep(0.3)
+        require(has_usermode(snapowner, "snapowner", "r", timeout=15),
+                "equivalent snapshot revoked identity")
+        snap_whois = request(snapowner, "WHOIS snapowner", lambda line: " 318 " in line,
+                             "snapshot equivalent WHOIS", timeout=15)
+        require(any("snapowner-replaced.test" in line for line in snap_whois),
+                f"equivalent snapshot did not refresh effects: {snap_whois!r}")
+
+        # M: snapshot normal -> suspend revokes identity and keeps the nick.
+        snap_b = [("snapowner::pass", "sha256:" + sha256("snapownersecret")),
+                  ("snapowner::access", "127.0.0.0/8"),
+                  ("snapowner::vhost", "snapowner.test"),
+                  ("snapowner::suspend", "manual review")]
+        start = len(snapowner.lines)
+        replace_n_tree(services, 102, "nick-normal-to-suspend-b", snap_b)
+        snapowner.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                           "snapshot suspend notice", start=start, timeout=10)
+        require(current_nick(snapowner) == "snapowner", "snapshot normal->suspend renamed the holder")
+        assert_unidentified(snapowner, "snapowner", "snapshot suspended owner")
+
+        # N: snapshot suspend -> normal renames; suspend -> suspend keeps.
+        start = len(snapowner.lines)
+        replace_n_tree(services, 103, "nick-suspend-to-normal-c", snap_a)
+        free_guest(snapowner, "snapshot suspend to normal rename", start=start)
+        assert_unidentified(snapowner, current_nick(snapowner), "snapshot unsuspended holder")
+
+        # O: snapshot with a changed policy revokes identity and renames.
+        add_profile(services, "snappol", "snappolsecret", suspended=False)
+        snappol = IrcClient("127.0.0.1", client_port, "snappol-client")
+        clients.append(snappol)
+        snappol.request("NICK snappol:snappolsecret", lambda line: " NICK :snappol" in line,
+                        "snapshot policy identification")
+        wait_for_mode(snappol, "snappol", "+r", "snapshot policy +r")
+        snap_c = [("snappol::pass", "sha256:" + sha256("changedsecret")),
+                  ("snappol::access", "127.0.0.0/8")]
+        start = len(snappol.lines)
+        replace_n_tree(services, 104, "nick-policy-change-d", snap_c)
+        free_guest(snappol, "snapshot policy change rename", start=start)
+        assert_unidentified(snappol, current_nick(snappol), "snapshot policy changed holder")
+
+        # P: a removed profile revokes identity/effects but does not rename; the
+        # nick is simply no longer registered.
+        add_profile(services, "snapgone", "snapgonesecret", suspended=False)
+        snapgone = IrcClient("127.0.0.1", client_port, "snapgone-client")
+        clients.append(snapgone)
+        snapgone.request("NICK snapgone:snapgonesecret", lambda line: " NICK :snapgone" in line,
+                         "snapshot removal identification")
+        wait_for_mode(snapgone, "snapgone", "+r", "snapshot removal +r")
+        start = len(snapgone.lines)
+        replace_n_tree(services, 105, "nick-profile-removed-e", [("other::access", "127.0.0.0/8")])
+        time.sleep(0.4)
+        snapgone.receive(time.monotonic() + 0.3)
+        require(current_nick(snapgone) == "snapgone", "removed profile forced a rename")
+        assert_unidentified(snapgone, "snapgone", "removed profile holder")
+
+        # Q: snapshot passless -> pass never manufactures identity.
+        services.send_ins("N::snapx::access", "127.0.0.0/8")
+        services.send_ins("N::snapx::vhost", "snapx.udb")
+        time.sleep(0.25)
+        snapx = IrcClient("127.0.0.1", client_port, "snapx")
+        clients.append(snapx)
+        services.send("SVSLOGIN * snapx snapx")
+        services.send("SVS2MODE snapx +r")
+        wait_for_mode(snapx, "snapx", "+r", "snapshot external account identity", timeout=10)
+        snap_records = [("snapx::access", "127.0.0.0/8"),
+                        ("snapx::vhost", "snapx.udb"),
+                        ("snapx::pass", "sha256:" + sha256("snapxsecret"))]
+        start = len(snapx.lines)
+        replace_n_tree(services, 106, "nick-passless-protected-f", snap_records)
+        wait_for_db_records(n_db, ("snapx::pass sha256:" + sha256("snapxsecret"),))
+        guest = free_guest(snapx, "snapshot passless to pass rename", start=start)
+        snapx_whois = snapx.request(f"WHOIS {guest}", lambda line: " 318 " in line, "snapshot external WHOIS")
+        require(not any("snapx.udb" in line for line in snapx_whois),
+                f"snapshot passless->pass applied UDB identity from external account: {snapx_whois!r}")
+
+        # R: snapshot suspend -> suspend keeps the nick and never yields identity.
+        add_profile(services, "snaphold", "snapholdsecret")
+        snaphold = adopt_suspended("127.0.0.1", client_port, "snaphold", "snapholdsecret")
+        clients.append(snaphold)
+        snap_d = [("snaphold::pass", "sha256:" + sha256("snapholdsecret")),
+                  ("snaphold::access", "127.0.0.0/8"),
+                  ("snaphold::vhost", "snaphold-replaced.test"),
+                  ("snaphold::suspend", "manual review")]
+        start = len(snaphold.lines)
+        replace_n_tree(services, 107, "nick-suspend-to-suspend-g", snap_d)
+        wait_for_db_records(n_db, ("snaphold::vhost snaphold-replaced.test",))
+        time.sleep(0.3)
+        require(current_nick(snaphold) == "snaphold", "suspend->suspend snapshot renamed the holder")
+        assert_unidentified(snaphold, "snaphold", "snapshot re-suspended holder")
+
+        for client in clients:
+            client.close()
+        clients.clear()
+        time.sleep(0.4)
+
+        # S: SVSNICK is never authentication. A protected target is renamed
+        # away, with no identity and no effects.
+        add_profile(services, "forced", "forcedsecret", suspended=False)
+        forced_guest = IrcClient("127.0.0.1", client_port, "forced-guest")
+        clients.append(forced_guest)
+        services.send(f"SVSNICK {forced_guest.nick} forced {int(time.time())}")
+        free_guest(forced_guest, "forced protected safe rename")
+        forced_nick = current_nick(forced_guest)
+        require(forced_nick != "forced", "UDB kept an unauthenticated client on a protected nick")
+        require(not has_usermode(forced_guest, forced_nick, "r", timeout=15),
+                "forced rename to a protected profile granted +r")
+        forced_whois = request(forced_guest, f"WHOIS {forced_nick}", lambda line: " 318 " in line,
+                               "forced protected WHOIS", timeout=15)
+        require(not any("forced.test" in line for line in forced_whois),
+                f"forced rename applied UDB effects: {forced_whois!r}")
+
+        add_profile(services, "forcedheld", "forcedheldsecret")
+        held_guest = IrcClient("127.0.0.1", client_port, "forcedheld-guest")
+        clients.append(held_guest)
+        services.send(f"SVSNICK {held_guest.nick} forcedheld {int(time.time())}")
+        free_guest(held_guest, "forced suspended safe rename")
+        held_nick = current_nick(held_guest)
+        require(held_nick != "forcedheld", "UDB kept an unauthenticated client on a suspended nick")
+        assert_unidentified(held_guest, held_nick, "forced suspended holder", timeout=15)
+        hold_start = len(held_guest.lines)
+        services.send_del("N::forcedheld::suspend")
+        held_guest.receive(time.monotonic() + 0.8)
+        hold_events = held_guest.lines[hold_start:]
+        require(not any(" MODE " in line and "+r" in line for line in hold_events),
+                f"forced suspended rename left a restorable identity: {hold_events!r}")
+
+        # T: a credential is one-shot and belongs to its attempt: a stale
+        # password never authenticates another profile nor consumes its flood
+        # tracker, and a failed attempt followed by SVSNICK grants nothing.
+        add_profile(services, "aliceoneshot", "sharedoneshot", suspended=False)
+        add_profile(services, "boboneshot", "sharedoneshot", suspended=False)
+        oneshot = IrcClient("127.0.0.1", client_port, "oneshot-client")
+        clients.append(oneshot)
+        oneshot.request("NICK aliceoneshot:sharedoneshot", lambda line: " NICK :aliceoneshot" in line,
+                        "one-shot source identification")
+        wait_for_mode(oneshot, "aliceoneshot", "+r", "one-shot source +r")
+        oneshot.request("NICK oneshotfree", lambda line: " NICK :oneshotfree" in line, "one-shot free nick")
+        stale = request(oneshot, "NICK boboneshot", lambda line: " 432 " in line, "stale password rejection")
+        require(any("requires a password" in line for line in stale),
+                f"stale password was not rejected as a missing credential: {stale!r}")
+
+        add_profile(services, "aliceflood", "alicefloodsecret", suspended=False)
+        add_profile(services, "bobflood", "bobfloodsecret", suspended=False)
+        flood = IrcClient("127.0.0.1", client_port, "flood-client")
+        clients.append(flood)
+        flood.request("NICK aliceflood:alicefloodsecret", lambda line: " NICK :aliceflood" in line,
+                      "flood source identification")
+        wait_for_mode(flood, "aliceflood", "+r", "flood source +r")
+        flood.request("NICK floodfree", lambda line: " NICK :floodfree" in line, "flood free nick")
+        stale_attempt = request(flood, "NICK bobflood", lambda line: " 432 " in line, "stale flood attempt")
+        require(not any("Invalid password for bobflood" in line for line in stale_attempt),
+                f"stale credential consumed another profile's password check: {stale_attempt!r}")
+        flood.request("NICK bobflood:bobfloodsecret", lambda line: " NICK :bobflood" in line,
+                      "explicit flood destination authentication")
+        wait_for_mode(flood, "bobflood", "+r", "explicit flood destination +r", timeout=10)
+
+        add_profile(services, "sneak", "sneaksecretstale")
+        sneak_holder = IrcClient("127.0.0.1", client_port, "sneak-holder")
+        clients.append(sneak_holder)
+        sneak_holder.request("NICK sneak:sneaksecretstale", lambda line: " NICK :sneak" in line,
+                             "sneak holder adoption")
+        sneak_holder.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                              "sneak holder suspension notice", timeout=10)
+        add_profile(services, "victimproof", "victimproofsecret")
+        victim = adopt_suspended("127.0.0.1", client_port, "victimproof", "victimproofsecret")
+        clients.append(victim)
+        victim.request("NICK sneak:sneaksecretstale", lambda line: " 433 " in line,
+                       "occupied suspended target rejection")
+        current = current_nick(victim)
+        sneak_holder.close()
+        clients.remove(sneak_holder)
+        time.sleep(0.5)
+        services.send(f"SVSNICK {current} sneak {int(time.time())}")
+        free_guest(victim, "forced rename after failed attempt")
+        sneak_nick = current_nick(victim)
+        assert_unidentified(victim, sneak_nick, "forced rename after failed attempt", timeout=10)
+        start = len(victim.lines)
+        services.send_del("N::sneak::suspend")
+        time.sleep(0.8)
+        events = victim.lines[start:]
+        require(not any(" MODE " in line and "+r" in line for line in events),
+                f"stale pending credential was promoted by SVSNICK: {events!r}")
+
+        # U: a hot access denial for a passless profile renames but must not
+        # strip externally owned state.
+        services.send_ins("N::denyinert::access", "127.0.0.0/8")
+        services.send_ins("N::denyinert::modes", "+S")
+        time.sleep(0.25)
+        deniedext = IrcClient("127.0.0.1", client_port, "denyinert-external")
+        clients.append(deniedext)
+        services.send("SVS2MODE denyinert-external +S")
+        wait_for_mode(deniedext, "denyinert-external", "+S", "external +S before hot access denial")
+        deniedext.request("NICK denyinert", lambda line: " NICK :denyinert" in line, "hot deny passless nick")
+        start = len(deniedext.lines)
+        services.send_ins("N::denyinert::access", "192.0.2.0/24")
+        renamed = free_guest(deniedext, "passless hot access rename", start=start)
+        require(has_usermode(deniedext, renamed, "S", timeout=10),
+                "hot passless access denial stripped external +S")
+
+        # U2: a full passless snapshot must not revoke externally owned state,
+        # even when the profile is replaced or removed.
+        services.send_ins("N::snapinert::access", "127.0.0.0/8")
+        services.send_ins("N::snapinert::vhost", "snapinert.test")
+        services.send_ins("N::snapgone::access", "127.0.0.0/8")
+        services.send_ins("N::snapgone::vhost", "snapgone.test")
+        time.sleep(0.3)
+        snapinertc = IrcClient("127.0.0.1", client_port, "snapinert-external")
+        clients.append(snapinertc)
+        services.send("SVS2MODE snapinert-external +S")
+        services.send("CHGHOST snapinert-external external-snapinert.test")
+        wait_for_mode(snapinertc, "snapinert-external", "+S", "external state before passless snapshot")
+        snapinertc.wait_for(lambda line: " 396 " in line and "external-snapinert.test" in line,
+                            "external vhost before passless snapshot", timeout=15)
+        snapinertc.request("NICK snapinert", lambda line: " NICK :snapinert" in line, "passless snapshot keep")
+        snapgonec = IrcClient("127.0.0.1", client_port, "snapgone-external")
+        clients.append(snapgonec)
+        services.send("SVS2MODE snapgone-external +S")
+        services.send("CHGHOST snapgone-external external-snapgone.test")
+        wait_for_mode(snapgonec, "snapgone-external", "+S", "external state before removed snapshot")
+        snapgonec.wait_for(lambda line: " 396 " in line and "external-snapgone.test" in line,
+                           "external vhost before removed snapshot", timeout=15)
+        snapgonec.request("NICK snapgone", lambda line: " NICK :snapgone" in line, "passless snapshot remove")
+        replace_n_tree(services, 108, "nick-passless-inert-h",
+                       [("snapinert::access", "127.0.0.0/8"),
+                        ("snapinert::vhost", "snapinert-replaced.test")])
+        wait_for_db_records(n_db, ("snapinert-replaced.test",), ("snapgone::vhost",))
+        time.sleep(0.3)
+        require(has_usermode(snapinertc, "snapinert", "S", timeout=15) and
+                has_usermode(snapgonec, "snapgone", "S", timeout=15),
+                "passless snapshot revoked externally owned +S")
+        kept_whois = request(snapinertc, "WHOIS snapinert", lambda line: " 318 " in line,
+                             "snapshot passless external vhost", timeout=15)
+        require(any("external-snapinert.test" in line for line in kept_whois) and
+                not any("snapinert-replaced.test" in line for line in kept_whois),
+                f"passless snapshot replaced external vhost: {kept_whois!r}")
+        gone_whois = request(snapgonec, "WHOIS snapgone", lambda line: " 318 " in line,
+                             "removed passless snapshot external vhost", timeout=15)
+        require(any("external-snapgone.test" in line for line in gone_whois) and
+                not any("snapgone.test" in line and "external-snapgone.test" not in line
+                        for line in gone_whois),
+                f"removed passless snapshot revoked external vhost: {gone_whois!r}")
+
+        for client in clients:
+            client.close()
+        clients.clear()
+        time.sleep(0.4)
+
+        # V: first NICK registration follows the same identity rules; a first
+        # registration onto a suspended profile keeps no identity.
+        add_profile(services, "firstowner", "firstownersecret", suspended=False)
+        firstowner = RegistrationClient("127.0.0.1", client_port, "firstowner", "firstownersecret")
+        clients.append(firstowner)
+        wait_for_mode(firstowner, "firstowner", "+r", "first NICK +r", timeout=10)
+        first_whois = firstowner.request("WHOIS firstowner", lambda line: " 318 " in line, "first NICK vhost")
+        require(any("firstowner.test" in line for line in first_whois),
+                f"first NICK did not apply profile effects: {first_whois!r}")
+
+        add_profile(services, "firstheld", "firstheldsecret")
+        firstheld = RegistrationClient("127.0.0.1", client_port, "firstheld", "firstheldsecret")
+        clients.append(firstheld)
+        firstheld.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                           "first NICK suspended notice", timeout=10)
+        assert_unidentified(firstheld, "firstheld", "first NICK suspended holder", timeout=10)
+        start = len(firstheld.lines)
+        services.send_del("N::firstheld::suspend")
+        free_guest(firstheld, "first NICK suspended DEL rename", start=start)
+        assert_unidentified(firstheld, current_nick(firstheld), "first NICK unsuspended holder")
+
+        print("PASS: identity, suspend revocation, snapshots, SVSNICK and one-shot nick auth")
+    finally:
+        for client in clients:
+            client.close()
+        if services:
+            services.close()
+        if process:
+            stop(process)
+        if not keep:
+            shutil.rmtree(root, ignore_errors=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--ircd", type=pathlib.Path, default=DEFAULT_IRCD)
+    parser.add_argument("--module", type=pathlib.Path, default=find_module_path())
+    parser.add_argument("--keep", action="store_true")
+    args = parser.parse_args()
+    if not args.ircd.is_file() or not os.access(args.ircd, os.X_OK):
+        return skip(f"UnrealIRCd binary is unavailable: {args.ircd}")
+    if not args.module.is_file():
+        return skip(f"compiled UDB module is unavailable: {args.module}")
+    if not (RUNTIME_ROOT / "conf/modules.default.conf").is_file():
+        return skip(f"installed modules.default.conf is unavailable under {RUNTIME_ROOT}")
+    try:
+        run_tests(args.ircd, args.module, args.keep)
+    except EnvironmentUnavailable as error:
+        return skip(str(error))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

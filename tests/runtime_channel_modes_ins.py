@@ -505,11 +505,9 @@ def main():
                    f"{CHANNEL}::topic Persistent topic\n")
         seed_block(data / "udb_N.db", "N",
                    f"alice::pass sha256:{sha256('secret')}\n"
-                   "alice::challenge sha256\n"
                    "alice::access 127.0.0.0/8\n"
                    "alice::vhost alice.test\n"
-                   f"locked::pass sha256:{sha256('secret')}\n"
-                   "locked::challenge sha256\n")
+                   f"locked::pass sha256:{sha256('secret')}\n")
         seed_block(data / "udb_S.db", "S",
                    "nickserv NickServ!services@services.test\n"
                    "chanserv ChanServ!services@services.test\n"

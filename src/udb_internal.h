@@ -497,10 +497,19 @@ static void udb_mutation_opt(UdbContext *ctx, Client *client, Client *direct_pee
 static void udb_mutation_exp(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, const char *path,
 							 time_t expected_expires, int is_for_me, int is_broadcast);
 static int udb_mutation_expire_local(UdbContext *ctx, const char *path, time_t expected_expires);
-static void udb_nick_apply(Client *client, UdbRecord *nick_rec, int is_hot_sync);
+
+typedef enum
+{
+	UDB_NICK_APPLY_ADOPT,
+	UDB_NICK_APPLY_REFRESH
+} UdbNickApplyReason;
+
+static void udb_nick_apply(Client *client, UdbRecord *nick_rec, UdbNickApplyReason reason);
 static void udb_nick_strip(Client *client, UdbRecord *nick_rec);
-static void udb_nick_suspend_auth_clear(Client *client);
-static void udb_nick_suspend_auth_prepare_tree_replace(UdbBlock *block, UdbRecord *candidate_tree);
+static void udb_nick_identity_clear(Client *client);
+static void udb_nick_pending_auth_clear(Client *client);
+static void udb_nick_prepare_tree_replace(UdbBlock *block, UdbRecord *candidate_tree);
+static void udb_nick_finish_tree_replace(void);
 static void udb_nick_remove_record(UdbBlock *block, UdbRecord *rec);
 static void udb_nick_revoke_oper(Client *client);
 static int udb_check_password(const char *pass, UdbRecord *profile_rec, Client *client);

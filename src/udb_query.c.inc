@@ -11,8 +11,7 @@
 
 static int udb_query_is_secret(const UdbRecord *rec)
 {
-	return rec && rec->key &&
-		   (!strcmp(rec->key, NKEY_PASS) || !strcmp(rec->key, NKEY_CHALLENGE) || !strcmp(rec->key, SKEY_CRYPT_KEY));
+	return rec && rec->key && (!strcmp(rec->key, NKEY_PASS) || !strcmp(rec->key, SKEY_CRYPT_KEY));
 }
 
 static void udb_query_send_status(Client *client)

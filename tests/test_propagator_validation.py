@@ -339,9 +339,13 @@ def main():
             recent = peer.lines[start_idx:]
             for line in recent:
                 assert "ERR INS" not in line, f"Unexpected ERR INS for valid S::propagator of len {len(val)}: {line}"
+            db_path = node / "runtime-data/udb_S.db"
             deadline = time.monotonic() + 3
             while time.monotonic() < deadline:
-                db_text = (node / "runtime-data/udb_S.db").read_text(errors="replace")
+                if not db_path.exists():
+                    time.sleep(0.05)
+                    continue
+                db_text = db_path.read_text(errors="replace")
                 if f"propagator {val}" in db_text:
                     break
                 time.sleep(0.05)

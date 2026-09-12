@@ -141,22 +141,24 @@ Consulta [doc/udb_technical_es.md](doc/udb_technical_es.md) para la gramática c
 
 ## Uso por usuarios
 
-Para un nick registrado:
+Sólo un perfil que contiene `N::pass` está protegido por contraseña y puede establecer identidad UDB:
 
 ```text
 /NICK alice:Password
 ```
 
-Si el nick está ocupado y se quiere recuperar:
+Si un nick protegido por contraseña está ocupado y se quiere recuperar:
 
 ```text
 /NICK alice!Password
 /GHOST alice Password
 ```
 
-Si `N::access` existe, también debe coincidir la IP con sus CIDR autorizados.
+Sin `N::pass`, un perfil no es una identidad: el nick puede usarse si `forbid` y `access` lo permiten, pero no concede `account=<nick>`, `+r`, vhost, oper, modos, snomasks ni SWHOIS. Esos efectos configurados están dormidos: UDB no los aplica ni los utiliza como política negativa para retirar estado equivalente aportado por otra fuente, tampoco cuando se borra un registro dormido o un snapshot completo de N reemplaza o elimina el perfil. `N::access` restringe el uso del nick (y la autenticación cuando existe `pass`); coincidir con él nunca autentica. La sintaxis de contraseña/recovery no prueba propiedad en un perfil sin `pass`.
 
-Un nick suspendido sigue exigiendo sus comprobaciones normales de `pass`/`access`. La autenticación correcta sólo se conserva para ese cliente local y ese nick: mientras exista `N::suspend`, UDB no publica account/`+r` ni aplica efectos del perfil. Al eliminar `suspend`, restaura automáticamente account, `+r` y los efectos únicamente si la autenticación conservada sigue siendo válida para la política sin cambios de `pass`/`challenge`/`access`; en ese caso no vuelve a pedir la contraseña.
+Una credencial `/NICK nick:Password` es de un solo uso y sólo aplica a ese intento: la cuenta, `+r` y los efectos del perfil sólo se materializan cuando el cambio de nick es efectivo, y un cambio rechazado (`433`, Q-line, límites de cambio de nick) deja intacta la identidad UDB activa del nick actual. El registro inicial sigue la misma regla, y una credencial de un intento fallido nunca se reutiliza por un rename forzado posterior. Cuando un perfil antes passless recibe su primer `N::pass`, el `account`/`+r` de otra fuente no se acepta como su autenticación. Un cambio de nick forzado por servicios (`SVSNICK`) nunca es autenticación UDB: un nick protegido alcanzado sin una identidad activa válida se renombra de forma segura.
+
+Un nick suspendido protegido por contraseña sigue exigiendo sus comprobaciones normales de `pass`/`access` antes de poder adoptarse. `N::pass` admite los tipos `argon2id`, `sha256` y `crypt`, seleccionados por su propio prefijo (`argon2id:`, `sha256:` o `crypt:`). La autenticación correcta queda ligada únicamente al nick activo: mientras exista `N::suspend`, UDB no publica account/`+r`, no aplica efectos del perfil y no conserva autenticación alguna. Al eliminar `suspend` de un perfil con `pass`, el ocupante actual se renombra y debe autenticarse de nuevo con `/NICK nick:Password`; un perfil sin `pass` no tiene identidad que revocar, así que eliminar su `suspend` nunca identifica al ocupante. Account/`+r` por sí solos no pueden crear identidad. UDB no añade ni retira el `+S` de propiedad externa.
 
 La clave de canal es exclusivamente el parámetro nativo `+k` de `C::<canal>::modes`, por ejemplo `+ntk secret`. Protege tanto el primer JOIN como los posteriores. Un fundador identificado recibe `+q` de UDB.
 
@@ -176,7 +178,7 @@ La clave de canal es exclusivamente el parámetro nativo `+k` de `C::<canal>::mo
 
 ### Advertencia actual de DBQ
 
-El código redacciona `N::*::pass`, `N::*::challenge` y `S::encryption_key`.
+El código redacciona `N::*::pass` y `S::encryption_key`.
 
 ## Desarrollo
 

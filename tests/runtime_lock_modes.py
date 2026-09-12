@@ -494,7 +494,6 @@ def main():
                    f"chanserv {CHANSERV_MASK}\n")
         seed_block(data / "udb_N.db", "N",
                    f"davidlig::pass sha256:{sha256('secret')}\n"
-                   "davidlig::challenge sha256\n"
                    "davidlig::access 127.0.0.0/8\n")
         seed_block(data / "udb_C.db", "C",
                    f"{CHANNEL}::founder davidlig\n"

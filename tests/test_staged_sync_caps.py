@@ -370,21 +370,21 @@ def run_tests(ircd_bin, keep=False):
         print("PASS: byte-limit abort cancels reconciliation round immediately and recovers cleanly")
 
         # -------------------------------------------------------------
-        # Test 2c: invalid PUT payload abort cancels reconciliation round immediately
+        # Test 2c: removed N::challenge PUT aborts reconciliation round immediately
         # -------------------------------------------------------------
         daemon_logs.read_available()
         log_start = len(daemon_logs.lines)
         services.send_begin("N", "tx-parse-rnd", "00000000")
         current_round = services.round_id
-        services.send_put("N", "tx-parse-rnd", "user1::unknownbadkey", "value")
+        services.send_put("N", "tx-parse-rnd", "user1::challenge", "sha256")
         services.wait_for(lambda l: " DB " in l and " ERR " in l and " PUT " in l,
-                          "parse-failure ERR for round-failure test")
+                          "removed challenge ERR for round-failure test")
         daemon_logs.wait_for_reconcile_abort(current_round, "invalid staged PUT payload", start=log_start)
         services.send_begin("N", "tx-after-parse", "00000000")
         services.send_end("N", "tx-after-parse", "00000000")
         services.wait_for(lambda l: " DB " in l and " ACK " in l and " N " in l,
                           "ACK after parse-failure round proves recovery")
-        print("PASS: invalid PUT parse failure cancels reconciliation round immediately and recovers cleanly")
+        print("PASS: removed N::challenge PUT cancels reconciliation round immediately and recovers cleanly")
 
         # -------------------------------------------------------------
         # Test 2d: digest mismatch in END cancels reconciliation round immediately
