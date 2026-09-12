@@ -249,6 +249,47 @@ def run_tests(ircd, module, keep=False):
         free_guest(held, "suspended DEL rename", start=start)
         assert_unidentified(held, current_nick(held), "suspended DEL holder")
 
+        # E2: adopting a suspended profile materializes nothing, so externally
+        # supplied state (here +S) must survive even when the profile lists it.
+        services.send_ins("N::helds::pass", "sha256:" + sha256("heldssecret"))
+        services.send_ins("N::helds::access", "127.0.0.0/8")
+        services.send_ins("N::helds::modes", "+S")
+        services.send_ins("N::helds::suspend", "manual review")
+        time.sleep(0.25)
+        helds = IrcClient("127.0.0.1", client_port, "helds-external")
+        clients.append(helds)
+        services.send("SVS2MODE helds-external +S")
+        wait_for_mode(helds, "helds-external", "+S", "external +S before suspended adoption")
+        helds.request("NICK helds:heldssecret", lambda line: " NICK :helds" in line, "suspended +S adoption")
+        helds.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                       "suspended +S notice", timeout=15)
+        helds_modes = request(helds, "MODE helds", lambda line: " 221 " in line, "suspended +S modes", timeout=15)
+        require(not any("+r" in line for line in helds_modes),
+                f"suspended adoption granted UDB identity: {helds_modes!r}")
+        require(any("S" in line.split(" :", 1)[-1] for line in helds_modes),
+                f"suspended adoption stripped external +S: {helds_modes!r}")
+
+        # E3: same for an externally owned vhost: adoption must not apply the
+        # dormant UDB vhost nor remove the external one.
+        services.send_ins("N::heldv::pass", "sha256:" + sha256("heldvsecret"))
+        services.send_ins("N::heldv::access", "127.0.0.0/8")
+        services.send_ins("N::heldv::vhost", "udb-held.test")
+        services.send_ins("N::heldv::suspend", "manual review")
+        time.sleep(0.25)
+        heldv = IrcClient("127.0.0.1", client_port, "heldv-external")
+        clients.append(heldv)
+        services.send("CHGHOST heldv-external external-held.test")
+        heldv.wait_for(lambda line: " 396 " in line and "external-held.test" in line,
+                       "external vhost before suspended adoption", timeout=15)
+        heldv.request("NICK heldv:heldvsecret", lambda line: " NICK :heldv" in line, "suspended vhost adoption")
+        heldv.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                       "suspended vhost notice", timeout=15)
+        heldv_whois = request(heldv, "WHOIS heldv", lambda line: " 318 " in line,
+                              "suspended vhost WHOIS", timeout=15)
+        require(any("external-held.test" in line for line in heldv_whois) and
+                not any("udb-held.test" in line for line in heldv_whois),
+                f"suspended adoption replaced external vhost: {heldv_whois!r}")
+
         # F: a passless suspended profile has no identity to revoke; DEL suspend
         # keeps the nick while access allows it.
         services.send_ins("N::openhold::access", "127.0.0.0/8")
@@ -514,6 +555,84 @@ def run_tests(ircd, module, keep=False):
         require(current_nick(snaphold) == "snaphold", "suspend->suspend snapshot renamed the holder")
         assert_unidentified(snaphold, "snaphold", "snapshot re-suspended holder")
 
+        # R2: snapshot normal -> suspend strips only the old profile once. A new
+        # candidate +S must not remove an externally owned +S.
+        services.send_ins("N::snapmode::pass", "sha256:" + sha256("snapmodesecret"))
+        services.send_ins("N::snapmode::access", "127.0.0.0/8")
+        time.sleep(0.25)
+        snapmode = IrcClient("127.0.0.1", client_port, "snapmode-client")
+        clients.append(snapmode)
+        snapmode.request("NICK snapmode:snapmodesecret", lambda line: " NICK :snapmode" in line,
+                         "snapshot modes identification")
+        wait_for_mode(snapmode, "snapmode", "+r", "snapshot modes +r")
+        services.send("SVS2MODE snapmode +S")
+        wait_for_mode(snapmode, "snapmode", "+S", "external +S before snapshot suspend")
+        snap_e = [("snapmode::pass", "sha256:" + sha256("snapmodesecret")),
+                  ("snapmode::access", "127.0.0.0/8"),
+                  ("snapmode::modes", "+S"),
+                  ("snapmode::suspend", "manual review")]
+        start = len(snapmode.lines)
+        replace_n_tree(services, 108, "nick-normal-suspend-modes", snap_e)
+        snapmode.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                          "snapshot modes suspend notice", start=start, timeout=15)
+        require(current_nick(snapmode) == "snapmode", "snapshot normal->suspend renamed the holder")
+        require(not has_usermode(snapmode, "snapmode", "r", timeout=15),
+                "snapshot normal->suspend kept identity")
+        require(has_usermode(snapmode, "snapmode", "S", timeout=15),
+                "candidate modes stripped externally owned +S")
+
+        # R3: snapshot normal -> suspend with a new candidate vhost must not
+        # remove an externally owned vhost nor apply the dormant one.
+        services.send_ins("N::snapvhost::pass", "sha256:" + sha256("snapvhostsecret"))
+        services.send_ins("N::snapvhost::access", "127.0.0.0/8")
+        time.sleep(0.25)
+        snapvhost = IrcClient("127.0.0.1", client_port, "snapvhost-client")
+        clients.append(snapvhost)
+        snapvhost.request("NICK snapvhost:snapvhostsecret", lambda line: " NICK :snapvhost" in line,
+                          "snapshot vhost identification")
+        wait_for_mode(snapvhost, "snapvhost", "+r", "snapshot vhost +r")
+        services.send("CHGHOST snapvhost external-snapvhost.test")
+        snapvhost.wait_for(lambda line: " 396 " in line and "external-snapvhost.test" in line,
+                           "external vhost before snapshot suspend", timeout=15)
+        snap_f = [("snapvhost::pass", "sha256:" + sha256("snapvhostsecret")),
+                  ("snapvhost::access", "127.0.0.0/8"),
+                  ("snapvhost::vhost", "udb-snapvhost.test"),
+                  ("snapvhost::suspend", "manual review")]
+        start = len(snapvhost.lines)
+        replace_n_tree(services, 110, "nick-normal-suspend-vhost", snap_f)
+        snapvhost.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                           "snapshot vhost suspend notice", start=start, timeout=15)
+        require(current_nick(snapvhost) == "snapvhost", "snapshot vhost transition renamed the holder")
+        snapvhost_whois = request(snapvhost, "WHOIS snapvhost", lambda line: " 318 " in line,
+                                  "snapshot vhost WHOIS", timeout=15)
+        require(any("external-snapvhost.test" in line for line in snapvhost_whois) and
+                not any("udb-snapvhost.test" in line for line in snapvhost_whois),
+                f"candidate vhost replaced external vhost: {snapvhost_whois!r}")
+
+        # R4: an active profile without N::vhost must not strip an external
+        # vhost on INS suspend.
+        services.send_ins("N::novhost::pass", "sha256:" + sha256("novhostsecret"))
+        services.send_ins("N::novhost::access", "127.0.0.0/8")
+        time.sleep(0.25)
+        novhost = IrcClient("127.0.0.1", client_port, "novhost-client")
+        clients.append(novhost)
+        novhost.request("NICK novhost:novhostsecret", lambda line: " NICK :novhost" in line,
+                        "no-vhost profile identification")
+        wait_for_mode(novhost, "novhost", "+r", "no-vhost profile +r")
+        services.send("CHGHOST novhost external-novhost.test")
+        novhost.wait_for(lambda line: " 396 " in line and "external-novhost.test" in line,
+                         "external vhost before hot suspend", timeout=15)
+        start = len(novhost.lines)
+        services.send_ins("N::novhost::suspend", "manual review")
+        novhost.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                         "no-vhost suspend notice", start=start, timeout=15)
+        require(not has_usermode(novhost, "novhost", "r", timeout=15),
+                "hot suspend kept identity on a no-vhost profile")
+        novhost_whois = request(novhost, "WHOIS novhost", lambda line: " 318 " in line,
+                                "no-vhost WHOIS", timeout=15)
+        require(any("external-novhost.test" in line for line in novhost_whois),
+                f"strip removed an external vhost without N::vhost: {novhost_whois!r}")
+
         for client in clients:
             client.close()
         clients.clear()
@@ -646,7 +765,7 @@ def run_tests(ircd, module, keep=False):
         snapgonec.wait_for(lambda line: " 396 " in line and "external-snapgone.test" in line,
                            "external vhost before removed snapshot", timeout=15)
         snapgonec.request("NICK snapgone", lambda line: " NICK :snapgone" in line, "passless snapshot remove")
-        replace_n_tree(services, 108, "nick-passless-inert-h",
+        replace_n_tree(services, 111, "nick-passless-inert-h",
                        [("snapinert::access", "127.0.0.0/8"),
                         ("snapinert::vhost", "snapinert-replaced.test")])
         wait_for_db_records(n_db, ("snapinert-replaced.test",), ("snapgone::vhost",))

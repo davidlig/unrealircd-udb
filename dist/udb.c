@@ -6355,7 +6355,6 @@ static void udb_ocl_handle_begin(Client *direct_peer, const char *parv[])
 				return; /* already committed */
 			if (origin->staging && !strcmp(origin->staging->epoch, epoch) && origin->staging->generation == generation)
 				return; /* already staging */
-			/* The previous attempt was aborted; rebuild the same high-water snapshot. */
 		}
 	}
 	else if (origin->accepted_valid && strcmp(origin->accepted_epoch, epoch))
@@ -8687,11 +8686,11 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, UdbNickApplyReas
 		return;
 	}
 
-	/* Adoption of a suspended profile validates pass/access but keeps no
-	 * identity: the nick stays, account/+r/effects stay off. */
-	if (suspend)
+	/* Adoption of a suspended profile validates pass/access but materializes
+	 * nothing: no identity, account/+r or effects, and no strip of state UDB
+	 * never applied. */
+	if (reason == UDB_NICK_APPLY_ADOPT && suspend)
 	{
-		udb_nick_strip(client, nick_rec);
 		udb_nick_identity_clear(client);
 		udb_send_service_notice(client, SKEY_NICKSERV, "This nickname is suspended. Reason: %s",
 								suspend->data_str ? suspend->data_str : "No reason given");
@@ -8724,6 +8723,9 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, UdbNickApplyReas
 
 static void udb_nick_strip(Client *client, UdbRecord *nick_rec)
 {
+	UdbRecord *vhost_rec;
+	UdbRecord *snomask_rec;
+
 	if (!client)
 		return;
 
@@ -8744,9 +8746,17 @@ static void udb_nick_strip(Client *client, UdbRecord *nick_rec)
 	client->umodes &= ~UMODE_REGNICK;
 	send_umode_out(client, 1, old_umodes);
 
-	set_snomask(client, NULL);
+	/* UDB only removes effects its active profile had actually applied. An
+	 * absent vhost or snomask record means UDB never owned that state, so
+	 * externally supplied values must survive the strip. */
+	vhost_rec = nick_rec ? udb_record_find(udb_ctx, NKEY_VHOST, nick_rec) : NULL;
+	snomask_rec = nick_rec ? udb_record_find(udb_ctx, NKEY_SNOMASKS, nick_rec) : NULL;
 
-	udb_nick_remove_vhost(client);
+	if (snomask_rec)
+		set_snomask(client, NULL);
+
+	if (vhost_rec)
+		udb_nick_remove_vhost(client);
 
 	if (nick_rec)
 	{
@@ -8839,10 +8849,12 @@ static void udb_nick_remove_record(UdbBlock *block, UdbRecord *rec)
 			UdbRecord *candidate =
 				udb_nick_replacement_tree ? udb_record_find(NULL, rec->key, udb_nick_replacement_tree) : NULL;
 			/* Active identity survives a full replacement only for an existing
-			 * candidate with the same pass/access policy, no forbid, and a
-			 * still-permitted access check. A deleted profile or a changed
-			 * policy revokes it; UDB only removes effects it actually owned. */
+			 * candidate with the same pass/access policy, without forbid or
+			 * suspend, and with a still-permitted access check. A deleted
+			 * profile, a changed policy or a normal->suspend transition
+			 * revokes it; UDB only removes effects it actually owned. */
 			int keep_identity = candidate && !udb_record_find(udb_ctx, NKEY_FORBID, candidate) &&
+								!udb_record_find(udb_ctx, NKEY_SUSPEND, candidate) &&
 								udb_nick_identity_valid(client, candidate);
 
 			udb_nick_pending_auth_clear(client);

@@ -107,7 +107,8 @@ class PostReviewCorrectionsTest(unittest.TestCase):
         refresh_suspend = apply.index("if (reason == UDB_NICK_APPLY_REFRESH && suspend)")
         self.assertLess(refresh_suspend, guard)
         # The guard strips UDB-owned effects, clears identity, and renames.
-        guard_block = apply[guard:apply.index("if (suspend)", guard)]
+        adopt_suspend = apply.index("if (reason == UDB_NICK_APPLY_ADOPT && suspend)", guard)
+        guard_block = apply[guard:adopt_suspend]
         self.assertIn("udb_nick_strip(client, nick_rec);", guard_block)
         self.assertIn("udb_nick_identity_clear(client);", guard_block)
         self.assertIn("udb_nick_force_rename(client, nick_rec->key);", guard_block)
@@ -116,12 +117,13 @@ class PostReviewCorrectionsTest(unittest.TestCase):
         self.assertIn("udb_nick_strip(client, nick_rec);", refresh_block)
         self.assertIn("udb_nick_identity_clear(client);", refresh_block)
         self.assertNotIn("udb_nick_force_rename", refresh_block)
-        # ADOPT of a suspended profile still requires the preflight credential:
-        # identity_valid runs before the final suspend branch.
-        final_suspend = apply.index("if (suspend)", guard)
-        self.assertLess(guard, final_suspend)
-        adopt_block = apply[final_suspend:apply.index("if (client->user)", final_suspend)]
+        # ADOPT of a suspended profile validates the preflight credential but
+        # materializes nothing: identity is cleared, never-applied effects are
+        # not stripped, and the nick is kept.
+        self.assertLess(guard, adopt_suspend)
+        adopt_block = apply[adopt_suspend:apply.index("if (client->user)", adopt_suspend)]
         self.assertIn("udb_nick_identity_clear(client);", adopt_block)
+        self.assertNotIn("udb_nick_strip", adopt_block)
         self.assertNotIn("udb_nick_force_rename", adopt_block)
 
     def test_forbid_and_access_denial_strip_owned_effects_only(self):
@@ -152,7 +154,21 @@ class PostReviewCorrectionsTest(unittest.TestCase):
         self.assertIn("udb_nick_replacement_tree", remove)
         self.assertIn("udb_nick_identity_valid(client, candidate)", remove)
         self.assertIn("NKEY_FORBID, candidate", remove)
+        self.assertIn("NKEY_SUSPEND, candidate", remove)
         self.assertIn("udb_nick_strip(client, rec);", remove)
+
+    def test_strip_only_removes_profile_owned_effects(self):
+        strip = re.search(r"static void udb_nick_strip\(.*?\n}\n", self.nicks, re.S).group(0)
+        # Vhost and snomasks are only removed when the active profile had the
+        # corresponding record; +S and other external state must survive.
+        self.assertLess(strip.index("NKEY_VHOST"), strip.index("udb_nick_remove_vhost"))
+        self.assertLess(strip.index("NKEY_SNOMASKS"), strip.index("set_snomask(client, NULL)"))
+        self.assertIn("NKEY_MODES", strip)
+        self.assertIn('swhois_delete(client, "udb", "*", &me, NULL);', strip)
+        # Oper ownership stays explicit and separate from the identity marker.
+        self.assertIn("udb_nick_revoke_oper(client);", strip)
+        revoke = re.search(r"static void udb_nick_revoke_oper\(.*?\n}\n", self.nicks, re.S).group(0)
+        self.assertIn("udb_nick_oper_owned_md", revoke)
 
     def test_nick_change_destroys_identity_only_for_owned_effects(self):
         change = re.search(r"static int udb_hook_nick_change\(.*?\n}\n\nstatic int udb_hook_post_nick_change",

@@ -794,7 +794,6 @@ static void udb_ocl_handle_begin(Client *direct_peer, const char *parv[])
 				return; /* already committed */
 			if (origin->staging && !strcmp(origin->staging->epoch, epoch) && origin->staging->generation == generation)
 				return; /* already staging */
-			/* The previous attempt was aborted; rebuild the same high-water snapshot. */
 		}
 	}
 	else if (origin->accepted_valid && strcmp(origin->accepted_epoch, epoch))
