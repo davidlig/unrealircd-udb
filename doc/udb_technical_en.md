@@ -533,9 +533,9 @@ ACK:
 :<sid> DB <peer-sid> HEL 4 ACK <selector> <epoch> OCL [OCLG]
 ```
 
-- required version: `4`;
-- `epoch`: 16 lowercase hexadecimal characters identifying the OCL instance;
-- `OCL`: mandatory;
+- required version: `4` (strict single version; no negotiation, downgrade shims, or legacy compatibility);
+- `epoch`: 16 lowercase hexadecimal characters identifying the peer's runtime instance;
+- `OCL`: mandatory runtime operclass capability;
 - `OCLG`: optional subscription to the derived global view, typically for consumers such as Services.
 
 Selector meaning:
@@ -544,9 +544,9 @@ Selector meaning:
 - `-`: policy exists but no usable candidate is currently selected;
 - `<servername>`: selected source/propagator.
 
-If a direct peer does not acknowledge HEL before timeout or does not support required OCL capability, UDB aborts the server link. An epoch change for the same SID is treated as a new instance and resets replay/latch state.
+If a direct peer does not acknowledge HEL before timeout or fails to present mandatory `OCL`, UDB aborts the server link with `ERR HEL 6` (`FORBIDDEN`). An instance epoch change for the same SID is treated as a fresh instance and resets sequence counters, replay buffers, and latch state.
 
-## 8. Authority and bootstrap model
+## 8. Authority, bootstrap, and freshness model
 
 ### 8.1 With policy
 
@@ -561,6 +561,13 @@ A policy change aborts sessions/pending requests owned by a now-invalid source a
 
 This prevents an already authoritative node from accidentally adopting a neighbor's database merely because the link exists.
 
+### 8.3 Freshness policy (Policy A — Authoritative propagator precedence)
+
+UDB enforces deterministic authority precedence (**Policy A**):
+- The snapshot and sequenced mutation stream from the selected authoritative propagator win unconditionally.
+- Filesystem modification times (`mtime`) and local wall-clock timestamps are strictly informational and never determine record ownership or override authoritative state.
+- In case of network divergence, nodes reconcile toward the selected authority regardless of local timestamp comparisons.
+
 ## 9. Snapshot reconciliation
 
 Reconciliation is **inventory-driven pull**, hop-by-hop. Reconciliation frames are not forwarded through the network.
@@ -568,49 +575,53 @@ Reconciliation is **inventory-driven pull**, hop-by-hop. Reconciliation frames a
 Typical round:
 
 ```text
-Authority                         Receiver
-    |                                |
-    | INF round N checksum mtime     |
-    |------------------------------->|
-    |                                | compares checksum
-    |            RES round N         | if divergent
-    |<-------------------------------|
-    | BEGIN round N txid checksum    |
-    |------------------------------->|
-    | PUT round N txid path :value   |
-    |------------------------------->|
-    | ...                            |
-    | END round N txid checksum      |
-    |------------------------------->|
-    |     ACK round N txid digest    |
-    |<-------------------------------|
+Authority                                     Receiver
+    |                                            |
+    | INF round N block sha256 mtime watermark   |
+    |------------------------------------------->|
+    |                                            | compares sha256 digest
+    |            RES round N block               | if divergent
+    |<-------------------------------------------|
+    | BEGIN round N block txid sha256 watermark  |
+    |------------------------------------------->|
+    | PUT round N block txid path :value         |
+    |------------------------------------------->|
+    | ...                                        |
+    | END round N block txid sha256 watermark    |
+    |------------------------------------------->|
+    |       ACK round N block txid sha256        |
+    |<-------------------------------------------|
 ```
 
 The authority advertises `INF` for **all six blocks**. The receiver may transition to READY only after:
 
 1. N/C/I/S/L/K have all been compared in the round;
-2. every divergent block has completed its snapshot;
+2. every divergent block has completed its snapshot transfer;
 3. no staged sessions or pending `RES` remain;
 4. the complete READY generation and `.udb_state` can be durably committed.
 
 ### 9.1 Frames
 
 ```text
-INF   <round> <block> <checksum> <modified_at>
+INF   <round> <block> <sha256> <modified_at> <watermark_seq>
 RES   <round> <block>
-BEGIN <round> <block> <txid> <checksum>
+BEGIN <round> <block> <txid> <sha256> <watermark_seq>
 PUT   <round> <block> <txid> <path> :<string>
 PUT   <round> <block> <txid> <path> *<number>
-END   <round> <block> <txid> <checksum>
-ACK   <round> <block> <txid> <digest>
-ERR   <subcmd> <code> <round/correlation> <block>
+END   <round> <block> <txid> <sha256> <watermark_seq>
+ACK   <round> <block> <txid> <sha256> <watermark_seq>
+ERR   <subcmd> <code> <round_or_seq> <block>
 ```
 
-Round IDs are non-zero decimal integers. `txid` accepts only alphanumeric characters, `-`, `_`, maximum 31 characters.
+Parameters:
+- Round IDs are non-zero decimal integers.
+- `txid` accepts only alphanumeric characters, `-`, `_`, maximum 31 characters.
+- `sha256` is a 64-character lowercase hexadecimal cryptographic digest of the block's canonical serialization.
+- `watermark_seq` is the 64-bit monotonic sequence number representing the latest mutation included in the snapshot.
 
-`BEGIN` requires an active reconciliation with the same authority/round and a pending `RES` for that block. `PUT` must exactly match peer/round/txid. Invalid sequencing can abort the session and the reconciliation round.
+`BEGIN` requires an active reconciliation with the same authority/round and a pending `RES` for that block. `PUT` must exactly match peer/round/txid. Invalid sequencing aborts the session and the reconciliation round.
 
-`END` recalculates the staged-tree checksum and requires it to match the received digest before persistence and commit.
+`END` recalculates the staged-tree canonical SHA-256 digest and requires an exact match with the received digest before persistence and atomic commit.
 
 ### 9.2 Staging limits
 
@@ -625,17 +636,41 @@ The inactivity deadline is refreshed by PUT activity; the absolute deadline is n
 
 Failed rounds schedule bounded retries (`UDB_RECONCILE_RETRY_MAX = 6`) with backoff.
 
-## 10. Live mutations
+### 9.3 Strong identity and canonical serialization
 
-Authorized mutations are:
+Convergence detection relies on deterministic SHA-256 digests rather than checksums:
+- Every record is serialized into canonical wire form: `<Block::path> <value>\n` (or `<Block::path>\n` when valueless).
+- Records are sorted strictly in lexicographical byte order (`strcmp`).
+- Empty blocks hash an empty byte string.
+- No C struct padding, pointers, uninitialized bytes, or hash-table iteration dependencies are included.
+- Any single-byte semantic divergence produces a completely different 64-hex SHA-256 digest.
+
+### 9.4 Watermark and snapshot/live mutation race resolution
+
+To eliminate race conditions between live mutations and background reconciliation snapshots:
+1. Every snapshot carries `watermark_seq` indicating the exact authority sequence number reflected in the dataset.
+2. Upon committing the snapshot and entering `READY`, the node sets:
+   - `last_applied_seq = watermark_seq`
+   - `expected_seq = watermark_seq + 1`
+3. Live mutations received with `seq <= watermark_seq` are discarded as duplicates (`seq <= last_applied_seq`).
+4. Live mutations with `seq == watermark_seq + 1` apply cleanly on top of the committed state.
+5. Live mutations with `seq > watermark_seq + 1` trigger gap detection and a fresh reconciliation.
+
+## 10. Live mutations and sequencing
+
+Authorized mutations originated by the selected authoritative propagator are:
 
 ```text
-INS <Block::path> <value>
-DEL <Block::path>
-DRP <block>
-OPT <block> [modified_at]
+INS <epoch> <seq> <Block::path> <value>
+DEL <epoch> <seq> <Block::path>
+DRP <epoch> <seq> <block>
+OPT <epoch> <seq> <block> [modified_at]
 EXP <path> <expected-expires>
 ```
+
+Parameters:
+- `epoch`: 16 lowercase hex characters matching the authority's confirmed instance epoch.
+- `seq`: 64-bit decimal integer strictly monotonic within the authority epoch (`seq >= 1`), shared across all six persistent blocks (`N`, `C`, `I`, `S`, `L`, `K`) to ensure total causal ordering.
 
 Semantics:
 
@@ -643,13 +678,41 @@ Semantics:
 - `DEL`: delete a path; deleting a missing path is idempotent.
 - `DRP`: drop a complete block, first persisting the empty snapshot.
 - `OPT`: force block save/update and optionally relay `modified_at`.
-- `EXP`: point-to-point compare-and-delete request for an expired K line sent from followers to their selected direct authority (`DB <target> EXP <path> <expected-expires>`). If `expected-expires` matches the authority's record and has elapsed, the authority deletes the profile locally, persists `udb_K.db`, and broadcasts a transactional `DEL` across confirmed peers; stale requests are ignored without error.
+- `EXP`: point-to-point compare-and-delete request for an expired K line sent from followers to their selected direct authority (`DB <target> EXP <path> <expected-expires>`). If `expected-expires` matches the authority's record and has elapsed, the authority deletes the profile locally, persists `udb_K.db`, and broadcasts a transactional `DEL <epoch> <seq> <path>` across confirmed peers; stale requests are ignored without error.
 
-A mutation is accepted only from the selected remote propagator. Persistence happens before runtime publication. After processing, it may be relayed hop-by-hop to HEL-confirmed direct peers, excluding the incoming direction.
+### 10.1 Monotonic sequence rules and gap recovery
+
+Receivers process incoming mutations against the selected authority stream:
+
+- `expected_seq = last_applied_seq + 1`:
+  - **In-order (`seq == expected_seq`)**: Validate -> persist locally -> publish to runtime -> advance `last_applied_seq = seq` -> relay multihop to downstream confirmed peers.
+  - **Duplicate / Stale (`seq <= last_applied_seq`)**: Safely ignored without re-applying or mutating active state.
+  - **Gap / Out-of-order (`seq > expected_seq`)**: Gap detected. The node suspends live application, marks sync health `DEGRADED`, and triggers an immediate staged reconciliation round (`RES`) to heal the gap.
+  - **Epoch mismatch (`epoch != authority_epoch`)**: Stale epoch packets are dropped. If the authority announces a new epoch via HEL, the sequence stream resets and full reconciliation takes place.
+  - **Persistence failure**: If persisting an in-order mutation fails (e.g. disk I/O error), the node marks sync health `DEGRADED` and initiates reconciliation pull, ensuring local storage failures cannot cause silent network divergence.
 
 Unlike `INF/RES/BEGIN/PUT/END`, mutations are intentionally capable of multihop propagation through validated re-forwarding at each node.
 
-S2S error codes:
+### 10.2 Periodic anti-entropy verification
+
+To detect silent divergence between peers without waiting for network events or link restarts, healthy nodes periodically verify state with their direct authority:
+
+Frames:
+
+```text
+MANIFEST REQ <round>
+MANIFEST ACK <round> <block> <count> <sha256> <watermark_seq>
+```
+
+Workflow:
+1. Every `anti-entropy-interval` (default 300 s ± 30 s jitter), a follower sends `MANIFEST REQ` to its selected authority.
+2. The authority replies with `MANIFEST ACK` for each of the six blocks, reporting its current `(count, sha256, watermark_seq)`.
+3. The follower compares the authority's manifests with its local active block manifests.
+4. **Match**: All blocks match; the state is verified convergent. No data is transferred and no noisy logs are produced.
+5. **Mismatch**: Any count or SHA-256 divergence immediately marks health `DEGRADED` and requests reconciliation pull (`RES`) for the divergent block.
+6. Rate limiting and single in-flight checks prevent synchronization storms.
+
+### 10.3 S2S error codes
 
 | Code | Name |
 |---:|---|
@@ -659,6 +722,7 @@ S2S error codes:
 | 4 | `SYNC_ACTIVE` |
 | 5 | `NO_SYNC` |
 | 6 | `FORBIDDEN` |
+
 
 ## 11. Readiness, health and client admission
 

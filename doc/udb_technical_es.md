@@ -539,9 +539,9 @@ ACK:
 :<sid> DB <peer-sid> HEL 4 ACK <selector> <epoch> OCL [OCLG]
 ```
 
-- versión exigida: `4`;
-- `epoch`: 16 caracteres hexadecimales minúsculos que identifican la instancia OCL;
-- `OCL`: obligatorio;
+- versión exigida: `4` (versión canónica única estricta; sin negociación de downgrade, shims ni retrocompatibilidad legacy);
+- `epoch`: 16 caracteres hexadecimales minúsculos que identifican la instancia runtime del peer;
+- `OCL`: obligatorio; capacidad de operclasses distribuidas en runtime;
 - `OCLG`: opcional; indica suscripción a la proyección global, normalmente usada por consumidores como Services.
 
 El selector anunciado significa:
@@ -550,9 +550,9 @@ El selector anunciado significa:
 - `-`: existe política pero no hay candidato utilizable;
 - `<servername>`: fuente/propagador seleccionado.
 
-Si un peer directo no responde al HEL dentro del timeout o no soporta la capacidad OCL requerida, UDB aborta el enlace de servidor. Un cambio de epoch del mismo SID se trata como una nueva instancia y reinicia los latches/replays asociados.
+Si un peer directo no responde al HEL dentro del timeout o no soporta la capacidad obligatoria `OCL`, UDB aborta el enlace de servidor emitiendo `ERR HEL 6` (`FORBIDDEN`). Un cambio de epoch de instancia del mismo SID se trata como una nueva instancia y reinicia los contadores de secuencia, buffers de replay y estados de latch.
 
-## 8. Modelo de autoridad y bootstrap
+## 8. Modelo de autoridad, bootstrap y freshness
 
 ### 8.1 Con política
 
@@ -567,6 +567,13 @@ Si cambia la política, UDB cancela sesiones/peticiones pertenecientes a otra fu
 
 Esto evita que un nodo ya autoritativo adopte accidentalmente la base de un vecino sólo por estar conectado.
 
+### 8.3 Política de freshness (Política A — Precedencia de la autoridad seleccionada)
+
+UDB aplica precedencia determinista de autoridad (**Política A**):
+- El snapshot y el stream de mutaciones secuenciadas del propagador autoritativo seleccionado prevalecen incondicionalmente.
+- Los tiempos de modificación del sistema de archivos (`mtime`) y los relojes locales de pared son estrictamente informativos y nunca deciden propiedad ni anulan el estado autoritativo.
+- Ante divergencia en la red, los nodos reconcilian hacia la autoridad seleccionada independientemente de comparaciones de timestamps locales.
+
 ## 9. Reconciliación de snapshots
 
 La reconciliación es **pull dirigida por inventario** y hop-by-hop. Los frames de reconciliación no se reenvían a través de la red.
@@ -574,49 +581,53 @@ La reconciliación es **pull dirigida por inventario** y hop-by-hop. Los frames 
 Secuencia para cada ronda:
 
 ```text
-Autoridad                         Receptor
-    |                                |
-    | INF round N checksum mtime     |
-    |------------------------------->|
-    |                                | compara checksum
-    |            RES round N         | si diverge
-    |<-------------------------------|
-    | BEGIN round N txid checksum    |
-    |------------------------------->|
-    | PUT round N txid path :value   |
-    |------------------------------->|
-    | ...                            |
-    | END round N txid checksum      |
-    |------------------------------->|
-    |     ACK round N txid digest    |
-    |<-------------------------------|
+Autoridad                                     Receptor
+    |                                            |
+    | INF round N block sha256 mtime watermark   |
+    |------------------------------------------->|
+    |                                            | compara digest sha256
+    |            RES round N block               | si diverge
+    |<-------------------------------------------|
+    | BEGIN round N block txid sha256 watermark  |
+    |------------------------------------------->|
+    | PUT round N block txid path :value         |
+    |------------------------------------------->|
+    | ...                                        |
+    | END round N block txid sha256 watermark    |
+    |------------------------------------------->|
+    |       ACK round N block txid sha256        |
+    |<-------------------------------------------|
 ```
 
 La autoridad ofrece `INF` para los **seis bloques**. El receptor sólo puede pasar a READY cuando:
 
 1. ha comparado N/C/I/S/L/K en la ronda;
-2. cada bloque divergente ha finalizado su snapshot;
+2. cada bloque divergente ha finalizado la transferencia de su snapshot;
 3. no quedan sesiones staged ni `RES` pendientes;
 4. puede guardar de forma durable el conjunto READY y `.udb_state`.
 
 ### 9.1 Frames
 
 ```text
-INF   <round> <block> <checksum> <modified_at>
+INF   <round> <block> <sha256> <modified_at> <watermark_seq>
 RES   <round> <block>
-BEGIN <round> <block> <txid> <checksum>
+BEGIN <round> <block> <txid> <sha256> <watermark_seq>
 PUT   <round> <block> <txid> <path> :<string>
 PUT   <round> <block> <txid> <path> *<number>
-END   <round> <block> <txid> <checksum>
-ACK   <round> <block> <txid> <digest>
-ERR   <subcmd> <code> <round/correlation> <block>
+END   <round> <block> <txid> <sha256> <watermark_seq>
+ACK   <round> <block> <txid> <sha256> <watermark_seq>
+ERR   <subcmd> <code> <round_or_seq> <block>
 ```
 
-Los IDs de ronda válidos son enteros decimales no cero. `txid` sólo admite alfanuméricos, `-` y `_` y tiene máximo 31 caracteres.
+Parámetros:
+- Los IDs de ronda válidos son enteros decimales no cero.
+- `txid` sólo admite caracteres alfanuméricos, `-` y `_`, con un máximo de 31 caracteres.
+- `sha256` es el digest criptográfico hexadecimal en minúsculas de 64 caracteres de la serialización canónica del bloque.
+- `watermark_seq` es el entero monotónico de 64 bits que representa la última mutación incluida en el snapshot.
 
-`BEGIN` sólo se acepta si existe una reconciliación activa con la misma autoridad/ronda y ese bloque tenía un `RES` pendiente. `PUT` debe coincidir exactamente con peer/ronda/txid. Una secuencia inválida puede abortar la sesión y la ronda.
+`BEGIN` sólo se acepta si existe una reconciliación activa con la misma autoridad/ronda y ese bloque tenía un `RES` pendiente. `PUT` debe coincidir exactamente con peer/ronda/txid. Una secuencia inválida aborta la sesión y la ronda.
 
-`END` recalcula el checksum del árbol staged y exige que coincida con el digest recibido antes de persistir y hacer commit.
+`END` recalcula el digest SHA-256 canónico del árbol staged y exige coincidencia exacta con el digest recibido antes de persistir y aplicar commit atómico.
 
 ### 9.2 Límites staged
 
@@ -631,17 +642,41 @@ El timeout de inactividad se renueva con cada PUT; el absoluto no. También exis
 
 Las rondas fallidas programan reintentos limitados (`UDB_RECONCILE_RETRY_MAX = 6`) con backoff.
 
-## 10. Mutaciones en vivo
+### 9.3 Identidad fuerte y serialización canónica
 
-Las mutaciones autorizadas son:
+La detección de convergencia se basa en digests deterministas SHA-256 en lugar de checksums:
+- Cada registro se serializa en formato canónico de línea wire: `<Block::path> <value>\n` (o `<Block::path>\n` si carece de valor).
+- Los registros se ordenan estrictamente por orden lexicográfico de bytes (`strcmp`).
+- Un bloque vacío genera el digest de una cadena vacía de bytes.
+- No se incluye padding de structs C, punteros, memoria no inicializada ni dependencias del orden interno de tablas hash.
+- Cualquier diferencia semántica de un solo byte genera un digest SHA-256 hexadecimal completamente distinto.
+
+### 9.4 Watermark y resolución de carreras snapshot/mutación viva
+
+Para eliminar condiciones de carrera entre mutaciones online y snapshots de reconciliación en segundo plano:
+1. Cada snapshot transporta `watermark_seq`, indicando el número de secuencia exacto de la autoridad reflejado en el dataset.
+2. Al consolidar el commit del snapshot y pasar a `READY`, el nodo fija:
+   - `last_applied_seq = watermark_seq`
+   - `expected_seq = watermark_seq + 1`
+3. Las mutaciones online recibidas con `seq <= watermark_seq` se descartan como duplicados (`seq <= last_applied_seq`).
+4. Las mutaciones online con `seq == watermark_seq + 1` se aplican limpiamente sobre el estado comprometido.
+5. Las mutaciones con `seq > watermark_seq + 1` disparan detección de hueco y una nueva reconciliación.
+
+## 10. Mutaciones en vivo y secuenciación
+
+Las mutaciones autorizadas originadas por el propagador autoritativo seleccionado son:
 
 ```text
-INS <Block::path> <value>
-DEL <Block::path>
-DRP <block>
-OPT <block> [modified_at]
+INS <epoch> <seq> <Block::path> <value>
+DEL <epoch> <seq> <Block::path>
+DRP <epoch> <seq> <block>
+OPT <epoch> <seq> <block> [modified_at]
 EXP <path> <expected-expires>
 ```
+
+Parámetros:
+- `epoch`: 16 caracteres hexadecimales minúsculos coincidentes con el instance epoch confirmado de la autoridad.
+- `seq`: entero decimal de 64 bits estrictamente monotónico dentro del epoch de autoridad (`seq >= 1`), compartido globalmente entre los seis bloques persistentes (`N`, `C`, `I`, `S`, `L`, `K`) para garantizar orden causal total.
 
 Semántica:
 
@@ -649,13 +684,41 @@ Semántica:
 - `DEL`: elimina una ruta; borrar una ruta inexistente es idempotente.
 - `DRP`: vacía un bloque completo, persistiendo primero el snapshot vacío.
 - `OPT`: fuerza guardado/actualización del bloque y puede propagar `modified_at`.
-- `EXP`: solicitud compare-and-delete punto a punto de una línea K expirada enviada por followers a su autoridad directa seleccionada (`DB <target> EXP <path> <expected-expires>`). Si `expected-expires` coincide con el registro de la autoridad y ha vencido, la autoridad elimina el perfil localmente, persiste `udb_K.db` y difunde un `DEL` transaccional al resto de peers confirmados; si no coincide o es obsoleta, se ignora de forma segura sin error.
+- `EXP`: solicitud compare-and-delete punto a punto de una línea K expirada enviada por followers a su autoridad directa seleccionada (`DB <target> EXP <path> <expected-expires>`). Si `expected-expires` coincide con el registro de la autoridad y ha vencido, la autoridad elimina el perfil localmente, persiste `udb_K.db` y difunde un `DEL <epoch> <seq> <path>` transaccional al resto de peers confirmados; si no coincide o es obsoleta, se ignora de forma segura sin error.
 
-Una mutación sólo se acepta desde el propagador remoto seleccionado. Se persiste antes de publicar los efectos runtime. Después de procesarla puede retransmitirse hop-by-hop a peers directos con HEL confirmado, excluyendo la dirección de entrada.
+### 10.1 Reglas de secuencia monotónica y autorreparación de gaps
+
+Los receptores procesan las mutaciones entrantes contra el stream de la autoridad seleccionada:
+
+- `expected_seq = last_applied_seq + 1`:
+  - **En orden (`seq == expected_seq`)**: Valida -> persiste localmente -> publica en runtime -> avanza `last_applied_seq = seq` -> retransmite multihop a downstream peers confirmados.
+  - **Duplicado / Obsoleto (`seq <= last_applied_seq`)**: Se descarta de forma segura sin re-aplicar ni mutar el estado activo.
+  - **Hueco / Desorden (`seq > expected_seq`)**: Se detecta gap. El nodo suspende la aplicación online, marca la salud de sincronización como `DEGRADED` y dispara inmediatamente una ronda de reconciliación staged (`RES`) para sanar el hueco.
+  - **Epoch discordante (`epoch != authority_epoch`)**: Paquetes de un epoch obsoleto se descartan. Si la autoridad anuncia un nuevo epoch mediante HEL, el stream de secuencias se reinicia y se ejecuta una reconciliación completa.
+  - **Fallo de persistencia**: Si falla la persistencia local de una mutación en orden (por ejemplo, error de E/S de disco), el nodo marca salud `DEGRADED` e inicia reconciliación, asegurando que un fallo de almacenamiento local no genere divergencia silenciosa en la red.
 
 A diferencia de `INF/RES/BEGIN/PUT/END`, las mutaciones sí están diseñadas para propagarse por múltiples saltos mediante retransmisión validada en cada nodo.
 
-Códigos de error S2S:
+### 10.2 Verificación periódica de anti-entropía
+
+Para detectar divergencias silenciosas entre peers sin depender de reconexiones de enlace o reinicios, los nodos sanos verifican periódicamente su estado contra su autoridad directa:
+
+Frames:
+
+```text
+MANIFEST REQ <round>
+MANIFEST ACK <round> <block> <count> <sha256> <watermark_seq>
+```
+
+Flujo:
+1. Cada `anti-entropy-interval` (por defecto 300 s ± 30 s de jitter), el follower envía `MANIFEST REQ` a su autoridad seleccionada.
+2. La autoridad responde con `MANIFEST ACK` para cada uno de los seis bloques, indicando su `(count, sha256, watermark_seq)` actual.
+3. El follower compara los manifests de la autoridad con sus manifests locales activos.
+4. **Coincidencia**: Todos los bloques coinciden; el estado está verificado como convergente. No se transfieren datos ni se generan logs ruidosos.
+5. **Divergencia**: Cualquier diferencia en recuento o digest SHA-256 marca inmediatamente la salud como `DEGRADED` y solicita reconciliación staged (`RES`) para el bloque divergente.
+6. El rate limiting y el límite de una sola comprobación en curso previenen tormentas de sincronización.
+
+### 10.3 Códigos de error S2S
 
 | Código | Nombre |
 |---:|---|
@@ -665,6 +728,7 @@ Códigos de error S2S:
 | 4 | `SYNC_ACTIVE` |
 | 5 | `NO_SYNC` |
 | 6 | `FORBIDDEN` |
+
 
 ## 11. Readiness, salud y admisión de clientes
 
