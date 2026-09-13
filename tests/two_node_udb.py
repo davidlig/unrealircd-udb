@@ -32,6 +32,11 @@ RENAME_FAIL_SOURCE = pathlib.Path(__file__).resolve().parent / "udb_snapshot_ren
 RENAME_FAIL_MODULE = RENAME_FAIL_SOURCE.with_suffix(".so")
 MUTATOR_END_TRIGGER = "udb-test-mutator-end-go"
 K_STAGED_RECORD = "G::*@udb-staged.test::reason staged-sync-k-effect"
+# Sanitizer-instrumented CI nodes can spend longer than the normal S2S wait
+# writing, fsyncing and failing an armed rename. Fault evidence is observed
+# over a wider window; predicates still enforce the invariant, so a longer
+# window can never turn a real failure into a pass.
+FAULT_OBSERVATION_TIMEOUT = 45
 
 
 def find_module_path():
@@ -560,7 +565,7 @@ def main():
             return 1
         print("PASS: each node loaded its seeded N/K blocks from its configured temporary database directory")
 
-        deadline = time.monotonic() + args.timeout
+        deadline = time.monotonic() + max(args.timeout, FAULT_OBSERVATION_TIMEOUT)
         if args.snapshot_rename_failure:
             while time.monotonic() < deadline:
                 if snapshot_rename_failure_observed(logs[0], logs[1], b_db, b_baseline):
@@ -646,7 +651,7 @@ def main():
         if args.malformed_end_checksum:
             b_baseline = b_db.read_bytes()
             (a / "runtime-data" / MUTATOR_END_TRIGGER).touch()
-            deadline = time.monotonic() + args.timeout
+            deadline = time.monotonic() + max(args.timeout, FAULT_OBSERVATION_TIMEOUT)
             while time.monotonic() < deadline:
                 if malformed_end_checksums_rejected(logs[0], logs[1], b_db, b_baseline):
                     break
@@ -674,7 +679,7 @@ def main():
             (a / "runtime-data" / MUTATOR_DRP_TRIGGER).touch()
         elif not args.runtime_del_rename_failure:
             (a / "runtime-data" / "udb-test-mutator-go").touch()
-        deadline = time.monotonic() + args.timeout
+        deadline = time.monotonic() + max(args.timeout, FAULT_OBSERVATION_TIMEOUT)
         if args.runtime_rename_failure:
             while time.monotonic() < deadline:
                 if runtime_rename_failure_observed(logs[0], logs[1], b_db, b_baseline):
