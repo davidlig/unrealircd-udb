@@ -32,9 +32,9 @@ Honor `UDB_TEST_IRCD_ROOT` / `UDB_MODULE_PATH` overrides when present.
 
 ## Focused test map
 
-Parsing/persistence/limits: `test_loader_fail_safe.py`, `test_numeric_strict.py`, `test_ipv6_and_paths.py`, `test_size_invariants.py`, `test_spamfilter_limits.py`.
+Parsing/persistence/limits/security: `test_loader_fail_safe.py`, `test_numeric_strict.py`, `test_ipv6_and_paths.py`, `test_size_invariants.py`, `test_spamfilter_limits.py`, `test_security_hardening.py`, `test_protocol_fault_qualification.py`.
 
-DB sync/bootstrap/readiness/convergence: `test_staged_sync_caps.py`, `test_staged_sync_ownership.py`, `test_convergence_degraded_stale.py`, `test_bootstrap_readiness_and_convergence.py`; expand to multihop/runtime only when the invariant requires it.
+DB sync/bootstrap/readiness/convergence: `test_staged_sync_caps.py`, `test_staged_sync_ownership.py`, `test_convergence_degraded_stale.py`, `test_bootstrap_readiness_and_convergence.py`, `test_mutation_gap_recovery.py`, `test_anti_entropy.py`; expand to multihop/runtime only when the invariant requires it.
 
 Propagator: `test_propagator_validation.py`, `test_propagator_failover.py`, `test_propagator_non_adjacent.py`, `test_propagator_runtime_failover.py`.
 

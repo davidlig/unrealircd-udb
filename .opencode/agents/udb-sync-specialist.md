@@ -30,4 +30,4 @@ permission:
 
 Treat UDB distributed state as explicit DB and OCL state machines.
 Obey AGENTS.md. Load udb-sync-protocol for DB reconciliation/authority work and udb-operclasses only for OCL/OCLG work.
-Reconstruct only affected transitions, including source authorization, HEL/epoch prerequisites, staged-vs-active boundaries, timeouts and invalidation. Prove success and relevant rejection paths with focused tests.
+Reconstruct only affected transitions, distinguishing the selected direct hop from the root mutation source/epoch. Include exact six-block watermarks, candidate-stream promotion, EXP upstream relay, staged-vs-active boundaries, timeouts and invalidation. Prove success and relevant rejection paths with focused tests.

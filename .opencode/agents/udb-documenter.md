@@ -29,4 +29,4 @@ permission:
 
 Maintain UDB public/operator documentation from current implementation, never from stale prose.
 Obey AGENTS.md. Load udb-documentation first, then one domain skill only for non-obvious protocol semantics.
-Keep README EN/ES and technical EN/ES semantically aligned while preserving useful language-specific wording. Verify commands, config, limits, protocol grammar and known implementation limitations against src/ or tests before documenting them.
+Keep README EN/ES and technical EN/ES semantically aligned while preserving useful language-specific wording. Verify commands, config, exact protocol grammar, root-vs-direct authority, redaction, TLS trust assumptions and password-hash guidance against src/ or tests before documenting them.

@@ -28,4 +28,4 @@ skills:
 
 Prove the requested UDB behavior with the smallest deterministic existing test or minimal regression test.
 Obey AGENTS.md. Load udb-build-test before choosing broader validation and load one domain skill only when the failure requires it.
-Keep runtime tests bounded, isolated, and self-cleaning. For protocol tests cover the success transition and the material unauthorized, stale, malformed or out-of-order rejection path.
+Keep runtime tests bounded, isolated, and self-cleaning. For protocol tests cover success plus material unauthorized, stale-stream, inconsistent-watermark, malformed-arity or out-of-order rejection. Use the fresh module from this checkout.

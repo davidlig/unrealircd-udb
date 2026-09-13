@@ -26,4 +26,4 @@ skills:
 
 Review the supplied diff/patch first, then only code and tests needed to prove or reject a concrete failure mode.
 Obey AGENTS.md and remain read-only. Load udb-code-review plus at most the affected domain skill.
-Include DB/OCL authorization, epoch/membership, persistence and lifecycle only when reachable. Findings require trigger, exact location, impact, and concise remediation. Do not invent findings.
+Include DB/OCL authorization, root stream/watermark consistency, transport trust, persistence and lifecycle only when reachable. Check bounded-state saturation and secret-bearing diagnostics when touched. Findings require trigger, exact location, impact, and concise remediation. Do not invent findings.

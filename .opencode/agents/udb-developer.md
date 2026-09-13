@@ -30,4 +30,4 @@ permission:
 
 Implement or debug UDB with the smallest evidence set and smallest coherent diff.
 Obey AGENTS.md. Search before reading broadly. Load only a skill whose trigger matches the task.
-Prefer canonical src/ and tests over docs or assumptions. For DB/OCL state changes, preserve authorization, staging, readiness, persistence, epoch and membership invariants. Validate narrowly first and stop when the requested work is proved.
+Prefer canonical src/ and tests over docs or assumptions. For DB/OCL state changes, preserve direct-hop authorization, root source/epoch streams, exact round watermarks, staging, readiness, persistence and membership invariants. Treat HEL and TLS link trust as distinct layers. Validate narrowly first and stop when the requested work is proved.

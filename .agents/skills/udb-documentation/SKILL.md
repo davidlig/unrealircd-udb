@@ -33,6 +33,9 @@ Use for `README.md`, `README_ES.md`, `doc/udb_technical_en.md`, or `doc/udb_tech
 - Preserve implementation limitations that are operator-relevant; distinguish parsed/stored settings from settings actually consumed at runtime.
 - Treat OCL/OCLG as runtime-only and distinct from the six persistent DB blocks.
 - Document snapshot sync as hop-by-hop and live mutations as multihop only with per-hop authority enforcement.
+- Distinguish the selected direct transport hop from the root mutation `(source SID, epoch)` and document exact, round-consistent watermarks.
+- State that HEL is not payload authentication; recommend authenticated TLS with certificate verification for every UDB hop and TLS for client password commands.
+- Preserve `sha256`/`crypt` as compatibility formats while recommending `argon2id` for new credentials.
 - Mention security-sensitive diagnostic behavior only after verifying the concrete redaction path.
 
 ## Validation

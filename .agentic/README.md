@@ -36,6 +36,7 @@ Codex custom subagents are intentionally not generated. UDB specialization lives
 - `udb-sync-protocol` owns HEL 4, DB reconciliation, propagator/bootstrap/readiness and mutation convergence.
 - `udb-operclasses` owns runtime OCL inventories, epochs, membership, replay and OCLG completeness/intersection.
 - `udb-documentation` owns evidence-driven synchronization of the English/Spanish README and technical docs.
+- `udb-security` owns strict wire parsing, root stream/watermark checks, bounded-state fail-closed behavior, secret redaction, and the server-link TLS trust boundary.
 
 ## Verify in the full repository
 

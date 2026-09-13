@@ -86,6 +86,14 @@ class GeneratorContractTest(unittest.TestCase):
             content.index("python3 scripts/bundle.py"),
         )
 
+    def test_security_and_sync_skills_cover_stream_hardening(self):
+        security = (generate.ROOT / ".agents/skills/udb-security/SKILL.md").read_text(encoding="utf-8")
+        sync = (generate.ROOT / ".agents/skills/udb-sync-protocol/SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("root `(source SID, epoch)`", security)
+        self.assertIn("TLS certificate verification", security)
+        self.assertIn("one exact watermark", sync)
+        self.assertIn("only the root authority", sync)
+
     def test_reviewer_is_read_only(self):
         ag_path = generate.AG_ROOT / "udb-reviewer" / "agent.md"
         ag_fm = generate.parse_frontmatter(self.expected[ag_path], ag_path)

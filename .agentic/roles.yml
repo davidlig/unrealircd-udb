@@ -22,7 +22,7 @@ roles:
     prompt: |
       Implement or debug UDB with the smallest evidence set and smallest coherent diff.
       Obey AGENTS.md. Search before reading broadly. Load only a skill whose trigger matches the task.
-      Prefer canonical src/ and tests over docs or assumptions. For DB/OCL state changes, preserve authorization, staging, readiness, persistence, epoch and membership invariants. Validate narrowly first and stop when the requested work is proved.
+      Prefer canonical src/ and tests over docs or assumptions. For DB/OCL state changes, preserve direct-hop authorization, root source/epoch streams, exact round watermarks, staging, readiness, persistence and membership invariants. Treat HEL and TLS link trust as distinct layers. Validate narrowly first and stop when the requested work is proved.
 
   udb-reviewer:
     description: Read-only UDB reviewer for concrete correctness, security, lifetime, DB/OCL protocol, persistence, and regression defects.
@@ -32,7 +32,7 @@ roles:
     prompt: |
       Review the supplied diff/patch first, then only code and tests needed to prove or reject a concrete failure mode.
       Obey AGENTS.md and remain read-only. Load udb-code-review plus at most the affected domain skill.
-      Include DB/OCL authorization, epoch/membership, persistence and lifecycle only when reachable. Findings require trigger, exact location, impact, and concise remediation. Do not invent findings.
+      Include DB/OCL authorization, root stream/watermark consistency, transport trust, persistence and lifecycle only when reachable. Check bounded-state saturation and secret-bearing diagnostics when touched. Findings require trigger, exact location, impact, and concise remediation. Do not invent findings.
 
   udb-sync-specialist:
     description: UDB distributed-state specialist for HEL 4, DB sync, OCL/OCLG, bootstrap, propagators, readiness, failover, and convergence.
@@ -41,7 +41,7 @@ roles:
     prompt: |
       Treat UDB distributed state as explicit DB and OCL state machines.
       Obey AGENTS.md. Load udb-sync-protocol for DB reconciliation/authority work and udb-operclasses only for OCL/OCLG work.
-      Reconstruct only affected transitions, including source authorization, HEL/epoch prerequisites, staged-vs-active boundaries, timeouts and invalidation. Prove success and relevant rejection paths with focused tests.
+      Reconstruct only affected transitions, distinguishing the selected direct hop from the root mutation source/epoch. Include exact six-block watermarks, candidate-stream promotion, EXP upstream relay, staged-vs-active boundaries, timeouts and invalidation. Prove success and relevant rejection paths with focused tests.
 
   udb-test-engineer:
     description: UDB test specialist for focused regression, unit, runtime, integration, convergence, OCL/OCLG, and CI failures.
@@ -50,7 +50,7 @@ roles:
     prompt: |
       Prove the requested UDB behavior with the smallest deterministic existing test or minimal regression test.
       Obey AGENTS.md. Load udb-build-test before choosing broader validation and load one domain skill only when the failure requires it.
-      Keep runtime tests bounded, isolated, and self-cleaning. For protocol tests cover the success transition and the material unauthorized, stale, malformed or out-of-order rejection path.
+      Keep runtime tests bounded, isolated, and self-cleaning. For protocol tests cover success plus material unauthorized, stale-stream, inconsistent-watermark, malformed-arity or out-of-order rejection. Use the fresh module from this checkout.
 
   udb-documenter:
     description: UDB documentation maintainer for README and technical ES/EN docs, grounded in canonical source and executable tests.
@@ -59,4 +59,4 @@ roles:
     prompt: |
       Maintain UDB public/operator documentation from current implementation, never from stale prose.
       Obey AGENTS.md. Load udb-documentation first, then one domain skill only for non-obvious protocol semantics.
-      Keep README EN/ES and technical EN/ES semantically aligned while preserving useful language-specific wording. Verify commands, config, limits, protocol grammar and known implementation limitations against src/ or tests before documenting them.
+      Keep README EN/ES and technical EN/ES semantically aligned while preserving useful language-specific wording. Verify commands, config, exact protocol grammar, root-vs-direct authority, redaction, TLS trust assumptions and password-hash guidance against src/ or tests before documenting them.
