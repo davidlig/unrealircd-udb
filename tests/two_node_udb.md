@@ -64,16 +64,6 @@ The interposer is armed only after B has committed A's initial snapshot. B then
 receives the test mutator's authorized `INS`, fails its candidate snapshot
 rename, returns `ERR`, and must retain byte-identical durable and active data.
 
-To cover the transactional `OPT` failure path, run:
-
-```sh
-python3 src/modules/third/udb/tests/two_node_udb.py --runtime-opt-rename-failure
-```
-
-After staged synchronization, the armed interposer fails B's snapshot rename for
-an authorized `OPT`. The harness requires B's database bytes to remain unchanged,
-no temporary file, interposer evidence, and `ERR OPT 3` returned to A.
-
 To cover active record deletion and block-drop rollback, run either mode:
 
 ```sh
@@ -81,7 +71,7 @@ python3 src/modules/third/udb/tests/two_node_udb.py --runtime-del-rename-failure
 python3 src/modules/third/udb/tests/two_node_udb.py --runtime-drp-rename-failure
 ```
 
-The mutator arms `INS`, `DEL`, `DRP`, and `OPT` independently for failure modes;
+The mutator arms `INS`, `DEL`, and `DRP` independently for failure modes;
 the default `udb-test-mutator-go` trigger continues to emit its existing `INS`
 then `DEL` sequence. The DEL mode first persists its fixture record, then arms
 the interposer before sending DEL. DRP operates on B's seeded N records. Both

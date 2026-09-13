@@ -16,7 +16,7 @@ Use this skill only when repository ownership/location is not already obvious.
 - `src/udb_config.c.inc` — `udb {}` configuration plus S/L settings effects.
 - `src/udb_sync.c.inc` — HEL, propagator/authority, reconciliation and staged snapshots.
 - `src/udb_operclasses.c.inc` — OCL inventories, membership, replay and OCLG view.
-- `src/udb_mutation.c.inc` — `INS`, `DEL`, `DRP`, `OPT`.
+- `src/udb_mutation.c.inc` — `INS`, `DEL`, `DRP`, `EXP`.
 - `src/udb_nicks.c.inc`, `udb_channels.c.inc`, `udb_ips.c.inc`, `udb_lines.c.inc` — block-specific schema/effects.
 - `src/udb_query.c.inc` — `/UDB` and `/DBQ` diagnostics.
 - `tests/` — Python unit, runtime, integration and multi-node harnesses.

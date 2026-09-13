@@ -16,7 +16,6 @@ ModuleHeader MOD_HEADER = {
 #define MUTATOR_INS_GO    "udb-test-mutator-ins-go"
 #define MUTATOR_DEL_GO    "udb-test-mutator-del-go"
 #define MUTATOR_DRP_GO    "udb-test-mutator-drp-go"
-#define MUTATOR_OPT_GO    "udb-test-mutator-opt-go"
 #define MUTATOR_END_GO    "udb-test-mutator-end-go"
 
 static Client *mutator_peer;
@@ -128,22 +127,6 @@ EVENT(udb_test_mutator_event)
 		mutator_state = 2;
 		unreal_log(ULOG_INFO, "udb-test-mutator", "UDB_TEST_MUTATOR", mutator_peer,
 		           "[UDB_TEST_MUTATOR] emitted authorized DRP", NULL);
-		return;
-	}
-	if (mutator_state == 0 && mutator_trigger_exists(MUTATOR_OPT_GO))
-	{
-		if (!IsServer(mutator_peer) || !MyConnect(mutator_peer))
-		{
-			mutator_state = -1;
-			unreal_log(ULOG_WARNING, "udb-test-mutator", "UDB_TEST_MUTATOR", NULL,
-			           "[UDB_TEST_MUTATOR] peer disappeared before mutation", NULL);
-			return;
-		}
-		sendto_one(mutator_peer, NULL, ":%s DB * OPT 0000000000000001 %lu N %lld", me.id, ++mutator_seq,
-		           (long long)TStime());
-		mutator_state = 2;
-		unreal_log(ULOG_INFO, "udb-test-mutator", "UDB_TEST_MUTATOR", mutator_peer,
-		           "[UDB_TEST_MUTATOR] emitted authorized OPT", NULL);
 		return;
 	}
 	if (mutator_state == 1 &&

@@ -137,7 +137,7 @@ En una ruta UDB, `::` es el separador de componentes, por lo que cada `:` de IPv
 
 La reconciliación compara los seis bloques mediante `INF`. Sólo los bloques divergentes se solicitan con `RES` y se reciben en un árbol privado con `BEGIN/PUT/END`. El `END` valida el checksum, persiste el snapshot y sólo después publica el nuevo árbol.
 
-Las mutaciones en vivo son `INS`, `DEL`, `DRP` y `OPT`; `EXP` es una solicitud dirigida de expiración follower-a-autoridad. Las mutaciones conservan el SID/epoch/secuencia del origen raíz mientras cada relay las valida y retransmite; las transferencias staged siguen siendo salto a salto y nunca se reenvían.
+Las mutaciones en vivo son `INS`, `DEL` y `DRP`; `EXP` es una solicitud dirigida de expiración follower-a-autoridad. Las mutaciones conservan el SID/epoch/secuencia del origen raíz mientras cada relay las valida y retransmite; las transferencias staged siguen siendo salto a salto y nunca se reenvían.
 
 Consulta [doc/udb_technical_es.md](doc/udb_technical_es.md) para la gramática completa y las invariantes de autoridad.
 

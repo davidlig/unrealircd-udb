@@ -704,9 +704,6 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, Client *direct_pee
 							 const char *epoch, uint64_t seq, const char *path, int is_for_me, int is_broadcast);
 static void udb_mutation_drp(UdbContext *ctx, Client *client, Client *direct_peer, const char *target,
 							 const char *epoch, uint64_t seq, char letter, int is_for_me, int is_broadcast);
-static void udb_mutation_opt(UdbContext *ctx, Client *client, Client *direct_peer, const char *target,
-							 const char *epoch, uint64_t seq, char letter, const char *modified_at, int is_for_me,
-							 int is_broadcast);
 static void udb_mutation_exp(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, const char *path,
 							 time_t expected_expires, int is_for_me, int is_broadcast);
 static int udb_mutation_expire_local(UdbContext *ctx, const char *path, time_t expected_expires);
@@ -7935,53 +7932,6 @@ static void udb_mutation_drp(UdbContext *ctx, Client *client, Client *direct_pee
 								 letter);
 }
 
-static void udb_mutation_opt(UdbContext *ctx, Client *client, Client *direct_peer, const char *target,
-							 const char *epoch, uint64_t seq, char letter, const char *modified_at, int is_for_me,
-							 int is_broadcast)
-{
-	if (is_for_me)
-	{
-		UdbBlock *block = udb_block_by_letter(ctx, letter);
-		if (!block)
-		{
-			udb_protocol_mutation_error(client, "OPT", UDB_ERR_NO_BLOCK, letter);
-			return;
-		}
-		if (block->session)
-		{
-			udb_protocol_mutation_error(client, "OPT", UDB_ERR_SYNC_ACTIVE, letter);
-			return;
-		}
-		if (!udb_is_propagator(ctx, direct_peer))
-		{
-			udb_protocol_mutation_error(client, "OPT", UDB_ERR_FORBIDDEN, letter);
-			return;
-		}
-
-		UdbSeqCheckResult seq_res = udb_mutation_check_sequence(ctx, client, direct_peer, epoch, seq);
-		if (seq_res == UDB_SEQ_DUPLICATE || seq_res == UDB_SEQ_STALE_EPOCH)
-			return;
-		if (seq_res == UDB_SEQ_GAP)
-			return;
-
-		if (!udb_file_save_block(ctx, block))
-		{
-			udb_mutation_trigger_gap_recovery(direct_peer);
-			udb_mutation_persist_error(client, "OPT", letter);
-			return;
-		}
-		ctx->last_applied_seq = seq;
-		if (!is_broadcast)
-			return;
-	}
-	if (modified_at)
-		udb_sendto_confirmed_servers(direct_peer, ":%s DB %s OPT %s %" PRIu64 " %c %s", client->id, target, epoch, seq,
-									 letter, modified_at);
-	else
-		udb_sendto_confirmed_servers(direct_peer, ":%s DB %s OPT %s %" PRIu64 " %c", client->id, target, epoch, seq,
-									 letter);
-}
-
 /* End of udb_mutation.c.inc */
 
 /* S2S protocol handler: DB command parsing, routing, and server sync */
@@ -8732,19 +8682,7 @@ CMD_FUNC(cmd_db)
 		break;
 
 	case 'O':
-		if (!strcasecmp(subcmd, "OPT"))
-		{
-			uint64_t seq = 0;
-			if ((parc != 6 && parc != 7) || !udb_hello_epoch_valid(parv[3]) ||
-				!udb_parse_uint64_strict(parv[4], &seq) || seq == 0 || !parv[5] || !*parv[5])
-			{
-				udb_protocol_mutation_error(client, subcmd, UDB_ERR_PARAMS, '0');
-				return;
-			}
-			udb_mutation_opt(ctx, client, direct_peer, target, parv[3], seq, *parv[5], parc == 7 ? parv[6] : NULL,
-							 is_for_me, is_broadcast);
-		}
-		else if (!strcasecmp(subcmd, "OCL"))
+		if (!strcasecmp(subcmd, "OCL"))
 		{
 			udb_ocl_handle(client, direct_peer, parc, parv, is_broadcast);
 		}

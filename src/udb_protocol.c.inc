@@ -744,19 +744,7 @@ CMD_FUNC(cmd_db)
 		break;
 
 	case 'O':
-		if (!strcasecmp(subcmd, "OPT"))
-		{
-			uint64_t seq = 0;
-			if ((parc != 6 && parc != 7) || !udb_hello_epoch_valid(parv[3]) ||
-				!udb_parse_uint64_strict(parv[4], &seq) || seq == 0 || !parv[5] || !*parv[5])
-			{
-				udb_protocol_mutation_error(client, subcmd, UDB_ERR_PARAMS, '0');
-				return;
-			}
-			udb_mutation_opt(ctx, client, direct_peer, target, parv[3], seq, *parv[5], parc == 7 ? parv[6] : NULL,
-							 is_for_me, is_broadcast);
-		}
-		else if (!strcasecmp(subcmd, "OCL"))
+		if (!strcasecmp(subcmd, "OCL"))
 		{
 			udb_ocl_handle(client, direct_peer, parc, parv, is_broadcast);
 		}

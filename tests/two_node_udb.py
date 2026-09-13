@@ -30,7 +30,6 @@ MUTATOR_DEL_TRIGGER = "udb-test-mutator-del-go"
 MUTATOR_DRP_TRIGGER = "udb-test-mutator-drp-go"
 RENAME_FAIL_SOURCE = pathlib.Path(__file__).resolve().parent / "udb_snapshot_rename_fail.c"
 RENAME_FAIL_MODULE = RENAME_FAIL_SOURCE.with_suffix(".so")
-MUTATOR_OPT_TRIGGER = "udb-test-mutator-opt-go"
 MUTATOR_END_TRIGGER = "udb-test-mutator-end-go"
 K_STAGED_RECORD = "G::*@udb-staged.test::reason staged-sync-k-effect"
 
@@ -334,13 +333,6 @@ def runtime_rename_failure_observed(a_log, b_log, b_db, baseline):
             "UDB_TEST_SNAPSHOT_RENAME_FAIL:" in log_text(b_log))
 
 
-def runtime_opt_rename_failure_observed(a_log, b_log, b_db, baseline):
-    return ("OPT" in udb_commands(b_log) and "ERR" in udb_commands(a_log) and
-            b_db.read_bytes() == baseline and not b_db.with_suffix(".db.tmp").exists() and
-            "UDB_TEST_SNAPSHOT_RENAME_FAIL:" in log_text(b_log) and
-            ("cmd=OPT err=3" in log_text(a_log) or "cmd=OPT err=6" in log_text(a_log)))
-
-
 def runtime_del_rename_failure_observed(a_log, b_log, b_db, baseline):
     return (ordered(udb_commands(b_log), ("INS", "DEL")) and "ERR" in udb_commands(a_log) and
             b_db.read_bytes() == baseline and db_contains(b_db, MUTATOR_RECORD) and
@@ -421,8 +413,6 @@ def main():
                         help="fail node A's post-rename .udb_state directory fsync and verify fail-closed recovery")
     parser.add_argument("--runtime-rename-failure", action="store_true",
                         help="fail node B's armed live INS snapshot rename and verify no local commit")
-    parser.add_argument("--runtime-opt-rename-failure", action="store_true",
-                        help="fail node B's armed live OPT snapshot rename and verify rollback")
     parser.add_argument("--runtime-del-rename-failure", action="store_true",
                         help="fail node B's armed live DEL snapshot rename and verify rollback")
     parser.add_argument("--runtime-drp-rename-failure", action="store_true",
@@ -448,8 +438,7 @@ def main():
         build_mutator()
         if (args.snapshot_rename_failure or args.snapshot_fsync_failure or args.snapshot_directory_fsync_failure or
                 args.state_directory_fsync_failure or args.snapshot_set_rename_failure or
-                args.runtime_rename_failure or args.runtime_opt_rename_failure or
-                args.runtime_del_rename_failure or args.runtime_drp_rename_failure):
+                args.runtime_rename_failure or args.runtime_del_rename_failure or args.runtime_drp_rename_failure):
             build_rename_fail_interposer()
         a, b = root / "node-a", root / "node-b"
         for node in (a, b):
@@ -514,11 +503,9 @@ def main():
                                                                   rename_failure=((args.snapshot_rename_failure or
                                                                                    args.snapshot_set_rename_failure) and node == b) or
                                                                                   ((args.runtime_rename_failure or
-                                                                                    args.runtime_opt_rename_failure or
                                                                                     args.runtime_del_rename_failure or
                                                                                     args.runtime_drp_rename_failure) and node == b),
                                                                   rename_failure_arm=(args.runtime_rename_failure or
-                                                                                      args.runtime_opt_rename_failure or
                                                                                       args.runtime_del_rename_failure or
                                                                                       args.runtime_drp_rename_failure) and node == b,
                                                                   fsync_failure=args.snapshot_fsync_failure and node == b,
@@ -651,13 +638,11 @@ def main():
             b_baseline = b_db.read_bytes()
             (b / "runtime-data" / "udb-snapshot-rename-fail-go").touch()
             (a / "runtime-data" / MUTATOR_DEL_TRIGGER).touch()
-        elif args.runtime_rename_failure or args.runtime_opt_rename_failure or args.runtime_drp_rename_failure:
+        elif args.runtime_rename_failure or args.runtime_drp_rename_failure:
             b_baseline = b_db.read_bytes()
             (b / "runtime-data" / "udb-snapshot-rename-fail-go").touch()
         if args.runtime_drp_rename_failure:
             (a / "runtime-data" / MUTATOR_DRP_TRIGGER).touch()
-        elif args.runtime_opt_rename_failure:
-            (a / "runtime-data" / MUTATOR_OPT_TRIGGER).touch()
         elif not args.runtime_del_rename_failure:
             (a / "runtime-data" / "udb-test-mutator-go").touch()
         deadline = time.monotonic() + args.timeout
@@ -670,16 +655,6 @@ def main():
                 print_diagnostics(logs, b_db)
                 return 1
             print("PASS: failed live INS snapshot rename left node B's active and durable N block unchanged")
-            return 0
-        if args.runtime_opt_rename_failure:
-            while time.monotonic() < deadline:
-                if runtime_opt_rename_failure_observed(logs[0], logs[1], b_db, b_baseline):
-                    break
-                time.sleep(0.25)
-            if not runtime_opt_rename_failure_observed(logs[0], logs[1], b_db, b_baseline):
-                print_diagnostics(logs, b_db)
-                return 1
-            print("PASS: failed live OPT snapshot rename left node B's durable N block unchanged and returned ERR")
             return 0
         if args.runtime_del_rename_failure:
             while time.monotonic() < deadline:

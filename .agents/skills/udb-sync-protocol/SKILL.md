@@ -23,7 +23,7 @@ Required properties:
 - bootstrap without explicit propagator policy does not mix initial snapshots from multiple peers;
 - failover/failback and authority selection are deterministic and select only eligible direct links;
 - snapshot frames remain hop-by-hop and are never broadcast/forwarded;
-- authorized live `INS`, `DEL`, `DRP`, `OPT` retain the root `(source SID, epoch, seq)` while relaying multihop, and every receiving node still enforces its own selected upstream authority;
+- authorized live `INS`, `DEL`, `DRP` retain the root `(source SID, epoch, seq)` while relaying multihop, and every receiving node still enforces its own selected upstream authority;
 - a stream mismatch is isolated as a candidate until all six blocks reconcile; it never advances active state directly;
 - `EXP` is validated and deduplicated hop by hop toward the selected upstream; only the root authority may allocate a sequence and emit the resulting `DEL`;
 - no stale disconnected `Client *` remains referenced;

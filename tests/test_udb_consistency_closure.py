@@ -46,7 +46,6 @@ def test_ready_loader_rejects_non_publishable_snapshots() -> None:
     [
         "--snapshot-rename-failure",
         "--runtime-rename-failure",
-        "--runtime-opt-rename-failure",
         "--runtime-del-rename-failure",
         "--runtime-drp-rename-failure",
         "--malformed-end-checksum",

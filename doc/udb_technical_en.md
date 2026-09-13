@@ -21,7 +21,7 @@ UDB does not implement an autonomous IRC registration service that creates accou
 5. `udb_effects.c.inc`: runtime effect application/removal.
 6. `udb_sync.c.inc`: HEL, authority, reconciliation, staged snapshots.
 7. `udb_operclasses.c.inc`: OCL inventories and OCLG global view.
-8. `udb_mutation.c.inc`: `INS`, `DEL`, `DRP`, `OPT`.
+8. `udb_mutation.c.inc`: `INS`, `DEL`, `DRP`, `EXP`.
 9. `udb_protocol.c.inc`: `DB` parsing and routing.
 10. `udb_nicks.c.inc`, `udb_channels.c.inc`, `udb_ips.c.inc`, `udb_lines.c.inc`: block-specific runtime behavior.
 11. `udb_query.c.inc`: `DBQ` and `UDB` diagnostics.
@@ -576,7 +576,7 @@ UDB operates under an explicit, deterministic authority model (**Policy A — Se
    - There is no ambiguous "newest timestamp wins" (LWW / Last-Write-Wins based on wall clock) or multi-master conflict resolution in UDB. Local timestamps are never evaluated for conflict resolution.
 
 3. **Informational role of `mtime` and wall-clock timestamps**:
-   - Filesystem modification times (`st_mtime`) and packet timestamp fields (`modified_at` in `INF` or `OPT`) are strictly diagnostic metadata intended for administrative visibility (e.g. operator `/DBQ <block>` queries).
+   - Filesystem modification times (`st_mtime`) and the `modified_at` field in `INF` are strictly diagnostic metadata intended for administrative visibility (e.g. operator `/DBQ <block>` queries).
    - `mtime` is never compared to resolve conflicting records, determine block ownership, or select which node's data survives.
    - Node clock skew, timezone differences, or artificial timestamp modifications (e.g. `touch`) have zero impact on synchronization, snapshot acceptance, or convergence.
 
@@ -682,7 +682,6 @@ Authorized mutations originated by the selected authoritative propagator are:
 INS <epoch> <seq> <Block::path> <value>
 DEL <epoch> <seq> <Block::path>
 DRP <epoch> <seq> <block>
-OPT <epoch> <seq> <block> [modified_at]
 EXP <path> <expected-expires>
 ```
 
@@ -695,7 +694,6 @@ Semantics:
 - `INS`: insert/replace after limits and schema validation.
 - `DEL`: delete a path; deleting a missing path is idempotent.
 - `DRP`: drop a complete block, first persisting the empty snapshot.
-- `OPT`: force block save/update and optionally relay `modified_at`.
 - `EXP`: point-to-point compare-and-delete request for an expired K line sent toward the selected direct authority (`DB <target> EXP <path> <expected-expires>`). A relay validates and deduplicates the request, then forwards it to its own selected upstream. Only the root authority deletes the profile, persists `udb_K.db`, allocates the next stream sequence, and broadcasts the transactional `DEL`; stale requests are ignored without error.
 
 ### 10.1 Monotonic sequence rules and gap recovery
@@ -926,7 +924,6 @@ ERR <subcmd> <code> <round/correlation> <block>
 INS <epoch> <seq> <Block::path> <value>
 DEL <epoch> <seq> <Block::path>
 DRP <epoch> <seq> <block>
-OPT <epoch> <seq> <block> [mtime]
 EXP <path> <expected-expires>
 
 MANIFEST REQ <round>

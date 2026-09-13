@@ -21,7 +21,7 @@ UDB no implementa un servicio de registro autónomo para crear cuentas o canales
 5. `udb_effects.c.inc`: aplicación y retirada de efectos en runtime.
 6. `udb_sync.c.inc`: HEL, autoridad, reconciliación y snapshots staged.
 7. `udb_operclasses.c.inc`: inventarios OCL y vista global OCLG.
-8. `udb_mutation.c.inc`: `INS`, `DEL`, `DRP` y `OPT`.
+8. `udb_mutation.c.inc`: `INS`, `DEL`, `DRP` y `EXP`.
 9. `udb_protocol.c.inc`: parser y encaminamiento del comando `DB`.
 10. `udb_nicks.c.inc`, `udb_channels.c.inc`, `udb_ips.c.inc`, `udb_lines.c.inc`: comportamiento específico por bloque.
 11. `udb_query.c.inc`: comandos de diagnóstico `DBQ` y `UDB`.
@@ -582,7 +582,7 @@ UDB opera bajo un modelo de autoridad explícito y determinista (**Política A �
    - En UDB no existe el concepto ambiguo de "gana el timestamp más reciente" (LWW / Last-Write-Wins basado en reloj de pared) ni resolución de conflictos multi-master. Los relojes locales jamás se consultan para dirimir conflictos.
 
 3. **Carácter informativo de `mtime` y timestamps de reloj**:
-   - Los tiempos de modificación del sistema de archivos (`st_mtime`) y los campos de timestamp en el protocolo (`modified_at` en `INF` u `OPT`) son metadatos puramente de diagnóstico para observabilidad del operador (por ejemplo, en consultas `/DBQ <bloque>`).
+   - Los tiempos de modificación del sistema de archivos (`st_mtime`) y el campo `modified_at` de `INF` son metadatos puramente de diagnóstico para observabilidad del operador (por ejemplo, en consultas `/DBQ <bloque>`).
    - `mtime` nunca se compara para dirimir registros en conflicto, determinar propiedad del bloque ni seleccionar qué datos prevalecen.
    - El desfase de reloj entre servidores, diferencias horarias o alteraciones de fecha en disco (e.g. `touch`) no alteran en modo alguno la sincronización, la aceptación de snapshots ni la convergencia.
 
@@ -688,7 +688,6 @@ Las mutaciones autorizadas originadas por el propagador autoritativo seleccionad
 INS <epoch> <seq> <Block::path> <value>
 DEL <epoch> <seq> <Block::path>
 DRP <epoch> <seq> <block>
-OPT <epoch> <seq> <block> [modified_at]
 EXP <path> <expected-expires>
 ```
 
@@ -701,7 +700,6 @@ Semántica:
 - `INS`: inserta o sustituye un valor después de validar límites y esquema.
 - `DEL`: elimina una ruta; borrar una ruta inexistente es idempotente.
 - `DRP`: vacía un bloque completo, persistiendo primero el snapshot vacío.
-- `OPT`: fuerza guardado/actualización del bloque y puede propagar `modified_at`.
 - `EXP`: solicitud compare-and-delete punto a punto de una línea K expirada enviada hacia la autoridad directa seleccionada (`DB <target> EXP <path> <expected-expires>`). Un relay valida y deduplica la solicitud y después la reenvía a su propio upstream seleccionado. Sólo la autoridad raíz elimina el perfil, persiste `udb_K.db`, asigna la siguiente secuencia del stream y difunde el `DEL` transaccional; las solicitudes obsoletas se ignoran de forma segura sin error.
 
 ### 10.1 Reglas de secuencia monotónica y autorreparación de gaps
@@ -932,7 +930,6 @@ ERR <subcmd> <code> <round/correlation> <block>
 INS <epoch> <seq> <Block::path> <value>
 DEL <epoch> <seq> <Block::path>
 DRP <epoch> <seq> <block>
-OPT <epoch> <seq> <block> [mtime]
 EXP <path> <expected-expires>
 
 MANIFEST REQ <round>

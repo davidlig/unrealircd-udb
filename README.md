@@ -137,7 +137,7 @@ In a UDB path, `::` is the component separator, so every IPv6 `:` is `%3A`; prin
 
 Reconciliation compares all six blocks with `INF`. Only divergent blocks are requested through `RES` and received into a private staged tree using `BEGIN/PUT/END`. END validates the checksum, persists the snapshot, and only then publishes the new tree.
 
-Live mutations are `INS`, `DEL`, `DRP`, and `OPT`; `EXP` is a directed follower-to-authority expiry request. Mutations retain the root origin SID/epoch/sequence while relays validate and forward them; staged snapshot transfers remain hop by hop and are never forwarded.
+Live mutations are `INS`, `DEL`, and `DRP`; `EXP` is a directed follower-to-authority expiry request. Mutations retain the root origin SID/epoch/sequence while relays validate and forward them; staged snapshot transfers remain hop by hop and are never forwarded.
 
 See [doc/udb_technical_en.md](doc/udb_technical_en.md) for the complete grammar and authority invariants.
 

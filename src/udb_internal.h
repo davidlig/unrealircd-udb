@@ -561,9 +561,6 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, Client *direct_pee
 							 const char *epoch, uint64_t seq, const char *path, int is_for_me, int is_broadcast);
 static void udb_mutation_drp(UdbContext *ctx, Client *client, Client *direct_peer, const char *target,
 							 const char *epoch, uint64_t seq, char letter, int is_for_me, int is_broadcast);
-static void udb_mutation_opt(UdbContext *ctx, Client *client, Client *direct_peer, const char *target,
-							 const char *epoch, uint64_t seq, char letter, const char *modified_at, int is_for_me,
-							 int is_broadcast);
 static void udb_mutation_exp(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, const char *path,
 							 time_t expected_expires, int is_for_me, int is_broadcast);
 static int udb_mutation_expire_local(UdbContext *ctx, const char *path, time_t expected_expires);
