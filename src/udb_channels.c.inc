@@ -118,7 +118,8 @@ static void udb_channel_do_mode(Channel *channel, MessageTag *mtags, const char 
 		safe_free(myparv[i]);
 
 	if (parameters && *parameters)
-		udb_send_to_debugs(NULL, "Mode change on %s: %s %s", channel_name, modes, parameters);
+		udb_send_to_debugs(NULL, "Mode change on %s: %s %s", channel_name, modes,
+						   strchr(modes, 'k') ? "<redacted>" : parameters);
 	else
 		udb_send_to_debugs(NULL, "Mode change on %s: %s", channel_name, modes);
 }

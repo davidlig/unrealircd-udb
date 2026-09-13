@@ -215,6 +215,15 @@ typedef struct UdbPasswordFailure
 	time_t since;
 } UdbPasswordFailure;
 
+typedef struct UdbLineExpiryPending
+{
+	char type;
+	char *pattern;
+	time_t expires;
+	int sent;
+	struct UdbLineExpiryPending *next;
+} UdbLineExpiryPending;
+
 /* Operclass registry (OCL): one inventory snapshot per origin server plus an
  * optional staging area for an in-flight BEGIN/ITEM/END transaction. */
 typedef struct UdbOclEntry
@@ -298,8 +307,12 @@ typedef struct UdbContext
 	int startup_loading;
 	uint64_t current_seq;
 	uint64_t last_applied_seq;
+	char authority_sid[IDLEN + 1];
 	char authority_epoch[UDB_OCL_EPOCH_LEN + 1];
 	int authority_epoch_known;
+	char candidate_authority_sid[IDLEN + 1];
+	char candidate_authority_epoch[UDB_OCL_EPOCH_LEN + 1];
+	int candidate_authority_epoch_known;
 } UdbContext;
 
 static UdbContext *udb_ctx = NULL;
@@ -363,6 +376,7 @@ typedef struct UdbReconcileState
 	time_t deadline;
 	time_t absolute_deadline;
 	uint64_t watermark_seq;
+	int watermark_known;
 } UdbReconcileState;
 
 static UdbReconcileState udb_reconcile = {0};
@@ -378,6 +392,8 @@ typedef struct UdbAntiEntropyState
 	time_t next_check_at;
 	time_t deadline;
 	unsigned int fail_count;
+	uint64_t watermark_seq;
+	int watermark_known;
 } UdbAntiEntropyState;
 
 static UdbAntiEntropyState udb_anti_entropy = {0};
@@ -428,6 +444,7 @@ static int udb_path_decode_component(const char *encoded, char *buf, size_t bufs
 static int udb_path_append(char *dst, size_t dst_size, size_t *used, const char *component);
 static int udb_path_append_component(char *pathbuf, size_t bufsz, const char *raw_component);
 static int udb_strtoull_strict(const char *s, unsigned long long *out);
+static int udb_parse_uint64_strict(const char *s, uint64_t *out);
 static int udb_strtoul_strict(const char *s, unsigned long *out);
 static int udb_parse_uint_strict(const char *s, unsigned int *out, unsigned int min_val, unsigned int max_val);
 static int udb_parse_ulong_strict(const char *s, unsigned long *out, unsigned long min_val, unsigned long max_val);
@@ -437,6 +454,7 @@ static int udb_parse_time_t(const char *s, time_t *out);
 static int udb_time_add(time_t base, unsigned long duration, time_t *result);
 static int udb_timestamp_parse(const char *s, time_t *out);
 static int udb_digest_parse(const char *input, char out_hex[UDB_SHA256_HEX_LEN + 1]);
+static UdbLineExpiryPending *udb_line_expiry_pending_add(char type, const char *pattern, time_t expires);
 static UdbRecord *udb_record_find(UdbContext *ctx, const char *key, UdbRecord *parent);
 static UdbRecord *udb_record_create(UdbRecord *parent);
 static UdbRecord *udb_record_insert(UdbContext *ctx, UdbBlock *block, UdbRecord *parent, const char *key,

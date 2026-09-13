@@ -1314,12 +1314,31 @@ def test_q14_malformed_protocol_rejection():
         peer.send(f"DB 001 INF 99 N {bad_hex} 1 0 1")
         peer.wait_for(lambda l: " DB " in l and " ERR INF 2 99 N" in l, "ERR INF 2 for invalid hex digest", timeout=3)
 
+        # Case 5: Uppercase digests are non-canonical on the wire.
+        peer.clear()
+        peer.send(f"DB 001 INF 99 N {'A' * 64} 1 0 1")
+        peer.wait_for(lambda l: " DB " in l and " ERR INF 2 99 N" in l,
+                      "ERR INF 2 for non-canonical uppercase digest", timeout=3)
+
+        # Case 6: Optional watermarks must parse strictly when present.
+        peer.clear()
+        peer.send(f"DB 001 INF 99 N {EMPTY_SHA256} 0 0 notanumber")
+        peer.wait_for(lambda l: " DB " in l and " ERR INF 2 99 N" in l,
+                      "ERR INF 2 for malformed watermark", timeout=3)
+
+        # Case 7: Mutation frames reject trailing fields instead of silently
+        # accepting an ambiguous spelling of the same operation.
+        peer.clear()
+        peer.send(f"DB * INS {peer.epoch} 1 N::extra::vhost valid.test trailing")
+        peer.wait_for(lambda l: " DB " in l and " ERR INS 2 " in l,
+                      "ERR INS 2 for trailing mutation parameter", timeout=3)
+
         # State remains clean and uncorrupted
         f_entries, f_sha = read_block_state(data_dir, 'N')
         assert len(f_entries) == 0
         assert f_sha == EMPTY_SHA256
         assert "UDB synchronization: OK" in client.udb_status()
-        print("PASS: Q14: Malformed sequence and digest fail-closed rejected with ERR PARAMS")
+        print("PASS: Q14: Malformed sequences, digests, watermarks, and arities fail closed with ERR PARAMS")
     finally:
         if client:
             client.close()

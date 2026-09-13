@@ -152,6 +152,7 @@ jobs:
           python3 tests/test_block_n_ownership_model.py
           python3 tests/test_block_k_expiration.py
           python3 tests/test_block_k_schema.py
+          python3 tests/test_security_hardening.py
           python3 tests/test_bundle_determinism.py
 
       - name: Run Integration & Multi-Hop Test Suites
@@ -163,6 +164,9 @@ jobs:
           python3 tests/test_propagator_failover.py
           python3 tests/test_propagator_non_adjacent.py
           python3 tests/test_propagator_runtime_failover.py
+          python3 tests/test_anti_entropy.py
+          python3 tests/test_mutation_gap_recovery.py
+          python3 tests/test_protocol_fault_qualification.py
           python3 tests/runtime_clone_limit.py
           python3 tests/runtime_channel_modes_ins.py
           python3 tests/runtime_channel_nick.py

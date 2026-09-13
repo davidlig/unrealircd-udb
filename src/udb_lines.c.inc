@@ -9,15 +9,6 @@
  * License: GNU General Public License v2+
  */
 
-typedef struct UdbLineExpiryPending
-{
-	char type;
-	char *pattern;
-	time_t expires;
-	int sent;
-	struct UdbLineExpiryPending *next;
-} UdbLineExpiryPending;
-
 static UdbLineExpiryPending *udb_line_expiry_pending = NULL;
 
 static UdbRecord *udb_line_owner(UdbRecord *rec)

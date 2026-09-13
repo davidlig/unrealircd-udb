@@ -191,20 +191,29 @@ static void udb_mutation_trigger_gap_recovery(Client *direct_peer)
 		udb_reconcile.next_retry_at = time(NULL) + UDB_RECONCILE_RETRY_BASE;
 }
 
-static UdbSeqCheckResult udb_mutation_check_sequence(UdbContext *ctx, Client *direct_peer, const char *epoch,
-													 uint64_t seq)
+static UdbSeqCheckResult udb_mutation_check_sequence(UdbContext *ctx, Client *source, Client *direct_peer,
+													 const char *epoch, uint64_t seq)
 {
+	const char *source_sid = source && IsServer(source) ? source->id : NULL;
+
+	if (!source_sid || !*source_sid)
+		return UDB_SEQ_STALE_EPOCH;
 	if (!ctx->authority_epoch_known)
 	{
+		strlcpy(ctx->authority_sid, source_sid, sizeof(ctx->authority_sid));
 		strlcpy(ctx->authority_epoch, epoch, sizeof(ctx->authority_epoch));
 		ctx->authority_epoch_known = 1;
 	}
-	else if (strcmp(epoch, ctx->authority_epoch) != 0)
+	else if (strcmp(source_sid, ctx->authority_sid) != 0 || strcmp(epoch, ctx->authority_epoch) != 0)
 	{
 		udb_log(ULOG_WARNING, "UDB_MUTATION_EPOCH_MISMATCH", direct_peer,
-				"Mutation epoch mismatch from $peer: got $epoch, expected $expected_epoch",
+				"Mutation stream mismatch from $peer: got $source/$epoch, expected $expected_source/$expected_epoch",
 				log_data_string("peer", direct_peer ? direct_peer->name : "none"), log_data_string("epoch", epoch),
+				log_data_string("source", source_sid), log_data_string("expected_source", ctx->authority_sid),
 				log_data_string("expected_epoch", ctx->authority_epoch));
+		strlcpy(ctx->candidate_authority_sid, source_sid, sizeof(ctx->candidate_authority_sid));
+		strlcpy(ctx->candidate_authority_epoch, epoch, sizeof(ctx->candidate_authority_epoch));
+		ctx->candidate_authority_epoch_known = 1;
 		udb_mutation_trigger_gap_recovery(direct_peer);
 		return UDB_SEQ_STALE_EPOCH;
 	}
@@ -247,7 +256,7 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 			return;
 		}
 
-		UdbSeqCheckResult seq_res = udb_mutation_check_sequence(ctx, direct_peer, epoch, seq);
+		UdbSeqCheckResult seq_res = udb_mutation_check_sequence(ctx, client, direct_peer, epoch, seq);
 		if (seq_res == UDB_SEQ_DUPLICATE || seq_res == UDB_SEQ_STALE_EPOCH)
 			return;
 		if (seq_res == UDB_SEQ_GAP)
@@ -473,7 +482,7 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, Client *direct_pee
 			return;
 		}
 
-		UdbSeqCheckResult seq_res = udb_mutation_check_sequence(ctx, direct_peer, epoch, seq);
+		UdbSeqCheckResult seq_res = udb_mutation_check_sequence(ctx, client, direct_peer, epoch, seq);
 		if (seq_res == UDB_SEQ_DUPLICATE || seq_res == UDB_SEQ_STALE_EPOCH)
 			return;
 		if (seq_res == UDB_SEQ_GAP)
@@ -554,12 +563,17 @@ static int udb_mutation_expire_local(UdbContext *ctx, const char *path, time_t e
 {
 	UdbBlock *block = udb_mutation_path_block(ctx, path);
 	UdbRecord *line;
+	uint64_t high;
 
 	if (!block || !udb_mutation_k_expiry_matches(block, path, expected_expires, &line))
 		return 0;
+	high = ctx->current_seq > ctx->last_applied_seq ? ctx->current_seq : ctx->last_applied_seq;
+	if (high == UINT64_MAX)
+		return 0;
 	if (udb_mutation_delete_local(ctx, block, line, NULL, "EXP snapshot") != 1)
 		return 0;
-	uint64_t seq = ++ctx->current_seq;
+	uint64_t seq = high + 1;
+	ctx->current_seq = seq;
 	const char *epoch = udb_ocl_epoch_value();
 	ctx->last_applied_seq = seq;
 	udb_sendto_confirmed_servers(NULL, ":%s DB * DEL %s %" PRIu64 " %s", me.id, epoch, seq, path);
@@ -571,6 +585,9 @@ static void udb_mutation_exp(UdbContext *ctx, Client *client, Client *direct_pee
 {
 	UdbBlock *block = udb_mutation_path_block(ctx, path);
 	UdbRecord *line;
+	UdbPropagatorSelection selected;
+	int has_selected;
+	uint64_t high;
 
 	(void)target;
 	if (!block || !path || expected_expires <= 0 || is_broadcast || !is_for_me || client != direct_peer ||
@@ -579,7 +596,7 @@ static void udb_mutation_exp(UdbContext *ctx, Client *client, Client *direct_pee
 		udb_protocol_mutation_error(client, "EXP", UDB_ERR_FORBIDDEN, 'K');
 		return;
 	}
-	if (block->session || (block->syncing_from && block->syncing_from != direct_peer))
+	if (block->session || block->syncing_from)
 	{
 		udb_protocol_mutation_error(client, "EXP", UDB_ERR_SYNC_ACTIVE, 'K');
 		return;
@@ -590,12 +607,30 @@ static void udb_mutation_exp(UdbContext *ctx, Client *client, Client *direct_pee
 				log_data_string("path", path), NULL);
 		return;
 	}
+	has_selected = udb_select_propagator(ctx, 1, &selected);
+	if (udb_propagator_policy_present(ctx) && (!has_selected || !selected.is_local))
+	{
+		UdbLineExpiryPending *pending = udb_line_expiry_pending_add(line->parent->key[0], line->key, expected_expires);
+
+		if (has_selected && selected.peer && pending && !pending->sent &&
+			udb_send_db_to_one(selected.peer, ":%s DB %s EXP %s %lu", me.id, selected.peer->id, path,
+							   (unsigned long)expected_expires))
+			pending->sent = 1;
+		return;
+	}
+	high = ctx->current_seq > ctx->last_applied_seq ? ctx->current_seq : ctx->last_applied_seq;
+	if (high == UINT64_MAX)
+	{
+		udb_protocol_mutation_error(client, "EXP", UDB_ERR_FATAL, 'K');
+		return;
+	}
 	if (udb_mutation_delete_local(ctx, block, line, direct_peer, "EXP snapshot") != 1)
 	{
 		udb_protocol_mutation_error(client, "EXP", UDB_ERR_FATAL, 'K');
 		return;
 	}
-	uint64_t seq = ++ctx->current_seq;
+	uint64_t seq = high + 1;
+	ctx->current_seq = seq;
 	const char *epoch = udb_ocl_epoch_value();
 	ctx->last_applied_seq = seq;
 	udb_sendto_confirmed_servers(NULL, ":%s DB * DEL %s %" PRIu64 " %s", me.id, epoch, seq, path);
@@ -625,7 +660,7 @@ static void udb_mutation_drp(UdbContext *ctx, Client *client, Client *direct_pee
 			return;
 		}
 
-		UdbSeqCheckResult seq_res = udb_mutation_check_sequence(ctx, direct_peer, epoch, seq);
+		UdbSeqCheckResult seq_res = udb_mutation_check_sequence(ctx, client, direct_peer, epoch, seq);
 		if (seq_res == UDB_SEQ_DUPLICATE || seq_res == UDB_SEQ_STALE_EPOCH)
 			return;
 		if (seq_res == UDB_SEQ_GAP)
@@ -702,7 +737,7 @@ static void udb_mutation_opt(UdbContext *ctx, Client *client, Client *direct_pee
 			return;
 		}
 
-		UdbSeqCheckResult seq_res = udb_mutation_check_sequence(ctx, direct_peer, epoch, seq);
+		UdbSeqCheckResult seq_res = udb_mutation_check_sequence(ctx, client, direct_peer, epoch, seq);
 		if (seq_res == UDB_SEQ_DUPLICATE || seq_res == UDB_SEQ_STALE_EPOCH)
 			return;
 		if (seq_res == UDB_SEQ_GAP)

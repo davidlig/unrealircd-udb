@@ -47,6 +47,17 @@ static int udb_strtoul_strict(const char *s, unsigned long *out)
 	return 1;
 }
 
+static int udb_parse_uint64_strict(const char *s, uint64_t *out)
+{
+	unsigned long long val;
+
+	if (!udb_strtoull_strict(s, &val) || val > UINT64_MAX)
+		return 0;
+	if (out)
+		*out = (uint64_t)val;
+	return 1;
+}
+
 static int udb_parse_uint_strict(const char *s, unsigned int *out, unsigned int min_val, unsigned int max_val)
 {
 	unsigned long long val;
@@ -140,10 +151,10 @@ static int udb_digest_parse(const char *input, char out_hex[UDB_SHA256_HEX_LEN +
 	for (int i = 0; i < UDB_SHA256_HEX_LEN; i++)
 	{
 		unsigned char c = (unsigned char)input[i];
-		if (!isxdigit(c))
+		if (!isdigit(c) && (c < 'a' || c > 'f'))
 			return 0;
 		if (out_hex)
-			out_hex[i] = (char)tolower(c);
+			out_hex[i] = (char)c;
 	}
 	if (out_hex)
 		out_hex[UDB_SHA256_HEX_LEN] = '\0';

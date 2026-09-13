@@ -359,8 +359,9 @@ def runtime_drp_rename_failure_observed(a_log, b_log, b_db, baseline):
 
 def malformed_end_checksums_rejected(a_log, b_log, b_db, baseline):
     return (udb_commands(b_log).count("END") >= 3 and
-            (log_text(a_log).count("cmd=END err=3") >= 3 or log_text(a_log).count("cmd=END err=6") >= 3) and
-            log_text(b_log).count("digest validation failure") >= 3 and
+            (log_text(a_log).count("cmd=END err=2") >= 3 or
+             log_text(a_log).count("cmd=END err=3") >= 3 or
+             log_text(a_log).count("cmd=END err=6") >= 3) and
             b_db.read_bytes() == baseline and not db_contains(b_db, "attack"))
 
 

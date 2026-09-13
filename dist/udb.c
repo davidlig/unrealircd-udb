@@ -358,6 +358,15 @@ typedef struct UdbPasswordFailure
 	time_t since;
 } UdbPasswordFailure;
 
+typedef struct UdbLineExpiryPending
+{
+	char type;
+	char *pattern;
+	time_t expires;
+	int sent;
+	struct UdbLineExpiryPending *next;
+} UdbLineExpiryPending;
+
 /* Operclass registry (OCL): one inventory snapshot per origin server plus an
  * optional staging area for an in-flight BEGIN/ITEM/END transaction. */
 typedef struct UdbOclEntry
@@ -441,8 +450,12 @@ typedef struct UdbContext
 	int startup_loading;
 	uint64_t current_seq;
 	uint64_t last_applied_seq;
+	char authority_sid[IDLEN + 1];
 	char authority_epoch[UDB_OCL_EPOCH_LEN + 1];
 	int authority_epoch_known;
+	char candidate_authority_sid[IDLEN + 1];
+	char candidate_authority_epoch[UDB_OCL_EPOCH_LEN + 1];
+	int candidate_authority_epoch_known;
 } UdbContext;
 
 static UdbContext *udb_ctx = NULL;
@@ -506,6 +519,7 @@ typedef struct UdbReconcileState
 	time_t deadline;
 	time_t absolute_deadline;
 	uint64_t watermark_seq;
+	int watermark_known;
 } UdbReconcileState;
 
 static UdbReconcileState udb_reconcile = {0};
@@ -521,6 +535,8 @@ typedef struct UdbAntiEntropyState
 	time_t next_check_at;
 	time_t deadline;
 	unsigned int fail_count;
+	uint64_t watermark_seq;
+	int watermark_known;
 } UdbAntiEntropyState;
 
 static UdbAntiEntropyState udb_anti_entropy = {0};
@@ -571,6 +587,7 @@ static int udb_path_decode_component(const char *encoded, char *buf, size_t bufs
 static int udb_path_append(char *dst, size_t dst_size, size_t *used, const char *component);
 static int udb_path_append_component(char *pathbuf, size_t bufsz, const char *raw_component);
 static int udb_strtoull_strict(const char *s, unsigned long long *out);
+static int udb_parse_uint64_strict(const char *s, uint64_t *out);
 static int udb_strtoul_strict(const char *s, unsigned long *out);
 static int udb_parse_uint_strict(const char *s, unsigned int *out, unsigned int min_val, unsigned int max_val);
 static int udb_parse_ulong_strict(const char *s, unsigned long *out, unsigned long min_val, unsigned long max_val);
@@ -580,6 +597,7 @@ static int udb_parse_time_t(const char *s, time_t *out);
 static int udb_time_add(time_t base, unsigned long duration, time_t *result);
 static int udb_timestamp_parse(const char *s, time_t *out);
 static int udb_digest_parse(const char *input, char out_hex[UDB_SHA256_HEX_LEN + 1]);
+static UdbLineExpiryPending *udb_line_expiry_pending_add(char type, const char *pattern, time_t expires);
 static UdbRecord *udb_record_find(UdbContext *ctx, const char *key, UdbRecord *parent);
 static UdbRecord *udb_record_create(UdbRecord *parent);
 static UdbRecord *udb_record_insert(UdbContext *ctx, UdbBlock *block, UdbRecord *parent, const char *key,
@@ -2305,6 +2323,17 @@ static int udb_strtoul_strict(const char *s, unsigned long *out)
 	return 1;
 }
 
+static int udb_parse_uint64_strict(const char *s, uint64_t *out)
+{
+	unsigned long long val;
+
+	if (!udb_strtoull_strict(s, &val) || val > UINT64_MAX)
+		return 0;
+	if (out)
+		*out = (uint64_t)val;
+	return 1;
+}
+
 static int udb_parse_uint_strict(const char *s, unsigned int *out, unsigned int min_val, unsigned int max_val)
 {
 	unsigned long long val;
@@ -2398,10 +2427,10 @@ static int udb_digest_parse(const char *input, char out_hex[UDB_SHA256_HEX_LEN +
 	for (int i = 0; i < UDB_SHA256_HEX_LEN; i++)
 	{
 		unsigned char c = (unsigned char)input[i];
-		if (!isxdigit(c))
+		if (!isdigit(c) && (c < 'a' || c > 'f'))
 			return 0;
 		if (out_hex)
-			out_hex[i] = (char)tolower(c);
+			out_hex[i] = (char)c;
 	}
 	if (out_hex)
 		out_hex[UDB_SHA256_HEX_LEN] = '\0';
@@ -4647,6 +4676,10 @@ static int udb_hello_peer_advertisement(Client *server, const char *propagator, 
 		{
 			udb_ctx->last_applied_seq = 0;
 			udb_ctx->authority_epoch_known = 0;
+			udb_ctx->authority_sid[0] = '\0';
+			udb_ctx->candidate_authority_epoch_known = 0;
+			udb_ctx->candidate_authority_sid[0] = '\0';
+			udb_ctx->candidate_authority_epoch[0] = '\0';
 			udb_sync_status = UDB_SYNC_DEGRADED;
 			if (!udb_degraded_since)
 				udb_degraded_since = time(NULL);
@@ -4777,6 +4810,8 @@ static void udb_reconcile_reset(void)
 	udb_reconcile.last_activity = 0;
 	udb_reconcile.deadline = 0;
 	udb_reconcile.absolute_deadline = 0;
+	udb_reconcile.watermark_seq = 0;
+	udb_reconcile.watermark_known = 0;
 }
 
 static void udb_reconcile_abort(UdbContext *ctx, const char *reason, int schedule_retry)
@@ -4807,6 +4842,22 @@ static void udb_reconcile_abort(UdbContext *ctx, const char *reason, int schedul
 		udb_reconcile.next_retry_at = 0;
 	}
 	udb_reconcile_reset();
+}
+
+static int udb_reconcile_accept_watermark(Client *peer, unsigned long round_id, uint64_t watermark_seq)
+{
+	if (!udb_reconcile.active || udb_reconcile.authority_peer != peer || udb_reconcile.round_id != round_id)
+		return 0;
+	if (!udb_reconcile.watermark_known)
+	{
+		udb_reconcile.watermark_seq = watermark_seq;
+		udb_reconcile.watermark_known = 1;
+		return 1;
+	}
+	if (udb_reconcile.watermark_seq == watermark_seq)
+		return 1;
+	udb_reconcile_abort(udb_ctx, "inconsistent reconciliation watermark", 1);
+	return 0;
 }
 
 /* One recovery boundary for every operation whose persistence outcome is not
@@ -4860,6 +4911,8 @@ static void udb_reconcile_begin(Client *authority, unsigned long round_id)
 	udb_reconcile.absolute_deadline =
 		udb_reconcile.started_at +
 		((udb_cfg && udb_cfg->sync_absolute_timeout > 0) ? udb_cfg->sync_absolute_timeout : UDB_SYNC_ABSOLUTE_TIMEOUT);
+	udb_reconcile.watermark_seq = 0;
+	udb_reconcile.watermark_known = 0;
 	udb_log(ULOG_INFO, "UDB_RECONCILE_ROUND_START", authority,
 			"Started reconciliation round $round with authority peer $peer",
 			log_data_integer("round", (int)udb_reconcile.round_id), log_data_client("peer", authority));
@@ -4985,8 +5038,18 @@ static int udb_reconcile_check(UdbContext *ctx)
 	udb_degraded_since = 0;
 	udb_bootstrap_peer = NULL;
 
-	if (udb_reconcile.watermark_seq > ctx->last_applied_seq)
-		ctx->last_applied_seq = udb_reconcile.watermark_seq;
+	/* The completed six-block round owns its watermark. A replacement stream
+	 * may legitimately restart below the previous stream's high-water mark. */
+	ctx->last_applied_seq = udb_reconcile.watermark_seq;
+	if (ctx->candidate_authority_epoch_known)
+	{
+		strlcpy(ctx->authority_sid, ctx->candidate_authority_sid, sizeof(ctx->authority_sid));
+		strlcpy(ctx->authority_epoch, ctx->candidate_authority_epoch, sizeof(ctx->authority_epoch));
+		ctx->authority_epoch_known = 1;
+		ctx->candidate_authority_epoch_known = 0;
+		ctx->candidate_authority_sid[0] = '\0';
+		ctx->candidate_authority_epoch[0] = '\0';
+	}
 
 	udb_reconcile_reset();
 	udb_reconcile.retry_count = 0;
@@ -5251,9 +5314,13 @@ static int udb_sync_begin(UdbBlock *block, Client *peer, unsigned long round_id,
 	session->received_puts = 0;
 	session->received_bytes = 0;
 	session->record_count = 0;
+	if (!udb_reconcile_accept_watermark(peer, round_id, watermark_seq))
+	{
+		udb_record_free_tree(session->tree);
+		safe_free(session);
+		return UDB_ERR_PARAMS;
+	}
 	session->watermark_seq = watermark_seq;
-	if (watermark_seq > udb_reconcile.watermark_seq)
-		udb_reconcile.watermark_seq = watermark_seq;
 	block->session = session;
 	block->syncing_from = peer;
 	udb_block_clear_pending(block);
@@ -5356,8 +5423,14 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, unsigned
 		}
 		return UDB_ERR_NO_SYNC;
 	}
-	if (watermark_seq > udb_reconcile.watermark_seq)
-		udb_reconcile.watermark_seq = watermark_seq;
+	if (watermark_seq != session->watermark_seq)
+	{
+		udb_sync_abort(block, "inconsistent staged sync watermark");
+		udb_reconcile_abort(udb_ctx, "inconsistent staged sync watermark", 1);
+		return UDB_ERR_PARAMS;
+	}
+	if (!udb_reconcile_accept_watermark(peer, round_id, watermark_seq))
+		return UDB_ERR_PARAMS;
 	time_t now = time(NULL);
 	if (now >= session->deadline)
 	{
@@ -5587,6 +5660,8 @@ static void udb_anti_entropy_trigger(time_t now, Client *authority_peer)
 	udb_anti_entropy.pending = 1;
 	udb_anti_entropy.acked_blocks = 0;
 	udb_anti_entropy.divergent_blocks = 0;
+	udb_anti_entropy.watermark_seq = 0;
+	udb_anti_entropy.watermark_known = 0;
 	udb_anti_entropy.last_check = now;
 	udb_anti_entropy.deadline = now + UDB_ANTI_ENTROPY_TIMEOUT;
 
@@ -5650,6 +5725,19 @@ static void udb_anti_entropy_record_ack(Client *peer, unsigned long round_id, ch
 
 	if (udb_anti_entropy.acked_blocks & mask)
 		return;
+	if (!udb_anti_entropy.watermark_known)
+	{
+		udb_anti_entropy.watermark_seq = watermark_seq;
+		udb_anti_entropy.watermark_known = 1;
+	}
+	else if (udb_anti_entropy.watermark_seq != watermark_seq)
+	{
+		udb_anti_entropy.pending = 0;
+		udb_anti_entropy.fail_count++;
+		udb_sync_mark_degraded(peer, "inconsistent anti-entropy watermark");
+		udb_sync_hello_refresh_all();
+		return;
+	}
 
 	udb_anti_entropy.acked_blocks |= mask;
 
@@ -5676,8 +5764,8 @@ static void udb_anti_entropy_record_ack(Client *peer, unsigned long round_id, ch
 			udb_reconcile.divergent_blocks = udb_anti_entropy.divergent_blocks;
 			udb_reconcile.compared_blocks = UDB_ALL_BLOCKS_MASK;
 			udb_reconcile.completed_blocks = UDB_ALL_BLOCKS_MASK & ~udb_anti_entropy.divergent_blocks;
-			if (watermark_seq > udb_reconcile.watermark_seq)
-				udb_reconcile.watermark_seq = watermark_seq;
+			udb_reconcile.watermark_seq = udb_anti_entropy.watermark_seq;
+			udb_reconcile.watermark_known = udb_anti_entropy.watermark_known;
 
 			UdbBlock *b;
 			for (b = udb_ctx->block_list; b; b = b->next)
@@ -7324,20 +7412,29 @@ static void udb_mutation_trigger_gap_recovery(Client *direct_peer)
 		udb_reconcile.next_retry_at = time(NULL) + UDB_RECONCILE_RETRY_BASE;
 }
 
-static UdbSeqCheckResult udb_mutation_check_sequence(UdbContext *ctx, Client *direct_peer, const char *epoch,
-													 uint64_t seq)
+static UdbSeqCheckResult udb_mutation_check_sequence(UdbContext *ctx, Client *source, Client *direct_peer,
+													 const char *epoch, uint64_t seq)
 {
+	const char *source_sid = source && IsServer(source) ? source->id : NULL;
+
+	if (!source_sid || !*source_sid)
+		return UDB_SEQ_STALE_EPOCH;
 	if (!ctx->authority_epoch_known)
 	{
+		strlcpy(ctx->authority_sid, source_sid, sizeof(ctx->authority_sid));
 		strlcpy(ctx->authority_epoch, epoch, sizeof(ctx->authority_epoch));
 		ctx->authority_epoch_known = 1;
 	}
-	else if (strcmp(epoch, ctx->authority_epoch) != 0)
+	else if (strcmp(source_sid, ctx->authority_sid) != 0 || strcmp(epoch, ctx->authority_epoch) != 0)
 	{
 		udb_log(ULOG_WARNING, "UDB_MUTATION_EPOCH_MISMATCH", direct_peer,
-				"Mutation epoch mismatch from $peer: got $epoch, expected $expected_epoch",
+				"Mutation stream mismatch from $peer: got $source/$epoch, expected $expected_source/$expected_epoch",
 				log_data_string("peer", direct_peer ? direct_peer->name : "none"), log_data_string("epoch", epoch),
+				log_data_string("source", source_sid), log_data_string("expected_source", ctx->authority_sid),
 				log_data_string("expected_epoch", ctx->authority_epoch));
+		strlcpy(ctx->candidate_authority_sid, source_sid, sizeof(ctx->candidate_authority_sid));
+		strlcpy(ctx->candidate_authority_epoch, epoch, sizeof(ctx->candidate_authority_epoch));
+		ctx->candidate_authority_epoch_known = 1;
 		udb_mutation_trigger_gap_recovery(direct_peer);
 		return UDB_SEQ_STALE_EPOCH;
 	}
@@ -7380,7 +7477,7 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 			return;
 		}
 
-		UdbSeqCheckResult seq_res = udb_mutation_check_sequence(ctx, direct_peer, epoch, seq);
+		UdbSeqCheckResult seq_res = udb_mutation_check_sequence(ctx, client, direct_peer, epoch, seq);
 		if (seq_res == UDB_SEQ_DUPLICATE || seq_res == UDB_SEQ_STALE_EPOCH)
 			return;
 		if (seq_res == UDB_SEQ_GAP)
@@ -7606,7 +7703,7 @@ static void udb_mutation_del(UdbContext *ctx, Client *client, Client *direct_pee
 			return;
 		}
 
-		UdbSeqCheckResult seq_res = udb_mutation_check_sequence(ctx, direct_peer, epoch, seq);
+		UdbSeqCheckResult seq_res = udb_mutation_check_sequence(ctx, client, direct_peer, epoch, seq);
 		if (seq_res == UDB_SEQ_DUPLICATE || seq_res == UDB_SEQ_STALE_EPOCH)
 			return;
 		if (seq_res == UDB_SEQ_GAP)
@@ -7687,12 +7784,17 @@ static int udb_mutation_expire_local(UdbContext *ctx, const char *path, time_t e
 {
 	UdbBlock *block = udb_mutation_path_block(ctx, path);
 	UdbRecord *line;
+	uint64_t high;
 
 	if (!block || !udb_mutation_k_expiry_matches(block, path, expected_expires, &line))
 		return 0;
+	high = ctx->current_seq > ctx->last_applied_seq ? ctx->current_seq : ctx->last_applied_seq;
+	if (high == UINT64_MAX)
+		return 0;
 	if (udb_mutation_delete_local(ctx, block, line, NULL, "EXP snapshot") != 1)
 		return 0;
-	uint64_t seq = ++ctx->current_seq;
+	uint64_t seq = high + 1;
+	ctx->current_seq = seq;
 	const char *epoch = udb_ocl_epoch_value();
 	ctx->last_applied_seq = seq;
 	udb_sendto_confirmed_servers(NULL, ":%s DB * DEL %s %" PRIu64 " %s", me.id, epoch, seq, path);
@@ -7704,6 +7806,9 @@ static void udb_mutation_exp(UdbContext *ctx, Client *client, Client *direct_pee
 {
 	UdbBlock *block = udb_mutation_path_block(ctx, path);
 	UdbRecord *line;
+	UdbPropagatorSelection selected;
+	int has_selected;
+	uint64_t high;
 
 	(void)target;
 	if (!block || !path || expected_expires <= 0 || is_broadcast || !is_for_me || client != direct_peer ||
@@ -7712,7 +7817,7 @@ static void udb_mutation_exp(UdbContext *ctx, Client *client, Client *direct_pee
 		udb_protocol_mutation_error(client, "EXP", UDB_ERR_FORBIDDEN, 'K');
 		return;
 	}
-	if (block->session || (block->syncing_from && block->syncing_from != direct_peer))
+	if (block->session || block->syncing_from)
 	{
 		udb_protocol_mutation_error(client, "EXP", UDB_ERR_SYNC_ACTIVE, 'K');
 		return;
@@ -7723,12 +7828,30 @@ static void udb_mutation_exp(UdbContext *ctx, Client *client, Client *direct_pee
 				log_data_string("path", path), NULL);
 		return;
 	}
+	has_selected = udb_select_propagator(ctx, 1, &selected);
+	if (udb_propagator_policy_present(ctx) && (!has_selected || !selected.is_local))
+	{
+		UdbLineExpiryPending *pending = udb_line_expiry_pending_add(line->parent->key[0], line->key, expected_expires);
+
+		if (has_selected && selected.peer && pending && !pending->sent &&
+			udb_send_db_to_one(selected.peer, ":%s DB %s EXP %s %lu", me.id, selected.peer->id, path,
+							   (unsigned long)expected_expires))
+			pending->sent = 1;
+		return;
+	}
+	high = ctx->current_seq > ctx->last_applied_seq ? ctx->current_seq : ctx->last_applied_seq;
+	if (high == UINT64_MAX)
+	{
+		udb_protocol_mutation_error(client, "EXP", UDB_ERR_FATAL, 'K');
+		return;
+	}
 	if (udb_mutation_delete_local(ctx, block, line, direct_peer, "EXP snapshot") != 1)
 	{
 		udb_protocol_mutation_error(client, "EXP", UDB_ERR_FATAL, 'K');
 		return;
 	}
-	uint64_t seq = ++ctx->current_seq;
+	uint64_t seq = high + 1;
+	ctx->current_seq = seq;
 	const char *epoch = udb_ocl_epoch_value();
 	ctx->last_applied_seq = seq;
 	udb_sendto_confirmed_servers(NULL, ":%s DB * DEL %s %" PRIu64 " %s", me.id, epoch, seq, path);
@@ -7758,7 +7881,7 @@ static void udb_mutation_drp(UdbContext *ctx, Client *client, Client *direct_pee
 			return;
 		}
 
-		UdbSeqCheckResult seq_res = udb_mutation_check_sequence(ctx, direct_peer, epoch, seq);
+		UdbSeqCheckResult seq_res = udb_mutation_check_sequence(ctx, client, direct_peer, epoch, seq);
 		if (seq_res == UDB_SEQ_DUPLICATE || seq_res == UDB_SEQ_STALE_EPOCH)
 			return;
 		if (seq_res == UDB_SEQ_GAP)
@@ -7835,7 +7958,7 @@ static void udb_mutation_opt(UdbContext *ctx, Client *client, Client *direct_pee
 			return;
 		}
 
-		UdbSeqCheckResult seq_res = udb_mutation_check_sequence(ctx, direct_peer, epoch, seq);
+		UdbSeqCheckResult seq_res = udb_mutation_check_sequence(ctx, client, direct_peer, epoch, seq);
 		if (seq_res == UDB_SEQ_DUPLICATE || seq_res == UDB_SEQ_STALE_EPOCH)
 			return;
 		if (seq_res == UDB_SEQ_GAP)
@@ -8170,8 +8293,8 @@ CMD_FUNC(cmd_db)
 			UdbBlock *block;
 			unsigned long round_id = 0;
 			uint64_t watermark_seq = 0;
-			if (parc < 7 || !udb_strtoul_strict(parv[3], &round_id) || !round_id || client != direct_peer ||
-				is_broadcast || !is_for_me || !udb_has_staged_sync(direct_peer))
+			if ((parc != 7 && parc != 8) || !udb_strtoul_strict(parv[3], &round_id) || !round_id ||
+				client != direct_peer || is_broadcast || !is_for_me || !udb_has_staged_sync(direct_peer))
 			{
 				if (round_id)
 					udb_protocol_round_error(client, subcmd, UDB_ERR_PARAMS, round_id, parc > 4 ? *parv[4] : '0');
@@ -8182,8 +8305,11 @@ CMD_FUNC(cmd_db)
 				udb_protocol_round_error(client, "BEGIN", UDB_ERR_PARAMS, round_id, parv[4] ? *parv[4] : '0');
 				return;
 			}
-			if (parc >= 8)
-				udb_strtoull_strict(parv[7], (unsigned long long *)&watermark_seq);
+			if (parc == 8 && !udb_parse_uint64_strict(parv[7], &watermark_seq))
+			{
+				udb_protocol_round_error(client, "BEGIN", UDB_ERR_PARAMS, round_id, parv[4] ? *parv[4] : '0');
+				return;
+			}
 			if (!udb_is_authorized_sync_source(ctx, direct_peer))
 			{
 				udb_protocol_round_error(client, "BEGIN", UDB_ERR_FORBIDDEN, round_id, parv[4] ? *parv[4] : '0');
@@ -8280,8 +8406,8 @@ CMD_FUNC(cmd_db)
 			int error;
 			unsigned long round_id = 0;
 			uint64_t watermark_seq = 0;
-			if (parc < 7 || !udb_strtoul_strict(parv[3], &round_id) || !round_id || client != direct_peer ||
-				is_broadcast || !is_for_me || !udb_has_staged_sync(direct_peer))
+			if ((parc != 7 && parc != 8) || !udb_strtoul_strict(parv[3], &round_id) || !round_id ||
+				client != direct_peer || is_broadcast || !is_for_me || !udb_has_staged_sync(direct_peer))
 			{
 				if (round_id)
 					udb_protocol_round_error(client, subcmd, UDB_ERR_PARAMS, round_id, parc > 4 ? *parv[4] : '0');
@@ -8292,8 +8418,11 @@ CMD_FUNC(cmd_db)
 				udb_protocol_round_error(client, "END", UDB_ERR_PARAMS, round_id, parv[4] ? *parv[4] : '0');
 				return;
 			}
-			if (parc >= 8)
-				udb_strtoull_strict(parv[7], (unsigned long long *)&watermark_seq);
+			if (parc == 8 && !udb_parse_uint64_strict(parv[7], &watermark_seq))
+			{
+				udb_protocol_round_error(client, "END", UDB_ERR_PARAMS, round_id, parv[4] ? *parv[4] : '0');
+				return;
+			}
 			if (!udb_is_authorized_sync_source(ctx, direct_peer))
 			{
 				udb_protocol_round_error(client, "END", UDB_ERR_FORBIDDEN, round_id, parv[4] ? *parv[4] : '0');
@@ -8376,11 +8505,17 @@ CMD_FUNC(cmd_db)
 		if (!strcasecmp(subcmd, "ACK"))
 		{
 			unsigned long round_id = 0;
-			if (parc < 7 || !udb_strtoul_strict(parv[3], &round_id) || !round_id || client != direct_peer ||
-				is_broadcast || !is_for_me || !udb_has_staged_sync(direct_peer))
+			uint64_t watermark_seq = 0;
+			if ((parc != 7 && parc != 8) || !udb_strtoul_strict(parv[3], &round_id) || !round_id ||
+				client != direct_peer || is_broadcast || !is_for_me || !udb_has_staged_sync(direct_peer))
 			{
 				if (round_id)
 					udb_protocol_round_error(client, subcmd, UDB_ERR_PARAMS, round_id, parc > 4 ? *parv[4] : '0');
+				return;
+			}
+			if (parc == 8 && !udb_parse_uint64_strict(parv[7], &watermark_seq))
+			{
+				udb_protocol_round_error(client, subcmd, UDB_ERR_PARAMS, round_id, parc > 4 ? *parv[4] : '0');
 				return;
 			}
 			if (!udb_digest_parse(parv[6], NULL))
@@ -8403,11 +8538,11 @@ CMD_FUNC(cmd_db)
 		{
 			unsigned long round_id = 0;
 			uint64_t watermark_seq = 0;
-			unsigned long remote_count = 0;
+			unsigned int remote_count = 0;
 			char remote_sha[UDB_SHA256_HEX_LEN + 1];
 			time_t remote_ts = 0;
 
-			if (parc < 8 || !udb_strtoul_strict(parv[3], &round_id) || !round_id)
+			if ((parc != 8 && parc != 9) || !udb_strtoul_strict(parv[3], &round_id) || !round_id)
 			{
 				if (round_id)
 					udb_protocol_round_error(client, subcmd, UDB_ERR_PARAMS, round_id, parc > 4 ? *parv[4] : '0');
@@ -8422,23 +8557,29 @@ CMD_FUNC(cmd_db)
 					udb_protocol_round_error(client, "INF", UDB_ERR_NO_BLOCK, round_id, letter);
 				return;
 			}
-			if (!udb_digest_parse(parv[5], remote_sha) || !udb_strtoul_strict(parv[6], &remote_count) ||
+			if (!udb_digest_parse(parv[5], remote_sha) || !udb_parse_uint_strict(parv[6], &remote_count, 0, UINT_MAX) ||
 				!udb_timestamp_parse(parv[7], &remote_ts))
 			{
 				udb_protocol_round_error(client, "INF", UDB_ERR_PARAMS, round_id, letter);
 				return;
 			}
-			if (parc >= 9)
-				udb_strtoull_strict(parv[8], (unsigned long long *)&watermark_seq);
+			if (parc == 9 && !udb_parse_uint64_strict(parv[8], &watermark_seq))
+			{
+				udb_protocol_round_error(client, "INF", UDB_ERR_PARAMS, round_id, letter);
+				return;
+			}
 			(void)remote_ts;
 
 			if (client == direct_peer && is_for_me && udb_is_authorized_sync_source(ctx, direct_peer))
 			{
-				udb_reconcile_record_inf(direct_peer, round_id, letter, remote_sha, (unsigned int)remote_count);
+				udb_reconcile_record_inf(direct_peer, round_id, letter, remote_sha, remote_count);
 				if (!udb_reconcile.active || udb_reconcile.round_id != round_id)
 					return;
-				if (watermark_seq > udb_reconcile.watermark_seq)
-					udb_reconcile.watermark_seq = watermark_seq;
+				if (!udb_reconcile_accept_watermark(direct_peer, round_id, watermark_seq))
+				{
+					udb_protocol_round_error(client, "INF", UDB_ERR_PARAMS, round_id, letter);
+					return;
+				}
 				if (strcmp(remote_sha, block->sha256) != 0)
 				{
 					if (udb_send_db_to_one(client, ":%s DB %s RES %lu %c", me.id, client->id, round_id, letter))
@@ -8460,8 +8601,7 @@ CMD_FUNC(cmd_db)
 		else if (!strcasecmp(subcmd, "INS"))
 		{
 			uint64_t seq = 0;
-			if (parc < 7 || !udb_hello_epoch_valid(parv[3]) ||
-				!udb_strtoull_strict(parv[4], (unsigned long long *)&seq) || seq == 0)
+			if (parc != 7 || !udb_hello_epoch_valid(parv[3]) || !udb_parse_uint64_strict(parv[4], &seq) || seq == 0)
 			{
 				udb_protocol_mutation_error(client, subcmd, UDB_ERR_PARAMS, '0');
 				return;
@@ -8516,8 +8656,7 @@ CMD_FUNC(cmd_db)
 		if (!strcasecmp(subcmd, "DEL"))
 		{
 			uint64_t seq = 0;
-			if (parc < 6 || !udb_hello_epoch_valid(parv[3]) ||
-				!udb_strtoull_strict(parv[4], (unsigned long long *)&seq) || seq == 0)
+			if (parc != 6 || !udb_hello_epoch_valid(parv[3]) || !udb_parse_uint64_strict(parv[4], &seq) || seq == 0)
 			{
 				udb_protocol_mutation_error(client, subcmd, UDB_ERR_PARAMS, '0');
 				return;
@@ -8527,8 +8666,8 @@ CMD_FUNC(cmd_db)
 		else if (!strcasecmp(subcmd, "DRP"))
 		{
 			uint64_t seq = 0;
-			if (parc < 6 || !udb_hello_epoch_valid(parv[3]) ||
-				!udb_strtoull_strict(parv[4], (unsigned long long *)&seq) || seq == 0 || !parv[5] || !*parv[5])
+			if (parc != 6 || !udb_hello_epoch_valid(parv[3]) || !udb_parse_uint64_strict(parv[4], &seq) || seq == 0 ||
+				!parv[5] || !*parv[5])
 			{
 				udb_protocol_mutation_error(client, subcmd, UDB_ERR_PARAMS, '0');
 				return;
@@ -8570,24 +8709,23 @@ CMD_FUNC(cmd_db)
 			}
 			else if (!strcasecmp(action, "ACK"))
 			{
-				if (parc < 9 || client != direct_peer || is_broadcast || !is_for_me)
+				if (parc != 9 || client != direct_peer || is_broadcast || !is_for_me)
 					return;
 				if (!udb_is_authorized_sync_source(ctx, direct_peer))
 					return;
 
 				char letter = *parv[5];
-				unsigned long remote_count = 0;
+				unsigned int remote_count = 0;
 				char remote_sha[UDB_SHA256_HEX_LEN + 1];
 				uint64_t watermark_seq = 0;
 
-				if (!udb_strtoul_strict(parv[6], &remote_count) || !udb_digest_parse(parv[7], remote_sha) ||
-					!udb_strtoull_strict(parv[8], (unsigned long long *)&watermark_seq))
+				if (!udb_parse_uint_strict(parv[6], &remote_count, 0, UINT_MAX) ||
+					!udb_digest_parse(parv[7], remote_sha) || !udb_parse_uint64_strict(parv[8], &watermark_seq))
 				{
 					return;
 				}
 
-				udb_anti_entropy_record_ack(direct_peer, round_id, letter, (unsigned int)remote_count, remote_sha,
-											watermark_seq);
+				udb_anti_entropy_record_ack(direct_peer, round_id, letter, remote_count, remote_sha, watermark_seq);
 				return;
 			}
 		}
@@ -8597,13 +8735,13 @@ CMD_FUNC(cmd_db)
 		if (!strcasecmp(subcmd, "OPT"))
 		{
 			uint64_t seq = 0;
-			if (parc < 6 || !udb_hello_epoch_valid(parv[3]) ||
-				!udb_strtoull_strict(parv[4], (unsigned long long *)&seq) || seq == 0 || !parv[5] || !*parv[5])
+			if ((parc != 6 && parc != 7) || !udb_hello_epoch_valid(parv[3]) ||
+				!udb_parse_uint64_strict(parv[4], &seq) || seq == 0 || !parv[5] || !*parv[5])
 			{
 				udb_protocol_mutation_error(client, subcmd, UDB_ERR_PARAMS, '0');
 				return;
 			}
-			udb_mutation_opt(ctx, client, direct_peer, target, parv[3], seq, *parv[5], parc >= 7 ? parv[6] : NULL,
+			udb_mutation_opt(ctx, client, direct_peer, target, parv[3], seq, *parv[5], parc == 7 ? parv[6] : NULL,
 							 is_for_me, is_broadcast);
 		}
 		else if (!strcasecmp(subcmd, "OCL"))
@@ -9691,9 +9829,9 @@ static void udb_nick_remove_record(UdbBlock *block, UdbRecord *rec)
 	}
 }
 
-static UdbPasswordFailure *udb_password_failure_find(UdbRecord *profile_rec, Client *client, int create)
+static UdbPasswordFailure *udb_password_failure_find(UdbRecord *profile_rec, Client *client, int create, int *saturated)
 {
-	UdbPasswordFailure *oldest = NULL;
+	UdbPasswordFailure *free_slot = NULL;
 	const char *ip = client ? client->ip : NULL;
 	time_t now = TStime();
 	int period = udb_cfg ? udb_cfg->flood_period : 60;
@@ -9701,6 +9839,8 @@ static UdbPasswordFailure *udb_password_failure_find(UdbRecord *profile_rec, Cli
 
 	if (period <= 0)
 		period = 60;
+	if (saturated)
+		*saturated = 0;
 	if (!profile_rec || !profile_rec->key || BadPtr(ip))
 		return NULL;
 	for (i = 0; i < UDB_PASSWORD_FAILURE_SLOTS; i++)
@@ -9711,34 +9851,39 @@ static UdbPasswordFailure *udb_password_failure_find(UdbRecord *profile_rec, Cli
 		if (entry->since && entry->block_idx == profile_rec->block_idx && !strcmp(entry->profile, profile_rec->key) &&
 			!strcmp(entry->ip, ip))
 			return entry;
-		if (!entry->since)
-			oldest = entry;
-		else if (!oldest || entry->since < oldest->since)
-			oldest = entry;
+		if (!entry->since && !free_slot)
+			free_slot = entry;
 	}
-	if (!create || !oldest)
+	if (!free_slot)
+	{
+		if (saturated)
+			*saturated = 1;
 		return NULL;
-	memset(oldest, 0, sizeof(*oldest));
-	strlcpy(oldest->profile, profile_rec->key, sizeof(oldest->profile));
-	strlcpy(oldest->ip, ip, sizeof(oldest->ip));
-	oldest->block_idx = profile_rec->block_idx;
-	oldest->since = now;
-	return oldest;
+	}
+	if (!create)
+		return NULL;
+	memset(free_slot, 0, sizeof(*free_slot));
+	strlcpy(free_slot->profile, profile_rec->key, sizeof(free_slot->profile));
+	strlcpy(free_slot->ip, ip, sizeof(free_slot->ip));
+	free_slot->block_idx = profile_rec->block_idx;
+	free_slot->since = now;
+	return free_slot;
 }
 
 static int udb_password_flooded(UdbRecord *profile_rec, Client *client)
 {
-	UdbPasswordFailure *entry = udb_password_failure_find(profile_rec, client, 0);
+	int saturated = 0;
+	UdbPasswordFailure *entry = udb_password_failure_find(profile_rec, client, 0, &saturated);
 	int attempts = udb_cfg ? udb_cfg->flood_attempts : 5;
 
 	if (attempts <= 0)
 		attempts = 5;
-	return entry && entry->attempts >= (unsigned int)attempts;
+	return saturated || (entry && entry->attempts >= (unsigned int)attempts);
 }
 
 static void udb_password_failure_record(UdbRecord *profile_rec, Client *client, int success)
 {
-	UdbPasswordFailure *entry = udb_password_failure_find(profile_rec, client, !success);
+	UdbPasswordFailure *entry = udb_password_failure_find(profile_rec, client, !success, NULL);
 
 	if (!entry)
 		return;
@@ -10374,7 +10519,8 @@ static void udb_channel_do_mode(Channel *channel, MessageTag *mtags, const char 
 		safe_free(myparv[i]);
 
 	if (parameters && *parameters)
-		udb_send_to_debugs(NULL, "Mode change on %s: %s %s", channel_name, modes, parameters);
+		udb_send_to_debugs(NULL, "Mode change on %s: %s %s", channel_name, modes,
+						   strchr(modes, 'k') ? "<redacted>" : parameters);
 	else
 		udb_send_to_debugs(NULL, "Mode change on %s: %s", channel_name, modes);
 }
@@ -11635,15 +11781,6 @@ static void udb_ips_init(ModuleInfo *modinfo)
  * License: GNU General Public License v2+
  */
 
-typedef struct UdbLineExpiryPending
-{
-	char type;
-	char *pattern;
-	time_t expires;
-	int sent;
-	struct UdbLineExpiryPending *next;
-} UdbLineExpiryPending;
-
 static UdbLineExpiryPending *udb_line_expiry_pending = NULL;
 
 static UdbRecord *udb_line_owner(UdbRecord *rec)
@@ -12100,7 +12237,9 @@ static void udb_lines_init(ModuleInfo *modinfo)
 
 static int udb_query_is_secret(const UdbRecord *rec)
 {
-	return rec && rec->key && (!strcmp(rec->key, NKEY_PASS) || !strcmp(rec->key, SKEY_CRYPT_KEY));
+	return rec && rec->key &&
+		   (!strcmp(rec->key, NKEY_PASS) || !strcmp(rec->key, SKEY_CRYPT_KEY) ||
+			(udb_ctx && !strcmp(rec->key, CKEY_MODES) && rec->parent && rec->parent->parent == udb_ctx->channels));
 }
 
 static void udb_query_send_status(Client *client)

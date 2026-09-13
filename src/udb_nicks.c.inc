@@ -1052,9 +1052,9 @@ static void udb_nick_remove_record(UdbBlock *block, UdbRecord *rec)
 	}
 }
 
-static UdbPasswordFailure *udb_password_failure_find(UdbRecord *profile_rec, Client *client, int create)
+static UdbPasswordFailure *udb_password_failure_find(UdbRecord *profile_rec, Client *client, int create, int *saturated)
 {
-	UdbPasswordFailure *oldest = NULL;
+	UdbPasswordFailure *free_slot = NULL;
 	const char *ip = client ? client->ip : NULL;
 	time_t now = TStime();
 	int period = udb_cfg ? udb_cfg->flood_period : 60;
@@ -1062,6 +1062,8 @@ static UdbPasswordFailure *udb_password_failure_find(UdbRecord *profile_rec, Cli
 
 	if (period <= 0)
 		period = 60;
+	if (saturated)
+		*saturated = 0;
 	if (!profile_rec || !profile_rec->key || BadPtr(ip))
 		return NULL;
 	for (i = 0; i < UDB_PASSWORD_FAILURE_SLOTS; i++)
@@ -1072,34 +1074,39 @@ static UdbPasswordFailure *udb_password_failure_find(UdbRecord *profile_rec, Cli
 		if (entry->since && entry->block_idx == profile_rec->block_idx && !strcmp(entry->profile, profile_rec->key) &&
 			!strcmp(entry->ip, ip))
 			return entry;
-		if (!entry->since)
-			oldest = entry;
-		else if (!oldest || entry->since < oldest->since)
-			oldest = entry;
+		if (!entry->since && !free_slot)
+			free_slot = entry;
 	}
-	if (!create || !oldest)
+	if (!free_slot)
+	{
+		if (saturated)
+			*saturated = 1;
 		return NULL;
-	memset(oldest, 0, sizeof(*oldest));
-	strlcpy(oldest->profile, profile_rec->key, sizeof(oldest->profile));
-	strlcpy(oldest->ip, ip, sizeof(oldest->ip));
-	oldest->block_idx = profile_rec->block_idx;
-	oldest->since = now;
-	return oldest;
+	}
+	if (!create)
+		return NULL;
+	memset(free_slot, 0, sizeof(*free_slot));
+	strlcpy(free_slot->profile, profile_rec->key, sizeof(free_slot->profile));
+	strlcpy(free_slot->ip, ip, sizeof(free_slot->ip));
+	free_slot->block_idx = profile_rec->block_idx;
+	free_slot->since = now;
+	return free_slot;
 }
 
 static int udb_password_flooded(UdbRecord *profile_rec, Client *client)
 {
-	UdbPasswordFailure *entry = udb_password_failure_find(profile_rec, client, 0);
+	int saturated = 0;
+	UdbPasswordFailure *entry = udb_password_failure_find(profile_rec, client, 0, &saturated);
 	int attempts = udb_cfg ? udb_cfg->flood_attempts : 5;
 
 	if (attempts <= 0)
 		attempts = 5;
-	return entry && entry->attempts >= (unsigned int)attempts;
+	return saturated || (entry && entry->attempts >= (unsigned int)attempts);
 }
 
 static void udb_password_failure_record(UdbRecord *profile_rec, Client *client, int success)
 {
-	UdbPasswordFailure *entry = udb_password_failure_find(profile_rec, client, !success);
+	UdbPasswordFailure *entry = udb_password_failure_find(profile_rec, client, !success, NULL);
 
 	if (!entry)
 		return;

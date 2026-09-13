@@ -335,6 +335,14 @@ def exercise(host, client_port, server_port, c_db):
         for nick in ("NickServ", "ChanServ", "IpServ"):
             services.send_uid(nick)
 
+        start = len(services.lines)
+        services.send(f"DBQ C::{CHANNEL}::modes")
+        query_lines = services.wait_for(
+            lambda line: f"DBQ C::{CHANNEL}" in line and "<redacted>" in line,
+            "redacted channel modes DBQ response")
+        require(not any("chansecret" in line for line in query_lines[start:]),
+                "DBQ disclosed the native +k channel key")
+
         alice = IrcClient(host, client_port, "alice-setup")
         clients.append(alice)
         alice.request("NICK alice:secret", lambda line: " NICK :alice" in line,

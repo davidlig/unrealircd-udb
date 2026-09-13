@@ -196,6 +196,10 @@ static int udb_hello_peer_advertisement(Client *server, const char *propagator, 
 		{
 			udb_ctx->last_applied_seq = 0;
 			udb_ctx->authority_epoch_known = 0;
+			udb_ctx->authority_sid[0] = '\0';
+			udb_ctx->candidate_authority_epoch_known = 0;
+			udb_ctx->candidate_authority_sid[0] = '\0';
+			udb_ctx->candidate_authority_epoch[0] = '\0';
 			udb_sync_status = UDB_SYNC_DEGRADED;
 			if (!udb_degraded_since)
 				udb_degraded_since = time(NULL);
@@ -326,6 +330,8 @@ static void udb_reconcile_reset(void)
 	udb_reconcile.last_activity = 0;
 	udb_reconcile.deadline = 0;
 	udb_reconcile.absolute_deadline = 0;
+	udb_reconcile.watermark_seq = 0;
+	udb_reconcile.watermark_known = 0;
 }
 
 static void udb_reconcile_abort(UdbContext *ctx, const char *reason, int schedule_retry)
@@ -356,6 +362,22 @@ static void udb_reconcile_abort(UdbContext *ctx, const char *reason, int schedul
 		udb_reconcile.next_retry_at = 0;
 	}
 	udb_reconcile_reset();
+}
+
+static int udb_reconcile_accept_watermark(Client *peer, unsigned long round_id, uint64_t watermark_seq)
+{
+	if (!udb_reconcile.active || udb_reconcile.authority_peer != peer || udb_reconcile.round_id != round_id)
+		return 0;
+	if (!udb_reconcile.watermark_known)
+	{
+		udb_reconcile.watermark_seq = watermark_seq;
+		udb_reconcile.watermark_known = 1;
+		return 1;
+	}
+	if (udb_reconcile.watermark_seq == watermark_seq)
+		return 1;
+	udb_reconcile_abort(udb_ctx, "inconsistent reconciliation watermark", 1);
+	return 0;
 }
 
 /* One recovery boundary for every operation whose persistence outcome is not
@@ -409,6 +431,8 @@ static void udb_reconcile_begin(Client *authority, unsigned long round_id)
 	udb_reconcile.absolute_deadline =
 		udb_reconcile.started_at +
 		((udb_cfg && udb_cfg->sync_absolute_timeout > 0) ? udb_cfg->sync_absolute_timeout : UDB_SYNC_ABSOLUTE_TIMEOUT);
+	udb_reconcile.watermark_seq = 0;
+	udb_reconcile.watermark_known = 0;
 	udb_log(ULOG_INFO, "UDB_RECONCILE_ROUND_START", authority,
 			"Started reconciliation round $round with authority peer $peer",
 			log_data_integer("round", (int)udb_reconcile.round_id), log_data_client("peer", authority));
@@ -534,8 +558,18 @@ static int udb_reconcile_check(UdbContext *ctx)
 	udb_degraded_since = 0;
 	udb_bootstrap_peer = NULL;
 
-	if (udb_reconcile.watermark_seq > ctx->last_applied_seq)
-		ctx->last_applied_seq = udb_reconcile.watermark_seq;
+	/* The completed six-block round owns its watermark. A replacement stream
+	 * may legitimately restart below the previous stream's high-water mark. */
+	ctx->last_applied_seq = udb_reconcile.watermark_seq;
+	if (ctx->candidate_authority_epoch_known)
+	{
+		strlcpy(ctx->authority_sid, ctx->candidate_authority_sid, sizeof(ctx->authority_sid));
+		strlcpy(ctx->authority_epoch, ctx->candidate_authority_epoch, sizeof(ctx->authority_epoch));
+		ctx->authority_epoch_known = 1;
+		ctx->candidate_authority_epoch_known = 0;
+		ctx->candidate_authority_sid[0] = '\0';
+		ctx->candidate_authority_epoch[0] = '\0';
+	}
 
 	udb_reconcile_reset();
 	udb_reconcile.retry_count = 0;
@@ -800,9 +834,13 @@ static int udb_sync_begin(UdbBlock *block, Client *peer, unsigned long round_id,
 	session->received_puts = 0;
 	session->received_bytes = 0;
 	session->record_count = 0;
+	if (!udb_reconcile_accept_watermark(peer, round_id, watermark_seq))
+	{
+		udb_record_free_tree(session->tree);
+		safe_free(session);
+		return UDB_ERR_PARAMS;
+	}
 	session->watermark_seq = watermark_seq;
-	if (watermark_seq > udb_reconcile.watermark_seq)
-		udb_reconcile.watermark_seq = watermark_seq;
 	block->session = session;
 	block->syncing_from = peer;
 	udb_block_clear_pending(block);
@@ -905,8 +943,14 @@ static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, unsigned
 		}
 		return UDB_ERR_NO_SYNC;
 	}
-	if (watermark_seq > udb_reconcile.watermark_seq)
-		udb_reconcile.watermark_seq = watermark_seq;
+	if (watermark_seq != session->watermark_seq)
+	{
+		udb_sync_abort(block, "inconsistent staged sync watermark");
+		udb_reconcile_abort(udb_ctx, "inconsistent staged sync watermark", 1);
+		return UDB_ERR_PARAMS;
+	}
+	if (!udb_reconcile_accept_watermark(peer, round_id, watermark_seq))
+		return UDB_ERR_PARAMS;
 	time_t now = time(NULL);
 	if (now >= session->deadline)
 	{
@@ -1136,6 +1180,8 @@ static void udb_anti_entropy_trigger(time_t now, Client *authority_peer)
 	udb_anti_entropy.pending = 1;
 	udb_anti_entropy.acked_blocks = 0;
 	udb_anti_entropy.divergent_blocks = 0;
+	udb_anti_entropy.watermark_seq = 0;
+	udb_anti_entropy.watermark_known = 0;
 	udb_anti_entropy.last_check = now;
 	udb_anti_entropy.deadline = now + UDB_ANTI_ENTROPY_TIMEOUT;
 
@@ -1199,6 +1245,19 @@ static void udb_anti_entropy_record_ack(Client *peer, unsigned long round_id, ch
 
 	if (udb_anti_entropy.acked_blocks & mask)
 		return;
+	if (!udb_anti_entropy.watermark_known)
+	{
+		udb_anti_entropy.watermark_seq = watermark_seq;
+		udb_anti_entropy.watermark_known = 1;
+	}
+	else if (udb_anti_entropy.watermark_seq != watermark_seq)
+	{
+		udb_anti_entropy.pending = 0;
+		udb_anti_entropy.fail_count++;
+		udb_sync_mark_degraded(peer, "inconsistent anti-entropy watermark");
+		udb_sync_hello_refresh_all();
+		return;
+	}
 
 	udb_anti_entropy.acked_blocks |= mask;
 
@@ -1225,8 +1284,8 @@ static void udb_anti_entropy_record_ack(Client *peer, unsigned long round_id, ch
 			udb_reconcile.divergent_blocks = udb_anti_entropy.divergent_blocks;
 			udb_reconcile.compared_blocks = UDB_ALL_BLOCKS_MASK;
 			udb_reconcile.completed_blocks = UDB_ALL_BLOCKS_MASK & ~udb_anti_entropy.divergent_blocks;
-			if (watermark_seq > udb_reconcile.watermark_seq)
-				udb_reconcile.watermark_seq = watermark_seq;
+			udb_reconcile.watermark_seq = udb_anti_entropy.watermark_seq;
+			udb_reconcile.watermark_known = udb_anti_entropy.watermark_known;
 
 			UdbBlock *b;
 			for (b = udb_ctx->block_list; b; b = b->next)

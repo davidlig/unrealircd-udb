@@ -305,8 +305,8 @@ CMD_FUNC(cmd_db)
 			UdbBlock *block;
 			unsigned long round_id = 0;
 			uint64_t watermark_seq = 0;
-			if (parc < 7 || !udb_strtoul_strict(parv[3], &round_id) || !round_id || client != direct_peer ||
-				is_broadcast || !is_for_me || !udb_has_staged_sync(direct_peer))
+			if ((parc != 7 && parc != 8) || !udb_strtoul_strict(parv[3], &round_id) || !round_id ||
+				client != direct_peer || is_broadcast || !is_for_me || !udb_has_staged_sync(direct_peer))
 			{
 				if (round_id)
 					udb_protocol_round_error(client, subcmd, UDB_ERR_PARAMS, round_id, parc > 4 ? *parv[4] : '0');
@@ -317,8 +317,11 @@ CMD_FUNC(cmd_db)
 				udb_protocol_round_error(client, "BEGIN", UDB_ERR_PARAMS, round_id, parv[4] ? *parv[4] : '0');
 				return;
 			}
-			if (parc >= 8)
-				udb_strtoull_strict(parv[7], (unsigned long long *)&watermark_seq);
+			if (parc == 8 && !udb_parse_uint64_strict(parv[7], &watermark_seq))
+			{
+				udb_protocol_round_error(client, "BEGIN", UDB_ERR_PARAMS, round_id, parv[4] ? *parv[4] : '0');
+				return;
+			}
 			if (!udb_is_authorized_sync_source(ctx, direct_peer))
 			{
 				udb_protocol_round_error(client, "BEGIN", UDB_ERR_FORBIDDEN, round_id, parv[4] ? *parv[4] : '0');
@@ -415,8 +418,8 @@ CMD_FUNC(cmd_db)
 			int error;
 			unsigned long round_id = 0;
 			uint64_t watermark_seq = 0;
-			if (parc < 7 || !udb_strtoul_strict(parv[3], &round_id) || !round_id || client != direct_peer ||
-				is_broadcast || !is_for_me || !udb_has_staged_sync(direct_peer))
+			if ((parc != 7 && parc != 8) || !udb_strtoul_strict(parv[3], &round_id) || !round_id ||
+				client != direct_peer || is_broadcast || !is_for_me || !udb_has_staged_sync(direct_peer))
 			{
 				if (round_id)
 					udb_protocol_round_error(client, subcmd, UDB_ERR_PARAMS, round_id, parc > 4 ? *parv[4] : '0');
@@ -427,8 +430,11 @@ CMD_FUNC(cmd_db)
 				udb_protocol_round_error(client, "END", UDB_ERR_PARAMS, round_id, parv[4] ? *parv[4] : '0');
 				return;
 			}
-			if (parc >= 8)
-				udb_strtoull_strict(parv[7], (unsigned long long *)&watermark_seq);
+			if (parc == 8 && !udb_parse_uint64_strict(parv[7], &watermark_seq))
+			{
+				udb_protocol_round_error(client, "END", UDB_ERR_PARAMS, round_id, parv[4] ? *parv[4] : '0');
+				return;
+			}
 			if (!udb_is_authorized_sync_source(ctx, direct_peer))
 			{
 				udb_protocol_round_error(client, "END", UDB_ERR_FORBIDDEN, round_id, parv[4] ? *parv[4] : '0');
@@ -511,11 +517,17 @@ CMD_FUNC(cmd_db)
 		if (!strcasecmp(subcmd, "ACK"))
 		{
 			unsigned long round_id = 0;
-			if (parc < 7 || !udb_strtoul_strict(parv[3], &round_id) || !round_id || client != direct_peer ||
-				is_broadcast || !is_for_me || !udb_has_staged_sync(direct_peer))
+			uint64_t watermark_seq = 0;
+			if ((parc != 7 && parc != 8) || !udb_strtoul_strict(parv[3], &round_id) || !round_id ||
+				client != direct_peer || is_broadcast || !is_for_me || !udb_has_staged_sync(direct_peer))
 			{
 				if (round_id)
 					udb_protocol_round_error(client, subcmd, UDB_ERR_PARAMS, round_id, parc > 4 ? *parv[4] : '0');
+				return;
+			}
+			if (parc == 8 && !udb_parse_uint64_strict(parv[7], &watermark_seq))
+			{
+				udb_protocol_round_error(client, subcmd, UDB_ERR_PARAMS, round_id, parc > 4 ? *parv[4] : '0');
 				return;
 			}
 			if (!udb_digest_parse(parv[6], NULL))
@@ -538,11 +550,11 @@ CMD_FUNC(cmd_db)
 		{
 			unsigned long round_id = 0;
 			uint64_t watermark_seq = 0;
-			unsigned long remote_count = 0;
+			unsigned int remote_count = 0;
 			char remote_sha[UDB_SHA256_HEX_LEN + 1];
 			time_t remote_ts = 0;
 
-			if (parc < 8 || !udb_strtoul_strict(parv[3], &round_id) || !round_id)
+			if ((parc != 8 && parc != 9) || !udb_strtoul_strict(parv[3], &round_id) || !round_id)
 			{
 				if (round_id)
 					udb_protocol_round_error(client, subcmd, UDB_ERR_PARAMS, round_id, parc > 4 ? *parv[4] : '0');
@@ -557,23 +569,29 @@ CMD_FUNC(cmd_db)
 					udb_protocol_round_error(client, "INF", UDB_ERR_NO_BLOCK, round_id, letter);
 				return;
 			}
-			if (!udb_digest_parse(parv[5], remote_sha) || !udb_strtoul_strict(parv[6], &remote_count) ||
+			if (!udb_digest_parse(parv[5], remote_sha) || !udb_parse_uint_strict(parv[6], &remote_count, 0, UINT_MAX) ||
 				!udb_timestamp_parse(parv[7], &remote_ts))
 			{
 				udb_protocol_round_error(client, "INF", UDB_ERR_PARAMS, round_id, letter);
 				return;
 			}
-			if (parc >= 9)
-				udb_strtoull_strict(parv[8], (unsigned long long *)&watermark_seq);
+			if (parc == 9 && !udb_parse_uint64_strict(parv[8], &watermark_seq))
+			{
+				udb_protocol_round_error(client, "INF", UDB_ERR_PARAMS, round_id, letter);
+				return;
+			}
 			(void)remote_ts;
 
 			if (client == direct_peer && is_for_me && udb_is_authorized_sync_source(ctx, direct_peer))
 			{
-				udb_reconcile_record_inf(direct_peer, round_id, letter, remote_sha, (unsigned int)remote_count);
+				udb_reconcile_record_inf(direct_peer, round_id, letter, remote_sha, remote_count);
 				if (!udb_reconcile.active || udb_reconcile.round_id != round_id)
 					return;
-				if (watermark_seq > udb_reconcile.watermark_seq)
-					udb_reconcile.watermark_seq = watermark_seq;
+				if (!udb_reconcile_accept_watermark(direct_peer, round_id, watermark_seq))
+				{
+					udb_protocol_round_error(client, "INF", UDB_ERR_PARAMS, round_id, letter);
+					return;
+				}
 				if (strcmp(remote_sha, block->sha256) != 0)
 				{
 					if (udb_send_db_to_one(client, ":%s DB %s RES %lu %c", me.id, client->id, round_id, letter))
@@ -595,8 +613,7 @@ CMD_FUNC(cmd_db)
 		else if (!strcasecmp(subcmd, "INS"))
 		{
 			uint64_t seq = 0;
-			if (parc < 7 || !udb_hello_epoch_valid(parv[3]) ||
-				!udb_strtoull_strict(parv[4], (unsigned long long *)&seq) || seq == 0)
+			if (parc != 7 || !udb_hello_epoch_valid(parv[3]) || !udb_parse_uint64_strict(parv[4], &seq) || seq == 0)
 			{
 				udb_protocol_mutation_error(client, subcmd, UDB_ERR_PARAMS, '0');
 				return;
@@ -651,8 +668,7 @@ CMD_FUNC(cmd_db)
 		if (!strcasecmp(subcmd, "DEL"))
 		{
 			uint64_t seq = 0;
-			if (parc < 6 || !udb_hello_epoch_valid(parv[3]) ||
-				!udb_strtoull_strict(parv[4], (unsigned long long *)&seq) || seq == 0)
+			if (parc != 6 || !udb_hello_epoch_valid(parv[3]) || !udb_parse_uint64_strict(parv[4], &seq) || seq == 0)
 			{
 				udb_protocol_mutation_error(client, subcmd, UDB_ERR_PARAMS, '0');
 				return;
@@ -662,8 +678,8 @@ CMD_FUNC(cmd_db)
 		else if (!strcasecmp(subcmd, "DRP"))
 		{
 			uint64_t seq = 0;
-			if (parc < 6 || !udb_hello_epoch_valid(parv[3]) ||
-				!udb_strtoull_strict(parv[4], (unsigned long long *)&seq) || seq == 0 || !parv[5] || !*parv[5])
+			if (parc != 6 || !udb_hello_epoch_valid(parv[3]) || !udb_parse_uint64_strict(parv[4], &seq) || seq == 0 ||
+				!parv[5] || !*parv[5])
 			{
 				udb_protocol_mutation_error(client, subcmd, UDB_ERR_PARAMS, '0');
 				return;
@@ -705,24 +721,23 @@ CMD_FUNC(cmd_db)
 			}
 			else if (!strcasecmp(action, "ACK"))
 			{
-				if (parc < 9 || client != direct_peer || is_broadcast || !is_for_me)
+				if (parc != 9 || client != direct_peer || is_broadcast || !is_for_me)
 					return;
 				if (!udb_is_authorized_sync_source(ctx, direct_peer))
 					return;
 
 				char letter = *parv[5];
-				unsigned long remote_count = 0;
+				unsigned int remote_count = 0;
 				char remote_sha[UDB_SHA256_HEX_LEN + 1];
 				uint64_t watermark_seq = 0;
 
-				if (!udb_strtoul_strict(parv[6], &remote_count) || !udb_digest_parse(parv[7], remote_sha) ||
-					!udb_strtoull_strict(parv[8], (unsigned long long *)&watermark_seq))
+				if (!udb_parse_uint_strict(parv[6], &remote_count, 0, UINT_MAX) ||
+					!udb_digest_parse(parv[7], remote_sha) || !udb_parse_uint64_strict(parv[8], &watermark_seq))
 				{
 					return;
 				}
 
-				udb_anti_entropy_record_ack(direct_peer, round_id, letter, (unsigned int)remote_count, remote_sha,
-											watermark_seq);
+				udb_anti_entropy_record_ack(direct_peer, round_id, letter, remote_count, remote_sha, watermark_seq);
 				return;
 			}
 		}
@@ -732,13 +747,13 @@ CMD_FUNC(cmd_db)
 		if (!strcasecmp(subcmd, "OPT"))
 		{
 			uint64_t seq = 0;
-			if (parc < 6 || !udb_hello_epoch_valid(parv[3]) ||
-				!udb_strtoull_strict(parv[4], (unsigned long long *)&seq) || seq == 0 || !parv[5] || !*parv[5])
+			if ((parc != 6 && parc != 7) || !udb_hello_epoch_valid(parv[3]) ||
+				!udb_parse_uint64_strict(parv[4], &seq) || seq == 0 || !parv[5] || !*parv[5])
 			{
 				udb_protocol_mutation_error(client, subcmd, UDB_ERR_PARAMS, '0');
 				return;
 			}
-			udb_mutation_opt(ctx, client, direct_peer, target, parv[3], seq, *parv[5], parc >= 7 ? parv[6] : NULL,
+			udb_mutation_opt(ctx, client, direct_peer, target, parv[3], seq, *parv[5], parc == 7 ? parv[6] : NULL,
 							 is_for_me, is_broadcast);
 		}
 		else if (!strcasecmp(subcmd, "OCL"))
