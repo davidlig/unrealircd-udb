@@ -12,7 +12,8 @@ Invariants checked after every event:
   * without identity there are no UDB-owned effects;
   * state UDB does not own is never removed or overwritten on revoke;
   * a failed authentication, a forced rename or leaving a nick grants nothing;
-  * a deleted or policy-changed profile never restores identity.
+  * a deleted or suspended profile never restores identity, while a pass or
+    access value change that still permits the holder keeps it.
 
 The scripted scenarios here correspond to the runtime scenarios in
 tests/runtime_nick_auth.py (sections W, X, Y and AA/AB): the model states what
@@ -186,13 +187,18 @@ class BlockNModel:
         self.revoke_identity()
         self.profile["suspend"] = False
 
-    def policy_change(self, pass_value=None, access=None):
+    def policy_change(self, pass_value=None, access=None, access_ok=True):
         if pass_value is not None:
             self.profile["pass"] = pass_value
         if access is not None:
             self.profile["access"] = access
-        self.revoke_effects()
-        self.revoke_identity()
+        # Credential/access values are re-checked live: only losing pass, being
+        # suspended, or an access list that no longer permits revokes identity.
+        if not self.has_pass() or self.is_suspended() or not access_ok:
+            self.revoke_effects()
+            self.revoke_identity()
+        elif self.identity:
+            self.apply_effects()
 
     def delete_profile(self):
         self.revoke_effects()
@@ -257,10 +263,8 @@ class BlockNModel:
             self.runtime_operclass = None
 
     def snapshot(self, new_profile, access_ok=True):
-        same_policy = (new_profile.get("pass") == self.profile.get("pass") and
-                       new_profile.get("access") == self.profile.get("access"))
         keep = (self.identity and new_profile.get("pass") and
-                not new_profile.get("suspend") and access_ok and same_policy)
+                not new_profile.get("suspend") and access_ok)
         self.profile = dict(new_profile)
         if keep:
             self.apply_effects()
@@ -539,8 +543,20 @@ def scenario_snapshots():
     model = BlockNModel({"pass": "p", "access": "a"})
     model.authenticate()
     model.snapshot({"pass": "p", "access": "b"})
-    require(not model.identity, "snapshot policy change: identity kept")
-    model.check("snapshot policy change")
+    require(model.identity, "snapshot access change: identity revoked while still permitted")
+    model.check("snapshot access change")
+
+    model = BlockNModel({"pass": "p", "access": "a"})
+    model.authenticate()
+    model.snapshot({"pass": "q", "access": "b"})
+    require(model.identity, "snapshot pass change: identity revoked")
+    model.check("snapshot pass change")
+
+    model = BlockNModel({"pass": "p", "access": "a"})
+    model.authenticate()
+    model.snapshot({"pass": "p", "access": "b"}, access_ok=False)
+    require(not model.identity, "snapshot access denial: identity kept")
+    model.check("snapshot access denial")
 
     model = BlockNModel({"pass": "p", "access": "a"})
     model.authenticate()
@@ -616,7 +632,7 @@ def random_sequences():
             elif event == 4:
                 model.policy_change(pass_value=rng.choice(["p", "q"]))
             elif event == 5:
-                model.policy_change(access=rng.choice(["a", "b"]))
+                model.policy_change(access=rng.choice(["a", "b"]), access_ok=rng.random() < 0.9)
             elif event == 6:
                 model.delete_profile()
             elif event == 7:

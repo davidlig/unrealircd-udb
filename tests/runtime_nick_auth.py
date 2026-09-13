@@ -4,6 +4,7 @@
 Semantics under test:
 
   authentication -> active UDB identity + effects
+  pass/access change -> identity and effects survive when access still permits
   INS suspend    -> revoke identity/effects, keep the nick
   DEL suspend    -> Guest rename for protected profiles (reauth required)
   SVSNICK        -> never authentication: protected nicks are renamed away
@@ -440,43 +441,49 @@ def run_tests(ircd, module, keep=False):
         require(any("hotctrl-updated.test" in line for line in hotctrl_whois),
                 f"hot effect update did not refresh effects: {hotctrl_whois!r}")
 
-        # I: changing pass or access invalidates identity; UDB strips owned
-        # effects and renames even when the new access CIDR still permits.
+        # I: changing pass or an access list that still permits keeps the
+        # active identity and owned effects; the holder is never renamed.
         add_profile(services, "passchg", "oldsecret", suspended=False)
         passchg = IrcClient("127.0.0.1", client_port, "passchg-client")
         clients.append(passchg)
         passchg.request("NICK passchg:oldsecret", lambda line: " NICK :passchg" in line, "pass change source")
         wait_for_mode(passchg, "passchg", "+r", "pass change +r")
-        start = len(passchg.lines)
         services.send_ins("N::passchg::pass", "sha256:" + sha256("newsecret"))
-        free_guest(passchg, "pass change rename", start=start)
-        assert_unidentified(passchg, current_nick(passchg), "pass changed holder")
+        time.sleep(0.4)
+        passchg.receive(time.monotonic() + 0.3)
+        require(current_nick(passchg) == "passchg", "pass change renamed the holder")
+        require(has_usermode(passchg, "passchg", "r", timeout=15), "pass change revoked identity")
+        pass_whois = request(passchg, "WHOIS passchg", lambda line: " 318 " in line, "pass change WHOIS", timeout=15)
+        require(any("passchg.test" in line for line in pass_whois),
+                f"pass change did not preserve effects: {pass_whois!r}")
 
         add_profile(services, "acctchg", "acctsecret", suspended=False)
         acctchg = IrcClient("127.0.0.1", client_port, "acctchg-client")
         clients.append(acctchg)
         acctchg.request("NICK acctchg:acctsecret", lambda line: " NICK :acctchg" in line, "access change source")
         wait_for_mode(acctchg, "acctchg", "+r", "access change +r")
-        start = len(acctchg.lines)
         services.send_ins("N::acctchg::access", "127.0.0.0/9")
-        free_guest(acctchg, "access change rename", start=start)
-        assert_unidentified(acctchg, current_nick(acctchg), "access changed holder")
+        time.sleep(0.4)
+        acctchg.receive(time.monotonic() + 0.3)
+        require(current_nick(acctchg) == "acctchg", "access change renamed the holder")
+        require(has_usermode(acctchg, "acctchg", "r", timeout=15),
+                "access change that still permits revoked identity")
 
-        # I2: deleting the access record goes through the same candidate
-        # reapply and revokes identity.
+        # I2: deleting the access record broadens permission and keeps identity.
         add_profile(services, "acctdel", "acctdelsecret", suspended=False)
         acctdel = IrcClient("127.0.0.1", client_port, "acctdel-client")
         clients.append(acctdel)
         acctdel.request("NICK acctdel:acctdelsecret", lambda line: " NICK :acctdel" in line,
                         "access delete source")
         wait_for_mode(acctdel, "acctdel", "+r", "access delete +r")
-        start = len(acctdel.lines)
         services.send_del("N::acctdel::access")
-        free_guest(acctdel, "access delete rename", start=start)
-        assert_unidentified(acctdel, current_nick(acctdel), "access deleted holder")
+        time.sleep(0.4)
+        acctdel.receive(time.monotonic() + 0.3)
+        require(current_nick(acctdel) == "acctdel", "access deletion renamed the holder")
+        require(has_usermode(acctdel, "acctdel", "r", timeout=15), "access deletion revoked identity")
 
         # I3: deleting a non-policy effect keeps identity and only removes that
-        # effect; the remaining profile still validates against the digest.
+        # effect; the remaining profile still validates against live policy.
         add_profile(services, "effectdel", "effectdelsecret", suspended=False)
         effectdel = IrcClient("127.0.0.1", client_port, "effectdel-client")
         clients.append(effectdel)
@@ -587,7 +594,8 @@ def run_tests(ircd, module, keep=False):
         free_guest(snapowner, "snapshot suspend to normal rename", start=start)
         assert_unidentified(snapowner, current_nick(snapowner), "snapshot unsuspended holder")
 
-        # O: snapshot with a changed policy revokes identity and renames.
+        # O: a snapshot that changes the credential but still permits the
+        # holder keeps identity, effects reconciliation and the nick.
         add_profile(services, "snappol", "snappolsecret", suspended=False)
         snappol = IrcClient("127.0.0.1", client_port, "snappol-client")
         clients.append(snappol)
@@ -596,10 +604,16 @@ def run_tests(ircd, module, keep=False):
         wait_for_mode(snappol, "snappol", "+r", "snapshot policy +r")
         snap_c = [("snappol::pass", "sha256:" + sha256("changedsecret")),
                   ("snappol::access", "127.0.0.0/8")]
-        start = len(snappol.lines)
         replace_n_tree(services, 104, "nick-policy-change-d", snap_c)
-        free_guest(snappol, "snapshot policy change rename", start=start)
-        assert_unidentified(snappol, current_nick(snappol), "snapshot policy changed holder")
+        wait_for_db_records(n_db, ("snappol::pass sha256:" + sha256("changedsecret"),))
+        time.sleep(0.3)
+        require(current_nick(snappol) == "snappol", "snapshot credential change renamed the holder")
+        require(has_usermode(snappol, "snappol", "r", timeout=15),
+                "snapshot credential change revoked identity")
+        snappol_whois = request(snappol, "WHOIS snappol", lambda line: " 318 " in line,
+                                "snapshot credential change WHOIS", timeout=15)
+        require(not any("snappol.test" in line for line in snappol_whois),
+                f"snapshot credential change kept the removed vhost: {snappol_whois!r}")
 
         # P: a removed profile revokes identity/effects but does not rename; the
         # nick is simply no longer registered.

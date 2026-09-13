@@ -20,13 +20,14 @@ struct UdbNickPasswordCache
 };
 
 /* Active UDB identity marker. It exists only while an authenticated profile is
- * bound to the current nick; it is destroyed by suspend, by policy changes and
- * by leaving the nick, and is never reconstructed after the fact. */
+ * bound to the current nick; it is destroyed by suspend and by leaving the
+ * nick, and is never reconstructed after the fact. Credential and access
+ * values are re-checked live on every use: changing pass, or an access list
+ * that still permits the holder, does not revoke an active identity. */
 typedef struct UdbNickIdentity UdbNickIdentity;
 struct UdbNickIdentity
 {
 	char nick[NICKLEN + 1];
-	char policy_digest[65];
 };
 
 /* Preflight password/access success for a destination nick. It never grants
@@ -166,6 +167,9 @@ static int udb_nick_auth_policy_digest_field(EVP_MD_CTX *ctx, char label, const 
 		   EVP_DigestUpdate(ctx, lenbuf, sizeof(lenbuf)) == 1 && (!len || EVP_DigestUpdate(ctx, value, len) == 1);
 }
 
+/* Binds a one-shot pending credential to the exact pass/access policy that was
+ * validated. Active identity deliberately does not use this digest: changing
+ * pass, or an access list that still permits the holder, must not revoke it. */
 static int udb_nick_auth_policy_digest(UdbRecord *nick_rec, char out[65])
 {
 	EVP_MD_CTX *ctx;
@@ -231,11 +235,6 @@ static void udb_nick_identity_set(Client *client, UdbRecord *nick_rec)
 		!udb_nick_identity_md)
 		return;
 	identity = safe_alloc(sizeof(*identity));
-	if (!udb_nick_auth_policy_digest(nick_rec, identity->policy_digest))
-	{
-		safe_free(identity);
-		return;
-	}
 	strlcpy(identity->nick, nick_rec->key, sizeof(identity->nick));
 	udb_nick_identity_clear(client);
 	moddata_local_client(client, udb_nick_identity_md).ptr = identity;
@@ -244,14 +243,12 @@ static void udb_nick_identity_set(Client *client, UdbRecord *nick_rec)
 static int udb_nick_identity_valid(Client *client, UdbRecord *nick_rec)
 {
 	UdbNickIdentity *identity;
-	char digest[65];
 
 	if (!client || !nick_rec || BadPtr(nick_rec->key) || !udb_nick_identity_md)
 		return 0;
 	identity = moddata_local_client(client, udb_nick_identity_md).ptr;
 	if (!identity || strcasecmp(identity->nick, nick_rec->key) || strcasecmp(client->name, identity->nick) ||
-		!udb_nick_profile_has_pass(nick_rec) || !udb_nick_auth_policy_digest(nick_rec, digest) ||
-		strcmp(identity->policy_digest, digest) || !udb_nick_access_allowed(client, nick_rec))
+		!udb_nick_profile_has_pass(nick_rec) || !udb_nick_access_allowed(client, nick_rec))
 		return 0;
 	return 1;
 }
@@ -948,8 +945,8 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, UdbNickApplyReas
 	}
 
 	/* A protected profile materializes identity only with a valid active UDB
-	 * proof. SVSNICK and forced changes never carry one, and a pass/access
-	 * change invalidates the digest, so both are renamed away. */
+	 * proof. SVSNICK and forced changes never carry one, and credential/access
+	 * values are checked live, so a holder without proof is renamed away. */
 	if (!udb_nick_identity_valid(client, nick_rec))
 	{
 		udb_nick_revoke_effects(client);
@@ -1033,11 +1030,12 @@ static void udb_nick_remove_record(UdbBlock *block, UdbRecord *rec)
 			UdbRecord *candidate =
 				udb_nick_replacement_tree ? udb_record_find(NULL, rec->key, udb_nick_replacement_tree) : NULL;
 			/* Active identity survives a full replacement only for an existing
-			 * candidate with the same pass/access policy, without forbid or
-			 * suspend, and with a still-permitted access check. A deleted
-			 * profile, a changed policy or a normal->suspend transition
-			 * revokes it. Equivalent candidates keep both markers and the
-			 * candidate reapply reconciles effects. */
+			 * candidate with a credential, without forbid or suspend, and with
+			 * a still-permitted access check. A deleted profile, a removed
+			 * credential or a normal->suspend transition revokes it; changed
+			 * pass/access values that still permit the holder do not.
+			 * Equivalent candidates keep both markers and the candidate
+			 * reapply reconciles effects. */
 			int keep_identity = candidate && !udb_record_find(udb_ctx, NKEY_FORBID, candidate) &&
 								!udb_record_find(udb_ctx, NKEY_SUSPEND, candidate) &&
 								udb_nick_identity_valid(client, candidate);

@@ -282,6 +282,7 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 		UdbHashIndex hash_index;
 		int unchanged;
 		int nick_pass_added;
+		int nick_pass_changed;
 
 		if (!udb_record_validate(block, path + 3, data))
 		{
@@ -305,6 +306,8 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 		rec = udb_record_insert_path(tree, path + 3, data);
 		nick_pass_added = rec && block->letter == UDB_BLOCK_NICKS && rec->parent && rec->parent != tree &&
 						  !strcmp(rec->key, NKEY_PASS) && !old_rec;
+		nick_pass_changed = old_rec && block->letter == UDB_BLOCK_NICKS && old_rec->parent &&
+							old_rec->parent != block->tree && !strcmp(old_rec->key, NKEY_PASS);
 		if (rec && block->letter == UDB_BLOCK_NICKS && rec->parent && rec->parent != tree)
 		{
 			if (!strcmp(rec->key, NKEY_FORBID))
@@ -352,9 +355,12 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 		}
 		else if (old_rec && !unchanged)
 		{
-			if (block->letter != 'C' || old_rec->parent == block->tree ||
-				(strcmp(old_rec->key, CKEY_MODES) && strcmp(old_rec->key, CKEY_TOPIC) &&
-				 strcmp(old_rec->key, CKEY_OPTIONS)))
+			/* Replacing an existing credential must not revoke the holder's
+			 * identity or effects: the active proof is checked live against the
+			 * new policy and the following apply reconciles effects. */
+			if (!nick_pass_changed && (block->letter != 'C' || old_rec->parent == block->tree ||
+									   (strcmp(old_rec->key, CKEY_MODES) && strcmp(old_rec->key, CKEY_TOPIC) &&
+										strcmp(old_rec->key, CKEY_OPTIONS))))
 				udb_remove_special_record(ctx, block, old_rec);
 		}
 		if (block->letter == 'K')
@@ -363,8 +369,10 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 		/* A newly added credential cannot inherit identity from an earlier
 		 * passless profile, a matching nick, or externally residual account/+r.
 		 * The following apply sees no identity marker and renames the holder.
-		 * A passless profile never applied runtime effects, so it must not
-		 * revoke externally supplied state either. */
+		 * Changing an existing credential does not come through here: live
+		 * policy checks preserve the holder's active identity. A passless
+		 * profile never applied runtime effects, so it must not revoke
+		 * externally supplied state either. */
 		if (nick_pass_added)
 		{
 			Client *profile_client = find_user(rec->parent->key, NULL);

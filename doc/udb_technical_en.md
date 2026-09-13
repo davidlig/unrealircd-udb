@@ -139,7 +139,7 @@ If the profile has `access`, a valid password is **not sufficient**: the client 
 
 For a normal profile with `N::pass`, successful authentication sets `account=<nick>` and `+r` and enables vhost, operclass, modes, SWHOIS, and snomasks. Leaving the profile removes UDB-owned state, including an oper grant owned by UDB. Removing `pass` immediately removes UDB identity/effects; an already matching nick or residual account/`+r` cannot replace a password authentication.
 
-During a hot replacement of N, neither account nor `+r` is trusted: continuity requires an active UDB identity whose bound `pass`/`access` digest matches the candidate profile and whose access still permits the client. Otherwise UDB removes the effects it actually owned and, when a password record exists, renames the current nick holder.
+During a hot replacement of N, neither account nor `+r` is trusted: continuity requires an active UDB identity for that nick, the candidate profile to keep `pass`, and the candidate `access` to still permit the client. Changing the `pass` value, or an `access` list that still permits the holder, does not revoke identity. Otherwise UDB removes the effects it actually owned and, when the holder has no valid identity and a password record exists, renames the current nick holder.
 
 
 #### N runtime state and ownership
@@ -164,7 +164,7 @@ Per-effect ownership:
 
 Identity revocation is limited to `account`, `+r` and the identity marker, and it only acts when UDB holds an identity. Effect revocation is limited to state recorded in the ownership marker. A passless profile never creates an ownership marker, so "passless never applies and never removes" follows from the model instead of special branches.
 
-Hot mutations (`INS`/`DEL`/`UPDATE`) and full N snapshots use the same reconciler: remove owned effects that are no longer desired, preserve external effects UDB never owned, apply missing desired effects, and record exactly what changed. A snapshot with an equivalent `pass`/`access` policy keeps identity and reconciles effects; a changed policy, a new `suspend`, a removal or an access denial revokes identity and effects. `INS suspend` revokes effects and identity but keeps the nick; removing `suspend` never restores identity.
+Hot mutations (`INS`/`DEL`/`UPDATE`) and full N snapshots use the same reconciler: remove owned effects that are no longer desired, preserve external effects UDB never owned, apply missing desired effects, and record exactly what changed. A snapshot that keeps `pass` and an `access` list that still permits the holder keeps identity and reconciles effects, even when the values change; a new `suspend`, a removal, losing `pass` or an access denial revokes identity and effects. `INS suspend` revokes effects and identity but keeps the nick; removing `suspend` never restores identity.
 
 External `account`/`+r` never authenticate. While UDB identity is active, an external change to them invalidates the public representation but cannot recreate authentication; revoking identity sets `account=*` and removes `+r`. When UDB never held identity, external `account`/`+r` are left untouched.
 

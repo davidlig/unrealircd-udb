@@ -145,7 +145,7 @@ Si el perfil contiene `access`, la contraseña correcta **no basta**: la IP del 
 
 En un perfil normal con `N::pass`, una autenticación correcta asigna `account=<nick>` y `+r` y habilita vhost, operclass, modos, SWHOIS y snomasks. Cuando el usuario abandona el perfil, UDB retira el estado que posee, incluido el oper concedido por UDB. Al borrar `pass`, retira inmediatamente identidad/efectos UDB; ni coincidir con el nick ni un account/`+r` residual sustituyen una autenticación por contraseña.
 
-En un reemplazo caliente del bloque N no se confía ni en el account ni en `+r`: la continuidad exige una identidad UDB activa cuyo digest de `pass`/`access` coincida con el perfil candidato y cuyo acceso siga permitiendo al cliente. De lo contrario UDB retira los efectos que realmente poseía y, si existe contraseña, renombra al ocupante actual del nick.
+En un reemplazo caliente del bloque N no se confía ni en el account ni en `+r`: la continuidad exige una identidad UDB activa para ese nick, que el perfil candidato conserve `pass` y que el `access` candidato siga permitiendo al cliente. Cambiar el valor de `pass`, o un `access` que aún permite, no revoca la identidad. De lo contrario UDB retira los efectos que realmente poseía y, si el ocupante carece de identidad válida y existe contraseña, renombra al ocupante actual del nick.
 
 
 #### Estado runtime y ownership del bloque N
@@ -170,7 +170,7 @@ Ownership por efecto:
 
 La revocación de identidad se limita a `account`, `+r` y el marcador de identidad, y sólo actúa cuando UDB posee una identidad. La revocación de efectos se limita al estado registrado en el marcador de ownership. Un perfil passless nunca crea marcador de ownership, así que "passless nunca aplica ni retira" surge del modelo en lugar de ramas especiales.
 
-Las mutaciones en caliente (`INS`/`DEL`/`UPDATE`) y los snapshots completos de N usan el mismo reconciliador: retirar efectos poseídos que ya no se desean, preservar efectos externos que UDB nunca poseyó, aplicar los efectos deseados que faltan y registrar exactamente lo que cambió. Un snapshot con política `pass`/`access` equivalente conserva la identidad y reconcilia efectos; un cambio de política, un `suspend` nuevo, una eliminación o una denegación de acceso revocan identidad y efectos. `INS suspend` revoca efectos e identidad pero mantiene el nick; retirar `suspend` nunca restaura la identidad.
+Las mutaciones en caliente (`INS`/`DEL`/`UPDATE`) y los snapshots completos de N usan el mismo reconciliador: retirar efectos poseídos que ya no se desean, preservar efectos externos que UDB nunca poseyó, aplicar los efectos deseados que faltan y registrar exactamente lo que cambió. Un snapshot que conserva `pass` y un `access` que aún permite al portador mantiene la identidad y reconcilia efectos, aunque cambien los valores; un `suspend` nuevo, una eliminación, la pérdida de `pass` o una denegación de acceso revocan identidad y efectos. `INS suspend` revoca efectos e identidad pero mantiene el nick; retirar `suspend` nunca restaura la identidad.
 
 Un `account`/`+r` externo nunca autentica. Mientras hay identidad UDB activa, un cambio externo de esos valores invalida la representación pública pero no puede recrear autenticación; al revocar la identidad se fija `account=*` y se retira `+r`. Cuando UDB nunca poseyó identidad, el `account`/`+r` externo no se toca.
 
