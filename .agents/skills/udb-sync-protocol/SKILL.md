@@ -19,7 +19,7 @@ Before a non-trivial DB protocol change, write down only the affected transition
 Required properties:
 - staged snapshot data cannot alter active state before full validation and persistence commit;
 - `INF/RES/BEGIN/PUT/END/ACK` reconciliation is tied to the selected authority, round, block and txid;
-- every frame in one six-block reconciliation reports one exact watermark; a different stream may adopt a lower watermark only after complete reconciliation;
+- all watermark values carried by the round's validated `INF`, `BEGIN`, and `END` frames resolve to one exact watermark; a different stream may adopt a lower watermark only after complete reconciliation;
 - bootstrap without explicit propagator policy does not mix initial snapshots from multiple peers;
 - failover/failback and authority selection are deterministic and select only eligible direct links;
 - snapshot frames remain hop-by-hop and are never broadcast/forwarded;

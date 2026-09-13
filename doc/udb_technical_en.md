@@ -544,7 +544,7 @@ Selector meaning:
 - `-`: policy exists but no usable candidate is currently selected;
 - `<servername>`: selected source/propagator.
 
-If a direct peer does not acknowledge HEL before timeout, UDB aborts the server link. Certain recognizable legacy request shapes that omit or misplace mandatory `OCL` are aborted immediately; other malformed HEL frames are ignored, cannot confirm the capability, and may consequently reach the timeout. These paths do not emit a DB `ERR HEL` frame. An instance epoch change for the same SID is treated as a fresh instance and resets sequence/stream latch state before a full reconciliation.
+If a direct peer does not acknowledge HEL before timeout, UDB aborts the server link. Certain recognizable legacy request shapes that omit or misplace mandatory `OCL` are aborted immediately; other malformed HEL frames are ignored, cannot confirm the capability, and may consequently reach the timeout. These paths do not emit a DB `ERR HEL` frame. An instance epoch change for the currently selected upstream SID is treated as a fresh authority stream: it resets sequence/stream latch state and requires a full reconciliation. For any other direct peer, the change only invalidates that peer's replay/OCL instance state.
 
 ## 8. Authority, bootstrap, and freshness model
 
@@ -635,7 +635,7 @@ Parameters:
 - `txid` accepts only alphanumeric characters, `-`, `_`, maximum 31 characters.
 - `sha256` is a 64-character lowercase hexadecimal cryptographic digest of the block's canonical serialization.
 - `watermark_seq` is the 64-bit monotonic sequence number representing the latest mutation included in the snapshot.
-- Only the documented arities are accepted. `INF`, `BEGIN`, `END`, and `ACK` may omit the legacy-compatible optional watermark, but if present it must be a canonical unsigned decimal value.
+- Only the documented arities are accepted. `INF`, `BEGIN`, `END`, and `ACK` may omit the legacy-compatible optional watermark, but if present it must be a valid unsigned decimal value within the `uint64_t` range.
 
 `BEGIN` requires an active reconciliation with the same authority/round and a pending `RES` for that block. `PUT` must exactly match peer/round/txid. Invalid sequencing aborts the session and the reconciliation round.
 

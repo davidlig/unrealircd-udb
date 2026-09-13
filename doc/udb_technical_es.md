@@ -550,7 +550,7 @@ El selector anunciado significa:
 - `-`: existe política pero no hay candidato utilizable;
 - `<servername>`: fuente/propagador seleccionado.
 
-Si un peer directo no responde al HEL dentro del timeout, UDB aborta el enlace de servidor. Ciertas formas heredadas reconocibles que omiten o colocan mal la capacidad obligatoria `OCL` se abortan inmediatamente; otros frames HEL malformados se ignoran, no pueden confirmar la capacidad y pueden acabar alcanzando el timeout. Estas rutas no emiten un frame DB `ERR HEL`. Un cambio de epoch de instancia del mismo SID se trata como una nueva instancia y reinicia el estado de secuencia/stream antes de una reconciliación completa.
+Si un peer directo no responde al HEL dentro del timeout, UDB aborta el enlace de servidor. Ciertas formas heredadas reconocibles que omiten o colocan mal la capacidad obligatoria `OCL` se abortan inmediatamente; otros frames HEL malformados se ignoran, no pueden confirmar la capacidad y pueden acabar alcanzando el timeout. Estas rutas no emiten un frame DB `ERR HEL`. Un cambio de epoch de instancia del SID upstream seleccionado se trata como un nuevo stream de autoridad: reinicia el estado de secuencia/stream y requiere una reconciliación completa. Para cualquier otro peer directo, el cambio sólo invalida el estado de instancia replay/OCL de ese peer.
 
 ## 8. Modelo de autoridad, bootstrap y freshness
 
@@ -641,7 +641,7 @@ Parámetros:
 - `txid` sólo admite caracteres alfanuméricos, `-` y `_`, con un máximo de 31 caracteres.
 - `sha256` es el digest criptográfico hexadecimal en minúsculas de 64 caracteres de la serialización canónica del bloque.
 - `watermark_seq` es el entero monotónico de 64 bits que representa la última mutación incluida en el snapshot.
-- Sólo se aceptan las aridades documentadas. `INF`, `BEGIN`, `END` y `ACK` pueden omitir el watermark opcional por compatibilidad heredada, pero si aparece debe ser un decimal unsigned canónico.
+- Sólo se aceptan las aridades documentadas. `INF`, `BEGIN`, `END` y `ACK` pueden omitir el watermark opcional por compatibilidad heredada, pero si aparece debe ser un valor decimal unsigned válido dentro del rango de `uint64_t`.
 
 `BEGIN` sólo se acepta si existe una reconciliación activa con la misma autoridad/ronda y ese bloque tenía un `RES` pendiente. `PUT` debe coincidir exactamente con peer/ronda/txid. Una secuencia inválida aborta la sesión y la ronda.
 
