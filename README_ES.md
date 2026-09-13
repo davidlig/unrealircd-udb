@@ -125,8 +125,9 @@ Un enlace directo negocia:
 DB <peer> HEL 4 <selector> <epoch> OCL [OCLG]
 ```
 
-Sin HEL 4/OCL confirmado no se acepta el resto del protocolo; un timeout de HEL puede provocar que UDB aborte el enlace.
-El bloque `K` usa `expires *<timestamp_unix>` para sanciones temporales G/Z/S/Q/F; sin `expires` es permanente. La autoridad elimina transaccionalmente el subtree K completo vencido, mientras los followers solicitan `EXP` y nunca borran persistencia autoritativa localmente.
+Sin HEL 4/OCL confirmado no se acepta el resto del protocolo; un timeout de HEL puede provocar que UDB aborte el enlace. HEL negocia capacidad y autoridad, pero no autentica criptográficamente al peer: UDB hereda la frontera de confianza del enlace de servidores de UnrealIRCd. Usa enlaces TLS autenticados y con verificación de certificado en cada salto UDB; sin TLS, snapshots, hashes de contraseña, claves de canal y mutaciones quedan expuestos en tránsito.
+
+El bloque `K` usa `expires *<timestamp_unix>` para sanciones temporales G/Z/S/Q/F; sin `expires` es permanente. Los followers retransmiten solicitudes `EXP` dirigidas salto a salto hacia la autoridad raíz seleccionada y nunca borran persistencia autoritativa localmente; sólo esa autoridad elimina el subtree vencido y origina el `DEL` secuenciado.
 
 
 ### Rutas IPv4/IPv6 del bloque K
@@ -136,7 +137,7 @@ En una ruta UDB, `::` es el separador de componentes, por lo que cada `:` de IPv
 
 La reconciliación compara los seis bloques mediante `INF`. Sólo los bloques divergentes se solicitan con `RES` y se reciben en un árbol privado con `BEGIN/PUT/END`. El `END` valida el checksum, persiste el snapshot y sólo después publica el nuevo árbol.
 
-Las mutaciones en vivo son `INS`, `DEL`, `DRP` y `OPT`; `EXP` es una solicitud dirigida de expiración follower-a-autoridad. Pueden retransmitirse multihop; las transferencias staged no se retransmiten.
+Las mutaciones en vivo son `INS`, `DEL`, `DRP` y `OPT`; `EXP` es una solicitud dirigida de expiración follower-a-autoridad. Las mutaciones conservan el SID/epoch/secuencia del origen raíz mientras cada relay las valida y retransmite; las transferencias staged siguen siendo salto a salto y nunca se reenvían.
 
 Consulta [doc/udb_technical_es.md](doc/udb_technical_es.md) para la gramática completa y las invariantes de autoridad.
 
@@ -161,7 +162,7 @@ Sin `N::pass`, un perfil no es una identidad: el nick puede usarse si `forbid` y
 
 Una credencial `/NICK nick:Password` es de un solo uso y sólo aplica a ese intento: la cuenta, `+r` y los efectos del perfil sólo se materializan cuando el cambio de nick es efectivo, y un cambio rechazado (`433`, Q-line, límites de cambio de nick) deja intacta la identidad UDB activa del nick actual. El registro inicial sigue la misma regla, y una credencial de un intento fallido nunca se reutiliza por un rename forzado posterior. Cuando un perfil antes passless recibe su primer `N::pass`, el `account`/`+r` de otra fuente no se acepta como su autenticación. Un cambio de nick forzado por servicios (`SVSNICK`) nunca es autenticación UDB: un nick protegido alcanzado sin una identidad activa válida se renombra de forma segura.
 
-Un nick suspendido protegido por contraseña sigue exigiendo sus comprobaciones normales de `pass`/`access` antes de poder adoptarse. `N::pass` admite los tipos `argon2id`, `sha256` y `crypt`, seleccionados por su propio prefijo (`argon2id:`, `sha256:` o `crypt:`). La autenticación correcta queda ligada únicamente al nick activo: mientras exista `N::suspend`, UDB no publica account/`+r`, no aplica efectos del perfil y no conserva autenticación alguna. Al eliminar `suspend` de un perfil con `pass`, el ocupante actual se renombra y debe autenticarse de nuevo con `/NICK nick:Password`; un perfil sin `pass` no tiene identidad que revocar, así que eliminar su `suspend` nunca identifica al ocupante. Account/`+r` por sí solos no pueden crear identidad. UDB no añade ni retira el `+S` de propiedad externa.
+Un nick suspendido protegido por contraseña sigue exigiendo sus comprobaciones normales de `pass`/`access` antes de poder adoptarse. `N::pass` admite los tipos `argon2id`, `sha256` y `crypt`, seleccionados por su propio prefijo (`argon2id:`, `sha256:` o `crypt:`). Usa `argon2id` para credenciales nuevas y migra registros `sha256`/`crypt` heredados cuando los usuarios se autentiquen; mantener compatibilidad no convierte SHA-256 sin salt en una opción adecuada para contraseñas nuevas. Exige TLS a los clientes que envíen `/NICK nick:Password` o `/GHOST`, porque esos comandos transportan la contraseña proporcionada. La autenticación correcta queda ligada únicamente al nick activo: mientras exista `N::suspend`, UDB no publica account/`+r`, no aplica efectos del perfil y no conserva autenticación alguna. Al eliminar `suspend` de un perfil con `pass`, el ocupante actual se renombra y debe autenticarse de nuevo con `/NICK nick:Password`; un perfil sin `pass` no tiene identidad que revocar, así que eliminar su `suspend` nunca identifica al ocupante. Account/`+r` por sí solos no pueden crear identidad. UDB no añade ni retira el `+S` de propiedad externa.
 
 La clave de canal es exclusivamente el parámetro nativo `+k` de `C::<canal>::modes`, por ejemplo `+ntk secret`. Protege tanto el primer JOIN como los posteriores. Un fundador identificado recibe `+q` de UDB.
 
@@ -179,9 +180,9 @@ La clave de canal es exclusivamente el parámetro nativo `+k` de `C::<canal>::mo
 
 `/UDB OPERCLASSES` verifica si todos los IRCd participantes han entregado inventario OCL. `/UDB OPERCLASS <nombre>` comprueba que una operclass exista y tenga el mismo digest efectivo en todos.
 
-### Advertencia actual de DBQ
+### Redacción de secretos
 
-El código redacciona `N::*::pass` y `S::encryption_key`.
+El código redacciona `N::*::pass`, `S::encryption_key` y el valor completo de `C::<canal>::modes`, ya que puede contener una clave nativa `+k`. Los avisos de debug de modos también redaccionan los parámetros cuando la expresión de modos contiene `k`.
 
 ## Desarrollo
 

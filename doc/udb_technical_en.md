@@ -110,9 +110,9 @@ sha256:<64 hex>
 crypt:<hash>
 ```
 
-The supported `N::pass` types are `argon2id`, `sha256`, and `crypt`; its prefix selects the authentication algorithm. SHA-256 compares the hexadecimal SHA-256 of the supplied password.
+The supported `N::pass` types are `argon2id`, `sha256`, and `crypt`; its prefix selects the authentication algorithm. SHA-256 compares the hexadecimal SHA-256 of the supplied password. `argon2id` is the recommended format for new credentials; `sha256` and `crypt` remain compatibility formats and should be migrated rather than provisioned for new passwords. Client connections that submit `/NICK nick:Password` or `/GHOST` must use TLS because the supplied password is present in the IRC command.
 
-Password failure throttling uses 256 slots conceptually keyed by profile/IP. The default is `5:60`; it can be configured with `udb::password-flood` and overridden at runtime by `S::flood`.
+Password failure throttling uses 256 slots conceptually keyed by profile/IP. The default is `5:60`; it can be configured with `udb::password-flood` and overridden at runtime by `S::flood`. Expired entries are reused, but a full active table fails closed for a new profile/IP pair instead of evicting an active entry and permitting spray attempts.
 
 #### Using a registered nick
 
@@ -313,7 +313,7 @@ K::<type>::<pattern>::expires *<unix_timestamp>
 
 The pattern node is a container and has no direct value. `expires` is one absolute Unix timestamp chosen by the origin; its absence is the only representation of a permanent line. `expires *0` is invalid. A timestamp at or before the local time is never materialized as a TKL.
 
-Expiry is not derived from the TKL runtime state. The authority sweeps expired K profiles and performs the canonical transactional `DEL K::<type>::<pattern>`, which removes the complete subtree from memory and `udb_K.db`; followers remove only their local runtime TKL and send an `EXP <path> <expected-expires>` compare-and-delete request. Therefore restart, reload, snapshot, reconnect, or a change to a profile property cannot renew or resurrect a temporary line. Only an explicit `INS ...::expires` changes its lifetime; `DEL ...::expires` converts a valid remaining profile to permanent.
+Expiry is not derived from the TKL runtime state. The root authority sweeps expired K profiles and performs the canonical transactional `DEL K::<type>::<pattern>`, which removes the complete subtree from memory and `udb_K.db`; followers remove only their local runtime TKL and send or relay an `EXP <path> <expected-expires>` compare-and-delete request toward their selected upstream. Therefore restart, reload, snapshot, reconnect, or a change to a profile property cannot renew or resurrect a temporary line. Only an explicit `INS ...::expires` changes its lifetime; `DEL ...::expires` converts a valid remaining profile to permanent.
 
 UDB tags managed TKLs with the reserved `set_by="UDB:managed"` marker and only removes matching UDB-owned lines.
 
@@ -544,13 +544,13 @@ Selector meaning:
 - `-`: policy exists but no usable candidate is currently selected;
 - `<servername>`: selected source/propagator.
 
-If a direct peer does not acknowledge HEL before timeout or fails to present mandatory `OCL`, UDB aborts the server link with `ERR HEL 6` (`FORBIDDEN`). An instance epoch change for the same SID is treated as a fresh instance and resets sequence counters, replay buffers, and latch state.
+If a direct peer does not acknowledge HEL before timeout, UDB aborts the server link. Certain recognizable legacy request shapes that omit or misplace mandatory `OCL` are aborted immediately; other malformed HEL frames are ignored, cannot confirm the capability, and may consequently reach the timeout. These paths do not emit a DB `ERR HEL` frame. An instance epoch change for the same SID is treated as a fresh instance and resets sequence/stream latch state before a full reconciliation.
 
 ## 8. Authority, bootstrap, and freshness model
 
 ### 8.1 With policy
 
-The first valid candidate in policy order is selected. Snapshot imports and incoming mutations must originate from the selected direct peer with confirmed HEL.
+The first valid candidate in policy order is selected. Snapshot imports and incoming mutations must arrive through the selected direct peer with confirmed HEL. A multihop mutation retains the root origin SID/epoch in its IRC prefix and payload; the direct peer is the authorized transport hop, not necessarily the stream origin.
 
 A policy change aborts sessions/pending requests owned by a now-invalid source and reevaluates reconciliation.
 
@@ -606,7 +606,7 @@ Authority                                     Receiver
     | ...                                        |
     | END round N block txid sha256 watermark    |
     |------------------------------------------->|
-    |       ACK round N block txid sha256        |
+    | ACK round N block txid sha256 watermark    |
     |<-------------------------------------------|
 ```
 
@@ -635,6 +635,7 @@ Parameters:
 - `txid` accepts only alphanumeric characters, `-`, `_`, maximum 31 characters.
 - `sha256` is a 64-character lowercase hexadecimal cryptographic digest of the block's canonical serialization.
 - `watermark_seq` is the 64-bit monotonic sequence number representing the latest mutation included in the snapshot.
+- Only the documented arities are accepted. `INF`, `BEGIN`, `END`, and `ACK` may omit the legacy-compatible optional watermark, but if present it must be a canonical unsigned decimal value.
 
 `BEGIN` requires an active reconciliation with the same authority/round and a pending `RES` for that block. `PUT` must exactly match peer/round/txid. Invalid sequencing aborts the session and the reconciliation round.
 
@@ -665,7 +666,7 @@ Convergence detection relies on deterministic SHA-256 digests rather than checks
 ### 9.4 Watermark and snapshot/live mutation race resolution
 
 To eliminate race conditions between live mutations and background reconciliation snapshots:
-1. Every snapshot carries `watermark_seq` indicating the exact authority sequence number reflected in the dataset.
+1. Every snapshot carries `watermark_seq` indicating the exact authority sequence number reflected in the dataset. All six `INF` entries and every `BEGIN`/`END` in one round must report the same watermark; inconsistent rounds abort fail closed.
 2. Upon committing the snapshot and entering `READY`, the node sets:
    - `last_applied_seq = watermark_seq`
    - `expected_seq = watermark_seq + 1`
@@ -686,8 +687,8 @@ EXP <path> <expected-expires>
 ```
 
 Parameters:
-- `epoch`: 16 lowercase hex characters matching the authority's confirmed instance epoch.
-- `seq`: 64-bit decimal integer strictly monotonic within the authority epoch (`seq >= 1`), shared across all six persistent blocks (`N`, `C`, `I`, `S`, `L`, `K`) to ensure total causal ordering.
+- `epoch`: 16 lowercase hex characters identifying the root origin's instance epoch.
+- `seq`: 64-bit decimal integer strictly monotonic within the `(root source SID, epoch)` stream (`seq >= 1`), shared across all six persistent blocks (`N`, `C`, `I`, `S`, `L`, `K`) to ensure total causal ordering.
 
 Semantics:
 
@@ -695,17 +696,17 @@ Semantics:
 - `DEL`: delete a path; deleting a missing path is idempotent.
 - `DRP`: drop a complete block, first persisting the empty snapshot.
 - `OPT`: force block save/update and optionally relay `modified_at`.
-- `EXP`: point-to-point compare-and-delete request for an expired K line sent from followers to their selected direct authority (`DB <target> EXP <path> <expected-expires>`). If `expected-expires` matches the authority's record and has elapsed, the authority deletes the profile locally, persists `udb_K.db`, and broadcasts a transactional `DEL <epoch> <seq> <path>` across confirmed peers; stale requests are ignored without error.
+- `EXP`: point-to-point compare-and-delete request for an expired K line sent toward the selected direct authority (`DB <target> EXP <path> <expected-expires>`). A relay validates and deduplicates the request, then forwards it to its own selected upstream. Only the root authority deletes the profile, persists `udb_K.db`, allocates the next stream sequence, and broadcasts the transactional `DEL`; stale requests are ignored without error.
 
 ### 10.1 Monotonic sequence rules and gap recovery
 
-Receivers process incoming mutations against the selected authority stream:
+Receivers process incoming mutations against the active `(root source SID, epoch)` stream, received through the selected direct peer:
 
 - `expected_seq = last_applied_seq + 1`:
   - **In-order (`seq == expected_seq`)**: Validate -> persist locally -> publish to runtime -> advance `last_applied_seq = seq` -> relay multihop to downstream confirmed peers.
   - **Duplicate / Stale (`seq <= last_applied_seq`)**: Safely ignored without re-applying or mutating active state.
   - **Gap / Out-of-order (`seq > expected_seq`)**: Gap detected. The node suspends live application, marks sync health `DEGRADED`, and triggers an immediate staged reconciliation round (`RES`) to heal the gap.
-  - **Epoch mismatch (`epoch != authority_epoch`)**: Stale epoch packets are dropped. If the authority announces a new epoch via HEL, the sequence stream resets and full reconciliation takes place.
+  - **Stream mismatch (source SID or epoch differs)**: The packet is not applied. Its stream becomes a candidate and a full six-block reconciliation runs; only a successful round promotes the candidate and adopts that round's exact watermark, which may legitimately be lower than the previous stream's watermark.
   - **Persistence failure**: If persisting an in-order mutation fails (e.g. disk I/O error), the node marks sync health `DEGRADED` and initiates reconciliation pull, ensuring local storage failures cannot cause silent network divergence.
 
 Unlike `INF/RES/BEGIN/PUT/END`, mutations are intentionally capable of multihop propagation through validated re-forwarding at each node.
@@ -723,7 +724,7 @@ MANIFEST ACK <round> <block> <count> <sha256> <watermark_seq>
 
 Workflow:
 1. Every `anti-entropy-interval` (default 300 s ± 30 s jitter), a follower sends `MANIFEST REQ` to its selected authority.
-2. The authority replies with `MANIFEST ACK` for each of the six blocks, reporting its current `(count, sha256, watermark_seq)`.
+2. The authority replies with `MANIFEST ACK` for each of the six blocks, reporting its current `(count, sha256, watermark_seq)`. All six acknowledgements must carry one identical watermark; an inconsistent set fails closed and forces capability refresh/recovery.
 3. The follower compares the authority's manifests with its local active block manifests.
 4. **Match**: All blocks match; the state is verified convergent. No data is transferred and no noisy logs are produced.
 5. **Mismatch**: Any count or SHA-256 divergence immediately marks health `DEGRADED` and requests reconciliation pull (`RES`) for the divergent block.
@@ -852,7 +853,10 @@ A block-only query returns metadata such as record count, file size, mtime, SHA-
 Current `udb_query_is_secret()` explicitly hides:
 
 - `N::*::pass`;
-- `S::encryption_key`.
+- `S::encryption_key`;
+- the complete `C::<channel>::modes` value, because it may contain a native `+k` key.
+
+Mode debug notices likewise replace all parameters with `<redacted>` whenever the mode expression contains `k`.
 
 
 ## 15. Security and invariants
@@ -868,6 +872,10 @@ The implementation follows several fail-closed rules:
 - defensive cleanup refuses to unlink a temporary path if it is a symlink or non-regular file;
 - durability uncertainty after rename revokes READY;
 - incompatible HEL/OCL can close a server link rather than silently form a mixed inconsistent network.
+
+### 15.1 Trust and transport boundary
+
+HEL 4 authenticates neither a server nor a payload. UDB trusts UnrealIRCd's authenticated server link and then applies its own direct-peer authority policy, sequencing, staging, and schema checks. Every UDB hop should therefore use TLS with certificate verification and tightly controlled link credentials. Without TLS, the DB protocol exposes full snapshots and live values in transit, including password hashes, encryption material, and channel keys; integrity also depends on the underlying link authentication. UDB provides no end-to-end encryption or signature above the server link.
 
 Editing `udb_*.db` while the daemon is live is not recommended. Apart from bypassing the in-memory tree, manual edits can break generation invariants, schema, canonical digests, S2S size constraints, or the `.udb_state` generation set.
 
@@ -921,8 +929,8 @@ DRP <epoch> <seq> <block>
 OPT <epoch> <seq> <block> [mtime]
 EXP <path> <expected-expires>
 
-MANIFEST REQ <round> <block> <sha256> <count>
-MANIFEST ACK <round> <block> <sha256> <count>
+MANIFEST REQ <round>
+MANIFEST ACK <round> <block> <count> <sha256> <watermark_seq>
 
 OCL BEGIN <originSID> <epoch> <gen> <count> <digest>
 OCL ITEM  <originSID> <epoch> <gen> <operclass> <digest>

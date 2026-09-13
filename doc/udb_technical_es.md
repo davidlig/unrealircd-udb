@@ -111,9 +111,9 @@ sha256:<64 hex>
 crypt:<hash>
 ```
 
-Los tipos admitidos por `N::pass` son `argon2id`, `sha256` y `crypt`; su prefijo selecciona el algoritmo de autenticación. En SHA-256 se compara el SHA-256 hexadecimal de la contraseña enviada.
+Los tipos admitidos por `N::pass` son `argon2id`, `sha256` y `crypt`; su prefijo selecciona el algoritmo de autenticación. En SHA-256 se compara el SHA-256 hexadecimal de la contraseña enviada. `argon2id` es el formato recomendado para credenciales nuevas; `sha256` y `crypt` se mantienen por compatibilidad y deben migrarse en lugar de aprovisionarse para contraseñas nuevas. Las conexiones de cliente que envíen `/NICK nick:Password` o `/GHOST` deben usar TLS porque la contraseña proporcionada está presente en el comando IRC.
 
-El control de fallos de contraseña usa una tabla de 256 entradas indexada conceptualmente por perfil/IP. El valor por defecto es `5:60` y puede configurarse con `udb::password-flood` o sustituirse en runtime mediante `S::flood`.
+El control de fallos de contraseña usa una tabla de 256 entradas indexada conceptualmente por perfil/IP. El valor por defecto es `5:60` y puede configurarse con `udb::password-flood` o sustituirse en runtime mediante `S::flood`. Las entradas caducadas se reutilizan, pero una tabla activa llena falla de forma cerrada para una pareja perfil/IP nueva en vez de expulsar una entrada activa y permitir intentos de spray.
 
 #### Uso del nick
 
@@ -319,7 +319,7 @@ K::<tipo>::<patron>::expires *<timestamp_unix>
 
 El nodo patrón es un contenedor y no tiene valor directo. `expires` es un único timestamp Unix absoluto elegido por el origen; su ausencia es la única representación de una línea permanente. `expires *0` es inválido. Un timestamp igual o anterior a la hora local nunca se materializa como TKL.
 
-La expiración no se deriva del estado runtime de la TKL. La autoridad barre perfiles K vencidos y realiza el `DEL K::<tipo>::<patron>` transaccional canónico, que elimina el subtree completo de memoria y de `udb_K.db`; los followers sólo eliminan su TKL runtime local y envían una solicitud compare-and-delete `EXP <path> <expected-expires>`. Por tanto restart, reload, snapshot, reconnect o un cambio de una propiedad del perfil no pueden renovar ni resucitar una línea temporal. Sólo un `INS ...::expires` explícito cambia su vida; `DEL ...::expires` convierte un perfil restante válido en permanente.
+La expiración no se deriva del estado runtime de la TKL. La autoridad raíz barre perfiles K vencidos y realiza el `DEL K::<tipo>::<patron>` transaccional canónico, que elimina el subtree completo de memoria y de `udb_K.db`; los followers sólo eliminan su TKL runtime local y envían o retransmiten una solicitud compare-and-delete `EXP <path> <expected-expires>` hacia su upstream seleccionado. Por tanto restart, reload, snapshot, reconnect o un cambio de una propiedad del perfil no pueden renovar ni resucitar una línea temporal. Sólo un `INS ...::expires` explícito cambia su vida; `DEL ...::expires` convierte un perfil restante válido en permanente.
 
 UDB etiqueta las TKL gestionadas con el marcador reservado `set_by="UDB:managed"` y sólo elimina líneas propias coincidentes.
 
@@ -550,13 +550,13 @@ El selector anunciado significa:
 - `-`: existe política pero no hay candidato utilizable;
 - `<servername>`: fuente/propagador seleccionado.
 
-Si un peer directo no responde al HEL dentro del timeout o no soporta la capacidad obligatoria `OCL`, UDB aborta el enlace de servidor emitiendo `ERR HEL 6` (`FORBIDDEN`). Un cambio de epoch de instancia del mismo SID se trata como una nueva instancia y reinicia los contadores de secuencia, buffers de replay y estados de latch.
+Si un peer directo no responde al HEL dentro del timeout, UDB aborta el enlace de servidor. Ciertas formas heredadas reconocibles que omiten o colocan mal la capacidad obligatoria `OCL` se abortan inmediatamente; otros frames HEL malformados se ignoran, no pueden confirmar la capacidad y pueden acabar alcanzando el timeout. Estas rutas no emiten un frame DB `ERR HEL`. Un cambio de epoch de instancia del mismo SID se trata como una nueva instancia y reinicia el estado de secuencia/stream antes de una reconciliación completa.
 
 ## 8. Modelo de autoridad, bootstrap y freshness
 
 ### 8.1 Con política
 
-El primer candidato válido de la política se selecciona. Para importar snapshots o aceptar mutaciones, el origen debe coincidir con el peer directo seleccionado y tener HEL confirmado.
+El primer candidato válido de la política se selecciona. Para importar snapshots o aceptar mutaciones, el tráfico debe llegar a través del peer directo seleccionado con HEL confirmado. Una mutación multihop conserva el SID/epoch del origen raíz en su prefijo IRC y payload; el peer directo es el salto de transporte autorizado, no necesariamente el origen del stream.
 
 Si cambia la política, UDB cancela sesiones/peticiones pertenecientes a otra fuente y vuelve a evaluar la reconciliación.
 
@@ -612,7 +612,7 @@ Autoridad                                     Receptor
     | ...                                        |
     | END round N block txid sha256 watermark    |
     |------------------------------------------->|
-    |       ACK round N block txid sha256        |
+    | ACK round N block txid sha256 watermark    |
     |<-------------------------------------------|
 ```
 
@@ -641,6 +641,7 @@ Parámetros:
 - `txid` sólo admite caracteres alfanuméricos, `-` y `_`, con un máximo de 31 caracteres.
 - `sha256` es el digest criptográfico hexadecimal en minúsculas de 64 caracteres de la serialización canónica del bloque.
 - `watermark_seq` es el entero monotónico de 64 bits que representa la última mutación incluida en el snapshot.
+- Sólo se aceptan las aridades documentadas. `INF`, `BEGIN`, `END` y `ACK` pueden omitir el watermark opcional por compatibilidad heredada, pero si aparece debe ser un decimal unsigned canónico.
 
 `BEGIN` sólo se acepta si existe una reconciliación activa con la misma autoridad/ronda y ese bloque tenía un `RES` pendiente. `PUT` debe coincidir exactamente con peer/ronda/txid. Una secuencia inválida aborta la sesión y la ronda.
 
@@ -671,7 +672,7 @@ La detección de convergencia se basa en digests deterministas SHA-256 en lugar 
 ### 9.4 Watermark y resolución de carreras snapshot/mutación viva
 
 Para eliminar condiciones de carrera entre mutaciones online y snapshots de reconciliación en segundo plano:
-1. Cada snapshot transporta `watermark_seq`, indicando el número de secuencia exacto de la autoridad reflejado en el dataset.
+1. Cada snapshot transporta `watermark_seq`, indicando el número de secuencia exacto de la autoridad reflejado en el dataset. Las seis entradas `INF` y cada `BEGIN`/`END` de una ronda deben declarar el mismo watermark; una ronda inconsistente se aborta de forma cerrada.
 2. Al consolidar el commit del snapshot y pasar a `READY`, el nodo fija:
    - `last_applied_seq = watermark_seq`
    - `expected_seq = watermark_seq + 1`
@@ -692,8 +693,8 @@ EXP <path> <expected-expires>
 ```
 
 Parámetros:
-- `epoch`: 16 caracteres hexadecimales minúsculos coincidentes con el instance epoch confirmado de la autoridad.
-- `seq`: entero decimal de 64 bits estrictamente monotónico dentro del epoch de autoridad (`seq >= 1`), compartido globalmente entre los seis bloques persistentes (`N`, `C`, `I`, `S`, `L`, `K`) para garantizar orden causal total.
+- `epoch`: 16 caracteres hexadecimales minúsculos que identifican el instance epoch del origen raíz.
+- `seq`: entero decimal de 64 bits estrictamente monotónico dentro del stream `(SID de origen raíz, epoch)` (`seq >= 1`), compartido globalmente entre los seis bloques persistentes (`N`, `C`, `I`, `S`, `L`, `K`) para garantizar orden causal total.
 
 Semántica:
 
@@ -701,17 +702,17 @@ Semántica:
 - `DEL`: elimina una ruta; borrar una ruta inexistente es idempotente.
 - `DRP`: vacía un bloque completo, persistiendo primero el snapshot vacío.
 - `OPT`: fuerza guardado/actualización del bloque y puede propagar `modified_at`.
-- `EXP`: solicitud compare-and-delete punto a punto de una línea K expirada enviada por followers a su autoridad directa seleccionada (`DB <target> EXP <path> <expected-expires>`). Si `expected-expires` coincide con el registro de la autoridad y ha vencido, la autoridad elimina el perfil localmente, persiste `udb_K.db` y difunde un `DEL <epoch> <seq> <path>` transaccional al resto de peers confirmados; si no coincide o es obsoleta, se ignora de forma segura sin error.
+- `EXP`: solicitud compare-and-delete punto a punto de una línea K expirada enviada hacia la autoridad directa seleccionada (`DB <target> EXP <path> <expected-expires>`). Un relay valida y deduplica la solicitud y después la reenvía a su propio upstream seleccionado. Sólo la autoridad raíz elimina el perfil, persiste `udb_K.db`, asigna la siguiente secuencia del stream y difunde el `DEL` transaccional; las solicitudes obsoletas se ignoran de forma segura sin error.
 
 ### 10.1 Reglas de secuencia monotónica y autorreparación de gaps
 
-Los receptores procesan las mutaciones entrantes contra el stream de la autoridad seleccionada:
+Los receptores procesan las mutaciones entrantes contra el stream activo `(SID de origen raíz, epoch)`, recibido a través del peer directo seleccionado:
 
 - `expected_seq = last_applied_seq + 1`:
   - **En orden (`seq == expected_seq`)**: Valida -> persiste localmente -> publica en runtime -> avanza `last_applied_seq = seq` -> retransmite multihop a downstream peers confirmados.
   - **Duplicado / Obsoleto (`seq <= last_applied_seq`)**: Se descarta de forma segura sin re-aplicar ni mutar el estado activo.
   - **Hueco / Desorden (`seq > expected_seq`)**: Se detecta gap. El nodo suspende la aplicación online, marca la salud de sincronización como `DEGRADED` y dispara inmediatamente una ronda de reconciliación staged (`RES`) para sanar el hueco.
-  - **Epoch discordante (`epoch != authority_epoch`)**: Paquetes de un epoch obsoleto se descartan. Si la autoridad anuncia un nuevo epoch mediante HEL, el stream de secuencias se reinicia y se ejecuta una reconciliación completa.
+  - **Stream discordante (cambia el SID de origen o el epoch)**: El paquete no se aplica. Su stream pasa a ser candidato y se ejecuta una reconciliación completa de los seis bloques; sólo una ronda correcta promociona el candidato y adopta su watermark exacto, que legítimamente puede ser inferior al del stream anterior.
   - **Fallo de persistencia**: Si falla la persistencia local de una mutación en orden (por ejemplo, error de E/S de disco), el nodo marca salud `DEGRADED` e inicia reconciliación, asegurando que un fallo de almacenamiento local no genere divergencia silenciosa en la red.
 
 A diferencia de `INF/RES/BEGIN/PUT/END`, las mutaciones sí están diseñadas para propagarse por múltiples saltos mediante retransmisión validada en cada nodo.
@@ -729,7 +730,7 @@ MANIFEST ACK <round> <block> <count> <sha256> <watermark_seq>
 
 Flujo:
 1. Cada `anti-entropy-interval` (por defecto 300 s ± 30 s de jitter), el follower envía `MANIFEST REQ` a su autoridad seleccionada.
-2. La autoridad responde con `MANIFEST ACK` para cada uno de los seis bloques, indicando su `(count, sha256, watermark_seq)` actual.
+2. La autoridad responde con `MANIFEST ACK` para cada uno de los seis bloques, indicando su `(count, sha256, watermark_seq)` actual. Los seis acknowledgements deben llevar un watermark idéntico; un conjunto inconsistente falla de forma cerrada y fuerza refresh/recuperación de capacidad.
 3. El follower compara los manifests de la autoridad con sus manifests locales activos.
 4. **Coincidencia**: Todos los bloques coinciden; el estado está verificado como convergente. No se transfieren datos ni se generan logs ruidosos.
 5. **Divergencia**: Cualquier diferencia en recuento o digest SHA-256 marca inmediatamente la salud como `DEGRADED` y solicita reconciliación staged (`RES`) para el bloque divergente.
@@ -858,7 +859,10 @@ Consultar sólo un bloque devuelve metadatos (registros, tamaño, mtime, digest 
 El código actual de `udb_query_is_secret()` oculta explícitamente:
 
 - `N::*::pass`;
-- `S::encryption_key`.
+- `S::encryption_key`;
+- el valor completo de `C::<canal>::modes`, porque puede contener una clave nativa `+k`.
+
+Los avisos de debug de modos sustituyen igualmente todos los parámetros por `<redacted>` cuando la expresión de modos contiene `k`.
 
 
 ## 15. Seguridad e invariantes
@@ -874,6 +878,10 @@ La implementación aplica varias reglas de fail-closed:
 - no borra un temporal si resulta ser symlink o fichero no regular durante la limpieza defensiva;
 - un error de durabilidad después de rename retira READY;
 - HEL/OCL incompatibles pueden cerrar el enlace, evitando una red mixta silenciosamente inconsistente.
+
+### 15.1 Frontera de confianza y transporte
+
+HEL 4 no autentica al servidor ni al payload. UDB confía en el enlace de servidores autenticado de UnrealIRCd y después aplica su propia política de autoridad por peer directo, secuenciación, staging y esquema. Cada salto UDB debe usar por tanto TLS con verificación de certificado y credenciales de enlace estrictamente controladas. Sin TLS, el protocolo DB expone snapshots completos y valores en vivo durante el tránsito, incluidos hashes de contraseña, material de cifrado y claves de canal; la integridad también depende de la autenticación del enlace subyacente. UDB no aporta cifrado ni firma end-to-end por encima del enlace de servidores.
 
 No se recomienda editar `udb_*.db` con el daemon activo. Además de no actualizar el árbol en memoria, una edición manual puede romper generación, esquema, digests canónicos, límites S2S o el conjunto protegido por `.udb_state`.
 
@@ -927,8 +935,8 @@ DRP <epoch> <seq> <block>
 OPT <epoch> <seq> <block> [mtime]
 EXP <path> <expected-expires>
 
-MANIFEST REQ <round> <block> <sha256> <count>
-MANIFEST ACK <round> <block> <sha256> <count>
+MANIFEST REQ <round>
+MANIFEST ACK <round> <block> <count> <sha256> <watermark_seq>
 
 OCL BEGIN <originSID> <epoch> <gen> <count> <digest>
 OCL ITEM  <originSID> <epoch> <gen> <operclass> <digest>
