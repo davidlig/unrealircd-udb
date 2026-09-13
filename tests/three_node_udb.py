@@ -24,10 +24,7 @@ CLOAK_KEYS = ("aB3" * 30, "cD4" * 30, "eF5" * 30)
 N_MARKER = "harness-a::vhost propagated.test\n"
 MUTATOR_SOURCE = pathlib.Path(__file__).resolve().parent / "udb_test_mutator.c"
 MUTATOR_MODULE = MUTATOR_SOURCE.with_suffix(".so")
-MUTATOR_RECORDS = {
-    "A-B": "udb-test-mutator authorized-insert",
-    "B-C": "udb-test-mutator authorized-insert-b-c",
-}
+MUTATOR_RECORD = "udb-test-mutator authorized-insert"
 STAGED_AUTH_TRIGGER = "udb-test-mutator-staged-authorization-go"
 
 
@@ -391,27 +388,28 @@ def main():
             return 1
         print("PASS: HEL-confirmed non-propagator C could not import a staged block from or request an export from B")
         arm_mutators((a,))
-        if not wait_for_mutation(logs["B"], b_db, MUTATOR_RECORDS["A-B"], False, args.timeout):
+        if not wait_for_mutation(logs["B"], b_db, MUTATOR_RECORD, False, args.timeout):
             print_diagnostics("A-to-B authorized INS timeout", (("node A", logs["A"]), ("node B", logs["B"])),
                               (("node B", b_db),))
             return skip("A-B-C staged-sync completed, but B did not durably apply the authorized A-to-B INS")
         print("PASS: B durably applied the authorized A-to-B INS")
-        if not wait_for_mutation(logs["B"], b_db, MUTATOR_RECORDS["A-B"], True, args.timeout):
+        if not wait_for_mutation(logs["C"], c_db, MUTATOR_RECORD, False, args.timeout):
+            print_diagnostics("A-to-B-to-C relayed INS timeout", (("node A", logs["A"]), ("node B", logs["B"]),
+                                                                    ("node C", logs["C"])),
+                              (("node C", c_db),))
+            return skip("A-B-C staged-sync completed, but C did not durably apply A's relayed INS")
+        print("PASS: C durably applied A's INS relayed through B with the root mutation stream intact")
+        if not wait_for_mutation(logs["B"], b_db, MUTATOR_RECORD, True, args.timeout):
             print_diagnostics("A-to-B authorized DEL timeout", (("node A", logs["A"]), ("node B", logs["B"])),
                               (("node B", b_db),))
             return skip("A-B-C staged-sync completed, but B did not durably apply the authorized A-to-B DEL")
         print("PASS: B durably applied the authorized A-to-B DEL")
-        arm_mutators((b,))
-        if not wait_for_mutation(logs["C"], c_db, MUTATOR_RECORDS["B-C"], False, args.timeout):
-            print_diagnostics("B-to-C authorized INS timeout", (("node B", logs["B"]), ("node C", logs["C"])),
+        if not wait_for_mutation(logs["C"], c_db, MUTATOR_RECORD, True, args.timeout):
+            print_diagnostics("A-to-B-to-C relayed DEL timeout", (("node A", logs["A"]), ("node B", logs["B"]),
+                                                                    ("node C", logs["C"])),
                               (("node C", c_db),))
-            return skip("B-C staged-sync completed, but C did not durably apply the authorized B-to-C INS")
-        print("PASS: C durably applied the authorized B-to-C INS")
-        if not wait_for_mutation(logs["C"], c_db, MUTATOR_RECORDS["B-C"], True, args.timeout):
-            print_diagnostics("B-to-C authorized DEL timeout", (("node B", logs["B"]), ("node C", logs["C"])),
-                              (("node C", c_db),))
-            return skip("B-C staged-sync completed, but C did not durably apply the authorized B-to-C DEL")
-        print("PASS: C durably applied the authorized B-to-C DEL")
+            return skip("A-B-C staged-sync completed, but C did not durably apply A's relayed DEL")
+        print("PASS: C durably applied A's DEL relayed through B with the root mutation stream intact")
         return 0
     except EnvironmentUnavailable as exc:
         return skip(f"bubblewrap isolation is unavailable: {exc}")

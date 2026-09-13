@@ -17,7 +17,7 @@ It compiles the existing test-only `udb_test_mutator.c` fixture and loads it
 on A, B, and C from their isolated module trees. The generated configurations
 form a strict downstream chain: A selects itself as the root authority, B
 selects A for A-to-B synchronization and mutations, and C selects B for
-B-to-C synchronization and mutations.
+B-to-C synchronization and relayed mutations.
 
 It starts B and A, requires A-B link/sync evidence and load-log evidence that
 both read their seeded blocks from their configured temporary directories, and
@@ -32,10 +32,10 @@ so B treats C as non-propagating: B must reject the staged frames, refuse the
 export request, leave its database byte-identical, and send no staged export
 to C.
 Once the staged A-to-B-to-C path is complete, the harness arms the test-only
-fixture and requires an authorized `INS` and matching `DEL` on both direct
-edges: B must durably contain and then omit A's record, and C must durably
-contain and then omit B's edge-specific record. The fixture is test-only and
-does not alter the production UDB module.
+fixture on A and requires its authorized `INS` and matching `DEL` to cross both
+direct edges without B minting a new mutation stream: B and C must each durably
+contain and then omit A's record. The fixture is test-only and does not alter
+the production UDB module.
 
 Every timeout prints relevant `Server linked`, `is now synced`, `[UDB]`, and
 fixture log lines, along with the received UDB command sequence and affected

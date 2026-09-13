@@ -152,6 +152,8 @@ class MockPeer:
         self.sock.settimeout(0.25)
         self.lines = []
         self.buffer = ""
+        self.mutation_epoch = "0000000000000001"
+        self.mutation_seq = 0
         self.send_raw(f"PASS :{LINK_PASSWORD}")
         self.send_raw(f"PROTOCTL EAUTH={self.name}")
         self.send_raw("PROTOCTL NOQUIT NICKv2 SJOIN SJOIN2 UMODE2 SJ3 BIGLINES SID=" + self.sid)
@@ -161,6 +163,12 @@ class MockPeer:
         self.send(f"DB {self.ircd_sid} HEL 4 {propagator_advertised} 0000000000000001 OCL")
         self.wait_for(lambda line: " DB " in line and " HEL 4 " in line, f"{self.name} HEL response")
         self.send(f"DB {self.ircd_sid} HEL 4 ACK {propagator_advertised} 0000000000000001 OCL")
+
+    def send_ins(self, path, value):
+        self.mutation_seq += 1
+        self.send(
+            f"DB {self.ircd_sid} INS {self.mutation_epoch} {self.mutation_seq} {path} :{value}"
+        )
 
     def send_raw(self, command):
         self.sock.sendall((command + "\r\n").encode("ascii"))
@@ -303,7 +311,7 @@ def main():
 
         for inv in invalid_s_propagators:
             start_idx = len(peer.lines)
-            peer.send(f"DB {IRCD_SID} INS S::propagator :{inv}")
+            peer.send_ins("S::propagator", inv)
             # Expect ERR INS
             peer.wait_for(lambda line: " DB " in line and " ERR INS " in line, f"ERR INS for {inv!r}",
                           start_idx=start_idx)
@@ -333,7 +341,7 @@ def main():
 
         for val in valid_s_propagators:
             start_idx = len(peer.lines)
-            peer.send(f"DB {IRCD_SID} INS S::propagator :{val}")
+            peer.send_ins("S::propagator", val)
             time.sleep(0.1)
             peer.receive(time.monotonic() + 0.2)
             recent = peer.lines[start_idx:]

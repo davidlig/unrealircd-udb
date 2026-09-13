@@ -40,8 +40,6 @@ static int mutator_server_synced(Client *client)
 {
 	if (!strcasecmp(me.name, "udb-a.test") && !strcasecmp(client->name, "udb-b.test"))
 		mutator_value = "authorized-insert";
-	else if (!strcasecmp(me.name, "udb-b.test") && !strcasecmp(client->name, "udb-c.test"))
-		mutator_value = "authorized-insert-b-c";
 	else if (!strcasecmp(me.name, "udb-c.test") && !strcasecmp(client->name, "udb-b.test"))
 		mutator_staged_authorization_test = 1;
 	else

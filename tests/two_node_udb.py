@@ -114,6 +114,33 @@ udb {{
 ''', encoding="ascii")
 
 
+_ASAN_LIBRARY_CACHE = {}
+
+
+def asan_preload_library(ircd):
+    ircd_path = str(pathlib.Path(ircd).resolve())
+    if ircd_path in _ASAN_LIBRARY_CACHE:
+        return _ASAN_LIBRARY_CACHE[ircd_path]
+    env_preload = os.environ.get("LD_PRELOAD", "")
+    for entry in env_preload.replace(":", " ").split():
+        if ("libasan" in entry or "libclang_rt.asan" in entry) and os.path.isfile(entry):
+            _ASAN_LIBRARY_CACHE[ircd_path] = entry
+            return entry
+    try:
+        proc = subprocess.run(["ldd", ircd_path], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if proc.returncode == 0:
+            for line in proc.stdout.splitlines():
+                if "libasan" in line or "libclang_rt.asan" in line:
+                    for token in line.split():
+                        if os.path.isabs(token) and os.path.isfile(token):
+                            _ASAN_LIBRARY_CACHE[ircd_path] = token
+                            return token
+    except Exception:
+        pass
+    _ASAN_LIBRARY_CACHE[ircd_path] = None
+    return None
+
+
 def bwrap_command(node, ircd, config, module, mutator=None, configtest=False, rename_failure=False,
                     rename_failure_arm=False, fsync_failure=False, directory_fsync_failure=False,
                     state_directory_fsync_failure=False, rename_failure_target=None):
@@ -132,7 +159,9 @@ def bwrap_command(node, ircd, config, module, mutator=None, configtest=False, re
                 "--setenv", "UDB_TEST_MUTATOR_DIRECTORY", str(node / "runtime-data")]
     runtime_data = RUNTIME_ROOT / "data"
     if rename_failure or fsync_failure or directory_fsync_failure or state_directory_fsync_failure:
-        command.extend(("--setenv", "LD_PRELOAD", str(RENAME_FAIL_MODULE)))
+        asan_lib = asan_preload_library(ircd)
+        preload = f"{asan_lib}:{RENAME_FAIL_MODULE}" if asan_lib else str(RENAME_FAIL_MODULE)
+        command.extend(("--setenv", "LD_PRELOAD", preload))
     if rename_failure:
         target = (runtime_data / rename_failure_target.name) if rename_failure_target else (runtime_data / "udb_N.db")
         command.extend(("--setenv", "UDB_SNAPSHOT_RENAME_FAIL_TARGET", str(target)))
