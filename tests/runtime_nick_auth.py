@@ -91,6 +91,17 @@ def wait_for_mode(client, nick, required, description, start=0, timeout=15):
     require(any(required in line for line in lines), f"{description}: {lines!r}")
 
 
+def wait_for_disconnect(client, description, timeout=15):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            client.receive(deadline)
+        except AssertionError as exc:
+            require("server closed the connection" in str(exc), f"{description}: {exc}")
+            return
+    raise AssertionError(f"{description}: client remained connected")
+
+
 def request(client, command, terminator, description, timeout=20):
     start = len(client.lines)
     client.send(command)
@@ -246,6 +257,20 @@ def read_oper_state(services, client, nick, description="get oper state", timeou
     raise AssertionError(f"Could not parse oper state from lines: {client.lines[start:]!r}")
 
 
+def read_userhost(client, nick, description="get userhost", timeout=20):
+    lines = request(client, f"WHOIS {nick}", lambda line: " 318 " in line, description, timeout=timeout)
+    for line in reversed(lines):
+        if " 311 " in line and f" {nick} " in line:
+            parts = line.split()
+            if len(parts) >= 6:
+                return parts[4], parts[5]
+    raise AssertionError(f"Could not parse userhost from lines: {lines!r}")
+
+
+def read_vhost(client, nick, description="get vhost", timeout=20):
+    return read_userhost(client, nick, description, timeout)[1]
+
+
 def authenticate(client, nick, password, description="authentication", timeout=20):
     client.request(f"NICK {nick}:{password}", lambda line: f" NICK :{nick}" in line, description,
                    timeout=timeout)
@@ -284,7 +309,10 @@ def run_tests(ircd, module, keep=False):
                          '    operclass netadmin;\n'
                          '    class clients;\n'
                          '};\n')
-            handle.write("set { anti-flood { known-users { nick-flood 20:60; } "
+            handle.write('set { modes-on-oper "+xws"; snomask-on-oper "+c"; '
+                         'oper-vhost "$operlogin.$operclass.oper.test"; '
+                         'oper-auto-join "#udb-opers,#udb-kill-on-join"; '
+                         "anti-flood { known-users { nick-flood 20:60; } "
                          "unknown-users { nick-flood 20:60; } } }\n")
         run_configtest(node, ircd, config)
         stdout_path = node / "logs" / "ircd.stdout"
@@ -1220,8 +1248,11 @@ def run_tests(ircd, module, keep=False):
         st_start = read_oper_state(services, opudb, "opudb-client", "opudb initial")
         require(not st_start["oper"], f"opudb was already oper: {st_start!r}")
         count_before = st_start["opercount"]
+        grant_start = len(opudb.lines)
         authenticate(opudb, "opudb", "opudbsecret", "opudb identification")
         wait_for_mode(opudb, "opudb", "+o", "opudb +o")
+        opudb.wait_for(lambda line: " JOIN :#udb-opers" in line or " JOIN #udb-opers" in line,
+                       "opudb oper auto-join", start=grant_start, timeout=15)
         st_grant = read_oper_state(services, opudb, "opudb", "opudb granted")
         require(st_grant["oper"] and st_grant["operclass"] == "locop",
                 f"UDB did not grant locop: {st_grant!r}")
@@ -1229,6 +1260,13 @@ def run_tests(ircd, module, keep=False):
                 f"opercount not incremented: before={count_before} grant={st_grant['opercount']}")
         require(st_grant["operlist"] == 1,
                 f"operlist duplicate or missing: {st_grant['operlist']}")
+        for mode in "xws":
+            require(has_usermode(opudb, "opudb", mode, timeout=15),
+                    f"UDB oper grant omitted modes-on-oper +{mode}")
+        require("c" in read_snomask(services, opudb, "opudb", "opudb default snomask"),
+                "UDB oper grant omitted snomask-on-oper +c")
+        require(read_vhost(opudb, "opudb", "opudb default oper vhost").lower() == "udb.locop.oper.test",
+                "UDB oper grant omitted oper-vhost")
         start = len(opudb.lines)
         services.send_ins("N::opudb::suspend", "manual review")
         opudb.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
@@ -1240,6 +1278,97 @@ def run_tests(ircd, module, keep=False):
                 f"opercount not restored: before={count_before} rev={st_rev['opercount']}")
         require(st_rev["operlist"] == 0,
                 f"operlist entry left after deoper: {st_rev['operlist']}")
+        require("c" not in read_snomask(services, opudb, "opudb", "opudb revoked snomask"),
+                "native deoper cleanup kept the default oper snomask")
+        require(not has_usermode(opudb, "opudb", "s", timeout=15),
+                "native deoper cleanup kept user mode +s")
+        require(read_vhost(opudb, "opudb", "opudb revoked oper vhost").lower() != "udb.locop.oper.test",
+                "deoper kept the vhost assigned by the UDB oper grant")
+
+        # Y7: an explicit N::vhost overrides oper-vhost. Removing it while the
+        # UDB oper is active reveals the native oper default, which remains
+        # owned and cannot overwrite a later external replacement on revoke.
+        add_effect_profile(services, "opvhost", "opvhostsecret",
+                           (("oper", "locop"), ("vhost", "literal@$nick.test")))
+        opvhost = IrcClient("127.0.0.1", client_port, "opvhost-client")
+        clients.append(opvhost)
+        previous_ident, _ = read_userhost(opvhost, "opvhost-client", "pre-oper literal userhost")
+        authenticate(opvhost, "opvhost", "opvhostsecret", "opvhost identification")
+        literal_ident, literal_host = read_userhost(opvhost, "opvhost", "explicit literal N vhost")
+        require(literal_host == "literal@$nick.test" and literal_ident == previous_ident,
+                "make_oper reinterpreted literal N::vhost as an expandable ident@host template")
+        services.send_del("N::opvhost::vhost")
+        wait_for_db_records(n_db, ("opvhost::oper locop",), ("opvhost::vhost",))
+        time.sleep(0.3)
+        require(read_vhost(opvhost, "opvhost", "oper vhost after N vhost deletion").lower() ==
+                "udb.locop.oper.test", "deleting N::vhost did not apply the active oper default")
+        services.send("CHGHOST opvhost external-oper.test")
+        opvhost.wait_for(lambda line: " 396 " in line and "external-oper.test" in line,
+                         "external oper vhost replacement", timeout=15)
+        start = len(opvhost.lines)
+        services.send_ins("N::opvhost::suspend", "manual review")
+        opvhost.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                         "opvhost suspend notice", start=start, timeout=15)
+        require(read_vhost(opvhost, "opvhost", "external vhost after UDB deoper") ==
+                "external-oper.test", "deoper removed an external vhost replacement")
+
+        # Y8: a synchronous LOCAL_OPER hook that replaces the native oper
+        # vhost is external ownership and must survive the UDB de-oper.
+        add_effect_profile(services, "ophook", "ophooksecret", (("oper", "locop"),))
+        ophook = IrcClient("127.0.0.1", client_port, "ophook-client")
+        clients.append(ophook)
+        authenticate(ophook, "ophook", "ophooksecret", "oper hook identification")
+        require(read_vhost(ophook, "ophook", "synchronous oper hook vhost") ==
+                "hook.external.test", "LOCAL_OPER did not replace the native oper vhost")
+        services.send_ins("N::ophook::swhois", "Hook-owned vhost test")
+        wait_for_db_records(n_db, ("ophook::swhois Hook-owned vhost test",))
+        time.sleep(0.3)
+        require(read_vhost(ophook, "ophook", "hook vhost after unrelated reconciliation") ==
+                "hook.external.test", "profile reconciliation overwrote a hook-owned vhost")
+        start = len(ophook.lines)
+        services.send_ins("N::ophook::suspend", "manual review")
+        ophook.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                        "oper hook suspend notice", start=start, timeout=15)
+        require(read_vhost(ophook, "ophook", "hook vhost after UDB deoper") ==
+                "hook.external.test", "deoper claimed and removed a synchronous hook vhost")
+
+        # Y9: stale UDB ownership after a manual de-oper still restores the
+        # native oper vhost and broadcasts the resulting -t mode change.
+        add_effect_profile(services, "opstale", "opstalesecret", (("oper", "locop"),))
+        opstale = IrcClient("127.0.0.1", client_port, "opstale-client")
+        clients.append(opstale)
+        authenticate(opstale, "opstale", "opstalesecret", "stale oper identification")
+        require(read_vhost(opstale, "opstale", "stale oper default vhost").lower() ==
+                "udb.locop.oper.test", "stale oper did not receive the default vhost")
+        start = len(opstale.lines)
+        opstale.send("MODE opstale -o")
+        opstale.wait_for(lambda line: " MODE opstale " in line and "-o" in line,
+                         "manual de-oper", start=start, timeout=15)
+        services_start = len(services.lines)
+        start = len(opstale.lines)
+        services.send_ins("N::opstale::suspend", "manual review")
+        opstale.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
+                         "stale oper suspend notice", start=start, timeout=15)
+        services.wait_for(lambda line: " UMODE2 " in line and
+                          "t" in line.rsplit(" ", 1)[-1] and "-" in line.rsplit(" ", 1)[-1],
+                          "stale oper -t broadcast", start=services_start, timeout=15)
+        require(not has_usermode(opstale, "opstale", "t", timeout=15),
+                "stale oper vhost restoration kept user mode +t")
+        require(read_vhost(opstale, "opstale", "stale oper restored vhost").lower() !=
+                "udb.locop.oper.test", "stale oper vhost was not restored")
+
+        # Y10: make_oper() reports failure when an oper-auto-join hook kills the
+        # client. Reconciliation must stop without touching the dead Client.
+        add_effect_profile(services, "opkill", "opkillsecret",
+                           (("oper", "locop"), ("modes", "+S"), ("vhost", "never.test")))
+        opkill = IrcClient("127.0.0.1", client_port, "opkill-client")
+        clients.append(opkill)
+        opkill.send("NICK opkill:opkillsecret")
+        wait_for_disconnect(opkill, "oper auto-join kill")
+        opkill.close()
+        clients.remove(opkill)
+        afterkill = IrcClient("127.0.0.1", client_port, "afterkill")
+        clients.append(afterkill)
 
         # Z: external account/+r during an active identity never recreates auth,
         # and identity revocation clears the public projection it owned.

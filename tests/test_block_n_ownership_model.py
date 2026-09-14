@@ -51,8 +51,12 @@ def apply_snomask_expression(current, expr):
 
 
 class BlockNModel:
-    def __init__(self, profile):
+    def __init__(self, profile, oper_modes=("x", "w", "s"),
+                 oper_snomask="+bBcdfxkqsSoO", oper_vhost=None):
         self.profile = dict(profile)
+        self.oper_modes = set(oper_modes)
+        self.oper_snomask = oper_snomask
+        self.oper_vhost = oper_vhost
         self.identity = False
         self.owned_modes = set()
         self.applied_vhost = None
@@ -61,6 +65,8 @@ class BlockNModel:
         self.applied_snomask = None
         self.snomask_owned = False
         self.oper_owned = False
+        self.oper_previous_vhost = None
+        self.oper_applied_vhost = None
         self.ext_modes = set()
         self.ext_vhost = None
         self.ext_snomask = None
@@ -98,6 +104,10 @@ class BlockNModel:
             return
         if self.runtime_snomask == self.applied_snomask:
             self.runtime_snomask = self.previous_snomask
+        if self.runtime_snomask:
+            self.runtime_modes.add("s")
+        else:
+            self.runtime_modes.discard("s")
         self.snomask_owned = False
         self.previous_snomask = None
         self.applied_snomask = None
@@ -111,6 +121,15 @@ class BlockNModel:
             return
         self.runtime_oper = False
         self.runtime_operclass = None
+        # UnrealIRCd's native de-oper cleanup removes all snomasks before the
+        # profile snomask layer is reconciled, including user mode +s.
+        self.runtime_snomask = None
+        self.runtime_modes.discard("s")
+        self.ext_snomask = None
+        if self.oper_applied_vhost is not None and self.runtime_vhost == self.oper_applied_vhost:
+            self.runtime_vhost = self.oper_previous_vhost
+        self.oper_previous_vhost = None
+        self.oper_applied_vhost = None
         self.oper_owned = False
 
     def revoke_effects(self):
@@ -124,6 +143,29 @@ class BlockNModel:
         self.identity = False
 
     def apply_effects(self):
+        desired_oper = self.profile.get("oper")
+        if not desired_oper:
+            self.revoke_oper()
+        elif self.runtime_oper and not self.oper_owned:
+            # External oper: UDB never touches it, never replaces operclass, never claims ownership
+            pass
+        elif self.oper_owned:
+            self.runtime_operclass = desired_oper
+        else:
+            self.runtime_oper = True
+            self.runtime_operclass = desired_oper
+            self.oper_owned = True
+            self.runtime_modes |= self.oper_modes
+            self.runtime_snomask = apply_snomask_expression(self.runtime_snomask, self.oper_snomask)
+            if self.runtime_snomask:
+                self.runtime_modes.add("s")
+            else:
+                self.runtime_modes.discard("s")
+            if not self.profile.get("vhost") and self.oper_vhost:
+                self.oper_previous_vhost = self.runtime_vhost
+                self.runtime_vhost = self.oper_vhost
+                self.oper_applied_vhost = self.oper_vhost
+
         desired_modes = set(self.profile.get("modes", ()))
         removed = self.owned_modes - desired_modes
         self.runtime_modes -= removed
@@ -153,21 +195,12 @@ class BlockNModel:
                 self.revoke_snomasks()
             self.previous_snomask = self.runtime_snomask
             self.runtime_snomask = apply_snomask_expression(self.runtime_snomask, desired_snomask)
+            if self.runtime_snomask:
+                self.runtime_modes.add("s")
+            else:
+                self.runtime_modes.discard("s")
             self.applied_snomask = self.runtime_snomask
             self.snomask_owned = True
-
-        desired_oper = self.profile.get("oper")
-        if not desired_oper:
-            self.revoke_oper()
-        elif self.runtime_oper and not self.oper_owned:
-            # External oper: UDB never touches it, never replaces operclass, never claims ownership
-            pass
-        elif self.oper_owned:
-            self.runtime_operclass = desired_oper
-        else:
-            self.runtime_oper = True
-            self.runtime_operclass = desired_oper
-            self.oper_owned = True
 
     # -- events -------------------------------------------------------------
     def authenticate(self, ok=True):
@@ -243,17 +276,27 @@ class BlockNModel:
     def external_snomask(self, value):
         self.ext_snomask = value
         self.runtime_snomask = value
+        if value:
+            self.runtime_modes.add("s")
+        else:
+            self.runtime_modes.discard("s")
         self.snomask_ambiguous = self.snomask_owned and value == self.applied_snomask
 
-    def external_oper(self, operclass="netadmin", snomask="BOSbcdfkoqsx"):
+    def external_oper(self, operclass="netadmin", snomask=_UNSET):
+        if snomask is _UNSET:
+            snomask = self.oper_snomask
         self.ext_oper = True
         self.ext_operclass = operclass
         self.runtime_oper = True
         self.runtime_operclass = operclass
         self.oper_owned = False
         if snomask is not None:
-            self.ext_snomask = snomask
-            self.runtime_snomask = snomask
+            self.runtime_snomask = apply_snomask_expression(self.runtime_snomask, snomask)
+            self.ext_snomask = self.runtime_snomask
+            if self.runtime_snomask:
+                self.runtime_modes.add("s")
+            else:
+                self.runtime_modes.discard("s")
 
     def external_deoper(self):
         self.ext_oper = False
@@ -280,7 +323,8 @@ class BlockNModel:
                 f"{context}: effects owned without identity")
         require(self.vhost_owned or self.vhost_ambiguous or self.runtime_vhost == self.ext_vhost,
                 f"{context}: external vhost changed while unowned")
-        require(self.snomask_owned or self.snomask_ambiguous or self.runtime_snomask == self.ext_snomask,
+        require(self.snomask_owned or self.snomask_ambiguous or self.oper_owned or
+                self.runtime_snomask == self.ext_snomask,
                 f"{context}: external snomask changed while unowned")
         require(not self.owned_modes or self.identity,
                 f"{context}: owned mode bookkeeping diverged without identity")
@@ -485,6 +529,8 @@ def scenario_oper_ownership():
     model.suspend()
     require(not model.runtime_oper and model.runtime_operclass is None and not model.oper_owned,
             "oper C: suspend did not revoke UDB-granted oper")
+    require("s" not in model.runtime_modes,
+            "oper C: native de-oper cleanup kept user mode +s")
     model.check("oper C")
 
     # 4. Hot update of operclass on UDB-owned oper

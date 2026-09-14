@@ -578,11 +578,14 @@ static void udb_nick_prepare_tree_replace(UdbBlock *block, UdbRecord *candidate_
 static void udb_nick_finish_tree_replace(void);
 static void udb_nick_remove_record(UdbBlock *block, UdbRecord *rec);
 static void udb_nick_revoke_oper(Client *client);
+static int udb_oper_owned(Client *client);
+static void udb_nick_effects_revoke_oper_vhost(Client *client);
+static void udb_nick_effects_apply_oper_vhost_default(Client *client);
 static int udb_check_password(const char *pass, UdbRecord *profile_rec, Client *client);
 static int udb_nick_access_allowed(Client *client, UdbRecord *nick_rec);
 static void udb_nick_set_vhost(Client *client, const char *vhost);
 static void udb_nick_remove_vhost(Client *client);
-static void udb_nick_grant_oper(Client *client, UdbRecord *nick_rec, UdbRecord *oper_rec);
+static int udb_nick_grant_oper(Client *client, UdbRecord *nick_rec, UdbRecord *oper_rec);
 static void udb_channel_apply_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new);
 static void udb_channel_remove_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
 static int udb_channels_load(ModuleInfo *modinfo);

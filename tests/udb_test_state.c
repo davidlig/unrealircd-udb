@@ -37,6 +37,26 @@ static void udb_test_state_report_oper(Client *target)
 	           in_oper_list);
 }
 
+static int udb_test_state_local_oper(Client *client, int add, const char *oper_block, const char *operclass)
+{
+	if (!add || strcmp(client->name, "ophook"))
+		return 0;
+
+	userhost_save_current(client);
+	safe_strdup(client->user->virthost, "hook.external.test");
+	client->umodes |= UMODE_HIDE | UMODE_SETHOST;
+	sendto_server(NULL, 0, 0, NULL, ":%s SETHOST :%s", client->id, client->user->virthost);
+	userhost_changed(client);
+	return 0;
+}
+
+static int udb_test_state_local_join(Client *client, Channel *channel, MessageTag *mtags)
+{
+	if (!strcmp(client->name, "opkill") && !strcmp(channel->name, "#udb-kill-on-join"))
+		exit_client(client, mtags, "UDB test auto-join kill");
+	return 0;
+}
+
 CMD_FUNC(cmd_udbtest)
 {
 	Client *target;
@@ -79,6 +99,8 @@ CMD_FUNC(cmd_udbtest)
 MOD_INIT()
 {
 	CommandAdd(modinfo->handle, "UDBTEST", cmd_udbtest, MAXPARA, CMD_SERVER);
+	HookAdd(modinfo->handle, HOOKTYPE_LOCAL_OPER, 100, udb_test_state_local_oper);
+	HookAdd(modinfo->handle, HOOKTYPE_LOCAL_JOIN, 100, udb_test_state_local_join);
 	return MOD_SUCCESS;
 }
 

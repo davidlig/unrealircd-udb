@@ -721,11 +721,14 @@ static void udb_nick_prepare_tree_replace(UdbBlock *block, UdbRecord *candidate_
 static void udb_nick_finish_tree_replace(void);
 static void udb_nick_remove_record(UdbBlock *block, UdbRecord *rec);
 static void udb_nick_revoke_oper(Client *client);
+static int udb_oper_owned(Client *client);
+static void udb_nick_effects_revoke_oper_vhost(Client *client);
+static void udb_nick_effects_apply_oper_vhost_default(Client *client);
 static int udb_check_password(const char *pass, UdbRecord *profile_rec, Client *client);
 static int udb_nick_access_allowed(Client *client, UdbRecord *nick_rec);
 static void udb_nick_set_vhost(Client *client, const char *vhost);
 static void udb_nick_remove_vhost(Client *client);
-static void udb_nick_grant_oper(Client *client, UdbRecord *nick_rec, UdbRecord *oper_rec);
+static int udb_nick_grant_oper(Client *client, UdbRecord *nick_rec, UdbRecord *oper_rec);
 static void udb_channel_apply_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new);
 static void udb_channel_remove_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
 static int udb_channels_load(ModuleInfo *modinfo);
@@ -8773,6 +8776,14 @@ struct UdbNickEffects
 	long modes_added;
 	int vhost_owned;
 	char applied_vhost[HOSTLEN + 1];
+	int oper_vhost_owned;
+	char *oper_previous_vhost;
+	char *oper_applied_vhost;
+	char oper_previous_username[USERLEN + 1];
+	char oper_applied_username[USERLEN + 1];
+	int oper_username_owned;
+	int oper_previous_sethost;
+	int oper_vhost_attempted;
 	int snomask_owned;
 	char *previous_snomask;
 	char *applied_snomask;
@@ -9114,6 +9125,8 @@ static void udb_nick_effects_free(ModData *m)
 	safe_free(fx->previous_snomask);
 	safe_free(fx->applied_snomask);
 	safe_free(fx->applied_snomask_expr);
+	safe_free(fx->oper_previous_vhost);
+	safe_free(fx->oper_applied_vhost);
 	safe_free(fx);
 	m->ptr = NULL;
 }
@@ -9294,6 +9307,7 @@ static void udb_nick_effects_apply_vhost(Client *client, UdbRecord *vhost_rec)
 	if (!fx)
 		return;
 	desired = vhost_rec->data_str;
+	udb_nick_effects_revoke_oper_vhost(client);
 
 	if (fx->vhost_owned && !strcmp(fx->applied_vhost, desired))
 	{
@@ -9301,12 +9315,16 @@ static void udb_nick_effects_apply_vhost(Client *client, UdbRecord *vhost_rec)
 		 * source replaced it, the profile still desires this value, so fall
 		 * through and reassert it. */
 		if (client->user->virthost && !strcmp(client->user->virthost, desired))
+		{
+			fx->oper_vhost_attempted = 0;
 			return;
+		}
 	}
 	else if (!fx->vhost_owned && client->user->virthost && !strcmp(client->user->virthost, desired) &&
 			 IsHidden(client) && IsSetHost(client))
 	{
 		/* Desired vhost already active without a UDB mutation: no claim. */
+		fx->oper_vhost_attempted = 1;
 		return;
 	}
 	else if (fx->vhost_owned)
@@ -9321,6 +9339,7 @@ static void udb_nick_effects_apply_vhost(Client *client, UdbRecord *vhost_rec)
 
 	udb_nick_set_vhost(client, desired);
 	fx->vhost_owned = 1;
+	fx->oper_vhost_attempted = 0;
 	strlcpy(fx->applied_vhost, desired, sizeof(fx->applied_vhost));
 }
 
@@ -9336,6 +9355,227 @@ static void udb_nick_effects_revoke_vhost(Client *client)
 	/* An external replacement is preserved. */
 	fx->vhost_owned = 0;
 	fx->applied_vhost[0] = '\0';
+}
+
+static int udb_nick_nullable_equal(const char *left, const char *right)
+{
+	if (!left || !*left)
+		return !right || !*right;
+	return right && !strcmp(left, right);
+}
+
+static int udb_nick_expected_oper_vhost(Client *client, const char *format, char *expected_vhost, size_t vhost_size,
+										char *expected_username, size_t username_size, int *expected_sethost)
+{
+	char expanded[HOSTLEN + 1];
+	char uhost[HOSTLEN + USERLEN + 1];
+	char *hostpart;
+
+	if (!client || !client->user || !expected_vhost || !expected_username || !expected_sethost)
+		return 0;
+	expected_vhost[0] = '\0';
+	strlcpy(expected_username, client->user->username, username_size);
+	*expected_sethost = IsSetHost(client) ? 1 : 0;
+
+	if (format)
+	{
+		*expanded = '\0';
+		unreal_expand_string(format, expanded, sizeof(expanded), NULL, 0, client);
+		if (!valid_vhost(expanded))
+			return 0;
+		strlcpy(uhost, expanded, sizeof(uhost));
+		hostpart = strchr(uhost, '@');
+		if (hostpart)
+		{
+			*hostpart++ = '\0';
+			strlcpy(expected_username, uhost, username_size);
+		}
+		else
+		{
+			hostpart = uhost;
+		}
+		strlcpy(expected_vhost, hostpart, vhost_size);
+		*expected_sethost = 1;
+		return 1;
+	}
+
+	if (((client->umodes | OPER_MODES) & UMODE_HIDE) && !client->user->virthost)
+	{
+		strlcpy(expected_vhost, client->user->cloakedhost, vhost_size);
+		return 1;
+	}
+	return 0;
+}
+
+static int udb_nick_expand_oper_vhost_default(Client *client, const char *operclass, char *expanded, size_t size)
+{
+	NameValuePrioList *nvp = NULL;
+
+	if (!client || BadPtr(operclass) || !expanded || !size || !iConf.oper_vhost)
+		return 0;
+	/* A regular /OPER stores its oper login before make_oper(), so these
+	 * variables are already available when set::oper-vhost is expanded. UDB
+	 * has no oper block to store, therefore provide the pending identity
+	 * explicitly without publishing it as live client state before the grant. */
+	add_nvplist(&nvp, -1, "operlogin", "UDB");
+	add_nvplist(&nvp, -1, "operclass", operclass);
+	unreal_expand_string(iConf.oper_vhost, expanded, size, nvp, 0, client);
+	return 1;
+}
+
+static void udb_nick_effects_capture_oper_vhost(Client *client, const char *previous_vhost,
+												const char *previous_username, int previous_sethost,
+												const char *expected_vhost, const char *expected_username,
+												int expected_sethost)
+{
+	UdbNickEffects *fx;
+	int host_owned;
+	int username_owned;
+
+	if (!client || !client->user || !MyUser(client))
+		return;
+	host_owned = (!udb_nick_nullable_equal(previous_vhost, expected_vhost) || previous_sethost != expected_sethost) &&
+				 udb_nick_nullable_equal(client->user->virthost, expected_vhost) &&
+				 (IsSetHost(client) ? 1 : 0) == expected_sethost;
+	username_owned = strcmp(previous_username, expected_username) && !strcmp(client->user->username, expected_username);
+	if (!host_owned && !username_owned)
+		return;
+
+	fx = udb_nick_effects_ensure(client);
+	if (!fx)
+		return;
+	if (host_owned)
+	{
+		safe_strdup(fx->oper_previous_vhost, previous_vhost);
+		safe_strdup(fx->oper_applied_vhost, expected_vhost);
+		fx->oper_previous_sethost = previous_sethost;
+		fx->oper_vhost_owned = 1;
+	}
+	strlcpy(fx->oper_previous_username, previous_username, sizeof(fx->oper_previous_username));
+	strlcpy(fx->oper_applied_username, expected_username, sizeof(fx->oper_applied_username));
+	fx->oper_username_owned = username_owned;
+}
+
+static void udb_nick_effects_revoke_oper_vhost(Client *client)
+{
+	UdbNickEffects *fx = udb_nick_effects_get(client);
+	const char *current_vhost;
+
+	if (!fx || (!fx->oper_vhost_owned && !fx->oper_username_owned) || !client->user)
+		return;
+	current_vhost = client->user->virthost;
+	if (fx->oper_vhost_owned && udb_nick_nullable_equal(current_vhost, fx->oper_applied_vhost))
+	{
+		if (fx->oper_previous_vhost)
+		{
+			userhost_save_current(client);
+			safe_strdup(client->user->virthost, fx->oper_previous_vhost);
+			if (fx->oper_previous_sethost)
+				client->umodes |= UMODE_SETHOST;
+			else
+				client->umodes &= ~UMODE_SETHOST;
+			sendto_server(client, 0, 0, NULL, ":%s SETHOST %s", client->id, client->user->virthost);
+			userhost_changed(client);
+		}
+		else
+		{
+			udb_nick_remove_vhost(client);
+		}
+	}
+	if (fx->oper_username_owned && !strcmp(client->user->username, fx->oper_applied_username))
+	{
+		userhost_save_current(client);
+		strlcpy(client->user->username, fx->oper_previous_username, sizeof(client->user->username));
+		sendto_server(NULL, 0, 0, NULL, ":%s SETIDENT %s", client->id, client->user->username);
+		userhost_changed(client);
+	}
+
+	safe_free(fx->oper_previous_vhost);
+	safe_free(fx->oper_applied_vhost);
+	fx->oper_previous_vhost = NULL;
+	fx->oper_applied_vhost = NULL;
+	fx->oper_previous_username[0] = '\0';
+	fx->oper_applied_username[0] = '\0';
+	fx->oper_username_owned = 0;
+	fx->oper_previous_sethost = 0;
+	fx->oper_vhost_owned = 0;
+}
+
+static void udb_nick_set_oper_vhost(Client *client, const char *format)
+{
+	char uhost[HOSTLEN + USERLEN + 1];
+	char newhost[HOSTLEN + 1];
+	char *hostpart;
+
+	if (!client || !client->user || BadPtr(format))
+		return;
+	*newhost = '\0';
+	unreal_expand_string(format, newhost, sizeof(newhost), NULL, 0, client);
+	if (!valid_vhost(newhost))
+		return;
+	strlcpy(uhost, newhost, sizeof(uhost));
+	hostpart = strchr(uhost, '@');
+	if (hostpart)
+	{
+		*hostpart++ = '\0';
+		strlcpy(client->user->username, uhost, sizeof(client->user->username));
+		sendto_server(NULL, 0, 0, NULL, ":%s SETIDENT %s", client->id, client->user->username);
+	}
+	else
+	{
+		hostpart = uhost;
+	}
+	safe_strdup(client->user->virthost, hostpart);
+	sendto_server(NULL, 0, 0, NULL, ":%s SETHOST :%s", client->id, client->user->virthost);
+	client->umodes |= UMODE_SETHOST | UMODE_HIDE;
+}
+
+static void udb_nick_effects_apply_oper_vhost_default(Client *client)
+{
+	UdbNickEffects *fx;
+	char *previous_vhost;
+	char previous_username[USERLEN + 1];
+	char expected_vhost[HOSTLEN + 1];
+	char expected_username[USERLEN + 1];
+	char expanded_default[HOSTLEN + 1];
+	const char *operclass;
+	const char *format;
+	long old_umodes;
+	int previous_sethost;
+	int expected_sethost;
+
+	if (!client || !client->user || !MyUser(client) || !IsOper(client) || !udb_oper_owned(client))
+		return;
+	fx = udb_nick_effects_ensure(client);
+	if (!fx || fx->oper_vhost_attempted || fx->oper_vhost_owned || fx->oper_username_owned)
+		return;
+	/* One default attempt belongs to the oper grant (or to the transition
+	 * that removed an owned N::vhost). An external replacement must not be
+	 * overwritten by unrelated later profile reconciliation. */
+	fx->oper_vhost_attempted = 1;
+	operclass = get_operclass(client);
+	format = udb_nick_expand_oper_vhost_default(client, operclass, expanded_default, sizeof(expanded_default))
+				 ? expanded_default
+				 : NULL;
+	if (!udb_nick_expected_oper_vhost(client, format, expected_vhost, sizeof(expected_vhost), expected_username,
+									  sizeof(expected_username), &expected_sethost))
+		return;
+
+	previous_vhost = client->user->virthost ? strdup(client->user->virthost) : NULL;
+	strlcpy(previous_username, client->user->username, sizeof(previous_username));
+	previous_sethost = IsSetHost(client) ? 1 : 0;
+	old_umodes = client->umodes & ALL_UMODES;
+	userhost_save_current(client);
+	if (format)
+		udb_nick_set_oper_vhost(client, format);
+	else if (IsHidden(client) && !client->user->virthost)
+		safe_strdup(client->user->virthost, client->user->cloakedhost);
+	userhost_changed(client);
+	udb_nick_effects_capture_oper_vhost(client, previous_vhost, previous_username, previous_sethost, expected_vhost,
+										expected_username, expected_sethost);
+	safe_free(previous_vhost);
+	if ((client->umodes & ALL_UMODES) != old_umodes)
+		send_umode_out(client, 1, old_umodes);
 }
 
 static void udb_nick_effects_apply_swhois(Client *client, UdbRecord *swhois_rec)
@@ -9390,11 +9630,17 @@ static void udb_nick_reconcile_effects(Client *client, UdbRecord *nick_rec)
 	if (effect_rec && effect_rec->data_str)
 		udb_nick_effects_apply_vhost(client, effect_rec);
 	else
+	{
 		udb_nick_effects_revoke_vhost(client);
+		udb_nick_effects_apply_oper_vhost_default(client);
+	}
 
 	effect_rec = udb_record_find(udb_ctx, NKEY_OPER, nick_rec);
 	if (effect_rec)
-		udb_nick_grant_oper(client, nick_rec, effect_rec);
+	{
+		if (!udb_nick_grant_oper(client, nick_rec, effect_rec))
+			return;
+	}
 	else
 		udb_nick_revoke_oper(client);
 
@@ -9481,61 +9727,96 @@ static int udb_oper_owned(Client *client)
 	return moddata_local_client(client, udb_nick_oper_owned_md).i ? 1 : 0;
 }
 
-static void udb_nick_grant_oper(Client *client, UdbRecord *nick_rec, UdbRecord *oper_rec)
+static int udb_nick_grant_oper(Client *client, UdbRecord *nick_rec, UdbRecord *oper_rec)
 {
+	UdbNickEffects *fx;
 	const char *operclass;
-	char *saved_vhost;
+	UdbRecord *vhost_rec;
+	const char *oper_vhost;
+	char *previous_vhost;
+	char previous_username[USERLEN + 1];
+	char expected_vhost[HOSTLEN + 1];
+	char expected_username[USERLEN + 1];
+	char expanded_default[HOSTLEN + 1];
+	int previous_sethost;
+	int expected_sethost = 0;
+	int expect_oper_vhost = 0;
+	int has_profile_vhost;
 
 	if (!client || !oper_rec)
-		return;
+		return 1;
 
 	operclass = oper_rec->data_str;
 	if (BadPtr(operclass))
-		return;
+		return 1;
 
 	if (!find_operclass(operclass))
 	{
 		udb_log(ULOG_WARNING, "UDB_OPERCLASS_NOT_FOUND", client,
 				"operclass '$operclass' for $client.details does not exist in unrealircd.conf",
 				log_data_string("operclass", operclass));
-		return;
+		return 1;
 	}
 
 	if (IsOper(client) && !udb_oper_owned(client))
 	{
 		/* external oper: do not touch */
-		return;
+		return 1;
 	}
 
 	if (udb_oper_owned(client))
 	{
 		const char *curr_class = get_operclass(client);
 		if (curr_class && !strcmp(curr_class, operclass))
-			return;
+			return 1;
 		udb_nick_revoke_oper(client);
 	}
 
 	if (!IsOper(client))
 	{
-		saved_vhost = (client->user && client->user->virthost) ? strdup(client->user->virthost) : NULL;
-		make_oper(client, "UDB", operclass, NULL, UMODE_OPER, "", NULL, "0");
-		if (saved_vhost)
+		vhost_rec = nick_rec ? udb_record_find(udb_ctx, NKEY_VHOST, nick_rec) : NULL;
+		has_profile_vhost = vhost_rec && !BadPtr(vhost_rec->data_str);
+		if (has_profile_vhost)
+			oper_vhost = vhost_rec->data_str;
+		else if (udb_nick_expand_oper_vhost_default(client, operclass, expanded_default, sizeof(expanded_default)))
+			oper_vhost = expanded_default;
+		else
+			oper_vhost = NULL;
+		previous_vhost = (client->user && client->user->virthost) ? strdup(client->user->virthost) : NULL;
+		strlcpy(previous_username, client->user->username, sizeof(previous_username));
+		previous_sethost = IsSetHost(client) ? 1 : 0;
+		expect_oper_vhost =
+			udb_nick_expected_oper_vhost(client, oper_vhost, expected_vhost, sizeof(expected_vhost), expected_username,
+										 sizeof(expected_username), &expected_sethost);
+		if (!make_oper(client, "UDB", operclass, NULL, 0, NULL, oper_vhost, NULL))
 		{
-			if (!client->user->virthost || strcmp(client->user->virthost, saved_vhost))
-				safe_strdup(client->user->virthost, saved_vhost);
-			safe_free(saved_vhost);
-		}
-		else if (client->user && client->user->virthost)
-		{
-			safe_free(client->user->virthost);
+			safe_free(previous_vhost);
+			return 0;
 		}
 		if (IsOper(client) && udb_nick_oper_owned_md)
+		{
 			moddata_local_client(client, udb_nick_oper_owned_md).i = 1;
+			fx = udb_nick_effects_ensure(client);
+			if (fx && !has_profile_vhost)
+				fx->oper_vhost_attempted = 1;
+			if (expect_oper_vhost)
+				udb_nick_effects_capture_oper_vhost(client, previous_vhost, previous_username, previous_sethost,
+													expected_vhost, expected_username, expected_sethost);
+			/* N::vhost is a literal profile effect. make_oper() treats its vhost
+			 * argument as an expandable ident@host template, so undo only the
+			 * transformation that survived synchronous hooks. The normal profile
+			 * marker remains responsible for the literal value. */
+			if (has_profile_vhost)
+				udb_nick_effects_revoke_oper_vhost(client);
+		}
+		safe_free(previous_vhost);
 	}
+	return 1;
 }
 
 static void udb_nick_revoke_oper(Client *client)
 {
+	UdbNickEffects *fx;
 	long old_umodes;
 
 	if (!client || !MyUser(client) || !udb_oper_owned(client))
@@ -9544,7 +9825,14 @@ static void udb_nick_revoke_oper(Client *client)
 	if (!IsOper(client))
 	{
 		/* Oper status was removed elsewhere: UDB keeps no claim over it. */
+		old_umodes = client->umodes & ALL_UMODES;
 		moddata_local_client(client, udb_nick_oper_owned_md).i = 0;
+		udb_nick_effects_revoke_oper_vhost(client);
+		fx = udb_nick_effects_get(client);
+		if (fx)
+			fx->oper_vhost_attempted = 0;
+		if ((client->umodes & ALL_UMODES) != old_umodes)
+			send_umode_out(client, 1, old_umodes);
 		return;
 	}
 
@@ -9566,9 +9854,12 @@ static void udb_nick_revoke_oper(Client *client)
 	}
 	if (MyUser(client))
 		RunHook(HOOKTYPE_LOCAL_OPER, client, 0, NULL, NULL);
-	remove_oper_modes(client);
-	swhois_delete(client, "oper", "*", &me, NULL);
+	remove_oper_privileges(client, 0);
 	moddata_local_client(client, udb_nick_oper_owned_md).i = 0;
+	udb_nick_effects_revoke_oper_vhost(client);
+	fx = udb_nick_effects_get(client);
+	if (fx)
+		fx->oper_vhost_attempted = 0;
 	send_umode_out(client, 1, old_umodes);
 }
 

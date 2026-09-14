@@ -104,6 +104,11 @@ def check_differential(model, client, services, expected_nick, description):
     if m_has_S != r_has_S:
         raise AssertionError(f"{description}: mode S mismatch: model={m_has_S}, runtime={r_has_S} (modes={modes_str!r})")
 
+    r_has_s = "s" in modes_str
+    m_has_s = "s" in model.runtime_modes
+    if m_has_s != r_has_s:
+        raise AssertionError(f"{description}: mode s mismatch: model={m_has_s}, runtime={r_has_s} (modes={modes_str!r})")
+
     # snomask check
     r_snomask = read_snomask(services, client, c_nick, description)
     m_snomask = model.runtime_snomask or ""
@@ -162,7 +167,9 @@ def run_differential_tests(ircd, module, keep=False):
                          '    operclass netadmin;\n'
                          '    class clients;\n'
                          '};\n')
-            handle.write("set { anti-flood { known-users { nick-flood 50:60; } "
+            handle.write('set { modes-on-oper "+xws"; snomask-on-oper "+c"; '
+                         'oper-auto-join "0"; '
+                         "anti-flood { known-users { nick-flood 50:60; } "
                          "unknown-users { nick-flood 50:60; } } }\n")
 
         run_configtest(node, ircd, config)
@@ -428,7 +435,8 @@ def run_differential_tests(ircd, module, keep=False):
             time.sleep(0.2)
 
             # Initialize model and runtime client
-            model = BlockNModel(prof_dict)
+            model = BlockNModel(prof_dict, oper_modes=("x", "w", "s"),
+                                oper_snomask="+c")
             client = IrcClient("127.0.0.1", client_port, f"{nick}-cli")
             clients.append(client)
 
