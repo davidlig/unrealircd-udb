@@ -1175,7 +1175,10 @@ static void udb_nick_force_rename(Client *client, const char *nick_in_db)
 
 static void udb_nick_force_rename_after_unsuspend(Client *client, const char *nick_in_db)
 {
-	udb_nick_force_rename_with_notice(client, nick_in_db, NULL, 0, 1);
+	char notice[256];
+
+	snprintf(notice, sizeof(notice), "The nickname %s is no longer suspended.", nick_in_db);
+	udb_nick_force_rename_with_notice(client, nick_in_db, notice, 0, 1);
 }
 
 static void udb_nick_apply(Client *client, UdbRecord *nick_rec, UdbNickApplyReason reason)

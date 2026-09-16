@@ -115,7 +115,8 @@ class PostReviewCorrectionsTest(unittest.TestCase):
         self.assertIn("udb_nick_force_rename_after_unsuspend(client, nick_rec->key);", self.nicks)
         helper = re.search(r"static void udb_nick_force_rename_after_unsuspend\(.*?\n}\n", self.nicks,
                            re.S).group(0)
-        self.assertIn("NULL, 0, 1", helper)
+        self.assertIn('"The nickname %s is no longer suspended."', helper)
+        self.assertIn("notice, 0, 1", helper)
 
     def test_generic_nick_modes_remain_unfiltered(self):
         self.assertIn("udb_nick_effects_apply_modes(client, effect_rec);", self.nicks)

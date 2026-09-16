@@ -215,7 +215,10 @@ def free_guest(client, description, start=0, timeout=20):
 
 def assert_unsuspend_rename_notice(client, nick, start, description):
     lines = client.lines[start:]
+    unsuspended = f"The nickname {nick} is no longer suspended."
     expected = f"You have been renamed. If you are the owner, please identify: /NICK {nick}:Password"
+    require(any(line.endswith(":" + unsuspended) for line in lines),
+            f"{description}: missing unsuspension notice: {lines!r}")
     require(any(line.endswith(":" + expected) for line in lines),
             f"{description}: missing identification prompt: {lines!r}")
     require(not any("has been registered or synced in the UDB database" in line for line in lines),
