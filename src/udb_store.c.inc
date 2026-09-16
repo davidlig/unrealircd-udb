@@ -223,11 +223,11 @@ static UdbRecord *udb_hash_find(UdbContext *ctx, int block_idx, const char *key)
  * ======================================================================== */
 static const char *udb_get_shared_subkey(const char *key)
 {
-	static const char *known_keys[] = {"pass",	   "vhost",	  "oper",	  "swhois",			"snomasks", "modes",
-									   "access",   "forbid",  "suspend",  "founder",		"topic",	"options",
-									   "clones",   "nolines", "host",	  "encryption_key", "suffix",	"nickserv",
-									   "chanserv", "ipserv",  "quit_ips", "quit_clones",	"flood",	"propagator",
-									   "type",	   "action",  "expires",  "reason",			NULL};
+	static const char *known_keys[] = {
+		"pass",	   "vhost",	   "oper",	   "swhois",  "snomasks",	   "modes",		  "access",		 "forbid",
+		"suspend", "founder",  "topic",	   "options", "clones",		   "nolines",	  "host",		 "encryption_key",
+		"suffix",  "nickserv", "chanserv", "ipserv",  "quit_ips",	   "quit_clones", "flood",		 "propagator",
+		"type",	   "action",   "expires",  "reason",  KKEY_MATCH_TYPE, KKEY_TARGETS,  KKEY_BAN_TIME, NULL};
 
 	for (int i = 0; known_keys[i]; i++)
 		if (!strcasecmp(known_keys[i], key))

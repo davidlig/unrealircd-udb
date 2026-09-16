@@ -15,8 +15,43 @@
  * Neither is ever persisted to the udb_*.db blocks.
  */
 
-/* conf.c owns the active operclass list; it is not exported through h.h. */
+/* ========================================================================
+ * UnrealIRCd internals compatibility layer
+ *
+ * conf.c owns the active operclass list and does not export it through h.h.
+ * Every direct reference to these internals is confined to this section so an
+ * upstream layout change has a single place to adapt.
+ * ======================================================================== */
 extern ConfigItem_operclass *conf_operclass;
+
+static ConfigItem_operclass *udb_compat_operclass_head(void)
+{
+	return conf_operclass;
+}
+
+static ConfigItem_operclass *udb_compat_operclass_next(const ConfigItem_operclass *oc)
+{
+	return oc ? oc->next : NULL;
+}
+
+static OperClass *udb_compat_operclass_struct(const ConfigItem_operclass *oc)
+{
+	return oc ? oc->classStruct : NULL;
+}
+
+static const char *udb_compat_operclass_name(const ConfigItem_operclass *oc)
+{
+	OperClass *contract = udb_compat_operclass_struct(oc);
+
+	return contract && contract->name && *contract->name ? contract->name : NULL;
+}
+
+static const char *udb_compat_operclass_parent_name(const ConfigItem_operclass *oc)
+{
+	OperClass *contract = udb_compat_operclass_struct(oc);
+
+	return contract && contract->ISA && *contract->ISA ? contract->ISA : NULL;
+}
 
 static UdbOclOrigin *udb_ocl_origins = NULL;
 static UdbOclInventory *udb_ocl_local = NULL;
@@ -66,11 +101,6 @@ static UdbOclOrigin *udb_ocl_get_origin(const char *sid)
 	origin->next = udb_ocl_origins;
 	udb_ocl_origins = origin;
 	return origin;
-}
-
-static ConfigItem_operclass *udb_ocl_operclass_list(void)
-{
-	return conf_operclass;
 }
 
 static int udb_ocl_member_exists(const char *sid)
@@ -515,9 +545,12 @@ static int udb_ocl_effective_of(UdbOclClassNode *nodes, unsigned int count, unsi
 		return 0;
 	}
 	node->state = 1;
-	if (node->conf && node->conf->classStruct && node->conf->classStruct->ISA && *node->conf->classStruct->ISA)
+	const char *parent_name = udb_compat_operclass_parent_name(node->conf);
+	OperClass *contract = udb_compat_operclass_struct(node->conf);
+
+	if (parent_name)
 	{
-		int pidx = udb_ocl_node_find(nodes, count, node->conf->classStruct->ISA);
+		int pidx = udb_ocl_node_find(nodes, count, parent_name);
 
 		if (pidx < 0 || !udb_ocl_effective_of(nodes, count, (unsigned int)pidx, depth + 1, parent))
 		{
@@ -529,7 +562,7 @@ static int udb_ocl_effective_of(UdbOclClassNode *nodes, unsigned int count, unsi
 	{
 		memset(parent, 0, sizeof(parent));
 	}
-	if (!node->conf || !node->conf->classStruct || !udb_ocl_own_digest(node->conf->classStruct, own))
+	if (!contract || !udb_ocl_own_digest(contract, own))
 	{
 		node->state = 3;
 		return 0;
@@ -550,16 +583,18 @@ static UdbOclInventory *udb_ocl_build_local_inventory(void)
 	unsigned char raw[32];
 	int limited = 0;
 
-	for (oc = udb_ocl_operclass_list(); oc; oc = oc->next)
+	for (oc = udb_compat_operclass_head(); oc; oc = udb_compat_operclass_next(oc))
 	{
-		if (!oc->classStruct || !oc->classStruct->name || !*oc->classStruct->name)
+		const char *name = udb_compat_operclass_name(oc);
+
+		if (!name)
 			continue;
 		if (count >= UDB_OCL_MAX_CLASSES)
 		{
 			limited = 1;
 			break;
 		}
-		if (udb_ocl_node_find(nodes, count, oc->classStruct->name) >= 0)
+		if (udb_ocl_node_find(nodes, count, name) >= 0)
 			continue; /* first occurrence wins, matching find_operclass() */
 		if (count >= cap)
 		{
@@ -572,7 +607,7 @@ static UdbOclInventory *udb_ocl_build_local_inventory(void)
 			cap = ncap;
 		}
 		memset(&nodes[count], 0, sizeof(nodes[count]));
-		strlcpy(nodes[count].name, oc->classStruct->name, sizeof(nodes[count].name));
+		strlcpy(nodes[count].name, name, sizeof(nodes[count].name));
 		nodes[count].conf = oc;
 		count++;
 	}

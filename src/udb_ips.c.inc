@@ -204,64 +204,66 @@ static int udb_ip_reapply_vhost(Client *client)
 	return 1;
 }
 
+static void udb_ip_refresh_derived_host(Client *client)
+{
+	UdbIpHostState *state;
+	const char *explicit_vhost;
+	char host[HOSTLEN + 1];
+
+	if (!udb_ip_host_md || !client->user || !MyConnect(client))
+		return;
+	state = moddata_local_client(client, udb_ip_host_md).ptr;
+	explicit_vhost = udb_ip_explicit_vhost(client);
+	if (explicit_vhost)
+	{
+		/* A nick vhost supersedes a derived vhost without restoring over it.
+		 * Keep the original state so removing the nick vhost can restore the
+		 * derived vhost instead of losing the precedence relationship. */
+		if ((!state || state->derived_vhost) && strcmp(udb_ip_visible_host(client), explicit_vhost))
+		{
+			char notice[HOSTLEN + 96];
+			userhost_save_current(client);
+			safe_strdup(client->user->virthost, explicit_vhost);
+			client->umodes |= UMODE_HIDE | UMODE_SETHOST;
+			snprintf(notice, sizeof(notice), "*** Your vhost is now %s", explicit_vhost);
+			udb_ip_notify_host_change(client, notice);
+		}
+		return;
+	}
+	if (!udb_ip_derive_vhost(client, host, sizeof(host)))
+	{
+		if (state && state->derived_vhost)
+		{
+			userhost_save_current(client);
+			udb_ip_restore_host(client, state->key);
+			udb_ip_notify_host_change(client, "*** Your IP-derived vhost has been removed");
+		}
+		return;
+	}
+	if (state && !state->derived_vhost)
+		return; /* I::host remains a stronger, explicit IP override. */
+	if (state && state->derived_vhost && !strcmp(client->user->virthost, host))
+		return;
+	userhost_save_current(client);
+	udb_ip_save_host_state(client, client->ip);
+	state = moddata_local_client(client, udb_ip_host_md).ptr;
+	safe_strdup(client->user->virthost, host);
+	client->umodes |= UMODE_HIDE | UMODE_SETHOST;
+	state->derived_vhost = 1;
+	{
+		char notice[HOSTLEN + 96];
+		snprintf(notice, sizeof(notice), "*** Your IP-derived vhost is now %s", host);
+		udb_ip_notify_host_change(client, notice);
+	}
+}
+
 static void udb_ip_refresh_derived_hosts(void)
 {
 	Client *client;
 
 	if (!udb_ip_host_md)
 		return;
-	list_for_each_entry(client, &lclient_list, lclient_node)
-	{
-		UdbIpHostState *state;
-		const char *explicit_vhost;
-		char host[HOSTLEN + 1];
-
-		if (!client->user || !MyConnect(client))
-			continue;
-		state = moddata_local_client(client, udb_ip_host_md).ptr;
-		explicit_vhost = udb_ip_explicit_vhost(client);
-		if (explicit_vhost)
-		{
-			/* A nick vhost supersedes a derived vhost without restoring over it.
-			 * Keep the original state so removing the nick vhost can restore the
-			 * derived vhost instead of losing the precedence relationship. */
-			if ((!state || state->derived_vhost) && strcmp(udb_ip_visible_host(client), explicit_vhost))
-			{
-				char notice[HOSTLEN + 96];
-				userhost_save_current(client);
-				safe_strdup(client->user->virthost, explicit_vhost);
-				client->umodes |= UMODE_HIDE | UMODE_SETHOST;
-				snprintf(notice, sizeof(notice), "*** Your vhost is now %s", explicit_vhost);
-				udb_ip_notify_host_change(client, notice);
-			}
-			continue;
-		}
-		if (!udb_ip_derive_vhost(client, host, sizeof(host)))
-		{
-			if (state && state->derived_vhost)
-			{
-				userhost_save_current(client);
-				udb_ip_restore_host(client, state->key);
-				udb_ip_notify_host_change(client, "*** Your IP-derived vhost has been removed");
-			}
-			continue;
-		}
-		if (state && !state->derived_vhost)
-			continue; /* I::host remains a stronger, explicit IP override. */
-		if (state && state->derived_vhost && !strcmp(client->user->virthost, host))
-			continue;
-		userhost_save_current(client);
-		udb_ip_save_host_state(client, client->ip);
-		state = moddata_local_client(client, udb_ip_host_md).ptr;
-		safe_strdup(client->user->virthost, host);
-		client->umodes |= UMODE_HIDE | UMODE_SETHOST;
-		state->derived_vhost = 1;
-		{
-			char notice[HOSTLEN + 96];
-			snprintf(notice, sizeof(notice), "*** Your IP-derived vhost is now %s", host);
-			udb_ip_notify_host_change(client, notice);
-		}
-	}
+	list_for_each_entry(client, &lclient_list, lclient_node) udb_ip_refresh_derived_host(client);
 }
 
 static void udb_ip_reconcile_host(const char *ip_key, const char *host)
@@ -401,7 +403,7 @@ static int udb_hook_pre_connect(Client *client)
 		if (udb_ip_is_throttle_exempt(ip_rec))
 			return HOOK_CONTINUE;
 	}
-	udb_ip_refresh_derived_hosts();
+	udb_ip_refresh_derived_host(client);
 
 	/* Fallback to global clones if no specific IP limit */
 	if (limit == 0 && udb_ctx && udb_ctx->settings)

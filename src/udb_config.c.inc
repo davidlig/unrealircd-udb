@@ -14,6 +14,171 @@ static int udb_config_seen_propagator = 0;
 
 static int udb_flood_valid(const char *value, int *attempts, int *period);
 
+typedef enum UdbConfigKind
+{
+	UDB_CFG_SERVER_NAME,
+	UDB_CFG_FLOOD,
+	UDB_CFG_UINT,
+	UDB_CFG_INT,
+	UDB_CFG_SIZE
+} UdbConfigKind;
+
+typedef struct UdbConfigDirective
+{
+	const char *name;
+	UdbConfigKind kind;
+	const char *unit;
+	size_t offset;
+	unsigned int min;
+	unsigned int max;
+	size_t size_min;
+	size_t size_max;
+	unsigned int fallback;
+} UdbConfigDirective;
+
+static const UdbConfigDirective udb_config_directives[] = {
+	{"propagator", UDB_CFG_SERVER_NAME, "", 0, 0, 0, 0, 0, 0},
+	{"password-flood", UDB_CFG_FLOOD, "", 0, 0, 0, 0, 0, 0},
+	{"max-staged-records", UDB_CFG_UINT, "records", offsetof(UdbConfig, max_staged_records), UDB_MIN_MAX_STAGED_RECORDS,
+	 UDB_MAX_MAX_STAGED_RECORDS, 0, 0, UDB_DEFAULT_MAX_STAGED_RECORDS},
+	{"max-staged-bytes", UDB_CFG_SIZE, "bytes", offsetof(UdbConfig, max_staged_bytes), 0, 0, UDB_MIN_MAX_STAGED_BYTES,
+	 (size_t)UDB_MAX_MAX_STAGED_BYTES, UDB_DEFAULT_MAX_STAGED_BYTES},
+	{"sync-inactivity-timeout", UDB_CFG_INT, "seconds", offsetof(UdbConfig, sync_inactivity_timeout), 1, 86400, 0, 0,
+	 UDB_SYNC_INACTIVITY_TIMEOUT},
+	{"sync-absolute-timeout", UDB_CFG_INT, "seconds", offsetof(UdbConfig, sync_absolute_timeout), 1, 86400, 0, 0,
+	 UDB_SYNC_ABSOLUTE_TIMEOUT},
+	{"stale-timeout", UDB_CFG_INT, "seconds", offsetof(UdbConfig, stale_timeout), 1, 604800, 0, 0, 300},
+	{"anti-entropy-interval", UDB_CFG_INT, "seconds", offsetof(UdbConfig, anti_entropy_interval),
+	 UDB_MIN_ANTI_ENTROPY_INTERVAL, UDB_MAX_ANTI_ENTROPY_INTERVAL, 0, 0, UDB_DEFAULT_ANTI_ENTROPY_INTERVAL},
+};
+
+static const UdbConfigDirective *udb_config_directive_find(const char *name)
+{
+	for (size_t i = 0; i < sizeof(udb_config_directives) / sizeof(udb_config_directives[0]); i++)
+		if (!strcmp(udb_config_directives[i].name, name))
+			return &udb_config_directives[i];
+	return NULL;
+}
+
+static int udb_config_apply_entry(const UdbConfigDirective *directive, ConfigEntry *cep, int apply)
+{
+	switch (directive->kind)
+	{
+	case UDB_CFG_SERVER_NAME:
+		if (!cep->value || !udb_server_name_valid(cep->value))
+			return 0;
+		if (apply)
+		{
+			udb_config_seen_propagator = 1;
+			safe_strdup(udb_cfg->propagator, cep->value);
+		}
+		return 1;
+	case UDB_CFG_FLOOD:
+		if (!cep->value || !udb_flood_valid(cep->value, apply ? &udb_cfg->flood_attempts : NULL,
+											apply ? &udb_cfg->flood_period : NULL))
+			return 0;
+		return 1;
+	case UDB_CFG_UINT:
+	{
+		unsigned int value;
+
+		if (!cep->value || !udb_parse_uint_strict(cep->value, &value, directive->min, directive->max))
+			return 0;
+		if (apply)
+			*(unsigned int *)((char *)udb_cfg + directive->offset) = value;
+		return 1;
+	}
+	case UDB_CFG_INT:
+	{
+		unsigned int value;
+
+		if (!cep->value || !udb_parse_uint_strict(cep->value, &value, directive->min, directive->max))
+			return 0;
+		if (apply)
+			*(int *)((char *)udb_cfg + directive->offset) = (int)value;
+		return 1;
+	}
+	case UDB_CFG_SIZE:
+	{
+		size_t value;
+
+		if (!cep->value || !udb_parse_size_strict(cep->value, &value, directive->size_min, directive->size_max))
+			return 0;
+		if (apply)
+			*(size_t *)((char *)udb_cfg + directive->offset) = value;
+		return 1;
+	}
+	}
+	return 0;
+}
+
+static void udb_config_error_entry(const UdbConfigDirective *directive, ConfigEntry *cep)
+{
+	switch (directive->kind)
+	{
+	case UDB_CFG_SERVER_NAME:
+		config_error("%s:%i: udb::%s requires a valid server name", cep->file->filename, cep->line_number,
+					 directive->name);
+		break;
+	case UDB_CFG_FLOOD:
+		config_error("%s:%i: udb::%s requires format attempts:seconds with positive integers (e.g. 5:30)",
+					 cep->file->filename, cep->line_number, directive->name);
+		break;
+	case UDB_CFG_UINT:
+	case UDB_CFG_INT:
+		if (directive->fallback)
+			config_error("%s:%i: udb::%s must be between %u and %u %s (default %u)", cep->file->filename,
+						 cep->line_number, directive->name, directive->min, directive->max, directive->unit,
+						 directive->fallback);
+		else
+			config_error("%s:%i: udb::%s must be between %u and %u %s", cep->file->filename, cep->line_number,
+						 directive->name, directive->min, directive->max, directive->unit);
+		break;
+	case UDB_CFG_SIZE:
+		config_error("%s:%i: udb::%s must be between %llu and %llu %s", cep->file->filename, cep->line_number,
+					 directive->name, (unsigned long long)directive->size_min, (unsigned long long)directive->size_max,
+					 directive->unit);
+		break;
+	}
+}
+
+static void udb_config_defaults(void)
+{
+	if (!udb_cfg)
+		return;
+	for (size_t i = 0; i < sizeof(udb_config_directives) / sizeof(udb_config_directives[0]); i++)
+	{
+		const UdbConfigDirective *directive = &udb_config_directives[i];
+
+		if (!directive->fallback || directive->kind == UDB_CFG_SERVER_NAME || directive->kind == UDB_CFG_FLOOD)
+			continue;
+		if (directive->kind == UDB_CFG_UINT)
+		{
+			unsigned int *slot = (unsigned int *)((char *)udb_cfg + directive->offset);
+			if (*slot == 0)
+				*slot = directive->fallback;
+		}
+		else if (directive->kind == UDB_CFG_INT)
+		{
+			int *slot = (int *)((char *)udb_cfg + directive->offset);
+			if (*slot == 0)
+				*slot = (int)directive->fallback;
+		}
+		else if (directive->kind == UDB_CFG_SIZE)
+		{
+			size_t *slot = (size_t *)((char *)udb_cfg + directive->offset);
+			if (*slot == 0)
+				*slot = (size_t)directive->fallback;
+		}
+	}
+	if (udb_cfg->flood_attempts == 0)
+		udb_cfg->flood_attempts = 5;
+	if (udb_cfg->flood_period == 0)
+		udb_cfg->flood_period = 60;
+	udb_cfg->config_flood_attempts = udb_cfg->flood_attempts;
+	udb_cfg->config_flood_period = udb_cfg->flood_period;
+}
+
 static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
 {
 	int errors = 0;
@@ -27,95 +192,17 @@ static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
 
 	for (cep = ce->items; cep; cep = cep->next)
 	{
-		if (!strcmp(cep->name, "propagator"))
-		{
-			if (!cep->value || !udb_server_name_valid(cep->value))
-			{
-				config_error("%s:%i: udb::propagator requires a valid server name", cep->file->filename,
-							 cep->line_number);
-				errors++;
-			}
-		}
-		else if (!strcmp(cep->name, "password-flood"))
-		{
-			int attempts, period;
-			if (!cep->value || !udb_flood_valid(cep->value, &attempts, &period))
-			{
-				config_error(
-					"%s:%i: udb::password-flood requires format attempts:seconds with positive integers (e.g. 5:30)",
-					cep->file->filename, cep->line_number);
-				errors++;
-			}
-		}
-		else if (!strcmp(cep->name, "max-staged-records"))
-		{
-			unsigned int val;
-			if (!cep->value ||
-				!udb_parse_uint_strict(cep->value, &val, UDB_MIN_MAX_STAGED_RECORDS, UDB_MAX_MAX_STAGED_RECORDS))
-			{
-				config_error("%s:%i: udb::max-staged-records must be between %d and %d (default %d)",
-							 cep->file->filename, cep->line_number, UDB_MIN_MAX_STAGED_RECORDS,
-							 UDB_MAX_MAX_STAGED_RECORDS, UDB_DEFAULT_MAX_STAGED_RECORDS);
-				errors++;
-			}
-		}
-		else if (!strcmp(cep->name, "max-staged-bytes"))
-		{
-			size_t val;
-			if (!cep->value ||
-				!udb_parse_size_strict(cep->value, &val, UDB_MIN_MAX_STAGED_BYTES, (size_t)UDB_MAX_MAX_STAGED_BYTES))
-			{
-				config_error("%s:%i: udb::max-staged-bytes must be between %llu and %llu bytes", cep->file->filename,
-							 cep->line_number, (unsigned long long)UDB_MIN_MAX_STAGED_BYTES,
-							 (unsigned long long)UDB_MAX_MAX_STAGED_BYTES);
-				errors++;
-			}
-		}
-		else if (!strcmp(cep->name, "sync-inactivity-timeout"))
-		{
-			unsigned int val;
-			if (!cep->value || !udb_parse_uint_strict(cep->value, &val, 1, 86400))
-			{
-				config_error("%s:%i: udb::sync-inactivity-timeout must be between 1 and 86400 seconds",
-							 cep->file->filename, cep->line_number);
-				errors++;
-			}
-		}
-		else if (!strcmp(cep->name, "sync-absolute-timeout"))
-		{
-			unsigned int val;
-			if (!cep->value || !udb_parse_uint_strict(cep->value, &val, 1, 86400))
-			{
-				config_error("%s:%i: udb::sync-absolute-timeout must be between 1 and 86400 seconds",
-							 cep->file->filename, cep->line_number);
-				errors++;
-			}
-		}
-		else if (!strcmp(cep->name, "stale-timeout"))
-		{
-			unsigned int val;
-			if (!cep->value || !udb_parse_uint_strict(cep->value, &val, 1, 604800))
-			{
-				config_error("%s:%i: udb::stale-timeout must be between 1 and 604800 seconds (default 300)",
-							 cep->file->filename, cep->line_number);
-				errors++;
-			}
-		}
-		else if (!strcmp(cep->name, "anti-entropy-interval"))
-		{
-			unsigned int val;
-			if (!cep->value ||
-				!udb_parse_uint_strict(cep->value, &val, UDB_MIN_ANTI_ENTROPY_INTERVAL, UDB_MAX_ANTI_ENTROPY_INTERVAL))
-			{
-				config_error("%s:%i: udb::anti-entropy-interval must be between %d and %d seconds (default %d)",
-							 cep->file->filename, cep->line_number, UDB_MIN_ANTI_ENTROPY_INTERVAL,
-							 UDB_MAX_ANTI_ENTROPY_INTERVAL, UDB_DEFAULT_ANTI_ENTROPY_INTERVAL);
-				errors++;
-			}
-		}
-		else
+		const UdbConfigDirective *directive = udb_config_directive_find(cep->name);
+
+		if (!directive)
 		{
 			config_error("%s:%i: unknown directive udb::%s", cep->file->filename, cep->line_number, cep->name);
+			errors++;
+			continue;
+		}
+		if (!udb_config_apply_entry(directive, cep, 0))
+		{
+			udb_config_error_entry(directive, cep);
 			errors++;
 		}
 	}
@@ -160,72 +247,14 @@ static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
 
 	for (cep = ce->items; cep; cep = cep->next)
 	{
-		if (!strcmp(cep->name, "propagator"))
-		{
-			udb_config_seen_propagator = 1;
-			safe_strdup(udb_cfg->propagator, cep->value);
-		}
-		else if (!strcmp(cep->name, "max-staged-records"))
-		{
-			unsigned int val = 0;
-			if (udb_parse_uint_strict(cep->value, &val, UDB_MIN_MAX_STAGED_RECORDS, UDB_MAX_MAX_STAGED_RECORDS))
-				udb_cfg->max_staged_records = val;
-		}
-		else if (!strcmp(cep->name, "max-staged-bytes"))
-		{
-			size_t val = 0;
-			if (udb_parse_size_strict(cep->value, &val, UDB_MIN_MAX_STAGED_BYTES, (size_t)UDB_MAX_MAX_STAGED_BYTES))
-				udb_cfg->max_staged_bytes = val;
-		}
-		else if (!strcmp(cep->name, "sync-inactivity-timeout"))
-		{
-			unsigned int val = 0;
-			if (udb_parse_uint_strict(cep->value, &val, 1, 86400))
-				udb_cfg->sync_inactivity_timeout = (int)val;
-		}
-		else if (!strcmp(cep->name, "sync-absolute-timeout"))
-		{
-			unsigned int val = 0;
-			if (udb_parse_uint_strict(cep->value, &val, 1, 86400))
-				udb_cfg->sync_absolute_timeout = (int)val;
-		}
-		else if (!strcmp(cep->name, "stale-timeout"))
-		{
-			unsigned int val = 0;
-			if (udb_parse_uint_strict(cep->value, &val, 1, 604800))
-				udb_cfg->stale_timeout = (int)val;
-		}
-		else if (!strcmp(cep->name, "anti-entropy-interval"))
-		{
-			unsigned int val = 0;
-			if (udb_parse_uint_strict(cep->value, &val, UDB_MIN_ANTI_ENTROPY_INTERVAL, UDB_MAX_ANTI_ENTROPY_INTERVAL))
-				udb_cfg->anti_entropy_interval = (int)val;
-		}
-		else if (!strcmp(cep->name, "password-flood"))
-		{
-			udb_flood_valid(cep->value, &udb_cfg->flood_attempts, &udb_cfg->flood_period);
-		}
+		const UdbConfigDirective *directive = udb_config_directive_find(cep->name);
+
+		if (directive)
+			(void)udb_config_apply_entry(directive, cep, 1);
 	}
 
 	/* Persistent files always live in UnrealIRCd PERMDATADIR. */
-	if (udb_cfg->max_staged_records == 0)
-		udb_cfg->max_staged_records = UDB_DEFAULT_MAX_STAGED_RECORDS;
-	if (udb_cfg->max_staged_bytes == 0)
-		udb_cfg->max_staged_bytes = UDB_DEFAULT_MAX_STAGED_BYTES;
-	if (udb_cfg->sync_inactivity_timeout == 0)
-		udb_cfg->sync_inactivity_timeout = UDB_SYNC_INACTIVITY_TIMEOUT;
-	if (udb_cfg->sync_absolute_timeout == 0)
-		udb_cfg->sync_absolute_timeout = UDB_SYNC_ABSOLUTE_TIMEOUT;
-	if (udb_cfg->stale_timeout == 0)
-		udb_cfg->stale_timeout = 300;
-	if (udb_cfg->anti_entropy_interval == 0)
-		udb_cfg->anti_entropy_interval = UDB_DEFAULT_ANTI_ENTROPY_INTERVAL;
-	if (udb_cfg->flood_attempts == 0)
-		udb_cfg->flood_attempts = 5;
-	if (udb_cfg->flood_period == 0)
-		udb_cfg->flood_period = 60;
-	udb_cfg->config_flood_attempts = udb_cfg->flood_attempts;
-	udb_cfg->config_flood_period = udb_cfg->flood_period;
+	udb_config_defaults();
 
 	return 1;
 }
@@ -351,31 +380,59 @@ static void udb_settings_restore_flood(void)
 	udb_cfg->flood_period = udb_cfg->config_flood_period;
 }
 
+typedef struct UdbSettingOps
+{
+	const char *key;
+	UdbValFunc validator;
+	size_t value_offset;
+	unsigned int flags;
+} UdbSettingOps;
+
+#define UDB_SETTING_NUMERIC_ONLY 0x1
+#define UDB_SETTING_FLOOD 0x2
+#define UDB_SETTING_REFRESH_HOSTS 0x4
+#define UDB_SETTING_POLICY_CHANGED 0x8
+
+static const UdbSettingOps udb_setting_ops[] = {
+	{SKEY_QUIT_IPS, udb_setting_string_valid, offsetof(UdbContext, quit_ips), 0},
+	{SKEY_QUIT_CLONES, udb_setting_string_valid, offsetof(UdbContext, quit_clones), 0},
+	{SKEY_CLONES, NULL, 0, UDB_SETTING_NUMERIC_ONLY},
+	{SKEY_FLOOD, NULL, 0, UDB_SETTING_FLOOD},
+	{SKEY_SUFFIX, udb_suffix_valid, offsetof(UdbContext, suffix), UDB_SETTING_REFRESH_HOSTS},
+	{SKEY_CRYPT_KEY, udb_encryption_key_valid, offsetof(UdbContext, encryption_key), UDB_SETTING_REFRESH_HOSTS},
+	{SKEY_NICKSERV, udb_service_mask_valid, offsetof(UdbContext, nickserv_mask), 0},
+	{SKEY_CHANSERV, udb_service_mask_valid, offsetof(UdbContext, chanserv_mask), 0},
+	{SKEY_IPSERV, udb_service_mask_valid, offsetof(UdbContext, ipserv_mask), 0},
+	{SKEY_PROPAGATOR, udb_propagator_list_valid, offsetof(UdbContext, propagator_setting), UDB_SETTING_POLICY_CHANGED},
+};
+
+static const UdbSettingOps *udb_setting_ops_find(const char *key)
+{
+	for (size_t i = 0; i < sizeof(udb_setting_ops) / sizeof(udb_setting_ops[0]); i++)
+		if (!strcmp(udb_setting_ops[i].key, key))
+			return &udb_setting_ops[i];
+	return NULL;
+}
+
+static char **udb_setting_slot(UdbContext *ctx, const UdbSettingOps *ops)
+{
+	return (char **)((char *)ctx + ops->value_offset);
+}
+
 static int udb_settings_apply_record(UdbContext *ctx, UdbRecord *rec)
 {
+	const UdbSettingOps *ops;
 	int attempts;
 	int period;
 
-	if (!rec || !rec->key)
+	if (!ctx || !rec || !rec->key)
 		return 0;
-	if (!strcmp(rec->key, SKEY_QUIT_IPS))
-	{
-		if (!udb_setting_string_valid(rec->data_str))
-			return 0;
-		udb_settings_replace(&ctx->quit_ips, rec->data_str);
-	}
-	else if (!strcmp(rec->key, SKEY_QUIT_CLONES))
-	{
-		if (!udb_setting_string_valid(rec->data_str))
-			return 0;
-		udb_settings_replace(&ctx->quit_clones, rec->data_str);
-	}
-	else if (!strcmp(rec->key, SKEY_CLONES))
-	{
-		if (rec->data_str || rec->data_num == 0)
-			return 0;
-	}
-	else if (!strcmp(rec->key, SKEY_FLOOD))
+	ops = udb_setting_ops_find(rec->key);
+	if (!ops)
+		return 0;
+	if (ops->flags & UDB_SETTING_NUMERIC_ONLY)
+		return !rec->data_str && rec->data_num != 0;
+	if (ops->flags & UDB_SETTING_FLOOD)
 	{
 		if (!udb_flood_valid(rec->data_str, &attempts, &period))
 			return 0;
@@ -384,84 +441,37 @@ static int udb_settings_apply_record(UdbContext *ctx, UdbRecord *rec)
 			udb_cfg->flood_attempts = attempts;
 			udb_cfg->flood_period = period;
 		}
+		return 1;
 	}
-	else if (!strcmp(rec->key, SKEY_SUFFIX))
-	{
-		if (!udb_suffix_valid(rec->data_str))
-			return 0;
-		udb_settings_replace(&ctx->suffix, rec->data_str);
-		udb_ip_refresh_derived_hosts();
-	}
-	else if (!strcmp(rec->key, SKEY_CRYPT_KEY))
-	{
-		if (!udb_encryption_key_valid(rec->data_str))
-			return 0;
-		udb_settings_replace(&ctx->encryption_key, rec->data_str);
-		udb_ip_refresh_derived_hosts();
-	}
-	else if (!strcmp(rec->key, SKEY_NICKSERV))
-	{
-		if (!udb_service_mask_valid(rec->data_str))
-			return 0;
-		udb_settings_replace(&ctx->nickserv_mask, rec->data_str);
-	}
-	else if (!strcmp(rec->key, SKEY_CHANSERV))
-	{
-		if (!udb_service_mask_valid(rec->data_str))
-			return 0;
-		udb_settings_replace(&ctx->chanserv_mask, rec->data_str);
-	}
-	else if (!strcmp(rec->key, SKEY_IPSERV))
-	{
-		if (!udb_service_mask_valid(rec->data_str))
-			return 0;
-		udb_settings_replace(&ctx->ipserv_mask, rec->data_str);
-	}
-	else if (!strcmp(rec->key, SKEY_PROPAGATOR))
-	{
-		if (!udb_propagator_list_valid(rec->data_str))
-			return 0;
-		udb_settings_replace(&ctx->propagator_setting, rec->data_str);
-		udb_propagator_policy_changed(ctx);
-	}
-	else
-	{
+	if (ops->validator && !ops->validator(rec->data_str))
 		return 0;
-	}
+	udb_settings_replace(udb_setting_slot(ctx, ops), rec->data_str);
+	if (ops->flags & UDB_SETTING_REFRESH_HOSTS)
+		udb_ip_refresh_derived_hosts();
+	if (ops->flags & UDB_SETTING_POLICY_CHANGED)
+		udb_propagator_policy_changed(ctx);
 	return 1;
 }
 
 static void udb_settings_remove_record(UdbContext *ctx, UdbRecord *rec)
 {
-	if (!rec || !rec->key)
+	const UdbSettingOps *ops;
+
+	if (!ctx || !rec || !rec->key)
 		return;
-	if (!strcmp(rec->key, SKEY_QUIT_IPS))
-		udb_settings_replace(&ctx->quit_ips, NULL);
-	else if (!strcmp(rec->key, SKEY_QUIT_CLONES))
-		udb_settings_replace(&ctx->quit_clones, NULL);
-	else if (!strcmp(rec->key, SKEY_FLOOD))
+	ops = udb_setting_ops_find(rec->key);
+	if (!ops || (ops->flags & UDB_SETTING_NUMERIC_ONLY))
+		return;
+	if (ops->flags & UDB_SETTING_FLOOD)
+	{
 		udb_settings_restore_flood();
-	else if (!strcmp(rec->key, SKEY_SUFFIX))
-	{
-		udb_settings_replace(&ctx->suffix, NULL);
-		udb_ip_refresh_derived_hosts();
+		return;
 	}
-	else if (!strcmp(rec->key, SKEY_CRYPT_KEY))
-	{
-		udb_settings_replace(&ctx->encryption_key, NULL);
+	udb_settings_replace(udb_setting_slot(ctx, ops), NULL);
+	if (ops->flags & UDB_SETTING_REFRESH_HOSTS)
 		udb_ip_refresh_derived_hosts();
-	}
-	else if (!strcmp(rec->key, SKEY_NICKSERV))
-		udb_settings_replace(&ctx->nickserv_mask, NULL);
-	else if (!strcmp(rec->key, SKEY_CHANSERV))
-		udb_settings_replace(&ctx->chanserv_mask, NULL);
-	else if (!strcmp(rec->key, SKEY_IPSERV))
-		udb_settings_replace(&ctx->ipserv_mask, NULL);
-	else if (!strcmp(rec->key, SKEY_PROPAGATOR))
-	{
-		udb_settings_replace(&ctx->propagator_setting, NULL);
+	if (ops->flags & UDB_SETTING_POLICY_CHANGED)
 		udb_propagator_policy_changed(ctx);
-	}
 }
 
 static void udb_link_apply_record(UdbContext *ctx, UdbRecord *rec)

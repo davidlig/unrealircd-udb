@@ -754,8 +754,7 @@ static int udb_engine_init(void)
 	}
 	if (!udb_cfg)
 		udb_cfg = safe_alloc(sizeof(UdbConfig));
-	if (udb_cfg->max_staged_records == 0)
-		udb_cfg->max_staged_records = UDB_DEFAULT_MAX_STAGED_RECORDS;
+	udb_config_defaults();
 	udb_ctx = safe_alloc(sizeof(UdbContext));
 	if (!udb_hash_init(udb_ctx))
 	{

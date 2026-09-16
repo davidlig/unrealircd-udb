@@ -92,10 +92,25 @@ static void udb_protocol_mutation_error(Client *client, const char *subcmd, int 
 	udb_protocol_round_error(client, subcmd, error, udb_protocol_next_error_correlation(), letter);
 }
 
+typedef struct UdbDbSubcommand
+{
+	const char *name;
+	int affects_reconciliation;
+} UdbDbSubcommand;
+
+static const UdbDbSubcommand udb_db_subcommands[] = {
+	{"HEL", 0}, {"BEGIN", 1}, {"PUT", 1}, {"EXP", 0}, {"END", 1},	   {"ERR", 0}, {"ACK", 0},	{"INF", 1},
+	{"INS", 0}, {"RES", 1},	  {"DEL", 0}, {"DRP", 0}, {"MANIFEST", 1}, {"OCL", 0}, {"OCLG", 0},
+};
+
 static int udb_protocol_error_affects_reconciliation(const char *subcmd)
 {
-	return subcmd && (!strcasecmp(subcmd, "INF") || !strcasecmp(subcmd, "RES") || !strcasecmp(subcmd, "BEGIN") ||
-					  !strcasecmp(subcmd, "PUT") || !strcasecmp(subcmd, "END") || !strcasecmp(subcmd, "MANIFEST"));
+	if (!subcmd)
+		return 0;
+	for (size_t i = 0; i < sizeof(udb_db_subcommands) / sizeof(udb_db_subcommands[0]); i++)
+		if (!strcasecmp(subcmd, udb_db_subcommands[i].name))
+			return udb_db_subcommands[i].affects_reconciliation;
+	return 0;
 }
 
 static int udb_sync_to_server(Client *server)
