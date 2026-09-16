@@ -126,6 +126,7 @@ struct UdbRecord
 	unsigned char block_idx;
 	unsigned int is_b64 : 1;
 	unsigned int is_dynamic_key : 1;
+	unsigned int nick_unsuspend_transition : 1;
 };
 
 typedef enum UdbBlockLoadState
@@ -568,7 +569,8 @@ static int udb_mutation_expire_local(UdbContext *ctx, const char *path, time_t e
 typedef enum
 {
 	UDB_NICK_APPLY_ADOPT,
-	UDB_NICK_APPLY_REFRESH
+	UDB_NICK_APPLY_REFRESH,
+	UDB_NICK_APPLY_UNSUSPEND
 } UdbNickApplyReason;
 
 static void udb_nick_apply(Client *client, UdbRecord *nick_rec, UdbNickApplyReason reason);

@@ -101,10 +101,21 @@ class PostReviewCorrectionsTest(unittest.TestCase):
         internal = (ROOT / "src/udb_internal.h").read_text(encoding="utf-8")
         self.assertIn("UDB_NICK_APPLY_ADOPT", internal)
         self.assertIn("UDB_NICK_APPLY_REFRESH", internal)
+        self.assertIn("UDB_NICK_APPLY_UNSUSPEND", internal)
         self.assertIn("static void udb_nick_apply(Client *client, UdbRecord *nick_rec, UdbNickApplyReason reason);",
                       internal)
         self.assertNotIn("int is_hot_sync", internal)
-        self.assertIn("is_new ? UDB_NICK_APPLY_REFRESH : UDB_NICK_APPLY_ADOPT", self.effects)
+        self.assertIn("UdbNickApplyReason reason = is_new ? UDB_NICK_APPLY_REFRESH : UDB_NICK_APPLY_ADOPT;",
+                      self.effects)
+        self.assertIn("reason = UDB_NICK_APPLY_UNSUSPEND;", self.effects)
+
+    def test_unsuspend_rename_has_a_dedicated_notice_path(self):
+        self.assertIn("candidate_nick_profile->nick_unsuspend_transition = 1;", self.mutation)
+        self.assertIn("candidate->nick_unsuspend_transition = 1;", self.nicks)
+        self.assertIn("udb_nick_force_rename_after_unsuspend(client, nick_rec->key);", self.nicks)
+        helper = re.search(r"static void udb_nick_force_rename_after_unsuspend\(.*?\n}\n", self.nicks,
+                           re.S).group(0)
+        self.assertIn("NULL, 0, 1", helper)
 
     def test_generic_nick_modes_remain_unfiltered(self):
         self.assertIn("udb_nick_effects_apply_modes(client, effect_rec);", self.nicks)

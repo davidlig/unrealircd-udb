@@ -439,6 +439,8 @@ static int udb_mutation_delete_local(UdbContext *ctx, UdbBlock *block, UdbRecord
 		candidate_line = candidate_rec->parent;
 	if (block->letter == UDB_BLOCK_NICKS && candidate_rec->parent && candidate_rec->parent != tree)
 		candidate_nick_profile = candidate_rec->parent;
+	if (candidate_nick_profile && !strcmp(old_rec->key, NKEY_SUSPEND))
+		candidate_nick_profile->nick_unsuspend_transition = 1;
 	udb_record_delete_tree(candidate_rec);
 	record_count = udb_record_count_tree(tree);
 	if (!udb_hash_prepare_tree(tree, &hash_index))

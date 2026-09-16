@@ -213,6 +213,15 @@ def free_guest(client, description, start=0, timeout=20):
     return current_nick(client)
 
 
+def assert_unsuspend_rename_notice(client, nick, start, description):
+    lines = client.lines[start:]
+    expected = f"You have been renamed. If you are the owner, please identify: /NICK {nick}:Password"
+    require(any(line.endswith(":" + expected) for line in lines),
+            f"{description}: missing identification prompt: {lines!r}")
+    require(not any("has been registered or synced in the UDB database" in line for line in lines),
+            f"{description}: redundant registered/synced notice: {lines!r}")
+
+
 def add_effect_profile(services, nick, password, effects=(), suspended=False):
     services.send_ins(f"N::{nick}::pass", "sha256:" + sha256(password))
     services.send_ins(f"N::{nick}::access", "127.0.0.0/8")
@@ -375,6 +384,7 @@ def run_tests(ircd, module, keep=False):
         start = len(owner.lines)
         services.send_del("N::owner::suspend")
         guest = free_guest(owner, "unsuspend rename", start=start)
+        assert_unsuspend_rename_notice(owner, "owner", start, "unsuspend rename")
         require(guest != "owner", "DEL suspend kept the unauthenticated holder on the nick")
         assert_unidentified(owner, guest, "unsuspended holder")
 
@@ -401,6 +411,7 @@ def run_tests(ircd, module, keep=False):
         start = len(held.lines)
         services.send_del("N::held::suspend")
         free_guest(held, "suspended DEL rename", start=start)
+        assert_unsuspend_rename_notice(held, "held", start, "suspended DEL rename")
         assert_unidentified(held, current_nick(held), "suspended DEL holder")
 
         # E2: adopting a suspended profile materializes nothing, so externally
@@ -459,6 +470,8 @@ def run_tests(ircd, module, keep=False):
         services.send_del("N::openhold::suspend")
         openhold.receive(time.monotonic() + 0.6)
         require(current_nick(openhold) == "openhold", "passless DEL suspend renamed the holder")
+        require(not any("You have been renamed. If you are the owner" in line for line in openhold.lines[start:]),
+                "passless DEL suspend emitted a rename prompt")
         assert_unidentified(openhold, "openhold", "passless unsuspended profile")
 
         # G: passless effects stay inert: dormant modes/vhosts never override or
@@ -653,6 +666,7 @@ def run_tests(ircd, module, keep=False):
         start = len(snapowner.lines)
         replace_n_tree(services, 103, "nick-suspend-to-normal-c", snap_a)
         free_guest(snapowner, "snapshot suspend to normal rename", start=start)
+        assert_unsuspend_rename_notice(snapowner, "snapowner", start, "snapshot suspend to normal rename")
         assert_unidentified(snapowner, current_nick(snapowner), "snapshot unsuspended holder")
 
         # O: a snapshot that changes the credential but still permits the

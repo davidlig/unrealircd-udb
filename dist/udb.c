@@ -269,6 +269,7 @@ struct UdbRecord
 	unsigned char block_idx;
 	unsigned int is_b64 : 1;
 	unsigned int is_dynamic_key : 1;
+	unsigned int nick_unsuspend_transition : 1;
 };
 
 typedef enum UdbBlockLoadState
@@ -711,7 +712,8 @@ static int udb_mutation_expire_local(UdbContext *ctx, const char *path, time_t e
 typedef enum
 {
 	UDB_NICK_APPLY_ADOPT,
-	UDB_NICK_APPLY_REFRESH
+	UDB_NICK_APPLY_REFRESH,
+	UDB_NICK_APPLY_UNSUSPEND
 } UdbNickApplyReason;
 
 static void udb_nick_apply(Client *client, UdbRecord *nick_rec, UdbNickApplyReason reason);
@@ -4374,10 +4376,17 @@ static int udb_apply_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord 
 	if (block->letter == 'N')
 	{
 		UdbRecord *nick_rec = rec->parent == block->tree ? rec : rec->parent;
+		UdbNickApplyReason reason = is_new ? UDB_NICK_APPLY_REFRESH : UDB_NICK_APPLY_ADOPT;
 		Client *client = find_user(nick_rec->key, NULL);
+
+		if (nick_rec->nick_unsuspend_transition)
+		{
+			nick_rec->nick_unsuspend_transition = 0;
+			reason = UDB_NICK_APPLY_UNSUSPEND;
+		}
 		if (client && MyUser(client))
 		{
-			udb_nick_apply(client, nick_rec, is_new ? UDB_NICK_APPLY_REFRESH : UDB_NICK_APPLY_ADOPT);
+			udb_nick_apply(client, nick_rec, reason);
 		}
 	}
 	else if (block->letter == 'C')
@@ -7660,6 +7669,8 @@ static int udb_mutation_delete_local(UdbContext *ctx, UdbBlock *block, UdbRecord
 		candidate_line = candidate_rec->parent;
 	if (block->letter == UDB_BLOCK_NICKS && candidate_rec->parent && candidate_rec->parent != tree)
 		candidate_nick_profile = candidate_rec->parent;
+	if (candidate_nick_profile && !strcmp(old_rec->key, NKEY_SUSPEND))
+		candidate_nick_profile->nick_unsuspend_transition = 1;
 	udb_record_delete_tree(candidate_rec);
 	record_count = udb_record_count_tree(tree);
 	if (!udb_hash_prepare_tree(tree, &hash_index))
@@ -9864,7 +9875,7 @@ static void udb_nick_revoke_oper(Client *client)
 }
 
 static void udb_nick_force_rename_with_notice(Client *client, const char *nick_in_db, const char *notice,
-											  int offer_identify)
+											  int announce_profile, int offer_identify)
 {
 	char newnick[32];
 	char rand_suffix[6];
@@ -9876,7 +9887,7 @@ static void udb_nick_force_rename_with_notice(Client *client, const char *nick_i
 	snprintf(newnick, sizeof(newnick), "Guest%s", rand_suffix);
 	if (notice)
 		udb_send_service_notice(client, SKEY_NICKSERV, "%s", notice);
-	else
+	else if (announce_profile)
 		udb_send_service_notice(client, SKEY_NICKSERV,
 								"This nickname (%s) has been registered or synced in the UDB database.", nick_in_db);
 	if (offer_identify)
@@ -9896,7 +9907,12 @@ static void udb_nick_force_rename_with_notice(Client *client, const char *nick_i
 
 static void udb_nick_force_rename(Client *client, const char *nick_in_db)
 {
-	udb_nick_force_rename_with_notice(client, nick_in_db, NULL, 1);
+	udb_nick_force_rename_with_notice(client, nick_in_db, NULL, 1, 1);
+}
+
+static void udb_nick_force_rename_after_unsuspend(Client *client, const char *nick_in_db)
+{
+	udb_nick_force_rename_with_notice(client, nick_in_db, NULL, 0, 1);
 }
 
 static void udb_nick_apply(Client *client, UdbRecord *nick_rec, UdbNickApplyReason reason)
@@ -9916,7 +9932,7 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, UdbNickApplyReas
 		udb_nick_revoke_identity(client);
 		snprintf(notice, sizeof(notice), "This nickname is forbidden. Reason: %s",
 				 forbid->data_str ? forbid->data_str : "No reason given");
-		udb_nick_force_rename_with_notice(client, nick_rec->key, notice, 0);
+		udb_nick_force_rename_with_notice(client, nick_rec->key, notice, 0, 0);
 		return;
 	}
 	pass_rec = udb_record_find(NULL, NKEY_PASS, nick_rec);
@@ -9930,7 +9946,7 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, UdbNickApplyReas
 		udb_nick_revoke_effects(client);
 		udb_nick_revoke_identity(client);
 		snprintf(notice, sizeof(notice), "Access to %s is not permitted from your IP address.", nick_rec->key);
-		udb_nick_force_rename_with_notice(client, nick_rec->key, notice, 0);
+		udb_nick_force_rename_with_notice(client, nick_rec->key, notice, 0, 0);
 		return;
 	}
 
@@ -9965,7 +9981,10 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, UdbNickApplyReas
 	{
 		udb_nick_revoke_effects(client);
 		udb_nick_revoke_identity(client);
-		udb_nick_force_rename(client, nick_rec->key);
+		if (reason == UDB_NICK_APPLY_UNSUSPEND)
+			udb_nick_force_rename_after_unsuspend(client, nick_rec->key);
+		else
+			udb_nick_force_rename(client, nick_rec->key);
 		return;
 	}
 
@@ -10054,6 +10073,8 @@ static void udb_nick_remove_record(UdbBlock *block, UdbRecord *rec)
 		{
 			UdbRecord *candidate =
 				udb_nick_replacement_tree ? udb_record_find(NULL, rec->key, udb_nick_replacement_tree) : NULL;
+			int unsuspended = candidate && udb_record_find(udb_ctx, NKEY_SUSPEND, rec) &&
+							  !udb_record_find(udb_ctx, NKEY_SUSPEND, candidate);
 			/* Active identity survives a full replacement only for an existing
 			 * candidate with a credential, without forbid or suspend, and with
 			 * a still-permitted access check. A deleted profile, a removed
@@ -10064,6 +10085,9 @@ static void udb_nick_remove_record(UdbBlock *block, UdbRecord *rec)
 			int keep_identity = candidate && !udb_record_find(udb_ctx, NKEY_FORBID, candidate) &&
 								!udb_record_find(udb_ctx, NKEY_SUSPEND, candidate) &&
 								udb_nick_identity_valid(client, candidate);
+
+			if (unsuspended)
+				candidate->nick_unsuspend_transition = 1;
 
 			udb_nick_pending_auth_clear(client);
 			if (!keep_identity)

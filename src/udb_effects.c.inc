@@ -16,10 +16,17 @@ static int udb_apply_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord 
 	if (block->letter == 'N')
 	{
 		UdbRecord *nick_rec = rec->parent == block->tree ? rec : rec->parent;
+		UdbNickApplyReason reason = is_new ? UDB_NICK_APPLY_REFRESH : UDB_NICK_APPLY_ADOPT;
 		Client *client = find_user(nick_rec->key, NULL);
+
+		if (nick_rec->nick_unsuspend_transition)
+		{
+			nick_rec->nick_unsuspend_transition = 0;
+			reason = UDB_NICK_APPLY_UNSUSPEND;
+		}
 		if (client && MyUser(client))
 		{
-			udb_nick_apply(client, nick_rec, is_new ? UDB_NICK_APPLY_REFRESH : UDB_NICK_APPLY_ADOPT);
+			udb_nick_apply(client, nick_rec, reason);
 		}
 	}
 	else if (block->letter == 'C')
