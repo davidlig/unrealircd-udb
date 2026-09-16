@@ -25,6 +25,7 @@
 
 #define UDB_BLOCK_PATH_MAX 1024
 #define UDB_RECORD_PATH_MAX 8192
+#define UDB_PATH_MAX_COMPONENTS 8
 #define UDB_COMPONENT_RAW_MAX 4608
 #define UDB_COMPONENT_ENCODED_MAX 4608
 #define UDB_COMPONENT_MAX UDB_COMPONENT_ENCODED_MAX
@@ -112,6 +113,14 @@ typedef struct UdbBlockSchema
 	const UdbKeyDescriptor *subkeys;
 	size_t subkey_count;
 } UdbBlockSchema;
+
+typedef struct UdbBlockDescriptor
+{
+	char letter;
+	const char *name;
+	unsigned int mask;
+	const UdbBlockSchema *schema;
+} UdbBlockDescriptor;
 
 struct UdbRecord
 {
@@ -359,7 +368,8 @@ typedef enum UdbPersistenceOrigin
 #define UDB_BLOCK_MASK_S (1 << 3)
 #define UDB_BLOCK_MASK_L (1 << 4)
 #define UDB_BLOCK_MASK_K (1 << 5)
-#define UDB_ALL_BLOCKS_MASK 0x3F
+#define UDB_ALL_BLOCKS_MASK                                                                                            \
+	(UDB_BLOCK_MASK_N | UDB_BLOCK_MASK_C | UDB_BLOCK_MASK_I | UDB_BLOCK_MASK_S | UDB_BLOCK_MASK_L | UDB_BLOCK_MASK_K)
 
 typedef struct UdbReconcileState
 {
@@ -416,7 +426,7 @@ static void udb_handle_persistence_failure(UdbContext *ctx, Client *peer, UdbBlo
 
 static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs);
 static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type);
-static int udb_config_posttest(int *errs);
+static void udb_config_defaults(void);
 static int udb_config_rehash(void);
 static int udb_config_postconf(void);
 static void udb_config_free(UdbContext *ctx);
@@ -442,6 +452,8 @@ static UdbBlock *udb_block_by_letter(UdbContext *ctx, char letter);
 static int udb_record_fits_limits(const char *path, const char *value);
 static int udb_path_encode_component(const char *raw, char *buf, size_t bufsz);
 static int udb_path_decode_component(const char *encoded, char *buf, size_t bufsz);
+typedef int (*UdbPathComponentFunc)(const char *decoded, unsigned int index, void *data);
+static int udb_path_foreach(const char *path, unsigned int max_components, UdbPathComponentFunc fn, void *data);
 static int udb_path_append(char *dst, size_t dst_size, size_t *used, const char *component);
 static int udb_path_append_component(char *pathbuf, size_t bufsz, const char *raw_component);
 static int udb_strtoull_strict(const char *s, unsigned long long *out);
@@ -458,10 +470,7 @@ static int udb_digest_parse(const char *input, char out_hex[UDB_SHA256_HEX_LEN +
 static UdbLineExpiryPending *udb_line_expiry_pending_add(char type, const char *pattern, time_t expires);
 static UdbRecord *udb_record_find(UdbContext *ctx, const char *key, UdbRecord *parent);
 static UdbRecord *udb_record_create(UdbRecord *parent);
-static UdbRecord *udb_record_insert(UdbContext *ctx, UdbBlock *block, UdbRecord *parent, const char *key,
-									const char *data_str, unsigned long data_num, int persist);
 static UdbRecord *udb_record_find_path(UdbContext *ctx, UdbBlock *block, const char *path);
-static UdbRecord *udb_record_delete(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int persist);
 static void udb_record_free_tree(UdbRecord *rec);
 static UdbRecord *udb_record_clone_tree(UdbRecord *rec, UdbRecord *needle, UdbRecord **needle_clone);
 static unsigned int udb_record_count_tree(UdbRecord *rec);
@@ -492,6 +501,8 @@ static int udb_stage_parse_line(UdbBlock *block, UdbSyncSession *session, const 
 static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSession *session, const char *sha256);
 static void udb_sync_session_free(UdbBlock *block);
 static int udb_block_letter_to_index(char letter);
+static const UdbBlockDescriptor *udb_block_descriptor(unsigned int index);
+static int udb_block_descriptors_validate(void);
 
 static int udb_sync_to_server(Client *server);
 static int udb_has_hello(Client *server);
@@ -552,7 +563,6 @@ static void udb_propagator_availability_refresh(void);
 static void udb_sync_status_refresh(void);
 static int udb_hook_readiness_pre_connect(Client *client);
 static void udb_query_send_status(Client *client);
-static int udb_send_db_to_confirmed_servers(Client *except, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static int udb_sendto_confirmed_servers(Client *except, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void udb_protocol_mutation_error(Client *client, const char *subcmd, int error, char letter);
 static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_peer, const char *target,
@@ -591,13 +601,13 @@ static int udb_nick_grant_oper(Client *client, UdbRecord *nick_rec, UdbRecord *o
 static void udb_channel_apply_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new);
 static void udb_channel_remove_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
 static int udb_channels_load(ModuleInfo *modinfo);
-static void udb_ips_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new);
+static void udb_ips_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
 static void udb_ips_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
 static void udb_ip_refresh_derived_hosts(void);
 static void udb_ips_shutdown(void);
 static void udb_config_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
 static void udb_config_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
-static void udb_lines_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new);
+static void udb_lines_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
 static void udb_lines_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
 static int udb_spamfilter_pattern(const char *stored, char *pattern, size_t patternsz);
 static const char *udb_get_bot_nick(const char *service_key, int force_default);
@@ -607,7 +617,7 @@ static void udb_send_service_notice(Client *target, const char *service_key, FOR
 	__attribute__((format(printf, 3, 4)));
 static int udb_ip_reapply_vhost(Client *client);
 /* Runtime dispatcher; concrete per-block effects stay in their own modules. */
-static int udb_apply_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new);
+static void udb_apply_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new);
 static void udb_remove_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
 static void udb_apply_tree_effects(UdbContext *ctx, UdbBlock *block);
 static void udb_remove_tree_effects(UdbContext *ctx, UdbBlock *block);

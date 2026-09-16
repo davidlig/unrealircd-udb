@@ -235,7 +235,8 @@ static int udb_sync_hello_start(Client *server)
 	/* No policy: a fresh node is seeking a bootstrap source, while a READY
 	 * node is its own standalone authority. */
 	propagator = udb_sync_hello_propagator(&selected);
-	ok = udb_send_db_to_one(server, ":%s DB %s HEL 4 %s %s OCL", me.id, server->id, propagator, udb_ocl_epoch_value());
+	ok = udb_send_db_to_one(server, ":%s DB %s HEL " UDB_PROTOCOL_HEL " %s %s OCL", me.id, server->id, propagator,
+							udb_ocl_epoch_value());
 	if (!ok)
 	{
 		peer->state = 0;
@@ -264,31 +265,11 @@ static void udb_sync_hello_ack(Client *server)
 	{
 		peer->state = UDB_HEL_CONFIRMED;
 		peer->deadline = 0;
-		udb_log(ULOG_INFO, "UDB_HEL_CONFIRMED", server, "UDB HEL 4 capability confirmed for directly linked server");
+		udb_log(ULOG_INFO, "UDB_HEL_CONFIRMED", server,
+				"UDB HEL " UDB_PROTOCOL_HEL " capability confirmed for directly linked server");
 		udb_propagator_policy_changed(udb_ctx);
 		udb_maybe_start_reconciliation(server, 0);
 		udb_ocl_maybe_replay_to_peer(server);
-	}
-}
-
-static unsigned int udb_block_letter_to_mask(char letter)
-{
-	switch (letter)
-	{
-	case 'N':
-		return UDB_BLOCK_MASK_N;
-	case 'C':
-		return UDB_BLOCK_MASK_C;
-	case 'I':
-		return UDB_BLOCK_MASK_I;
-	case 'S':
-		return UDB_BLOCK_MASK_S;
-	case 'L':
-		return UDB_BLOCK_MASK_L;
-	case 'K':
-		return UDB_BLOCK_MASK_K;
-	default:
-		return 0;
 	}
 }
 
@@ -701,8 +682,8 @@ static void udb_sync_hello_refresh_all(void)
 		if (IsServer(server) && MyConnect(server) && udb_has_hello(server))
 		{
 			UdbHelloPeer *hello = udb_hello_peer(server, 0);
-			if (udb_send_db_to_one(server, ":%s DB %s HEL 4 %s %s OCL", me.id, server->id, propagator,
-								   udb_ocl_epoch_value()) &&
+			if (udb_send_db_to_one(server, ":%s DB %s HEL " UDB_PROTOCOL_HEL " %s %s OCL", me.id, server->id,
+								   propagator, udb_ocl_epoch_value()) &&
 				hello)
 				hello->local_selection_sent = 1;
 		}
@@ -758,7 +739,7 @@ static void udb_propagator_policy_changed(UdbContext *ctx)
 		/* Replacing block S removes the old tree's effects while the S session
 		 * still owns its replacement tree. Do not abort that session from its
 		 * own policy callback; the new policy is applied after commit. */
-		if (block->session && block->letter != 'S' && block->session->peer != peer)
+		if (block->session && block->letter != UDB_BLOCK_SETTINGS && block->session->peer != peer)
 			udb_sync_abort(block, "propagator policy changed");
 		else if (!block->session && block->syncing_from && block->syncing_from != peer)
 			block->syncing_from = NULL;
@@ -790,6 +771,7 @@ static int udb_sync_begin(UdbBlock *block, Client *peer, unsigned long round_id,
 						  uint64_t watermark_seq)
 {
 	UdbSyncSession *session;
+	int block_idx;
 	int inact =
 		(udb_cfg && udb_cfg->sync_inactivity_timeout) ? udb_cfg->sync_inactivity_timeout : UDB_SYNC_INACTIVITY_TIMEOUT;
 	int abs_to =
@@ -798,6 +780,9 @@ static int udb_sync_begin(UdbBlock *block, Client *peer, unsigned long round_id,
 	const char *p;
 
 	if (!block)
+		return UDB_ERR_NO_BLOCK;
+	block_idx = udb_block_letter_to_index(block->letter);
+	if (block_idx < 0)
 		return UDB_ERR_NO_BLOCK;
 	if (!peer || !txid || !*txid)
 		return UDB_ERR_PARAMS;
@@ -828,7 +813,7 @@ static int udb_sync_begin(UdbBlock *block, Client *peer, unsigned long round_id,
 	session->deadline = session->started_at + inact;
 	session->absolute_deadline = session->started_at + abs_to;
 	session->tree = udb_record_create(NULL);
-	session->tree->block_idx = (unsigned char)udb_block_letter_to_index(block->letter);
+	session->tree->block_idx = (unsigned char)block_idx;
 	safe_strdup(session->tree->key, "UDB");
 	session->tree->is_dynamic_key = 1;
 	session->received_puts = 0;
@@ -1377,7 +1362,7 @@ EVENT(udb_sync_timeout_event)
 			Client *c = peer->peer;
 			peer->state = UDB_HEL_UNSUPPORTED;
 			udb_log(ULOG_ERROR, "UDB_HEL_TIMEOUT", c,
-					"No UDB HEL 4 acknowledgement from directly linked server; link aborted");
+					"No UDB HEL " UDB_PROTOCOL_HEL " acknowledgement from directly linked server; link aborted");
 			if (c)
 			{
 				exit_client_fmt(c, NULL, "Link aborted: server does not support UDB protocol (HEL timeout)");

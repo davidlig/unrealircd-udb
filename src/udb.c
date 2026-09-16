@@ -15,7 +15,8 @@
  * Module Header
  * ======================================================================== */
 
-ModuleHeader MOD_HEADER = {"third/udb", "4.0.0", "UDB 4 - Unreal Database System (nick/channel/IP registration & sync)",
+ModuleHeader MOD_HEADER = {"third/udb", UDB_VERSION,
+						   "UDB 4 - Unreal Database System (nick/channel/IP registration & sync)",
 						   "David Abuín Fontán ('davidlig')", "unrealircd-6"};
 
 /* ========================================================================

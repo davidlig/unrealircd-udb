@@ -216,7 +216,7 @@ static void udb_lines_expiry_pending_clear_record(UdbRecord *rec)
 		udb_line_expiry_pending_clear(line_rec->parent->key[0], line_rec->key);
 }
 
-static void udb_line_apply_record(UdbRecord *rec, int is_new)
+static void udb_line_apply_record(UdbRecord *rec)
 {
 	char type;
 	char pattern[UDB_SPAMFILTER_PATTERN_MAX + 1];
@@ -225,7 +225,6 @@ static void udb_line_apply_record(UdbRecord *rec, int is_new)
 	int expiry_state;
 	const char *reason;
 
-	(void)is_new;
 	line_rec = udb_line_owner(rec);
 	if (!line_rec || !line_rec->parent || !line_rec->parent->key)
 		return;
@@ -352,11 +351,11 @@ static void udb_line_remove_record(UdbRecord *rec)
 	udb_line_remove_owned(type, pattern);
 }
 
-static void udb_lines_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new)
+static void udb_lines_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec)
 {
 	if (!ctx || !block || !rec)
 		return;
-	udb_line_apply_record(rec, is_new);
+	udb_line_apply_record(rec);
 }
 
 static void udb_lines_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec)

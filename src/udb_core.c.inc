@@ -763,23 +763,79 @@ static const UdbBlockSchema udb_block_schemas[] = {{UDB_BLOCK_NICKS, 1, 2, udb_n
 													sizeof(udb_schema_l_subkeys) / sizeof(udb_schema_l_subkeys[0])},
 												   {UDB_BLOCK_LINES, 2, 3, udb_tkl_type_valid, NULL, 0}};
 
+static const UdbBlockDescriptor udb_block_descriptors[] = {
+	{UDB_BLOCK_NICKS, "Nicks", UDB_BLOCK_MASK_N, &udb_block_schemas[0]},
+	{UDB_BLOCK_CHANNELS, "Channels", UDB_BLOCK_MASK_C, &udb_block_schemas[1]},
+	{UDB_BLOCK_IPS, "IPs", UDB_BLOCK_MASK_I, &udb_block_schemas[2]},
+	{UDB_BLOCK_SETTINGS, "Settings", UDB_BLOCK_MASK_S, &udb_block_schemas[3]},
+	{UDB_BLOCK_LINKS, "Links", UDB_BLOCK_MASK_L, &udb_block_schemas[4]},
+	{UDB_BLOCK_LINES, "Lines", UDB_BLOCK_MASK_K, &udb_block_schemas[5]},
+};
+
+_Static_assert(sizeof(udb_block_descriptors) / sizeof(udb_block_descriptors[0]) == UDB_NUM_BLOCKS,
+			   "block descriptor table must cover every UDB block");
+
+static const UdbBlockDescriptor *udb_block_descriptor(unsigned int index)
+{
+	return index < UDB_NUM_BLOCKS ? &udb_block_descriptors[index] : NULL;
+}
+
+static int udb_block_descriptors_validate(void)
+{
+	for (unsigned int i = 0; i < UDB_NUM_BLOCKS; i++)
+	{
+		const UdbBlockDescriptor *descriptor = &udb_block_descriptors[i];
+
+		if (!descriptor->name || !descriptor->schema || descriptor->schema->letter != descriptor->letter ||
+			descriptor->mask != (1u << i))
+			return 0;
+	}
+	return 1;
+}
+
+static int udb_block_letter_to_index(char letter)
+{
+	for (unsigned int i = 0; i < UDB_NUM_BLOCKS; i++)
+		if (udb_block_descriptors[i].letter == letter)
+			return (int)i;
+	return -1;
+}
+
+static unsigned int udb_block_letter_to_mask(char letter)
+{
+	int index = udb_block_letter_to_index(letter);
+
+	return index < 0 ? 0 : udb_block_descriptors[index].mask;
+}
+
 static const UdbBlockSchema *udb_get_block_schema(char letter)
 {
-	for (size_t i = 0; i < sizeof(udb_block_schemas) / sizeof(udb_block_schemas[0]); i++)
-	{
-		if (udb_block_schemas[i].letter == letter)
-			return &udb_block_schemas[i];
-	}
-	return NULL;
+	int index = udb_block_letter_to_index(letter);
+
+	return index < 0 ? NULL : udb_block_descriptors[index].schema;
+}
+
+typedef struct UdbValidatePathState
+{
+	char **parts;
+	unsigned int depth;
+} UdbValidatePathState;
+
+static int udb_record_validate_component(const char *decoded, unsigned int index, void *data)
+{
+	UdbValidatePathState *state = data;
+
+	strlcpy(state->parts[index], decoded, UDB_COMPONENT_RAW_MAX + 1);
+	state->depth = index + 1;
+	return 1;
 }
 
 static int udb_record_validate(UdbBlock *block, const char *path, const char *value)
 {
-	char pathbuf[UDB_RECORD_PATH_MAX + 1];
 	char *decoded_parts = NULL;
 	char *parts[8];
+	UdbValidatePathState parts_state;
 	int depth = 0;
-	char *p, *next;
 	const UdbBlockSchema *schema;
 	const UdbKeyDescriptor *desc = NULL;
 	int result = 0;
@@ -798,25 +854,11 @@ static int udb_record_validate(UdbBlock *block, const char *path, const char *va
 	for (int i = 0; i < 8; i++)
 		parts[i] = decoded_parts + (i * (UDB_COMPONENT_RAW_MAX + 1));
 
-	strlcpy(pathbuf, path, sizeof(pathbuf));
-	p = pathbuf;
-	while (p && *p)
-	{
-		next = strstr(p, "::");
-		if (next)
-		{
-			*next = '\0';
-			next += 2;
-			if (!*next)
-				goto done;
-		}
-		if (depth >= 8)
-			goto done;
-		if (!udb_path_decode_component(p, parts[depth], UDB_COMPONENT_RAW_MAX + 1))
-			goto done;
-		depth++;
-		p = next;
-	}
+	parts_state.parts = parts;
+	parts_state.depth = 0;
+	if (!udb_path_foreach(path, UDB_PATH_MAX_COMPONENTS, udb_record_validate_component, &parts_state))
+		goto done;
+	depth = (int)parts_state.depth;
 
 	if (depth < schema->min_depth || depth > schema->max_depth)
 		goto done;
@@ -1000,217 +1042,6 @@ static void udb_block_replace_tree(UdbContext *ctx, UdbBlock *block, UdbRecord *
 	block->modified_at = time(NULL);
 	if (stat(block->filepath, &st) == 0)
 		block->filesize = st.st_size;
-}
-
-static UdbRecord *udb_record_insert(UdbContext *ctx, UdbBlock *block, UdbRecord *parent, const char *key,
-									const char *data_str, unsigned long data_num, int persist)
-{
-	if (persist)
-	{
-		UdbRecord *candidate_parent = NULL;
-		UdbRecord *candidate;
-		UdbHashIndex hash_index;
-		char value[32];
-
-		if (!parent)
-			parent = block->tree;
-		if (!data_str)
-		{
-			snprintf(value, sizeof(value), "*%lu", data_num);
-			data_str = value;
-		}
-		if (!udb_record_fits_limits(key, data_str))
-			return NULL;
-		candidate = udb_record_clone_tree(block->tree, parent, &candidate_parent);
-		if (!candidate_parent)
-			candidate_parent = candidate;
-		UdbRecord *rec = udb_record_find(NULL, key, candidate_parent);
-		if (!rec)
-		{
-			rec = udb_record_create(candidate_parent);
-			safe_strdup(rec->key, key);
-			rec->is_dynamic_key = 1;
-		}
-		if (rec->data_str)
-			safe_free(rec->data_str);
-		if (*data_str == '*')
-		{
-			if (!udb_strtoul_strict(data_str + 1, &rec->data_num))
-			{
-				udb_record_free_tree(candidate);
-				return NULL;
-			}
-			rec->data_str = NULL;
-		}
-		else
-		{
-			safe_strdup(rec->data_str, data_str);
-			rec->data_num = 0;
-		}
-		if (!udb_hash_prepare_tree(candidate, &hash_index))
-		{
-			udb_record_free_tree(candidate);
-			return NULL;
-		}
-		UdbSnapshotResult res = udb_file_write_snapshot(block, candidate, udb_record_count_tree(candidate));
-		if (res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
-		{
-			udb_hash_dispose_prepared(&hash_index);
-			udb_record_free_tree(candidate);
-			return NULL;
-		}
-		udb_block_replace_tree(ctx, block, candidate, udb_record_count_tree(candidate), &hash_index);
-		udb_apply_special_record(ctx, block, rec, 1);
-		if (res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
-			udb_mark_durability_uncertain(ctx, block, "record insert");
-		return rec;
-	}
-	if (!parent)
-		parent = block->tree;
-	UdbRecord *rec = udb_record_find(ctx, key, parent);
-	if (!rec)
-	{
-		rec = udb_record_create(parent);
-		if (key)
-		{
-			if (parent == block->tree)
-			{
-				safe_strdup(rec->key, key);
-				rec->is_dynamic_key = 1;
-			}
-			else
-			{
-				const char *shared = udb_get_shared_subkey(key);
-				if (shared)
-				{
-					rec->key = (char *)shared;
-					rec->is_dynamic_key = 0;
-				}
-				else
-				{
-					safe_strdup(rec->key, key);
-					rec->is_dynamic_key = 1;
-				}
-			}
-		}
-		if (parent == block->tree)
-		{
-			udb_hash_insert_record(ctx, rec, udb_block_letter_to_index(block->letter), key);
-		}
-		block->record_count++;
-		ctx->total_records++;
-	}
-
-	if (rec->data_str)
-	{
-		safe_free(rec->data_str);
-	}
-
-	// Auto-detect numeric data if it starts with *
-	if (data_str && *data_str == '*')
-	{
-		udb_strtoul_strict(data_str + 1, &rec->data_num);
-		rec->data_str = NULL;
-	}
-	else if (data_str)
-	{
-		safe_strdup(rec->data_str, data_str);
-		rec->data_num = 0;
-	}
-	else
-	{
-		rec->data_str = NULL;
-		rec->data_num = data_num;
-	}
-
-	udb_apply_special_record(ctx, block, rec, 1);
-
-	return rec;
-}
-
-static UdbRecord *udb_record_delete(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int persist)
-{
-	UdbRecord *line_rec = NULL;
-	if (!rec)
-		return NULL;
-	if (persist)
-	{
-		UdbRecord *candidate_rec = NULL;
-		UdbRecord *candidate_line = NULL;
-		UdbRecord *candidate = udb_record_clone_tree(block->tree, rec, &candidate_rec);
-		UdbHashIndex hash_index;
-		if (!candidate_rec)
-		{
-			udb_record_free_tree(candidate);
-			return rec;
-		}
-		if (block->letter == 'K' && candidate_rec->parent && candidate_rec->parent->parent &&
-			candidate_rec->parent->parent != candidate)
-			candidate_line = candidate_rec->parent;
-		udb_record_delete_tree(candidate_rec);
-		if (!udb_hash_prepare_tree(candidate, &hash_index))
-		{
-			udb_record_free_tree(candidate);
-			return rec;
-		}
-		UdbSnapshotResult res = udb_file_write_snapshot(block, candidate, udb_record_count_tree(candidate));
-		if (res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
-		{
-			udb_hash_dispose_prepared(&hash_index);
-			udb_record_free_tree(candidate);
-			return rec;
-		}
-		udb_remove_special_record(ctx, block, rec);
-		udb_block_replace_tree(ctx, block, candidate, udb_record_count_tree(candidate), &hash_index);
-		if (candidate_line)
-			udb_lines_apply_effect(ctx, block, candidate_line, 0);
-		if (res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
-			udb_mark_durability_uncertain(ctx, block, "record delete");
-		return NULL;
-	}
-
-	/* A K property deletion changes its owning pattern, not a line of its own. */
-	if (block->letter == 'K' && rec->parent && rec->parent->parent && rec->parent->parent != block->tree)
-		line_rec = rec->parent;
-
-	udb_remove_special_record(ctx, block, rec);
-
-	if (rec->parent)
-	{
-		if (rec->parent->parent == NULL)
-		{
-			udb_hash_remove_record(ctx, rec, udb_block_letter_to_index(block->letter), rec->key);
-		}
-
-		UdbRecord *curr = rec->parent->child;
-		UdbRecord *prev = NULL;
-		while (curr)
-		{
-			if (curr == rec)
-			{
-				if (prev)
-					prev->sibling = curr->sibling;
-				else
-					rec->parent->child = curr->sibling;
-				break;
-			}
-			prev = curr;
-			curr = curr->sibling;
-		}
-	}
-
-	if (block->record_count > 0)
-		block->record_count--;
-	if (ctx->total_records > 0)
-		ctx->total_records--;
-
-	udb_record_free_tree(rec);
-
-	/* Rebuild a surviving K pattern after one of its properties was removed. */
-	if (line_rec)
-		udb_lines_apply_effect(ctx, block, line_rec, 0);
-
-	return NULL;
 }
 
 /* ========================================================================
@@ -1546,7 +1377,7 @@ static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSessi
 	udb_nick_finish_tree_replace();
 	udb_policy_notify_deferred = 0;
 	udb_propagator_policy_flush(ctx);
-	if (block->letter == 'L')
+	if (block->letter == UDB_BLOCK_LINKS)
 		udb_sync_snomask_filter();
 	udb_propagator_availability_refresh();
 	udb_sync_status_refresh();
@@ -1710,11 +1541,16 @@ static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *li
 static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 {
 	UdbStartupCandidate *startup_candidate = NULL;
+	int block_idx;
+
 	if (!block || !block->filepath)
+		return 0;
+	block_idx = udb_block_letter_to_index(block->letter);
+	if (block_idx < 0)
 		return 0;
 	if (ctx && ctx->startup_loading)
 	{
-		startup_candidate = &ctx->startup_candidates[udb_block_letter_to_index(block->letter)];
+		startup_candidate = &ctx->startup_candidates[block_idx];
 		udb_record_free_tree(startup_candidate->tree);
 		udb_hash_dispose_prepared(&startup_candidate->hash_index);
 		memset(startup_candidate, 0, sizeof(*startup_candidate));
@@ -1754,7 +1590,7 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 	int generation_seen = 0;
 	unsigned long loaded_generation = 0;
 	UdbRecord *candidate = udb_record_create(NULL);
-	candidate->block_idx = (unsigned char)udb_block_letter_to_index(block->letter);
+	candidate->block_idx = (unsigned char)block_idx;
 	safe_strdup(candidate->key, block->tree && block->tree->key ? block->tree->key : "UDB");
 	candidate->is_dynamic_key = 1;
 	candidate->data_num = 1;
@@ -1913,7 +1749,7 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 			 startup_candidate ? startup_candidate->record_count : block->record_count);
 	udb_log(ULOG_INFO, "UDB_FILE_LOADED", NULL, "$msg", log_data_string("msg", logbuf));
 
-	if (!startup_candidate && block->letter == 'L')
+	if (!startup_candidate && block->letter == UDB_BLOCK_LINKS)
 		udb_sync_snomask_filter();
 
 	return 1;

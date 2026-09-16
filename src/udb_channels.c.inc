@@ -184,11 +184,10 @@ static void udb_channel_apply_modes(Channel *channel, const char *value)
 	safe_strdup(state->value, value);
 }
 
-static void udb_channel_remove_modes(Channel *channel, const char *fallback_value)
+static void udb_channel_remove_modes(Channel *channel)
 {
 	UdbChannelModeState *state;
 
-	(void)fallback_value;
 	if (!udb_channel_modes_md)
 		return;
 	state = moddata_channel(channel, udb_channel_modes_md).ptr;
@@ -421,8 +420,7 @@ static void udb_channel_remove_subrecord(UdbContext *ctx, Channel *channel, UdbR
 	}
 	else if (!strcmp(subkey, CKEY_MODES))
 	{
-		UdbRecord *mode_rec = udb_record_find(ctx, CKEY_MODES, chan_rec);
-		udb_channel_remove_modes(channel, mode_rec ? mode_rec->data_str : NULL);
+		udb_channel_remove_modes(channel);
 	}
 	else if (!strcmp(subkey, CKEY_OPTIONS))
 	{
@@ -434,9 +432,8 @@ static void udb_channel_remove_subrecord(UdbContext *ctx, Channel *channel, UdbR
 	}
 	else if (!strcasecmp(subkey, chan_rec->key))
 	{
-		UdbRecord *mode_rec = udb_record_find(ctx, CKEY_MODES, chan_rec);
 		udb_channel_reconcile_founder(channel, NULL);
-		udb_channel_remove_modes(channel, mode_rec ? mode_rec->data_str : NULL);
+		udb_channel_remove_modes(channel);
 		udb_channel_set_persistent(channel, 0);
 		if (udb_record_find(ctx, CKEY_TOPIC, chan_rec))
 			udb_channel_clear_topic(channel);

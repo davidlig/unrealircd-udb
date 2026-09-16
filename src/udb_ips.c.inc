@@ -193,7 +193,7 @@ static int udb_ip_reapply_vhost(Client *client)
 		return 1;
 	}
 
-	ip_rec = udb_hash_find(udb_ctx, udb_block_letter_to_index('I'), state->key);
+	ip_rec = udb_hash_find(udb_ctx, udb_block_letter_to_index(UDB_BLOCK_IPS), state->key);
 	host_rec = ip_rec ? udb_record_find(udb_ctx, IKEY_HOST, ip_rec) : NULL;
 	if (!host_rec || !host_rec->data_str || !*host_rec->data_str)
 		return 0;
@@ -298,9 +298,8 @@ static void udb_ip_reconcile_host(const char *ip_key, const char *host)
 	}
 }
 
-static void udb_ip_apply_record(const char *ip_key, UdbRecord *ip_rec, const char *subkey, int is_new)
+static void udb_ip_apply_record(const char *ip_key, UdbRecord *ip_rec, const char *subkey)
 {
-	(void)is_new;
 	if (!strcmp(subkey, IKEY_NOLINES))
 	{
 		UdbRecord *nolines = udb_record_find(udb_ctx, IKEY_NOLINES, ip_rec);
@@ -342,14 +341,14 @@ static void udb_ip_remove_record(const char *ip_key, UdbRecord *ip_rec, const ch
 	}
 }
 
-static void udb_ips_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new)
+static void udb_ips_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec)
 {
 	UdbRecord *ip_rec;
 
 	if (!ctx || !block || !rec)
 		return;
 	ip_rec = rec->parent == block->tree ? rec : rec->parent;
-	udb_ip_apply_record(ip_rec->key, ip_rec, rec->key, is_new);
+	udb_ip_apply_record(ip_rec->key, ip_rec, rec->key);
 }
 
 static void udb_ips_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec)
@@ -383,9 +382,9 @@ static int udb_hook_pre_connect(Client *client)
 		return 0;
 
 	/* Lookup IP or Host in UDB */
-	ip_rec = udb_hash_find(udb_ctx, udb_block_letter_to_index('I'), client->ip);
+	ip_rec = udb_hash_find(udb_ctx, udb_block_letter_to_index(UDB_BLOCK_IPS), client->ip);
 	if (!ip_rec && client->user)
-		ip_rec = udb_hash_find(udb_ctx, udb_block_letter_to_index('I'), client->user->realhost);
+		ip_rec = udb_hash_find(udb_ctx, udb_block_letter_to_index(UDB_BLOCK_IPS), client->user->realhost);
 
 	if (ip_rec)
 	{

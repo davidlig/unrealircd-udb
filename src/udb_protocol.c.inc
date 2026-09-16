@@ -36,48 +36,11 @@ static int udb_send_db_to_one(Client *to, const char *fmt, ...)
 	return 1;
 }
 
-static int udb_send_db_to_confirmed_servers(Client *except, const char *fmt, ...)
-{
-	Client *server;
-	char *line;
-	va_list args;
-	int n;
-	int sent = 0;
-
-	line = safe_alloc(UDB_S2S_LINE_MAX);
-	va_start(args, fmt);
-	n = vsnprintf(line, UDB_S2S_LINE_MAX, fmt, args);
-	va_end(args);
-
-	if (n < 0 || (size_t)n >= UDB_S2S_LINE_MAX)
-	{
-		udb_log(ULOG_ERROR, "UDB_S2S_OVERSIZE_BROADCAST", except,
-				"Oversized broadcast S2S frame ($length bytes) discarded to prevent truncation",
-				log_data_integer("length", n));
-		safe_free(line);
-		return 0;
-	}
-
-	list_for_each_entry(server, &server_list, special_node)
-	{
-		if (server == except || (except && server == except->direction))
-			continue;
-		if (IsServer(server) && MyConnect(server) && udb_has_hello(server))
-		{
-			sendto_one(server, NULL, "%s", line);
-			sent++;
-		}
-	}
-	safe_free(line);
-	return 1;
-}
-
 static int udb_sendto_confirmed_servers(Client *except, const char *fmt, ...)
 {
 	char *line;
 	va_list args;
 	int n;
-	int sent = 0;
 
 	line = safe_alloc(UDB_S2S_LINE_MAX);
 	va_start(args, fmt);
@@ -92,10 +55,7 @@ static int udb_sendto_confirmed_servers(Client *except, const char *fmt, ...)
 			if (server == except || (except && server == except->direction))
 				continue;
 			if (IsServer(server) && MyConnect(server) && udb_has_hello(server))
-			{
 				sendto_one(server, NULL, "%s", line);
-				sent++;
-			}
 		}
 	}
 	else
@@ -215,7 +175,7 @@ CMD_FUNC(cmd_db)
 	if (!strcasecmp(subcmd, "HEL"))
 	{
 		if (!IsServer(client) || !MyConnect(client) || (strcmp(target, me.id) && strcmp(target, me.name)) || parc < 4 ||
-			strcmp(parv[3], "4"))
+			strcmp(parv[3], UDB_PROTOCOL_HEL))
 			return;
 		snprintf(logbuf, sizeof(logbuf), "[UDB] S2S DB received: parc=%d target=%s subcmd=%s", parc, target, subcmd);
 		unreal_log(ULOG_INFO, "udb", "UDB_CMD_DB", client, "$msg", log_data_string("msg", logbuf));
@@ -238,12 +198,12 @@ CMD_FUNC(cmd_db)
 			if (parc == 5 || (parc >= 7 && strcasecmp(parv[6], "OCL")))
 			{
 				udb_log(ULOG_ERROR, "UDB_HEL_OCL_REQUIRED", client,
-						"Link aborted: HEL 4 request without the mandatory OCL capability token");
+						"Link aborted: HEL " UDB_PROTOCOL_HEL " request without the mandatory OCL capability token");
 				exit_client_fmt(client, NULL, "Link aborted: server does not support UDB OCL capability");
 			}
 			else
 				udb_log(ULOG_ERROR, "UDB_HEL_EPOCH_REQUIRED", client,
-						"HEL 4 request missing the mandatory instance epoch");
+						"HEL " UDB_PROTOCOL_HEL " request missing the mandatory instance epoch");
 			return;
 		}
 		if (parc != 7 && parc != 8)
@@ -275,8 +235,8 @@ CMD_FUNC(cmd_db)
 			{
 				UdbPropagatorSelection selected;
 				const char *local_prop = udb_sync_hello_propagator(&selected);
-				udb_send_db_to_one(client, ":%s DB %s HEL 4 ACK %s %s OCL", me.id, client->id, local_prop,
-								   udb_ocl_epoch_value());
+				udb_send_db_to_one(client, ":%s DB %s HEL " UDB_PROTOCOL_HEL " ACK %s %s OCL", me.id, client->id,
+								   local_prop, udb_ocl_epoch_value());
 			}
 			udb_ocl_maybe_replay_to_peer(client);
 			/* A repeated authorized selection is also the explicit retry trigger. */

@@ -12,12 +12,18 @@
 static UdbBlock *udb_block_create(UdbContext *ctx, char letter, const char *name)
 {
 	UdbBlock *b = safe_alloc(sizeof(UdbBlock));
+	int block_idx = udb_block_letter_to_index(letter);
 
+	if (block_idx < 0)
+	{
+		safe_free(b);
+		return NULL;
+	}
 	b->letter = letter;
 	b->version = 1;
 	b->load_state = UDB_LOAD_UNINITIALIZED;
 	b->tree = udb_record_create(NULL);
-	b->tree->block_idx = (unsigned char)udb_block_letter_to_index(letter);
+	b->tree->block_idx = (unsigned char)block_idx;
 	safe_strdup(b->tree->key, name);
 	b->tree->data_num = 1;
 
@@ -60,22 +66,22 @@ static void udb_block_set_context_root(UdbContext *ctx, UdbBlock *block)
 		return;
 	switch (block->letter)
 	{
-	case 'N':
+	case UDB_BLOCK_NICKS:
 		ctx->nicks = block->tree;
 		break;
-	case 'C':
+	case UDB_BLOCK_CHANNELS:
 		ctx->channels = block->tree;
 		break;
-	case 'I':
+	case UDB_BLOCK_IPS:
 		ctx->ips = block->tree;
 		break;
-	case 'S':
+	case UDB_BLOCK_SETTINGS:
 		ctx->settings = block->tree;
 		break;
-	case 'L':
+	case UDB_BLOCK_LINKS:
 		ctx->links = block->tree;
 		break;
-	case 'K':
+	case UDB_BLOCK_LINES:
 		ctx->lines = block->tree;
 		break;
 	}
@@ -88,13 +94,15 @@ static void udb_block_reset(UdbContext *ctx, UdbBlock *block)
 
 	if (!block)
 		return;
+	block_idx = udb_block_letter_to_index(block->letter);
+	if (block_idx < 0)
+		return;
 	udb_remove_tree_effects(ctx, block);
 
 	if (block->tree && block->tree->key)
 		safe_strdup(name, block->tree->key);
 	else
 		safe_strdup(name, "UDB");
-	block_idx = udb_block_letter_to_index(block->letter);
 	if (block->tree)
 	{
 		if (ctx->total_records >= block->record_count)
@@ -170,7 +178,7 @@ static void udb_startup_load_policy(UdbContext *ctx)
 	if (!ctx)
 		return;
 	safe_free(ctx->startup_propagator_setting);
-	candidate = &ctx->startup_candidates[udb_block_letter_to_index('S')];
+	candidate = &ctx->startup_candidates[udb_block_letter_to_index(UDB_BLOCK_SETTINGS)];
 	if (candidate->load_state != UDB_LOAD_SUCCESS || !candidate->tree)
 		return;
 	for (record = candidate->tree->child; record; record = record->sibling)
@@ -191,13 +199,17 @@ static int udb_startup_publish(UdbContext *ctx)
 		return 0;
 	for (block = ctx->block_list; block; block = block->next)
 	{
-		UdbStartupCandidate *candidate = &ctx->startup_candidates[udb_block_letter_to_index(block->letter)];
+		int block_idx = udb_block_letter_to_index(block->letter);
+		UdbStartupCandidate *candidate;
 		struct stat st;
 
+		if (block_idx < 0)
+			return 0;
+		candidate = &ctx->startup_candidates[block_idx];
 		if (candidate->load_state != UDB_LOAD_SUCCESS || !candidate->tree)
 			return 0;
 		udb_record_free_tree(block->tree);
-		udb_hash_publish_prepared(ctx, udb_block_letter_to_index(block->letter), &candidate->hash_index);
+		udb_hash_publish_prepared(ctx, block_idx, &candidate->hash_index);
 		block->tree = candidate->tree;
 		block->record_count = candidate->record_count;
 		strlcpy(block->sha256, candidate->sha256, sizeof(block->sha256));
@@ -734,6 +746,12 @@ static int udb_engine_init(void)
 	struct stat st = {0};
 	const char *dir;
 
+	if (!udb_block_descriptors_validate())
+	{
+		udb_log(ULOG_ERROR, "UDB_BLOCK_DESCRIPTORS_INVALID", NULL,
+				"Internal block descriptor table is inconsistent; refusing to initialize the database engine", NULL);
+		return 0;
+	}
 	if (!udb_cfg)
 		udb_cfg = safe_alloc(sizeof(UdbConfig));
 	if (udb_cfg->max_staged_records == 0)
@@ -766,19 +784,17 @@ static int udb_engine_init(void)
 		return 0;
 	}
 
-	if (!udb_block_create(udb_ctx, 'N', "Nicks") || !udb_block_create(udb_ctx, 'C', "Channels") ||
-		!udb_block_create(udb_ctx, 'I', "IPs") || !udb_block_create(udb_ctx, 'S', "Settings") ||
-		!udb_block_create(udb_ctx, 'L', "Links") || !udb_block_create(udb_ctx, 'K', "Lines"))
+	for (unsigned int i = 0; i < UDB_NUM_BLOCKS; i++)
 	{
-		udb_engine_cleanup(udb_ctx);
-		return 0;
+		const UdbBlockDescriptor *descriptor = udb_block_descriptor(i);
+
+		if (!descriptor || !udb_block_create(udb_ctx, descriptor->letter, descriptor->name))
+		{
+			udb_engine_cleanup(udb_ctx);
+			return 0;
+		}
+		udb_block_set_context_root(udb_ctx, udb_ctx->blocks[(unsigned char)descriptor->letter]);
 	}
-	udb_block_set_context_root(udb_ctx, udb_ctx->blocks['N']);
-	udb_block_set_context_root(udb_ctx, udb_ctx->blocks['C']);
-	udb_block_set_context_root(udb_ctx, udb_ctx->blocks['I']);
-	udb_block_set_context_root(udb_ctx, udb_ctx->blocks['S']);
-	udb_block_set_context_root(udb_ctx, udb_ctx->blocks['L']);
-	udb_block_set_context_root(udb_ctx, udb_ctx->blocks['K']);
 	udb_ctx->startup_loading = 1;
 	(void)udb_blocks_load_all(udb_ctx);
 
@@ -800,7 +816,16 @@ static int udb_engine_init(void)
 			backup_present = 1;
 		else if (lstat(backup_path, &backup_st) == 0 || errno != ENOENT)
 			backup_present = 1;
-		UdbStartupCandidate *candidate = &udb_ctx->startup_candidates[udb_block_letter_to_index(startup_block->letter)];
+		UdbStartupCandidate *candidate;
+		int block_idx = udb_block_letter_to_index(startup_block->letter);
+
+		if (block_idx < 0)
+		{
+			all_present_valid = 0;
+			all_missing = 0;
+			continue;
+		}
+		candidate = &udb_ctx->startup_candidates[block_idx];
 		if (candidate->load_state != UDB_LOAD_SUCCESS)
 			all_present_valid = 0;
 		if (candidate->load_state != UDB_LOAD_EMPTY)
@@ -831,9 +856,11 @@ static int udb_engine_init(void)
 		{
 			int generation_matches = 1;
 			for (startup_block = udb_ctx->block_list; startup_block; startup_block = startup_block->next)
-				if (udb_ctx->startup_candidates[udb_block_letter_to_index(startup_block->letter)].generation !=
-					persisted_generation)
+			{
+				int block_idx = udb_block_letter_to_index(startup_block->letter);
+				if (block_idx < 0 || udb_ctx->startup_candidates[block_idx].generation != persisted_generation)
 					generation_matches = 0;
+			}
 			if (!all_present_valid || !generation_matches)
 			{
 				startup_state = UDB_STARTUP_PERSISTED_READY_INCOMPLETE;
@@ -1025,7 +1052,6 @@ static void udb_sync_snomask_filter(void)
 static int udb_module_test(ModuleInfo *modinfo)
 {
 	HookAdd(modinfo->handle, HOOKTYPE_CONFIGTEST, 0, udb_config_test);
-	HookAdd(modinfo->handle, HOOKTYPE_CONFIGPOSTTEST, 0, udb_config_posttest);
 	return MOD_SUCCESS;
 }
 

@@ -12,27 +12,6 @@
 /* ========================================================================
  * Block Index and Hash Operations
  * ======================================================================== */
-static int udb_block_letter_to_index(char letter)
-{
-	switch (letter)
-	{
-	case 'N':
-		return 0;
-	case 'C':
-		return 1;
-	case 'I':
-		return 2;
-	case 'S':
-		return 3;
-	case 'L':
-		return 4;
-	case 'K':
-		return 5;
-	default:
-		return 0;
-	}
-}
-
 static void udb_hash_destroy(UdbContext *ctx);
 
 static int udb_hash_init(UdbContext *ctx)
@@ -296,13 +275,19 @@ static UdbRecord *udb_record_find(UdbContext *ctx, const char *key, UdbRecord *p
 /* ========================================================================
  * Record Limits and Feasibility Validation
  * ======================================================================== */
+static int udb_path_component_noop(const char *decoded, unsigned int index, void *data)
+{
+	(void)decoded;
+	(void)index;
+	(void)data;
+	return 1;
+}
+
 static int udb_record_fits_limits(const char *path, const char *value)
 {
 	size_t path_len;
 	size_t val_len = 0;
 	size_t serialized_line_len;
-	const char *comp;
-	const char *sep;
 
 	if (!path || !*path)
 		return 0;
@@ -311,34 +296,7 @@ static int udb_record_fits_limits(const char *path, const char *value)
 	if (path_len > UDB_RECORD_PATH_MAX)
 		return 0;
 
-	/* Validate each encoded component in path */
-	comp = path;
-	while ((sep = strstr(comp, "::")))
-	{
-		if (sep == comp || !sep[2])
-			return 0;
-		size_t clen = sep - comp;
-		if (clen > UDB_COMPONENT_ENCODED_MAX)
-			return 0;
-		char enc_buf[UDB_COMPONENT_ENCODED_MAX + 1];
-		char dec_buf[UDB_COMPONENT_RAW_MAX + 1];
-		memcpy(enc_buf, comp, clen);
-		enc_buf[clen] = '\0';
-		if (!udb_path_decode_component(enc_buf, dec_buf, sizeof(dec_buf)))
-			return 0;
-		if (strlen(dec_buf) > UDB_COMPONENT_RAW_MAX)
-			return 0;
-		comp = sep + 2;
-	}
-	if (!*comp)
-		return 0;
-	size_t last_clen = strlen(comp);
-	if (last_clen > UDB_COMPONENT_ENCODED_MAX)
-		return 0;
-	char dec_buf[UDB_COMPONENT_RAW_MAX + 1];
-	if (!udb_path_decode_component(comp, dec_buf, sizeof(dec_buf)))
-		return 0;
-	if (strlen(dec_buf) > UDB_COMPONENT_RAW_MAX)
+	if (!udb_path_foreach(path, (unsigned int)(path_len / 2 + 1), udb_path_component_noop, NULL))
 		return 0;
 
 	if (value)
@@ -455,6 +413,41 @@ static int udb_path_decode_component(const char *encoded, char *buf, size_t bufs
 	return 1;
 }
 
+static int udb_path_foreach(const char *path, unsigned int max_components, UdbPathComponentFunc fn, void *data)
+{
+	char encoded[UDB_COMPONENT_ENCODED_MAX + 1];
+	char decoded[UDB_COMPONENT_RAW_MAX + 1];
+	const char *component;
+	const char *separator;
+	unsigned int index = 0;
+
+	if (!path || !*path)
+		return 0;
+	component = path;
+	for (;;)
+	{
+		size_t length;
+
+		separator = strstr(component, "::");
+		if (separator == component || (separator && !separator[2]))
+			return 0;
+		length = separator ? (size_t)(separator - component) : strlen(component);
+		if (length > UDB_COMPONENT_ENCODED_MAX)
+			return 0;
+		memcpy(encoded, component, length);
+		encoded[length] = '\0';
+		if (!udb_path_decode_component(encoded, decoded, sizeof(decoded)))
+			return 0;
+		if (index >= max_components || !fn(decoded, index, data))
+			return 0;
+		index++;
+		if (!separator)
+			break;
+		component = separator + 2;
+	}
+	return (int)index;
+}
+
 static int udb_path_append(char *dst, size_t dst_size, size_t *used, const char *component)
 {
 	char encoded[UDB_COMPONENT_ENCODED_MAX + 1];
@@ -489,32 +482,35 @@ static int udb_path_append_component(char *pathbuf, size_t bufsz, const char *ra
 	return udb_path_append(pathbuf, bufsz, NULL, raw_component);
 }
 
+typedef struct UdbFindPathState
+{
+	UdbContext *ctx;
+	UdbRecord *node;
+} UdbFindPathState;
+
+static int udb_record_find_path_component(const char *decoded, unsigned int index, void *data)
+{
+	UdbFindPathState *state = data;
+	UdbRecord *rec = udb_record_find(state->ctx, decoded, state->node);
+
+	(void)index;
+	if (!rec)
+		return 0;
+	state->node = rec;
+	return 1;
+}
+
 static UdbRecord *udb_record_find_path(UdbContext *ctx, UdbBlock *block, const char *path)
 {
-	char decoded_part[UDB_COMPONENT_RAW_MAX + 1];
-	char pathbuf[UDB_RECORD_PATH_MAX + 1];
-	char *cur;
-	char *ds;
-	UdbRecord *rec;
+	UdbFindPathState state;
 
 	if (!block || !block->tree || !path || strlen(path) > UDB_RECORD_PATH_MAX || !udb_record_fits_limits(path, NULL))
 		return NULL;
-	strlcpy(pathbuf, path, sizeof(pathbuf));
-	cur = pathbuf;
-	rec = block->tree;
-	while ((ds = strstr(cur, "::")))
-	{
-		*ds = '\0';
-		if (!udb_path_decode_component(cur, decoded_part, sizeof(decoded_part)))
-			return NULL;
-		rec = udb_record_find(ctx, decoded_part, rec);
-		if (!rec)
-			return NULL;
-		cur = ds + 2;
-	}
-	if (!udb_path_decode_component(cur, decoded_part, sizeof(decoded_part)))
+	state.ctx = ctx;
+	state.node = block->tree;
+	if (!udb_path_foreach(path, UDB_PATH_MAX_COMPONENTS, udb_record_find_path_component, &state))
 		return NULL;
-	return udb_record_find(ctx, decoded_part, rec);
+	return state.node;
 }
 
 static void udb_record_free_tree(UdbRecord *rec)

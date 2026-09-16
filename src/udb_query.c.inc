@@ -86,7 +86,8 @@ static void udb_query_send_status(Client *client)
 			   (udb_reconcile.active || udb_reconcile.next_retry_at) ? "ACTIVE" : "IDLE");
 	sendto_one(client, NULL, ":%s 339 %s :Selected propagator: %s", me.name, client->name, selected_str);
 	sendto_one(client, NULL, ":%s 339 %s :Selected direct source: %s", me.name, client->name, selected_str);
-	sendto_one(client, NULL, ":%s 339 %s :Advertised state: HEL 4 %s", me.name, client->name, advertised_str);
+	sendto_one(client, NULL, ":%s 339 %s :Advertised state: HEL " UDB_PROTOCOL_HEL " %s", me.name, client->name,
+			   advertised_str);
 	sendto_one(client, NULL, ":%s 339 %s :Serving downstream: %s", me.name, client->name, udb_ready ? "YES" : "NO");
 	sendto_one(client, NULL, ":%s 339 %s :Policy source: %s", me.name, client->name, policy_source_str);
 	sendto_one(client, NULL, ":%s 339 %s :Policy: %s", me.name, client->name, policy_str);
@@ -133,18 +134,20 @@ static void udb_query_send_operclasses(Client *client, const char *filter)
 	for (origin = udb_ocl_origins; origin; origin = origin->next)
 	{
 		Client *acptr = udb_ocl_find_server(origin->sid);
+		UdbOclOrigin *current_origin;
 
 		if (!origin->member || !udb_ocl_is_participant(acptr) || IsMe(acptr))
 			continue;
 		if (filter && !match_simple(filter, acptr->name))
 			continue;
 		shown++;
-		origin = udb_ocl_find_origin(acptr->id);
-		if (origin && origin->current)
+		current_origin = udb_ocl_find_origin(acptr->id);
+		if (current_origin && current_origin->current)
 		{
 			sendto_one(client, NULL, ":%s 339 %s :%s SID %s epoch %s gen %lu classes %u digest %s", me.name,
-					   client->name, acptr->name, acptr->id, origin->current->epoch, origin->current->generation,
-					   origin->current->count, origin->current->inventory_digest);
+					   client->name, acptr->name, acptr->id, current_origin->current->epoch,
+					   current_origin->current->generation, current_origin->current->count,
+					   current_origin->current->inventory_digest);
 		}
 		else
 		{

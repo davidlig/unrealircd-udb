@@ -124,12 +124,6 @@ static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
 	return errors ? -1 : 1;
 }
 
-static int udb_config_posttest(int *errs)
-{
-	/* Could validate that propagator is a known link, etc. */
-	return 0;
-}
-
 /* CONFIGRUN only visits directives that still exist. Track the new generation
  * without mutating the active value until a successful postconf, so a failed
  * rehash cannot erase the last known-good propagator override. */
@@ -487,13 +481,13 @@ static void udb_link_remove_record(UdbContext *ctx, UdbRecord *rec)
 
 static void udb_config_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec)
 {
-	if (block->letter == 'S')
+	if (block->letter == UDB_BLOCK_SETTINGS)
 	{
 		if (!udb_settings_apply_record(ctx, rec))
 			udb_log(ULOG_WARNING, "UDB_SETTING_INVALID", NULL, "Ignoring invalid or unsupported S::$setting",
 					log_data_string("setting", rec->key));
 	}
-	else if (block->letter == 'L')
+	else if (block->letter == UDB_BLOCK_LINKS)
 	{
 		udb_link_apply_record(ctx, rec);
 	}
@@ -501,8 +495,8 @@ static void udb_config_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord 
 
 static void udb_config_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec)
 {
-	if (block->letter == 'S')
+	if (block->letter == UDB_BLOCK_SETTINGS)
 		udb_settings_remove_record(ctx, rec);
-	else if (block->letter == 'L')
+	else if (block->letter == UDB_BLOCK_LINKS)
 		udb_link_remove_record(ctx, rec);
 }

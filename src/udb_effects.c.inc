@@ -9,68 +9,72 @@
  * License: GNU General Public License v2+
  */
 
-static int udb_apply_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new)
+static void udb_nick_apply_effect(UdbBlock *block, UdbRecord *rec, int is_new)
+{
+	UdbRecord *nick_rec = rec->parent == block->tree ? rec : rec->parent;
+	UdbNickApplyReason reason = is_new ? UDB_NICK_APPLY_REFRESH : UDB_NICK_APPLY_ADOPT;
+	Client *client = find_user(nick_rec->key, NULL);
+
+	if (nick_rec->nick_unsuspend_transition)
+	{
+		nick_rec->nick_unsuspend_transition = 0;
+		reason = UDB_NICK_APPLY_UNSUSPEND;
+	}
+	if (client && MyUser(client))
+		udb_nick_apply(client, nick_rec, reason);
+}
+
+static void udb_apply_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new)
 {
 	if (!rec)
-		return 0;
-	if (block->letter == 'N')
+		return;
+	switch (block->letter)
 	{
-		UdbRecord *nick_rec = rec->parent == block->tree ? rec : rec->parent;
-		UdbNickApplyReason reason = is_new ? UDB_NICK_APPLY_REFRESH : UDB_NICK_APPLY_ADOPT;
-		Client *client = find_user(nick_rec->key, NULL);
-
-		if (nick_rec->nick_unsuspend_transition)
-		{
-			nick_rec->nick_unsuspend_transition = 0;
-			reason = UDB_NICK_APPLY_UNSUSPEND;
-		}
-		if (client && MyUser(client))
-		{
-			udb_nick_apply(client, nick_rec, reason);
-		}
-	}
-	else if (block->letter == 'C')
-	{
+	case UDB_BLOCK_NICKS:
+		udb_nick_apply_effect(block, rec, is_new);
+		break;
+	case UDB_BLOCK_CHANNELS:
 		udb_channel_apply_record(ctx, block, rec, is_new);
-	}
-	else if (block->letter == 'I')
-	{
-		udb_ips_apply_effect(ctx, block, rec, is_new);
-	}
-	else if (block->letter == 'S' || block->letter == 'L')
-	{
+		break;
+	case UDB_BLOCK_IPS:
+		udb_ips_apply_effect(ctx, block, rec);
+		break;
+	case UDB_BLOCK_SETTINGS:
+	case UDB_BLOCK_LINKS:
 		udb_config_apply_effect(ctx, block, rec);
+		break;
+	case UDB_BLOCK_LINES:
+		udb_lines_apply_effect(ctx, block, rec);
+		break;
+	default:
+		break;
 	}
-	else if (block->letter == 'K')
-	{
-		udb_lines_apply_effect(ctx, block, rec, is_new);
-	}
-	return 1;
 }
 
 static void udb_remove_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec)
 {
 	if (!rec)
 		return;
-	if (block->letter == 'N')
+	switch (block->letter)
 	{
+	case UDB_BLOCK_NICKS:
 		udb_nick_remove_record(block, rec);
-	}
-	else if (block->letter == 'C')
-	{
+		break;
+	case UDB_BLOCK_CHANNELS:
 		udb_channel_remove_record(ctx, block, rec);
-	}
-	else if (block->letter == 'I')
-	{
+		break;
+	case UDB_BLOCK_IPS:
 		udb_ips_remove_effect(ctx, block, rec);
-	}
-	else if (block->letter == 'S' || block->letter == 'L')
-	{
+		break;
+	case UDB_BLOCK_SETTINGS:
+	case UDB_BLOCK_LINKS:
 		udb_config_remove_effect(ctx, block, rec);
-	}
-	else if (block->letter == 'K')
-	{
+		break;
+	case UDB_BLOCK_LINES:
 		udb_lines_remove_effect(ctx, block, rec);
+		break;
+	default:
+		break;
 	}
 }
 
@@ -87,18 +91,18 @@ static void udb_tree_effects_walk(UdbContext *ctx, UdbBlock *block, UdbRecord *r
 	/* Select each runtime owner once; K patterns are below their line type. */
 	switch (block->letter)
 	{
-	case 'N':
+	case UDB_BLOCK_NICKS:
 		apply = depth == 1;
 		break;
-	case 'C':
-	case 'I':
+	case UDB_BLOCK_CHANNELS:
+	case UDB_BLOCK_IPS:
 		apply = depth == (remove ? 1 : 2);
 		break;
-	case 'K':
+	case UDB_BLOCK_LINES:
 		apply = depth == 2;
 		break;
-	case 'S':
-	case 'L':
+	case UDB_BLOCK_SETTINGS:
+	case UDB_BLOCK_LINKS:
 		apply = 1;
 		break;
 	}

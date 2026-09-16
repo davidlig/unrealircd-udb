@@ -358,12 +358,12 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 			/* Replacing an existing credential must not revoke the holder's
 			 * identity or effects: the active proof is checked live against the
 			 * new policy and the following apply reconciles effects. */
-			if (!nick_pass_changed && (block->letter != 'C' || old_rec->parent == block->tree ||
+			if (!nick_pass_changed && (block->letter != UDB_BLOCK_CHANNELS || old_rec->parent == block->tree ||
 									   (strcmp(old_rec->key, CKEY_MODES) && strcmp(old_rec->key, CKEY_TOPIC) &&
 										strcmp(old_rec->key, CKEY_OPTIONS))))
 				udb_remove_special_record(ctx, block, old_rec);
 		}
-		if (block->letter == 'K')
+		if (block->letter == UDB_BLOCK_LINES)
 			udb_lines_expiry_pending_clear_record(old_rec ? old_rec : rec);
 		udb_block_replace_tree(ctx, block, tree, udb_record_count_tree(tree), &hash_index);
 		/* A newly added credential cannot inherit identity from an earlier
@@ -386,7 +386,7 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 		if (!unchanged)
 		{
 			udb_apply_special_record(ctx, block, rec, 1);
-			if (block->letter == 'L')
+			if (block->letter == UDB_BLOCK_LINKS)
 				udb_sync_snomask_filter();
 		}
 		if (snap_res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
@@ -434,7 +434,7 @@ static int udb_mutation_delete_local(UdbContext *ctx, UdbBlock *block, UdbRecord
 		udb_record_free_tree(tree);
 		return 0;
 	}
-	if (block->letter == 'K' && candidate_rec->parent && candidate_rec->parent->parent &&
+	if (block->letter == UDB_BLOCK_LINES && candidate_rec->parent && candidate_rec->parent->parent &&
 		candidate_rec->parent->parent != tree)
 		candidate_line = candidate_rec->parent;
 	if (block->letter == UDB_BLOCK_NICKS && candidate_rec->parent && candidate_rec->parent != tree)
@@ -459,14 +459,14 @@ static int udb_mutation_delete_local(UdbContext *ctx, UdbBlock *block, UdbRecord
 	/* This is the common DEL transaction: persisted candidate first, then old
 	 * runtime effect removal, active-tree replacement, and candidate reapply. */
 	udb_remove_special_record(ctx, block, old_rec);
-	if (block->letter == 'K')
+	if (block->letter == UDB_BLOCK_LINES)
 		udb_lines_expiry_pending_clear_record(old_rec);
 	udb_block_replace_tree(ctx, block, tree, record_count, &hash_index);
 	if (candidate_nick_profile)
 		udb_apply_special_record(ctx, block, candidate_nick_profile, 1);
 	if (candidate_line)
-		udb_lines_apply_effect(ctx, block, candidate_line, 0);
-	if (block->letter == 'L')
+		udb_lines_apply_effect(ctx, block, candidate_line);
+	if (block->letter == UDB_BLOCK_LINKS)
 		udb_sync_snomask_filter();
 	if (snap_res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
 	{
