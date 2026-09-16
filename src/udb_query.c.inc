@@ -11,9 +11,25 @@
 
 static int udb_query_is_secret(const UdbRecord *rec)
 {
-	return rec && rec->key &&
-		   (!strcmp(rec->key, NKEY_PASS) || !strcmp(rec->key, SKEY_CRYPT_KEY) ||
-			(udb_ctx && !strcmp(rec->key, CKEY_MODES) && rec->parent && rec->parent->parent == udb_ctx->channels));
+	const UdbRecord *root;
+	unsigned int depth = 0;
+	char letter;
+
+	if (!rec || !rec->key)
+		return 0;
+	if (!udb_ctx)
+		return udb_secret_key_is_reserved(rec->key);
+	for (root = rec; root->parent; root = root->parent)
+		depth++;
+	if (root == udb_ctx->nicks)
+		letter = UDB_BLOCK_NICKS;
+	else if (root == udb_ctx->channels)
+		letter = UDB_BLOCK_CHANNELS;
+	else if (root == udb_ctx->settings)
+		letter = UDB_BLOCK_SETTINGS;
+	else
+		return 0;
+	return udb_secret_key_matches(letter, depth, rec->key);
 }
 
 static void udb_query_send_status(Client *client)

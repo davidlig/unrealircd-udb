@@ -77,7 +77,7 @@ static void udb_nick_password_cache_entry_free(UdbNickPasswordCache *cache)
 {
 	if (!cache)
 		return;
-	safe_free(cache->pass);
+	safe_free_sensitive(cache->pass);
 	safe_free(cache);
 }
 
@@ -112,7 +112,7 @@ static void udb_nick_password_cache_set(Client *client, const char *nick, const 
 	udb_nick_password_cache_clear(client);
 	cache = safe_alloc(sizeof(*cache));
 	strlcpy(cache->nick, nick, sizeof(cache->nick));
-	safe_strdup(cache->pass, pass);
+	safe_strdup_sensitive(cache->pass, pass);
 	cache->validated = validated ? 1 : 0;
 	moddata_local_client(client, udb_nick_password_cache_md).ptr = cache;
 }

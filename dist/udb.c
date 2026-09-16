@@ -600,6 +600,9 @@ typedef int (*UdbPathComponentFunc)(const char *decoded, unsigned int index, voi
 static int udb_path_foreach(const char *path, unsigned int max_components, UdbPathComponentFunc fn, void *data);
 static int udb_path_append(char *dst, size_t dst_size, size_t *used, const char *component);
 static int udb_path_append_component(char *pathbuf, size_t bufsz, const char *raw_component);
+static int udb_secret_key_is_reserved(const char *key);
+static int udb_secret_key_matches(char block_letter, unsigned int depth, const char *key);
+static int udb_path_value_is_secret(const char *path);
 static int udb_strtoull_strict(const char *s, unsigned long long *out);
 static int udb_parse_uint64_strict(const char *s, uint64_t *out);
 static int udb_strtoul_strict(const char *s, unsigned long *out);
@@ -1281,6 +1284,51 @@ static int udb_path_foreach(const char *path, unsigned int max_components, UdbPa
 		component = separator + 2;
 	}
 	return (int)index;
+}
+
+static int udb_secret_key_is_reserved(const char *key)
+{
+	return key && (!strcasecmp(key, NKEY_PASS) || !strcasecmp(key, SKEY_CRYPT_KEY) || !strcasecmp(key, CKEY_MODES));
+}
+
+static int udb_secret_key_matches(char block_letter, unsigned int depth, const char *key)
+{
+	if (!key)
+		return 0;
+	if (!strcasecmp(key, NKEY_PASS))
+		return block_letter == UDB_BLOCK_NICKS && depth == 2;
+	if (!strcasecmp(key, SKEY_CRYPT_KEY))
+		return block_letter == UDB_BLOCK_SETTINGS && depth == 1;
+	if (!strcasecmp(key, CKEY_MODES))
+		return block_letter == UDB_BLOCK_CHANNELS && depth == 2;
+	return 0;
+}
+
+typedef struct UdbSecretPathState
+{
+	char last[UDB_COMPONENT_RAW_MAX + 1];
+	unsigned int depth;
+} UdbSecretPathState;
+
+static int udb_path_secret_component(const char *decoded, unsigned int index, void *data)
+{
+	UdbSecretPathState *state = data;
+
+	strlcpy(state->last, decoded, sizeof(state->last));
+	state->depth = index + 1;
+	return 1;
+}
+
+static int udb_path_value_is_secret(const char *path)
+{
+	UdbSecretPathState state;
+
+	if (!path || path[0] == '\0' || path[1] != ':' || path[2] != ':')
+		return 0;
+	memset(&state, 0, sizeof(state));
+	if (!udb_path_foreach(path + 3, UDB_PATH_MAX_COMPONENTS, udb_path_secret_component, &state))
+		return 0;
+	return udb_secret_key_matches(path[0], state.depth, state.last);
 }
 
 static int udb_path_append(char *dst, size_t dst_size, size_t *used, const char *component)
@@ -7172,10 +7220,7 @@ static int udb_is_propagator(UdbContext *ctx, Client *server)
 
 static UdbBlock *udb_mutation_path_block(UdbContext *ctx, const char *path)
 {
-	const char *component;
-	const char *separator;
 	size_t len;
-	UdbBlock *block;
 
 	if (!path || !udb_record_fits_limits(path, NULL))
 		return NULL;
@@ -7184,59 +7229,12 @@ static UdbBlock *udb_mutation_path_block(UdbContext *ctx, const char *path)
 	if (len < 4 || len > UDB_RECORD_PATH_MAX || path[1] != ':' || path[2] != ':' || !path[3])
 		return NULL;
 
-	block = udb_block_by_letter(ctx, path[0]);
-	if (!block)
-		return NULL;
-
-	component = path + 3;
-	while ((separator = strstr(component, "::")))
-	{
-		if (separator == component || !separator[2])
-			return NULL;
-		char decoded[UDB_COMPONENT_RAW_MAX + 1];
-		char comp_buf[UDB_COMPONENT_ENCODED_MAX + 1];
-		size_t clen = separator - component;
-		if (clen >= sizeof(comp_buf))
-			return NULL;
-		memcpy(comp_buf, component, clen);
-		comp_buf[clen] = '\0';
-		if (!udb_path_decode_component(comp_buf, decoded, sizeof(decoded)))
-			return NULL;
-		component = separator + 2;
-	}
-	char decoded[UDB_COMPONENT_RAW_MAX + 1];
-	if (!*component || !udb_path_decode_component(component, decoded, sizeof(decoded)))
-		return NULL;
-
-	return block;
-}
-
-static int udb_mutation_value_is_secret(const char *path)
-{
-	const char *key;
-	char decoded[UDB_COMPONENT_RAW_MAX + 1];
-
-	if (!path)
-		return 0;
-	if (!strncasecmp(path, "S::", 3) && path[3])
-	{
-		if (!udb_path_decode_component(path + 3, decoded, sizeof(decoded)))
-			return 0;
-		return !strcasecmp(decoded, SKEY_CRYPT_KEY);
-	}
-	key = strrchr(path, ':');
-	if (!key || key == path || key[-1] != ':')
-		return 0;
-	if (!udb_path_decode_component(key + 1, decoded, sizeof(decoded)))
-		return 0;
-	if (!strncasecmp(path, "N::", 3))
-		return !strcasecmp(decoded, NKEY_PASS);
-	return 0;
+	return udb_block_by_letter(ctx, path[0]);
 }
 
 static const char *udb_mutation_safe_value(const char *path, const char *value)
 {
-	return udb_mutation_value_is_secret(path) ? "<redacted>" : (value ? value : "");
+	return udb_path_value_is_secret(path) ? "<redacted>" : (value ? value : "");
 }
 
 static int udb_mutation_forward_ins(Client *source, Client *except, const char *target, const char *epoch, uint64_t seq,
@@ -8661,7 +8659,7 @@ static void udb_nick_password_cache_entry_free(UdbNickPasswordCache *cache)
 {
 	if (!cache)
 		return;
-	safe_free(cache->pass);
+	safe_free_sensitive(cache->pass);
 	safe_free(cache);
 }
 
@@ -8696,7 +8694,7 @@ static void udb_nick_password_cache_set(Client *client, const char *nick, const 
 	udb_nick_password_cache_clear(client);
 	cache = safe_alloc(sizeof(*cache));
 	strlcpy(cache->nick, nick, sizeof(cache->nick));
-	safe_strdup(cache->pass, pass);
+	safe_strdup_sensitive(cache->pass, pass);
 	cache->validated = validated ? 1 : 0;
 	moddata_local_client(client, udb_nick_password_cache_md).ptr = cache;
 }
@@ -12350,9 +12348,25 @@ static void udb_lines_init(ModuleInfo *modinfo)
 
 static int udb_query_is_secret(const UdbRecord *rec)
 {
-	return rec && rec->key &&
-		   (!strcmp(rec->key, NKEY_PASS) || !strcmp(rec->key, SKEY_CRYPT_KEY) ||
-			(udb_ctx && !strcmp(rec->key, CKEY_MODES) && rec->parent && rec->parent->parent == udb_ctx->channels));
+	const UdbRecord *root;
+	unsigned int depth = 0;
+	char letter;
+
+	if (!rec || !rec->key)
+		return 0;
+	if (!udb_ctx)
+		return udb_secret_key_is_reserved(rec->key);
+	for (root = rec; root->parent; root = root->parent)
+		depth++;
+	if (root == udb_ctx->nicks)
+		letter = UDB_BLOCK_NICKS;
+	else if (root == udb_ctx->channels)
+		letter = UDB_BLOCK_CHANNELS;
+	else if (root == udb_ctx->settings)
+		letter = UDB_BLOCK_SETTINGS;
+	else
+		return 0;
+	return udb_secret_key_matches(letter, depth, rec->key);
 }
 
 static void udb_query_send_status(Client *client)

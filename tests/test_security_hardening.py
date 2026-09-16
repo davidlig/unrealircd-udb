@@ -18,6 +18,7 @@ class SecurityHardeningContractTest(unittest.TestCase):
         cls.query = (ROOT / "src/udb_query.c.inc").read_text(encoding="utf-8")
         cls.channels = (ROOT / "src/udb_channels.c.inc").read_text(encoding="utf-8")
         cls.sync = (ROOT / "src/udb_sync.c.inc").read_text(encoding="utf-8")
+        cls.store = (ROOT / "src/udb_store.c.inc").read_text(encoding="utf-8")
 
     def test_uint64_wire_parsing_avoids_pointer_punning(self):
         self.assertIn("udb_parse_uint64_strict", self.core)
@@ -49,7 +50,10 @@ class SecurityHardeningContractTest(unittest.TestCase):
         self.assertNotIn("entry->since < oldest->since", self.nicks)
 
     def test_channel_keys_are_redacted_from_queries_and_debug(self):
-        self.assertIn("!strcmp(rec->key, CKEY_MODES)", self.query)
+        self.assertIn("udb_secret_key_matches", self.query)
+        self.assertIn("udb_path_value_is_secret(path)", self.mutation)
+        for key in ("NKEY_PASS", "SKEY_CRYPT_KEY", "CKEY_MODES"):
+            self.assertIn(key, self.store)
         self.assertIn('strchr(modes, \'k\') ? "<redacted>" : parameters', self.channels)
 
 

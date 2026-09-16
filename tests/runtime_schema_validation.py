@@ -304,9 +304,11 @@ def test_clone_limits_int_max_and_one_over(services, data_dir):
 def test_secret_mutation_log_redaction(services, process):
     secret_key = "a1" * 32
     secret_hash = "sha256:" + ("b2" * 32)
+    secret_modes = "+ntk s3cr3tchannelkey"
     mutations = (
         ("S::encryption_key", secret_key),
         ("N::secretlogger::pass", secret_hash),
+        ("C::#secretlogger::modes", secret_modes),
     )
     for path, value in mutations:
         services.send_ins(path, value)
@@ -315,10 +317,12 @@ def test_secret_mutation_log_redaction(services, process):
     while select.select([process.stdout], [], [], 0)[0]:
         output += os.read(process.stdout.fileno(), 65536).decode(errors="replace")
     require(output, "secret mutation test did not capture daemon diagnostics")
-    for secret in (secret_key, secret_hash):
+    for secret in (secret_key, secret_hash, "s3cr3tchannelkey"):
         require(secret not in output, "secret mutation value appeared in daemon diagnostics")
-    require("S::encryption_key" in output and "N::secretlogger::pass" in output,
-            "redacted mutation diagnostics lost their paths")
+    require(
+        "S::encryption_key" in output and "N::secretlogger::pass" in output and "C::#secretlogger::modes" in output,
+        "redacted mutation diagnostics lost their paths",
+    )
     print("PASS: mutation diagnostics retain paths while redacting every secret value")
 
 

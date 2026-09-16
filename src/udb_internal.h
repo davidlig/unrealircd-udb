@@ -456,6 +456,9 @@ typedef int (*UdbPathComponentFunc)(const char *decoded, unsigned int index, voi
 static int udb_path_foreach(const char *path, unsigned int max_components, UdbPathComponentFunc fn, void *data);
 static int udb_path_append(char *dst, size_t dst_size, size_t *used, const char *component);
 static int udb_path_append_component(char *pathbuf, size_t bufsz, const char *raw_component);
+static int udb_secret_key_is_reserved(const char *key);
+static int udb_secret_key_matches(char block_letter, unsigned int depth, const char *key);
+static int udb_path_value_is_secret(const char *path);
 static int udb_strtoull_strict(const char *s, unsigned long long *out);
 static int udb_parse_uint64_strict(const char *s, uint64_t *out);
 static int udb_strtoul_strict(const char *s, unsigned long *out);

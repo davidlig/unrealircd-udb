@@ -70,10 +70,7 @@ static int udb_is_propagator(UdbContext *ctx, Client *server)
 
 static UdbBlock *udb_mutation_path_block(UdbContext *ctx, const char *path)
 {
-	const char *component;
-	const char *separator;
 	size_t len;
-	UdbBlock *block;
 
 	if (!path || !udb_record_fits_limits(path, NULL))
 		return NULL;
@@ -82,59 +79,12 @@ static UdbBlock *udb_mutation_path_block(UdbContext *ctx, const char *path)
 	if (len < 4 || len > UDB_RECORD_PATH_MAX || path[1] != ':' || path[2] != ':' || !path[3])
 		return NULL;
 
-	block = udb_block_by_letter(ctx, path[0]);
-	if (!block)
-		return NULL;
-
-	component = path + 3;
-	while ((separator = strstr(component, "::")))
-	{
-		if (separator == component || !separator[2])
-			return NULL;
-		char decoded[UDB_COMPONENT_RAW_MAX + 1];
-		char comp_buf[UDB_COMPONENT_ENCODED_MAX + 1];
-		size_t clen = separator - component;
-		if (clen >= sizeof(comp_buf))
-			return NULL;
-		memcpy(comp_buf, component, clen);
-		comp_buf[clen] = '\0';
-		if (!udb_path_decode_component(comp_buf, decoded, sizeof(decoded)))
-			return NULL;
-		component = separator + 2;
-	}
-	char decoded[UDB_COMPONENT_RAW_MAX + 1];
-	if (!*component || !udb_path_decode_component(component, decoded, sizeof(decoded)))
-		return NULL;
-
-	return block;
-}
-
-static int udb_mutation_value_is_secret(const char *path)
-{
-	const char *key;
-	char decoded[UDB_COMPONENT_RAW_MAX + 1];
-
-	if (!path)
-		return 0;
-	if (!strncasecmp(path, "S::", 3) && path[3])
-	{
-		if (!udb_path_decode_component(path + 3, decoded, sizeof(decoded)))
-			return 0;
-		return !strcasecmp(decoded, SKEY_CRYPT_KEY);
-	}
-	key = strrchr(path, ':');
-	if (!key || key == path || key[-1] != ':')
-		return 0;
-	if (!udb_path_decode_component(key + 1, decoded, sizeof(decoded)))
-		return 0;
-	if (!strncasecmp(path, "N::", 3))
-		return !strcasecmp(decoded, NKEY_PASS);
-	return 0;
+	return udb_block_by_letter(ctx, path[0]);
 }
 
 static const char *udb_mutation_safe_value(const char *path, const char *value)
 {
-	return udb_mutation_value_is_secret(path) ? "<redacted>" : (value ? value : "");
+	return udb_path_value_is_secret(path) ? "<redacted>" : (value ? value : "");
 }
 
 static int udb_mutation_forward_ins(Client *source, Client *except, const char *target, const char *epoch, uint64_t seq,

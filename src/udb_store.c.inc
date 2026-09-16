@@ -448,6 +448,51 @@ static int udb_path_foreach(const char *path, unsigned int max_components, UdbPa
 	return (int)index;
 }
 
+static int udb_secret_key_is_reserved(const char *key)
+{
+	return key && (!strcasecmp(key, NKEY_PASS) || !strcasecmp(key, SKEY_CRYPT_KEY) || !strcasecmp(key, CKEY_MODES));
+}
+
+static int udb_secret_key_matches(char block_letter, unsigned int depth, const char *key)
+{
+	if (!key)
+		return 0;
+	if (!strcasecmp(key, NKEY_PASS))
+		return block_letter == UDB_BLOCK_NICKS && depth == 2;
+	if (!strcasecmp(key, SKEY_CRYPT_KEY))
+		return block_letter == UDB_BLOCK_SETTINGS && depth == 1;
+	if (!strcasecmp(key, CKEY_MODES))
+		return block_letter == UDB_BLOCK_CHANNELS && depth == 2;
+	return 0;
+}
+
+typedef struct UdbSecretPathState
+{
+	char last[UDB_COMPONENT_RAW_MAX + 1];
+	unsigned int depth;
+} UdbSecretPathState;
+
+static int udb_path_secret_component(const char *decoded, unsigned int index, void *data)
+{
+	UdbSecretPathState *state = data;
+
+	strlcpy(state->last, decoded, sizeof(state->last));
+	state->depth = index + 1;
+	return 1;
+}
+
+static int udb_path_value_is_secret(const char *path)
+{
+	UdbSecretPathState state;
+
+	if (!path || path[0] == '\0' || path[1] != ':' || path[2] != ':')
+		return 0;
+	memset(&state, 0, sizeof(state));
+	if (!udb_path_foreach(path + 3, UDB_PATH_MAX_COMPONENTS, udb_path_secret_component, &state))
+		return 0;
+	return udb_secret_key_matches(path[0], state.depth, state.last);
+}
+
 static int udb_path_append(char *dst, size_t dst_size, size_t *used, const char *component)
 {
 	char encoded[UDB_COMPONENT_ENCODED_MAX + 1];
