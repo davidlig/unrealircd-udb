@@ -78,6 +78,7 @@ udb {
     sync-inactivity-timeout 60;
     sync-absolute-timeout 300;
     stale-timeout 300;
+    anti-entropy-interval 1800;
 };
 ```
 
@@ -90,6 +91,7 @@ udb {
 | `sync-inactivity-timeout` | 60 s | Se renueva con actividad PUT |
 | `sync-absolute-timeout` | 300 s | No se renueva con actividad |
 | `stale-timeout` | 300 s | Tiempo NOT_READY antes de STALE |
+| `anti-entropy-interval` | 1800 s | Cadencia de MANIFEST REQ con ±10% de jitter |
 
 `S::propagator`, a diferencia de la directiva local, puede contener una lista ordenada:
 

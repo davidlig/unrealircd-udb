@@ -2,6 +2,7 @@
 """Targeted test suite for UDB Phase 4: Periodic anti-entropy verification.
 
 Validates:
+  Test 0: The default MANIFEST REQ interval remains 1800 seconds.
   Test 1: Convergent anti-entropy cycle (follower sends MANIFEST REQ, authority replies
           with matching MANIFEST ACK, verified, zero data transfer, status remains OK).
   Test 2: Silent mutation drop / divergence recovery (authority reports divergent manifest,
@@ -32,6 +33,15 @@ DEFAULT_IRCD = RUNTIME_ROOT / "bin/unrealircd"
 CLOAK_KEYS = ("aB3" * 30, "cD4" * 30, "eF5" * 30)
 LINK_PASSWORD = "testlinkpassword"
 EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+
+def test_default_interval_contract():
+    print("--- Running Test 0: Default anti-entropy interval contract ---")
+    header = (pathlib.Path(__file__).resolve().parent.parent / "src" / "udb_internal.h").read_text(
+        encoding="utf-8")
+    assert "#define UDB_DEFAULT_ANTI_ENTROPY_INTERVAL 1800" in header, \
+        "default MANIFEST REQ interval must remain 1800 seconds"
+    print("PASS: Test 0: Default MANIFEST REQ interval is 1800 seconds")
 
 
 def free_ports(count):
@@ -586,6 +596,7 @@ def test_authority_err_handling():
 
 
 if __name__ == "__main__":
+    test_default_interval_contract()
     test_convergent_cycle()
     test_divergence_recovery()
     test_inbound_manifest_req()

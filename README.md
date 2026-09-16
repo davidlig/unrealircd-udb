@@ -78,6 +78,7 @@ udb {
     sync-inactivity-timeout 60;
     sync-absolute-timeout 300;
     stale-timeout 300;
+    anti-entropy-interval 1800;
 };
 ```
 
@@ -90,6 +91,7 @@ udb {
 | `sync-inactivity-timeout` | 60 s | Refreshed by PUT activity |
 | `sync-absolute-timeout` | 300 s | Never refreshed by activity |
 | `stale-timeout` | 300 s | NOT_READY age before STALE |
+| `anti-entropy-interval` | 1800 s | MANIFEST REQ cadence with ±10% jitter |
 
 Unlike local `udb::propagator`, distributed `S::propagator` may contain an ordered list:
 

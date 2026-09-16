@@ -440,6 +440,7 @@ Directivas admitidas:
 | `sync-inactivity-timeout` | 1..86,400 s | 60 s |
 | `sync-absolute-timeout` | 1..86,400 s | 300 s |
 | `stale-timeout` | 1..604,800 s | 300 s |
+| `anti-entropy-interval` | 1..86,400 s | 1800 s |
 
 Las directivas desconocidas son error de configuración.
 
@@ -729,7 +730,7 @@ MANIFEST ACK <round> <block> <count> <sha256> <watermark_seq>
 ```
 
 Flujo:
-1. Cada `anti-entropy-interval` (por defecto 300 s ± 30 s de jitter), el follower envía `MANIFEST REQ` a su autoridad seleccionada.
+1. Cada `anti-entropy-interval` (por defecto 1800 s ± 180 s de jitter), el follower envía `MANIFEST REQ` a su autoridad seleccionada.
 2. La autoridad responde con `MANIFEST ACK` para cada uno de los seis bloques, indicando su `(count, sha256, watermark_seq)` actual. Los seis acknowledgements deben llevar un watermark idéntico; un conjunto inconsistente falla de forma cerrada y fuerza refresh/recuperación de capacidad.
 3. El follower compara los manifests de la autoridad con sus manifests locales activos.
 4. **Coincidencia**: Todos los bloques coinciden; el estado está verificado como convergente. No se transfieren datos ni se generan logs ruidosos.

@@ -434,6 +434,7 @@ Accepted directives:
 | `sync-inactivity-timeout` | 1..86,400 s | 60 s |
 | `sync-absolute-timeout` | 1..86,400 s | 300 s |
 | `stale-timeout` | 1..604,800 s | 300 s |
+| `anti-entropy-interval` | 1..86,400 s | 1800 s |
 
 Unknown directives are configuration errors.
 
@@ -723,7 +724,7 @@ MANIFEST ACK <round> <block> <count> <sha256> <watermark_seq>
 ```
 
 Workflow:
-1. Every `anti-entropy-interval` (default 300 s ± 30 s jitter), a follower sends `MANIFEST REQ` to its selected authority.
+1. Every `anti-entropy-interval` (default 1800 s ± 180 s jitter), a follower sends `MANIFEST REQ` to its selected authority.
 2. The authority replies with `MANIFEST ACK` for each of the six blocks, reporting its current `(count, sha256, watermark_seq)`. All six acknowledgements must carry one identical watermark; an inconsistent set fails closed and forces capability refresh/recovery.
 3. The follower compares the authority's manifests with its local active block manifests.
 4. **Match**: All blocks match; the state is verified convergent. No data is transferred and no noisy logs are produced.
