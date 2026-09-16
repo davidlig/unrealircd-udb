@@ -170,6 +170,8 @@ Ownership por efecto:
 
 La revocación de identidad se limita a `account`, `+r` y el marcador de identidad, y sólo actúa cuando UDB posee una identidad. La revocación de efectos se limita al estado registrado en el marcador de ownership. Un perfil passless nunca crea marcador de ownership, así que "passless nunca aplica ni retira" surge del modelo en lugar de ramas especiales.
 
+Después de que una adopción explícita mediante `/NICK nick:Password` materialice correctamente la identidad y sus efectos, UDB envía `You are now identified for nickname <nick>.` como NOTICE de NickServ. Los refresh del perfil y las adopciones suspendidas no emiten ese aviso de éxito.
+
 Las mutaciones en caliente (`INS`/`DEL`/`UPDATE`) y los snapshots completos de N usan el mismo reconciliador: retirar efectos poseídos que ya no se desean, preservar efectos externos que UDB nunca poseyó, aplicar los efectos deseados que faltan y registrar exactamente lo que cambió. Un snapshot que conserva `pass` y un `access` que aún permite al portador mantiene la identidad y reconcilia efectos, aunque cambien los valores; un `suspend` nuevo, una eliminación, la pérdida de `pass` o una denegación de acceso revocan identidad y efectos. `INS suspend` revoca efectos e identidad pero mantiene el nick; retirar `suspend` nunca restaura la identidad.
 
 Un `account`/`+r` externo nunca autentica. Mientras hay identidad UDB activa, un cambio externo de esos valores invalida la representación pública pero no puede recrear autenticación; al revocar la identidad se fija `account=*` y se retira `+r`. Cuando UDB nunca poseyó identidad, el `account`/`+r` externo no se toca.

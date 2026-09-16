@@ -1267,6 +1267,17 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, UdbNickApplyReas
 	udb_nick_reconcile_effects(client, nick_rec);
 }
 
+static void udb_nick_adopt(Client *client, UdbRecord *nick_rec)
+{
+	int authenticated_now = udb_nick_pending_auth_consume(client, nick_rec);
+
+	if (authenticated_now)
+		udb_nick_identity_set(client, nick_rec);
+	udb_nick_apply(client, nick_rec, UDB_NICK_APPLY_ADOPT);
+	if (authenticated_now && udb_nick_identity_valid(client, nick_rec))
+		udb_send_service_notice(client, SKEY_NICKSERV, "You are now identified for nickname %s.", nick_rec->key);
+}
+
 /* Common DEL/removal primitive for a child record. Effect removal is expressed
  * through the ownership marker, never through the record being deleted; the
  * candidate profile is reapplied right after this by the common transaction. */
@@ -1826,9 +1837,7 @@ static int udb_hook_post_nick_change(Client *client, MessageTag *recv_mtags, con
 		/* A confirmed nick change consumes the preflight credential and only
 		 * then activates identity. SVSNICK and other forced changes own no
 		 * pending credential, so they never create identity. */
-		if (udb_nick_pending_auth_consume(client, new_rec))
-			udb_nick_identity_set(client, new_rec);
-		udb_nick_apply(client, new_rec, UDB_NICK_APPLY_ADOPT);
+		udb_nick_adopt(client, new_rec);
 	}
 	else
 	{
@@ -1849,9 +1858,7 @@ static int udb_hook_local_connect(Client *client)
 		/* Initial registration follows the same rule as a later nick change:
 		 * the preflight credential is consumed and becomes active identity
 		 * before the profile is applied. */
-		if (udb_nick_pending_auth_consume(client, nick_rec))
-			udb_nick_identity_set(client, nick_rec);
-		udb_nick_apply(client, nick_rec, UDB_NICK_APPLY_ADOPT);
+		udb_nick_adopt(client, nick_rec);
 	}
 	else
 	{

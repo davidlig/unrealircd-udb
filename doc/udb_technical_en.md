@@ -164,6 +164,8 @@ Per-effect ownership:
 
 Identity revocation is limited to `account`, `+r` and the identity marker, and it only acts when UDB holds an identity. Effect revocation is limited to state recorded in the ownership marker. A passless profile never creates an ownership marker, so "passless never applies and never removes" follows from the model instead of special branches.
 
+After an explicit `/NICK nick:Password` adoption successfully materializes identity and effects, UDB sends `You are now identified for nickname <nick>.` as a NickServ notice. Profile refreshes and suspended adoptions do not emit that success notice.
+
 Hot mutations (`INS`/`DEL`/`UPDATE`) and full N snapshots use the same reconciler: remove owned effects that are no longer desired, preserve external effects UDB never owned, apply missing desired effects, and record exactly what changed. A snapshot that keeps `pass` and an `access` list that still permits the holder keeps identity and reconciles effects, even when the values change; a new `suspend`, a removal, losing `pass` or an access denial revokes identity and effects. `INS suspend` revokes effects and identity but keeps the nick; removing `suspend` never restores identity.
 
 External `account`/`+r` never authenticate. While UDB identity is active, an external change to them invalidates the public representation but cannot recreate authentication; revoking identity sets `account=*` and removes `+r`. When UDB never held identity, external `account`/`+r` are left untouched.

@@ -202,6 +202,8 @@ def adopt_suspended(host, port, nick, password):
             "authenticated suspended nick", timeout=20)
     client.wait_for(lambda line: "This nickname is suspended. Reason: manual review" in line,
                     "suspension reason", timeout=20)
+    require(not any("You are now identified for nickname" in line for line in client.lines),
+            "suspended adoption emitted a successful-identification notice")
     assert_unidentified(client, nick, "suspended authenticated client")
     return client
 
@@ -332,10 +334,34 @@ def run_tests(ircd, module, keep=False):
         add_profile(services, "owner", "ownersecret", suspended=False)
         owner = IrcClient("127.0.0.1", client_port, "owner-client")
         clients.append(owner)
+        start = len(owner.lines)
         owner.request("NICK owner:ownersecret", lambda line: " NICK :owner" in line, "owner identification")
+        owner.wait_for(lambda line: line.startswith(":NickServ NOTICE owner :") and
+                       line.endswith("You are now identified for nickname owner."),
+                       "owner identification notice", start=start)
         wait_for_mode(owner, "owner", "+r", "owner +r")
         whois = owner.request("WHOIS owner", lambda line: " 318 " in line, "owner WHOIS")
         require(any("owner.test" in line for line in whois), f"authentication did not apply vhost: {whois!r}")
+
+        # A2: case-only NICK and SVSNICK preserve the existing identity but do
+        # not consume a credential, so neither may announce a new identification.
+        start = len(owner.lines)
+        owner.request("NICK OwNeR", lambda line: " NICK :OwNeR" in line, "case-only local nick change")
+        require(not any("You are now identified for nickname" in line for line in owner.lines[start:]),
+                "case-only local nick change emitted an identification notice")
+        require(has_usermode(owner, "OwNeR", "r", timeout=15), "case-only local nick change lost identity")
+
+        start = len(owner.lines)
+        services.send(f"SVSNICK {current_nick(owner)} OWNER {int(time.time())}")
+        owner.wait_for(lambda line: " NICK :OWNER" in line, "case-only SVSNICK", start=start)
+        require(not any("You are now identified for nickname" in line for line in owner.lines[start:]),
+                "case-only SVSNICK emitted an identification notice")
+        require(has_usermode(owner, "OWNER", "r", timeout=15), "case-only SVSNICK lost identity")
+
+        start = len(owner.lines)
+        owner.request("NICK owner", lambda line: " NICK :owner" in line, "restore owner nick case")
+        require(not any("You are now identified for nickname" in line for line in owner.lines[start:]),
+                "restoring nick case emitted an identification notice")
 
         # B: INS suspend revokes identity/effects and keeps the nick.
         start = len(owner.lines)
@@ -355,6 +381,9 @@ def run_tests(ircd, module, keep=False):
         # D: explicit re-authentication recovers the profile from scratch.
         start = len(owner.lines)
         owner.request("NICK owner:ownersecret", lambda line: " NICK :owner" in line, "owner reauthentication")
+        owner.wait_for(lambda line: line.startswith(":NickServ NOTICE owner :") and
+                       line.endswith("You are now identified for nickname owner."),
+                       "owner reauthentication notice", start=start)
         wait_for_mode(owner, "owner", "+r", "owner reauth +r", start=start, timeout=15)
         whois = request(owner, "WHOIS owner", lambda line: " 318 " in line, "owner reauth WHOIS", timeout=20)
         require(any("owner.test" in line for line in whois), f"reauth did not restore vhost: {whois!r}")
@@ -461,6 +490,7 @@ def run_tests(ircd, module, keep=False):
         hotctrl.request("NICK hotctrl:hotctrlsecret", lambda line: " NICK :hotctrl" in line,
                         "hot control identification")
         wait_for_mode(hotctrl, "hotctrl", "+r", "hot control +r", timeout=10)
+        refresh_start = len(hotctrl.lines)
         services.send_ins("N::hotctrl::vhost", "hotctrl-updated.test")
         time.sleep(0.4)
         require(has_usermode(hotctrl, "hotctrl", "r", timeout=15), "hot effect update lost identity")
@@ -468,6 +498,9 @@ def run_tests(ircd, module, keep=False):
                                 "hot control vhost", timeout=15)
         require(any("hotctrl-updated.test" in line for line in hotctrl_whois),
                 f"hot effect update did not refresh effects: {hotctrl_whois!r}")
+        require(not any("You are now identified for nickname" in line
+                        for line in hotctrl.lines[refresh_start:]),
+                "profile refresh emitted a duplicate successful-identification notice")
 
         # I: changing pass or an access list that still permits keeps the
         # active identity and owned effects; the holder is never renamed.
