@@ -15,7 +15,7 @@ import sys
 import tempfile
 import time
 
-from udb_state_seed import read_text_lenient, seed_block, seed_bootstrapping_state, seed_ready_state
+from udb_state_seed import read_bytes_lenient, read_text_lenient, seed_block, seed_bootstrapping_state, seed_ready_state
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -37,6 +37,10 @@ K_STAGED_RECORD = "G::*@udb-staged.test::reason staged-sync-k-effect"
 # over a wider window; predicates still enforce the invariant, so a longer
 # window can never turn a real failure into a pass.
 FAULT_OBSERVATION_TIMEOUT = 45
+# Logged once node B's six-block publication has completed and the READY
+# marker is durable; used to capture a settled baseline instead of racing
+# udb_blocks_save_all()'s rename-to-.udb_previous phase.
+READY_STATE_PERSISTED = "Persistent UDB state updated to READY"
 
 
 def find_module_path():
@@ -317,7 +321,7 @@ def snapshot_set_rename_failure_observed(b_log, state_file, data_dir, baselines,
     for letter in ('N', 'C', 'I', 'S', 'L', 'K'):
         db = data_dir / f"udb_{letter}.db"
         expected = imported.get(letter, baselines[letter])
-        if not db.is_file() or db.read_bytes() != expected:
+        if read_bytes_lenient(db) != expected:
             return False
         if db.with_suffix(".db.udb_previous").exists():
             return False
@@ -336,6 +340,34 @@ def db_text_if_present(db):
         return db.read_text(errors="replace")
     except FileNotFoundError:
         return None
+
+
+def wait_for_readable_bytes(db, timeout=FAULT_OBSERVATION_TIMEOUT):
+    """Poll a block snapshot until it is readable outside a rotation window."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        content = read_bytes_lenient(db)
+        if content is not None:
+            return content
+        time.sleep(0.05)
+    return None
+
+
+def wait_for_durable_baseline(log, db, timeout=FAULT_OBSERVATION_TIMEOUT):
+    """Capture a block snapshot only after its READY publication settled.
+
+    udb_blocks_save_all() renames the active snapshots to .udb_previous before
+    installing the new set, so byte-identity baselines captured mid-transition
+    would either crash (ENOENT) or pin a pre-publication revision. Wait for the
+    durable READY marker and a readable snapshot instead.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        content = read_bytes_lenient(db)
+        if content is not None and READY_STATE_PERSISTED in log_text(log):
+            return content
+        time.sleep(0.05)
+    return None
 
 
 def snapshot_is_private(db):
@@ -362,14 +394,14 @@ def mutator_delete_observed(b_log, b_db):
 
 def runtime_rename_failure_observed(a_log, b_log, b_db, baseline):
     return ("INS" in udb_commands(b_log) and "ERR" in udb_commands(a_log) and
-            b_db.read_bytes() == baseline and not db_contains(b_db, MUTATOR_RECORD) and
+            read_bytes_lenient(b_db) == baseline and not db_contains(b_db, MUTATOR_RECORD) and
             not b_db.with_suffix(".db.tmp").exists() and
             "UDB_TEST_SNAPSHOT_RENAME_FAIL:" in log_text(b_log))
 
 
 def runtime_del_rename_failure_observed(a_log, b_log, b_db, baseline):
     return (ordered(udb_commands(b_log), ("INS", "DEL")) and "ERR" in udb_commands(a_log) and
-            b_db.read_bytes() == baseline and db_contains(b_db, MUTATOR_RECORD) and
+            read_bytes_lenient(b_db) == baseline and db_contains(b_db, MUTATOR_RECORD) and
             not b_db.with_suffix(".db.tmp").exists() and
             "UDB_TEST_SNAPSHOT_RENAME_FAIL:" in log_text(b_log) and
             ("cmd=DEL err=3" in log_text(a_log) or "cmd=DEL err=6" in log_text(a_log)))
@@ -377,7 +409,7 @@ def runtime_del_rename_failure_observed(a_log, b_log, b_db, baseline):
 
 def runtime_drp_rename_failure_observed(a_log, b_log, b_db, baseline):
     return ("DRP" in udb_commands(b_log) and "ERR" in udb_commands(a_log) and
-            b_db.read_bytes() == baseline and db_contains(b_db, "harness-a::vhost winner.test") and
+            read_bytes_lenient(b_db) == baseline and db_contains(b_db, "harness-a::vhost winner.test") and
             not b_db.with_suffix(".db.tmp").exists() and
             "UDB_TEST_SNAPSHOT_RENAME_FAIL:" in log_text(b_log) and
             ("cmd=DRP err=3" in log_text(a_log) or "cmd=DRP err=6" in log_text(a_log)))
@@ -388,7 +420,7 @@ def malformed_end_checksums_rejected(a_log, b_log, b_db, baseline):
             (log_text(a_log).count("cmd=END err=2") >= 3 or
              log_text(a_log).count("cmd=END err=3") >= 3 or
              log_text(a_log).count("cmd=END err=6") >= 3) and
-            b_db.read_bytes() == baseline and not db_contains(b_db, "attack"))
+            read_bytes_lenient(b_db) == baseline and not db_contains(b_db, "attack"))
 
 
 def print_diagnostics(logs, b_db=None):
@@ -613,9 +645,14 @@ def main():
             # N and K were committed from the authority before the transition;
             # their durable content must be A's winner records, not B's seeds.
             imported = {
-                "N": (b / "runtime-data" / "udb_N.db").read_bytes(),
-                "K": (b / "runtime-data" / "udb_K.db").read_bytes(),
+                "N": wait_for_readable_bytes(b / "runtime-data" / "udb_N.db"),
+                "K": wait_for_readable_bytes(b / "runtime-data" / "udb_K.db"),
             }
+            if imported["N"] is None or imported["K"] is None:
+                print("FAIL: node B never exposed the imported N/K snapshots outside a rotation window",
+                      file=sys.stderr)
+                print_diagnostics(logs, b_db)
+                return 1
             while time.monotonic() < deadline:
                 if snapshot_set_rename_failure_observed(logs[1], state_file, b / "runtime-data", set_baselines, imported):
                     break
@@ -649,7 +686,11 @@ def main():
         print("PASS: authority A won divergent N and K blocks despite B's newer timestamp and higher SID, "
               "with exactly one RES per divergent block and no reverse transfer")
         if args.malformed_end_checksum:
-            b_baseline = b_db.read_bytes()
+            b_baseline = wait_for_durable_baseline(logs[1], b_db)
+            if b_baseline is None:
+                print("FAIL: node B never settled a durable N snapshot before the fault was armed", file=sys.stderr)
+                print_diagnostics(logs, b_db)
+                return 1
             (a / "runtime-data" / MUTATOR_END_TRIGGER).touch()
             deadline = time.monotonic() + max(args.timeout, FAULT_OBSERVATION_TIMEOUT)
             while time.monotonic() < deadline:
@@ -669,11 +710,19 @@ def main():
             if not mutator_insert_observed(logs[1], b_db):
                 print_diagnostics(logs, b_db)
                 return 1
-            b_baseline = b_db.read_bytes()
+            b_baseline = wait_for_durable_baseline(logs[1], b_db)
+            if b_baseline is None:
+                print("FAIL: node B never settled a durable N snapshot before the fault was armed", file=sys.stderr)
+                print_diagnostics(logs, b_db)
+                return 1
             (b / "runtime-data" / "udb-snapshot-rename-fail-go").touch()
             (a / "runtime-data" / MUTATOR_DEL_TRIGGER).touch()
         elif args.runtime_rename_failure or args.runtime_drp_rename_failure:
-            b_baseline = b_db.read_bytes()
+            b_baseline = wait_for_durable_baseline(logs[1], b_db)
+            if b_baseline is None:
+                print("FAIL: node B never settled a durable N snapshot before the fault was armed", file=sys.stderr)
+                print_diagnostics(logs, b_db)
+                return 1
             (b / "runtime-data" / "udb-snapshot-rename-fail-go").touch()
         if args.runtime_drp_rename_failure:
             (a / "runtime-data" / MUTATOR_DRP_TRIGGER).touch()

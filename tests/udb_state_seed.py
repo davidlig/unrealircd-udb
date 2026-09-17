@@ -45,6 +45,18 @@ def read_text_lenient(path):
         return ""
 
 
+def read_bytes_lenient(path):
+    """Byte-oriented counterpart of read_text_lenient().
+
+    Returns None instead of raising when the snapshot is mid-rotation, so
+    byte-identity polling predicates keep waiting instead of crashing.
+    """
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
 def block_header(letter, generation=DEFAULT_SEED_GENERATION):
     """Leading comment lines required in a seeded block snapshot file."""
     return f"; UDB Block {letter} - Version 1\n; Generation: {generation}\n"
