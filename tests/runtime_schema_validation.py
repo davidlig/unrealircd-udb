@@ -446,8 +446,8 @@ def test_block_k_canonical_profiles(services, data_dir):
         services.send_ins(root + "::action", "warn")
         services.send_ins(root + "::ban-time", "*60")
         services.send_ins(root + "::reason", f"case {pattern}")
-    content = wait_for_db_text(db, encoded("foo"),
-                               "case-distinct Base64 F patterns did not coexist in udb_K.db")
+    content = wait_for_db_text(db, f"{encoded('foo')}::reason case foo",
+                               "the complete foo F profile was not durably persisted")
     require(encoded("Foo") in content,
             "case-distinct Base64 F patterns did not coexist in udb_K.db")
     require("::targets c" in content and "::match-type regex" in content and "::ban-time *60" in content,
