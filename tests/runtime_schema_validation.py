@@ -52,6 +52,23 @@ def require(condition, message):
         raise AssertionError(message)
 
 
+def wait_for_db_text(db, needle, description, timeout=15.0):
+    """Poll a block snapshot until the authorized mutation is durably visible.
+
+    CI runners can stall between accepting an INS and the fsync-backed snapshot
+    rename, so a fixed sleep races the persistence commit. The predicate is
+    unchanged, so a wider window can never turn a real failure into a pass.
+    """
+    deadline = time.monotonic() + timeout
+    content = ""
+    while time.monotonic() < deadline:
+        content = db.read_text(encoding="ascii") if db.exists() else ""
+        if needle in content:
+            return content
+        time.sleep(0.05)
+    raise AssertionError(f"{description}: {needle!r} missing from {db.name}:\n{content}")
+
+
 def skip(message):
     print(f"SKIP: {message}")
     return 77
@@ -284,11 +301,9 @@ def test_clone_limits_int_max_and_one_over(services, data_dir):
 
     for path in paths:
         services.send_ins(path, "*" + accepted)
-    time.sleep(0.2)
     for path in paths:
         db = data_dir / ("udb_S.db" if path.startswith("S::") else "udb_I.db")
-        require(f"{path[3:]} *{accepted}" in db.read_text(encoding="ascii"),
-                f"{path} at INT_MAX was not persisted exactly")
+        wait_for_db_text(db, f"{path[3:]} *{accepted}", f"{path} at INT_MAX was not persisted exactly")
 
     for path in paths:
         start = len(services.lines)
@@ -361,9 +376,8 @@ def test_line_mask_component_and_native_boundaries(services, data_dir):
     host = "h" * 127
     valid_path = f"K::G::{user}@{host}::reason"
     services.send_ins(valid_path, "boundary mask")
-    time.sleep(0.2)
     db = data_dir / "udb_K.db"
-    require(valid_path[3:] in db.read_text(encoding="ascii"), "exact native mask boundary was not persisted")
+    wait_for_db_text(db, valid_path[3:], "exact native mask boundary was not persisted")
 
     for invalid_mask in (("u" * 128) + "@host.test", "user@" + ("h" * 128)):
         start = len(services.lines)
@@ -380,10 +394,8 @@ def test_block_k_absolute_expiry_schema(services, data_dir):
     future = int(time.time()) + 3600
     services.send_ins("K::G::*@expires.test::reason", "absolute expiry")
     services.send_ins("K::G::*@expires.test::expires", f"*{future}")
-    time.sleep(0.25)
-    content = db.read_text(encoding="ascii")
-    require(f"G::*@expires.test::expires *{future}" in content,
-            "absolute K expires value was not persisted exactly")
+    content = wait_for_db_text(db, f"G::*@expires.test::expires *{future}",
+                               "absolute K expires value was not persisted exactly")
     require("duration" not in content, "legacy K duration unexpectedly persisted")
 
     for path, value, label in (
@@ -434,9 +446,9 @@ def test_block_k_canonical_profiles(services, data_dir):
         services.send_ins(root + "::action", "warn")
         services.send_ins(root + "::ban-time", "*60")
         services.send_ins(root + "::reason", f"case {pattern}")
-    time.sleep(0.35)
-    content = db.read_text(encoding="ascii")
-    require(encoded("Foo") in content and encoded("foo") in content,
+    content = wait_for_db_text(db, encoded("foo"),
+                               "case-distinct Base64 F patterns did not coexist in udb_K.db")
+    require(encoded("Foo") in content,
             "case-distinct Base64 F patterns did not coexist in udb_K.db")
     require("::targets c" in content and "::match-type regex" in content and "::ban-time *60" in content,
             "complete F profile was not persisted with explicit schema")
@@ -462,14 +474,14 @@ def test_block_k_expiry_gc(services, data_dir, client_port):
     future = int(time.time()) + 60
     services.send_ins(path + "::reason", "expiry GC")
     services.send_ins(path + "::expires", f"*{future}")
-    time.sleep(0.3)
-    require(f"G::*@127.0.0.1::expires *{future}" in db.read_text(encoding="ascii"),
-            "temporary K profile was not in active persisted state")
+    content = wait_for_db_text(db, f"G::*@127.0.0.1::expires *{future}",
+                               "temporary K profile was not in active persisted state")
 
     # A non-expiry field change must not extend the absolute expiry.
     services.send_ins(path + "::reason", "expiry GC changed reason")
-    time.sleep(0.2)
-    require(f"G::*@127.0.0.1::expires *{future}" in db.read_text(encoding="ascii"),
+    content = wait_for_db_text(db, "G::*@127.0.0.1::reason expiry GC changed reason",
+                               "non-expiry K profile update was not persisted")
+    require(f"G::*@127.0.0.1::expires *{future}" in content,
             "reason update changed the absolute expiry")
 
     # Expire now. The follower cannot edit authoritative persistence; it asks
@@ -496,9 +508,8 @@ def test_channel_mode_parameter_capacity_atomic(services, data_dir):
     params12 = [str(index + 10) for index in range(12)]
     value12 = " ".join(["+" + ("l" * len(params12)), *params12])
     services.send_ins(f"C::{CHANNEL}::modes", value12)
-    time.sleep(0.2)
     db = data_dir / "udb_C.db"
-    require(value12 in db.read_text(encoding="ascii"), "12 mode parameters were not persisted as one record")
+    wait_for_db_text(db, value12, "12 mode parameters were not persisted as one record")
 
     params13 = [str(index + 10) for index in range(13)]
     value13 = " ".join(["+" + ("l" * len(params13)), *params13])
@@ -612,17 +623,16 @@ def run_tests(ircd_bin, keep=False):
             services.wait_for(lambda line: " DB " in line and " ERR INS " in line,
                               f"rejection of removed schema key {path}", start=start)
         services.send_ins("N::acceptsuspend::suspend", "manual review")
-        time.sleep(0.15)
-        require("acceptsuspend::suspend manual review" in (data_dir / "udb_N.db").read_text(encoding="ascii"),
-                "N::suspend was not accepted by the replacement schema")
+        wait_for_db_text(data_dir / "udb_N.db", "acceptsuspend::suspend manual review",
+                         "N::suspend was not accepted by the replacement schema")
 
         # `forbid` is canonical and exclusive: an INS atomically drops siblings
         # and future sibling inserts are rejected until forbid is deleted.
         services.send_ins("N::forbidtest::pass", "sha256:" + "ab" * 32)
         services.send_ins("N::forbidtest::forbid", "reserved")
-        time.sleep(0.2)
-        n_db = (data_dir / "udb_N.db").read_text(encoding="ascii")
-        require("forbidtest::forbid reserved" in n_db and "forbidtest::pass" not in n_db,
+        n_db = wait_for_db_text(data_dir / "udb_N.db", "forbidtest::forbid reserved",
+                                "INS forbid did not persist an exclusive canonical profile")
+        require("forbidtest::pass" not in n_db,
                 "INS forbid did not persist an exclusive canonical profile")
         records_header = next((line for line in n_db.splitlines() if line.startswith("; Records: ")), None)
         require(records_header is not None, "N snapshot omitted its Records header")
