@@ -347,6 +347,19 @@ def exercise(host, port):
         suspended_client.request("JOIN #firstkey firstsecret", lambda line: " 366 " in line, "first keyed JOIN")
         suspended_client.request("JOIN #vault chansecret", lambda line: " 366 " in line, "end of keyed JOIN")
 
+        rejected_forbid = suspended_client.request("JOIN #forbidden", lambda line: " 448 " in line,
+                                                   "forbidden channel rejection")
+        require(any("This channel is forbidden. Reason: reserved for testing" in line
+                    for line in rejected_forbid),
+                f"channel forbid lost its descriptive message: {rejected_forbid!r}")
+
+        rejected_percent = suspended_client.request("JOIN #percent", lambda line: " 448 " in line,
+                                                    "forbidden channel percent reason")
+        require(any("This channel is forbidden. Reason: Reserved %s for tests" in line
+                    for line in rejected_percent) and
+                not any("Reason: Reserved #" in line for line in rejected_percent),
+                f"channel forbid reason was interpreted as a format string: {rejected_percent!r}")
+
         alice.request("NICK alice2", lambda line: " NICK :alice2" in line, "nick change")
         mode_reply = alice.wait_for(lambda line: " MODE alice2 " in line and "-r" in line,
                                     "removal of +r on nick drop")
@@ -354,7 +367,8 @@ def exercise(host, port):
                 f"+r persisted after nick drop: {mode_reply!r}")
         require(any("-t" in line or "-rt" in line for line in mode_reply),
                 f"UDB vhost persisted after nick drop: {mode_reply!r}")
-        print("PASS: nick sha256 +r/vhost, founder-only +q, and native +k including the first JOIN")
+        print("PASS: nick sha256 +r/vhost, founder-only +q, native +k including the first JOIN, "
+              "and descriptive channel forbid")
     finally:
         for client in clients:
             client.close()
@@ -410,7 +424,9 @@ def main():
         seed_block(data / "udb_C.db", "C",
                    "#vault::founder alice\n"
                    "#vault::modes +ntk chansecret\n"
-                   "#firstkey::modes +ntk firstsecret\n")
+                   "#firstkey::modes +ntk firstsecret\n"
+                   "#forbidden::forbid reserved for testing\n"
+                   "#percent::forbid Reserved %s for tests\n")
         seed_block(data / "udb_L.db", "L",
                    "udb-one.test::options *1\n")
         for block in ("I", "S", "K"):

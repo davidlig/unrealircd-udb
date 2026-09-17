@@ -11043,6 +11043,28 @@ static int udb_channel_modes_key(const char *value, char *key_out, size_t key_ou
 	return 0;
 }
 
+static void udb_escape_percent(const char *src, char *dst, size_t dst_size)
+{
+	size_t pos = 0;
+
+	if (!dst || dst_size == 0)
+		return;
+	if (src)
+	{
+		for (; *src && pos + 1 < dst_size; src++)
+		{
+			if (*src == '%')
+			{
+				if (pos + 2 >= dst_size)
+					break;
+				dst[pos++] = '%';
+			}
+			dst[pos++] = *src;
+		}
+	}
+	dst[pos] = '\0';
+}
+
 static int udb_hook_can_join(Client *client, Channel *channel, const char *key, char **errmsg)
 {
 	static char errbuf[512];
@@ -11056,8 +11078,11 @@ static int udb_hook_can_join(Client *client, Channel *channel, const char *key, 
 	forbid_rec = udb_record_find(udb_ctx, CKEY_FORBID, chan_rec);
 	if (forbid_rec)
 	{
-		snprintf(errbuf, sizeof(errbuf), "%%s :%s",
-				 forbid_rec->data_str ? forbid_rec->data_str : "Channel is forbidden");
+		char escaped_reason[512];
+
+		udb_escape_percent(forbid_rec->data_str ? forbid_rec->data_str : "No reason given", escaped_reason,
+						   sizeof(escaped_reason));
+		snprintf(errbuf, sizeof(errbuf), "%%s :This channel is forbidden. Reason: %s", escaped_reason);
 		*errmsg = errbuf;
 		return ERR_FORBIDDENCHANNEL;
 	}
