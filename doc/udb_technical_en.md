@@ -188,11 +188,11 @@ Keys:
 | Key | Type | Current runtime effect |
 |---|---|---|
 | `founder` | nick | Identified founder; receives UDB-owned `+q`. |
-| `modes` | string | Channel modes/parameters validated against loaded handlers. |
+| `modes` | string | Channel modes/parameters validated against loaded handlers. The registration marker `r`, member ranks (`q`, `a`, `o`, `h`, `v`), and `P` are rejected in mutations, staged sync, and persisted files; persistence is expressed only by the `options` `PERSISTENT` bit. |
 | `topic` | string | UDB-managed topic. |
 | `access` | container | Authorized nickname list. |
 | `forbid` | string | Rejects JOIN with the stored reason. |
-| `suspend` | string | Suppresses registered-channel/founder behavior. |
+| `suspend` | string | Suppresses registered-channel/founder behavior: while present it removes native `+r` and founder `+q`; lifting it restores both on a live channel. |
 | `options` | numeric | Bitmask described below. |
 
 `C::<channel>::access::<nick>` may carry a numeric or string value according to the schema, but **the current JOIN hook only checks that the child exists and that the user has `+r`**. The child value is not interpreted as a rank.
@@ -211,6 +211,8 @@ Bits may be combined; `*15` enables all four.
 #### JOIN, founder and native key
 
 The founder is identified only when the nickname matches `founder` and the user has `+r`. The founder can bypass JOIN bans/keys/invite and receives `+q` unless the profile has `suspend`.
+
+UDB owns native `+r` as the registered-channel marker: registering a live channel applies it, `suspend` and profile deletion remove it, and lifting `suspend` restores it together with founder `+q`. `C::modes` never stores `r`, member ranks, or `P`.
 
 `C::modes` is the key source: `+k` uses UnrealIRCd native semantics, including exact comparison. UDB covers only the first-JOIN gap before the mode is materialized; later joins are enforced by UnrealIRCd.
 
@@ -958,6 +960,7 @@ To diagnose a node:
 At the documented commit:
 
 - `C::<channel>::access::<nick>` values do not define ranks; child presence plus `+r` identification authorizes JOIN.
+- `C::<channel>::modes` rejects the registration marker `r`, member ranks (`q`, `a`, `o`, `h`, `v`), and `P`; native `+r` tracks registration and `suspend` state.
 - I root keys use exact runtime lookup and are not CIDR matching rules.
 - `PERSISTENT` depends on UnrealIRCd having native channel mode `+P`; UDB does not create a substitute.
 

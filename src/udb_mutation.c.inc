@@ -310,7 +310,7 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 			 * new policy and the following apply reconciles effects. */
 			if (!nick_pass_changed && (block->letter != UDB_BLOCK_CHANNELS || old_rec->parent == block->tree ||
 									   (strcmp(old_rec->key, CKEY_MODES) && strcmp(old_rec->key, CKEY_TOPIC) &&
-										strcmp(old_rec->key, CKEY_OPTIONS))))
+										strcmp(old_rec->key, CKEY_OPTIONS) && strcmp(old_rec->key, CKEY_SUSPEND))))
 				udb_remove_special_record(ctx, block, old_rec);
 		}
 		if (block->letter == UDB_BLOCK_LINES)

@@ -194,11 +194,11 @@ Claves:
 | Clave | Tipo | Efecto actual |
 |---|---|---|
 | `founder` | nick | Fundador identificado. Recibe `+q` gestionado por UDB. |
-| `modes` | texto | Modos de canal y parámetros validados contra los handlers cargados. |
+| `modes` | texto | Modos de canal y parámetros validados contra los handlers cargados. El marcador de registro `r`, los rangos de miembro (`q`, `a`, `o`, `h`, `v`) y `P` se rechazan en mutaciones, sync staged y ficheros persistidos; la persistencia se expresa sólo con el bit `PERSISTENT` de `options`. |
 | `topic` | texto | Topic gestionado por UDB. |
 | `access` | contenedor | Lista de nicks autorizados. |
 | `forbid` | texto | Rechaza el JOIN con el motivo almacenado. |
-| `suspend` | texto | Suprime el comportamiento de canal registrado/fundador. |
+| `suspend` | texto | Suprime el comportamiento de canal registrado/fundador: mientras existe retira el `+r` nativo y el `+q` del fundador; al levantarlo restaura ambos en un canal vivo. |
 | `options` | numérico | Máscara de bits descrita abajo. |
 
 `C::<canal>::access::<nick>` acepta valor numérico o de texto por esquema, pero **el hook de JOIN actual sólo comprueba la existencia de la entrada y que el usuario tenga `+r`**. El valor de la entrada no se interpreta como rango en esta implementación.
@@ -217,6 +217,8 @@ Los bits pueden combinarse. Por ejemplo `*15` habilita los cuatro.
 #### JOIN, fundador y clave nativa
 
 El fundador sólo se considera identificado si su nick coincide con `founder` y tiene `+r`. Puede saltarse bans/keys/invite de JOIN y recibe `+q` salvo que el perfil tenga `suspend`.
+
+El `+r` nativo es el marcador de canal registrado propiedad de UDB: registrar un canal vivo lo aplica, `suspend` y la baja del perfil lo retiran, y levantar `suspend` lo restaura junto con el `+q` del fundador. `C::modes` nunca almacena `r`, rangos de miembro ni `P`.
 
 `C::modes` es la fuente de clave: `+k` usa la semántica nativa de UnrealIRCd, incluida comparación exacta. UDB cubre el hueco del primer JOIN antes de materializar el modo; después la aplica UnrealIRCd.
 
@@ -964,6 +966,7 @@ Para diagnosticar un nodo:
 A fecha del commit documentado:
 
 - el valor de `C::<canal>::access::<nick>` no define rango; la presencia de la entrada + identificación `+r` es lo que autoriza el JOIN.
+- `C::<canal>::modes` rechaza el marcador de registro `r`, los rangos de miembro (`q`, `a`, `o`, `h`, `v`) y `P`; el `+r` nativo sigue el estado de registro y de `suspend`.
 - las claves raíz del bloque I se buscan de forma exacta; no son reglas CIDR de matching.
 - `PERSISTENT` depende de que exista el modo nativo de canal `+P` en UnrealIRCd; UDB no crea un sustituto.
 

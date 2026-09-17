@@ -2696,16 +2696,20 @@ static int udb_channel_modes_record_valid(const char *value)
 			continue;
 		}
 
+		/* +r is UDB-owned registration state, +P is expressed by the
+		 * C::options PERSISTENT bit, and member ranks never live here. */
+		if (*c == 'r' || *c == 'P')
+			return 0;
+
 		cm = find_channel_mode_handler(*c);
 		if (!cm)
 			return 0;
 
-		mode_letters++;
 		if (cm->type == CMODE_MEMBER)
-		{
-			expected_params++;
-		}
-		else if (what == MODE_ADD && cm->paracount > 0)
+			return 0;
+
+		mode_letters++;
+		if (what == MODE_ADD && cm->paracount > 0)
 		{
 			expected_params++;
 		}
@@ -7456,7 +7460,7 @@ static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_pee
 			 * new policy and the following apply reconciles effects. */
 			if (!nick_pass_changed && (block->letter != UDB_BLOCK_CHANNELS || old_rec->parent == block->tree ||
 									   (strcmp(old_rec->key, CKEY_MODES) && strcmp(old_rec->key, CKEY_TOPIC) &&
-										strcmp(old_rec->key, CKEY_OPTIONS))))
+										strcmp(old_rec->key, CKEY_OPTIONS) && strcmp(old_rec->key, CKEY_SUSPEND))))
 				udb_remove_special_record(ctx, block, old_rec);
 		}
 		if (block->letter == UDB_BLOCK_LINES)
@@ -10831,10 +10835,9 @@ static void udb_channel_track_new_bans(Channel *channel, Client *client, UdbBanS
 	}
 }
 
-static void udb_channel_reconcile_founder(Channel *channel, UdbRecord *chan_rec)
+static void udb_channel_reconcile_founder(Channel *channel, UdbRecord *chan_rec, int suspended)
 {
 	Member *member;
-	int suspended = chan_rec && udb_record_find(udb_ctx, CKEY_SUSPEND, chan_rec);
 
 	for (member = channel->members; member; member = member->next)
 	{
@@ -10852,6 +10855,21 @@ static void udb_channel_reconcile_founder(Channel *channel, UdbRecord *chan_rec)
 			/* UDB owns founder +q, so a profile replacement has one owner only. */
 			udb_channel_do_mode(channel, NULL, "-q", member->client->name);
 		}
+	}
+}
+
+static void udb_channel_reconcile_registered(Channel *channel, int registered, int suspended, MessageTag *mtags)
+{
+	if (!channel || !find_channel_mode_handler('r'))
+		return;
+	if (registered && !suspended)
+	{
+		if (!has_channel_mode(channel, 'r'))
+			udb_channel_do_mode(channel, mtags, "+r", "");
+	}
+	else if (has_channel_mode(channel, 'r'))
+	{
+		udb_channel_do_mode(channel, mtags, "-r", "");
 	}
 }
 
@@ -10890,12 +10908,14 @@ static void udb_channel_apply_subrecord(UdbContext *ctx, Channel *channel, UdbRe
 	{
 		UdbRecord *mode_rec = udb_record_find(ctx, CKEY_MODES, chan_rec);
 		UdbRecord *topic_rec = udb_record_find(ctx, CKEY_TOPIC, chan_rec);
+		int suspended = udb_record_find(ctx, CKEY_SUSPEND, chan_rec) != NULL;
 
-		udb_channel_reconcile_founder(channel, chan_rec);
+		udb_channel_reconcile_founder(channel, chan_rec, suspended);
 		if (mode_rec && mode_rec->data_str)
 			udb_channel_apply_modes(channel, mode_rec->data_str);
-		udb_channel_set_persistent(channel, udb_channel_is_persistent(ctx, chan_rec));
 		udb_channel_apply_topic(channel, topic_rec);
+		/* -P may destroy an empty channel, so it is applied last. */
+		udb_channel_set_persistent(channel, udb_channel_is_persistent(ctx, chan_rec));
 		return;
 	}
 
@@ -10911,7 +10931,7 @@ static void udb_channel_apply_subrecord(UdbContext *ctx, Channel *channel, UdbRe
 
 	if (!strcmp(subkey, CKEY_FOUNDER))
 	{
-		udb_channel_reconcile_founder(channel, chan_rec);
+		udb_channel_reconcile_founder(channel, chan_rec, udb_record_find(ctx, CKEY_SUSPEND, chan_rec) != NULL);
 	}
 	else if (!strcmp(subkey, CKEY_MODES))
 	{
@@ -10921,13 +10941,17 @@ static void udb_channel_apply_subrecord(UdbContext *ctx, Channel *channel, UdbRe
 	{
 		udb_channel_apply_topic(channel, sub_rec);
 	}
+	else if (!strcmp(subkey, CKEY_SUSPEND))
+	{
+		udb_channel_reconcile_founder(channel, chan_rec, 1);
+	}
 }
 
 static void udb_channel_remove_subrecord(UdbContext *ctx, Channel *channel, UdbRecord *chan_rec, const char *subkey)
 {
 	if (!strcmp(subkey, CKEY_FOUNDER))
 	{
-		udb_channel_reconcile_founder(channel, NULL);
+		udb_channel_reconcile_founder(channel, NULL, 0);
 	}
 	else if (!strcmp(subkey, CKEY_MODES))
 	{
@@ -10941,13 +10965,23 @@ static void udb_channel_remove_subrecord(UdbContext *ctx, Channel *channel, UdbR
 	{
 		udb_channel_clear_topic(channel);
 	}
+	else if (!strcmp(subkey, CKEY_SUSPEND))
+	{
+		/* Lifting a suspension restores the registered marker and founder +q. */
+		udb_channel_reconcile_founder(channel, chan_rec, 0);
+		udb_channel_reconcile_registered(channel, 1, 0, NULL);
+	}
 	else if (!strcasecmp(subkey, chan_rec->key))
 	{
-		udb_channel_reconcile_founder(channel, NULL);
+		int had_topic = udb_record_find(ctx, CKEY_TOPIC, chan_rec) != NULL;
+
+		udb_channel_reconcile_founder(channel, NULL, 0);
+		udb_channel_reconcile_registered(channel, 0, 0, NULL);
 		udb_channel_remove_modes(channel);
-		udb_channel_set_persistent(channel, 0);
-		if (udb_record_find(ctx, CKEY_TOPIC, chan_rec))
+		if (had_topic)
 			udb_channel_clear_topic(channel);
+		/* -P may destroy an empty channel, so it is applied last. */
+		udb_channel_set_persistent(channel, 0);
 	}
 }
 
@@ -10966,7 +11000,13 @@ static void udb_channel_apply_record(UdbContext *ctx, UdbBlock *block, UdbRecord
 		channel->creationtime = TStime();
 	}
 	if (channel)
+	{
 		udb_channel_apply_subrecord(ctx, channel, chan_rec, rec->key, is_new);
+		/* Dropping -P may have destroyed an empty channel. */
+		channel = find_channel(chan_rec->key);
+		if (channel)
+			udb_channel_reconcile_registered(channel, 1, udb_record_find(ctx, CKEY_SUSPEND, chan_rec) != NULL, NULL);
+	}
 }
 
 static void udb_channel_remove_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec)
@@ -11122,30 +11162,24 @@ static void handle_join(Client *client, Channel *channel, MessageTag *mtags)
 	if (!chan_rec)
 		return;
 
-	int is_founder = udb_channel_is_identified_founder(client, chan_rec);
+	int suspended = udb_record_find(udb_ctx, CKEY_SUSPEND, chan_rec) != NULL;
 
 	if (channel->users == 1)
 	{
-		UdbRecord *susp_rec = udb_record_find(udb_ctx, CKEY_SUSPEND, chan_rec);
-
 		/* A registered channel assigns founder authority exclusively as +q. */
 		if (!IsServer(client) && !IsULine(client))
 		{
 			udb_channel_do_mode(channel, mtags, "-o", client->name);
 		}
 
-		if (!susp_rec)
-		{
-			udb_channel_do_mode(channel, mtags, "+r", "");
-		}
-
+		udb_channel_reconcile_registered(channel, 1, suspended, mtags);
 		udb_channel_apply_subrecord(udb_ctx, channel, chan_rec, CKEY_MODES, 0);
 		udb_channel_apply_subrecord(udb_ctx, channel, chan_rec, CKEY_TOPIC, 0);
 		udb_channel_set_persistent(channel, udb_channel_is_persistent(udb_ctx, chan_rec));
 	}
 
 	/* Founder +q is UDB-owned and must have exactly one current holder. */
-	udb_channel_reconcile_founder(channel, chan_rec);
+	udb_channel_reconcile_founder(channel, chan_rec, suspended);
 }
 
 static int udb_hook_local_join(Client *client, Channel *channel, MessageTag *mtags)

@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Regression: an identical C::#chan::modes INS must not revoke founder +q.
+"""Regression: C::#chan::modes ownership and registered-channel +r.
 
 Reproduces the services topology: a fake services server (UDB propagator)
 links to a one-node network and re-INSs the channel modes record. The UDB
-module must apply channel modes only when the value changes, and must never
-strip the founder rank (+q) as a side effect.
+module must apply channel modes only when the value changes, must never
+strip the founder rank (+q) as a side effect, and must reject the reserved
+registration marker (+r), member ranks (q/a/o/h/v), and +P. Native +r is
+UDB-owned registration state: registering a live channel adds it, suspend
+removes it, and lifting suspend restores +r and founder +q.
 """
 
 import argparse
@@ -243,14 +246,14 @@ class FakeServices:
                 elif line:
                     self.lines.append(line)
 
-    def wait_for(self, predicate, description, timeout=8):
+    def wait_for(self, predicate, description, start=0, timeout=8):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            matches = [line for line in self.lines if predicate(line)]
+            matches = [line for line in self.lines[start:] if predicate(line)]
             if matches:
                 return matches
             self.receive(deadline)
-        raise AssertionError(f"services: did not receive {description}; lines={self.lines!r}")
+        raise AssertionError(f"services: did not receive {description}; lines={self.lines[start:]!r}")
 
     def wait_hel(self):
         self.wait_for(lambda line: line.startswith(f":{self.ircd_sid} DB {self.sid} HEL 4 "),
@@ -415,24 +418,30 @@ def exercise(host, client_port, server_port, c_db):
         require(wait_for_file_content(c_db, f"{CHANNEL}::modes +ntkm chansecret", 5),
                 f"changed modes value was not persisted in {c_db}")
 
-        # Every UDB-managed member rank, including generic C::modes ranks, must
-        # be emitted by ChanServ when the target is already present.
+        # Member ranks (q/a/o/h/v) are never accepted in C::modes: the INS is
+        # rejected, no rank reaches the channel, and the value is unchanged.
+        bob.wait_for(lambda line: f"MODE {CHANNEL}" in line and "+m" in line,
+                     "bob sees the previous modes change")
         start = len(bob.lines)
+        services_start = len(services.lines)
         services.send_ins(f"C::{CHANNEL}::modes", "+ovh bob bob bob")
-        bob.wait_for(lambda line: f"MODE {CHANNEL}" in line and "+ovh" in line,
-                     "ChanServ q/a/o/h/v rank application", start=start)
-        rank_traffic = bob.lines[start:]
-        require(any(line.startswith(f"{CHANSERV_PREFIX} MODE {CHANNEL} ") and "+ovh" in line
-                    for line in rank_traffic),
-                f"the o/h/v ranks were not originated by ChanServ: {rank_traffic!r}")
+        services.wait_for(lambda line: " DB " in line and " ERR INS " in line,
+                          "rejection of member ranks in C::modes", start=services_start)
+        time.sleep(0.5)
+        bob.receive(time.monotonic() + 0.5)
+        rank_traffic = [line for line in bob.lines[start:] if f"MODE {CHANNEL}" in line]
+        require(not rank_traffic, f"rejected C::modes ranks were applied: {rank_traffic!r}")
+        require(wait_for_file_content(c_db, f"{CHANNEL}::modes +ntkm chansecret", 5),
+                f"rejected C::modes ranks changed the persisted modes in {c_db}")
 
+        # A non-member mode change applies and reverts the removed mode.
         start = len(alice.lines)
         services.send_ins(f"C::{CHANNEL}::modes", "+ntM")
         alice.wait_for(lambda line: f"MODE {CHANNEL}" in line and "+ntM" in line,
-                       "UDB-managed rank reversion", start=start)
-        require(any(line.startswith(f"{CHANSERV_PREFIX} MODE {CHANNEL} ") and "-ovh" in line
+                       "non-member mode application", start=start)
+        require(any(line.startswith(f"{CHANSERV_PREFIX} MODE {CHANNEL} ") and "-m" in line
                     for line in alice.lines[start:]),
-                f"the o/h/v rank reversion was not originated by ChanServ: {alice.lines[start:]!r}")
+                f"the removed +m was not reverted by ChanServ: {alice.lines[start:]!r}")
 
         # Phase 3: a channel-profile INS revokes and must restore the founder.
         start = len(alice.lines)
@@ -447,6 +456,50 @@ def exercise(host, client_port, server_port, c_db):
                 f"the founder +q restoration was not originated by ChanServ: {alice.lines[start:]!r}")
         require(any("~alice" in line for line in names(alice)),
                 f"channel INS did not restore founder +q: {names(alice)!r}")
+
+        # Phase 4: registering a live channel applies +r, and suspend toggles
+        # both the registered marker and founder +q.
+        fresh = "#fresh"
+        fresh_start = len(alice.lines)
+        alice.request("JOIN " + fresh, lambda line: " 366 " in line, "join unregistered channel")
+        require(not any(f"MODE {fresh}" in line and "+r" in line for line in alice.lines[fresh_start:]),
+                f"unregistered channel received +r: {alice.lines[fresh_start:]!r}")
+
+        start = len(alice.lines)
+        services.send_ins(f"C::{fresh}::founder", "alice")
+        alice.wait_for(lambda line: f"MODE {fresh}" in line and "+r" in line,
+                       "registration +r for a live channel", start=start)
+        require(any(line.startswith(f"{CHANSERV_PREFIX} MODE {fresh} ") and "+q alice" in line
+                    for line in alice.lines[start:]),
+                f"live registration did not grant founder +q: {alice.lines[start:]!r}")
+        require(wait_for_file_content(c_db, f"{fresh}::founder alice", 5),
+                f"live channel registration was not persisted in {c_db}")
+
+        for invalid in ("+ntr", "+ntP"):
+            services_start = len(services.lines)
+            services.send_ins(f"C::{fresh}::modes", invalid)
+            services.wait_for(lambda line: " DB " in line and " ERR INS " in line,
+                              f"rejection of {invalid} in C::modes", start=services_start)
+
+        start = len(alice.lines)
+        services.send_ins(f"C::{fresh}::suspend", "maintenance")
+        alice.wait_for(lambda line: f"MODE {fresh}" in line and "-r" in line,
+                       "suspension removing +r", start=start)
+        require(any(line.startswith(f"{CHANSERV_PREFIX} MODE {fresh} ") and "-q alice" in line
+                    for line in alice.lines[start:]),
+                f"suspension did not revoke founder +q: {alice.lines[start:]!r}")
+        require(wait_for_file_content(c_db, f"{fresh}::suspend maintenance", 5),
+                f"suspension was not persisted in {c_db}")
+
+        start = len(alice.lines)
+        services.send_del(f"C::{fresh}::suspend")
+        alice.wait_for(lambda line: f"MODE {fresh}" in line and "+r" in line,
+                       "unsuspension restoring +r", start=start)
+        require(any(line.startswith(f"{CHANSERV_PREFIX} MODE {fresh} ") and "+q alice" in line
+                    for line in alice.lines[start:]),
+                f"unsuspension did not restore founder +q: {alice.lines[start:]!r}")
+        require(f"{fresh}::suspend" not in c_db.read_text(errors="replace"),
+                f"removed suspension is still persisted in {c_db}")
 
         services.send_del(f"C::{CHANNEL}::topic")
         alice.wait_for(lambda line: line.startswith(f"{CHANSERV_PREFIX} TOPIC {CHANNEL} :"),
@@ -471,8 +524,8 @@ def exercise(host, client_port, server_port, c_db):
                      ("explicit IP vhost has been removed" in line or
                       "IP-derived vhost is now" in line),
                      "explicit IP vhost reversion")
-        print("PASS: Identical INS avoided churn and preserved +q, modes applied on change, and "
-              "founder restored after channel profile INS")
+        print("PASS: Identical INS avoided churn and preserved +q, only non-member modes are "
+              "accepted, and +r/+q follow registration, suspension, and channel profile INS")
     finally:
         if services:
             services.close()

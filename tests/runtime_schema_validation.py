@@ -781,6 +781,31 @@ def run_tests(ircd_bin, keep=False):
         proc = None
         print("PASS: Server startup aborted transactionally on corrupted records in udb_C.db")
 
+        # -------------------------------------------------------------
+        # Test 8: C::modes reserved letters are rejected on file load too
+        # -------------------------------------------------------------
+        for reserved_modes in ("+ntr", "+ntP", "+ntovh davidlig davidlig davidlig"):
+            db_c.write_text(f"""; UDB Block C - Version 1
+; Saved: 1787715840
+; Records: 2
+#reserved::founder davidlig
+#reserved::modes {reserved_modes}
+""", encoding="ascii")
+            orig_bytes = db_c.read_bytes()
+
+            proc = subprocess.Popen(bwrap_command(node, ircd_bin, config),
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            time.sleep(1.0)
+            stop(proc)
+            stdout, _ = proc.communicate()
+
+            if "Malformed persisted record in block C" not in stdout and "Failed to initialize database engine" not in stdout:
+                raise RuntimeError(f"Expected load rejection for C::modes {reserved_modes!r}, got:\n{stdout}")
+            if db_c.read_bytes() != orig_bytes:
+                raise AssertionError(f"udb_C.db with reserved modes {reserved_modes!r} was overwritten after failed load!")
+            proc = None
+        print("PASS: reserved C::modes letters (+r, +P, member ranks) abort startup transactionally")
+
     finally:
         if proc:
             stop(proc)
