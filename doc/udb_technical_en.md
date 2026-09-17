@@ -255,7 +255,6 @@ S only accepts depth-1 keys:
 | Key | Type | Current use |
 |---|---|---|
 | `clones` | numeric | Global clone fallback consumed by I. |
-| `quit_ips` | string | Stored in context; **no IP-limit disconnect consumer exists in the current sources**. |
 | `quit_clones` | string | Clone rejection message. |
 | `flood` | `attempts:seconds` | Overrides password failure throttling; deletion restores local config. |
 | `encryption_key` | 64 hex | HMAC key for derived vhosts. |
@@ -958,7 +957,6 @@ To diagnose a node:
 
 At the documented commit:
 
-- `S::quit_ips` is stored but has no runtime consumer in current sources.
 - `C::<channel>::access::<nick>` values do not define ranks; child presence plus `+r` identification authorizes JOIN.
 - I root keys use exact runtime lookup and are not CIDR matching rules.
 - `PERSISTENT` depends on UnrealIRCd having native channel mode `+P`; UDB does not create a substitute.

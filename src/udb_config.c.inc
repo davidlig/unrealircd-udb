@@ -263,7 +263,6 @@ static void udb_config_free(UdbContext *ctx)
 {
 	if (ctx)
 	{
-		safe_free(ctx->quit_ips);
 		safe_free(ctx->quit_clones);
 		safe_free(ctx->encryption_key);
 		safe_free(ctx->suffix);
@@ -394,7 +393,6 @@ typedef struct UdbSettingOps
 #define UDB_SETTING_POLICY_CHANGED 0x8
 
 static const UdbSettingOps udb_setting_ops[] = {
-	{SKEY_QUIT_IPS, udb_setting_string_valid, offsetof(UdbContext, quit_ips), 0},
 	{SKEY_QUIT_CLONES, udb_setting_string_valid, offsetof(UdbContext, quit_clones), 0},
 	{SKEY_CLONES, NULL, 0, UDB_SETTING_NUMERIC_ONLY},
 	{SKEY_FLOOD, NULL, 0, UDB_SETTING_FLOOD},

@@ -305,7 +305,6 @@ typedef struct UdbContext
 	UdbStartupCandidate startup_candidates[UDB_NUM_BLOCKS];
 	char *startup_propagator_setting;
 	char *propagator_setting;
-	char *quit_ips;
 	char *quit_clones;
 	char *encryption_key;
 	char *suffix;

@@ -63,7 +63,6 @@
 #define SKEY_CHANSERV "chanserv"		/* ChanServ bot mask */
 #define SKEY_IPSERV "ipserv"			/* IpServ bot mask */
 #define SKEY_CLONES "clones"			/* Global max clones (*N) */
-#define SKEY_QUIT_IPS "quit_ips"		/* Quit message for IP limit */
 #define SKEY_QUIT_CLONES "quit_clones"	/* Quit message for clone limit */
 #define SKEY_FLOOD "flood"				/* Password flood limit V:S */
 #define SKEY_PROPAGATOR "propagator"	/* Cluster authoritative propagator(s) */

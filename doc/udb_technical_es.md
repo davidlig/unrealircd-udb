@@ -261,7 +261,6 @@ El bloque S sólo admite claves de profundidad 1:
 | Clave | Tipo | Uso actual |
 |---|---|---|
 | `clones` | numérico | Límite global de clones usado como fallback por el bloque I. |
-| `quit_ips` | texto | Se almacena en el contexto; **no hay un consumidor de desconexión por límite IP en el código actual**. |
 | `quit_clones` | texto | Mensaje al rechazar por clones. |
 | `flood` | texto `intentos:segundos` | Sobrescribe el límite de fallos de contraseña; al borrarlo vuelve al valor local. |
 | `encryption_key` | 64 hex | Clave HMAC para vhosts derivados. |
@@ -964,7 +963,6 @@ Para diagnosticar un nodo:
 
 A fecha del commit documentado:
 
-- `S::quit_ips` se carga en contexto pero no tiene consumidor runtime en los fuentes actuales.
 - el valor de `C::<canal>::access::<nick>` no define rango; la presencia de la entrada + identificación `+r` es lo que autoriza el JOIN.
 - las claves raíz del bloque I se buscan de forma exacta; no son reglas CIDR de matching.
 - `PERSISTENT` depende de que exista el modo nativo de canal `+P` en UnrealIRCd; UDB no crea un sustituto.

@@ -108,7 +108,6 @@ module
 #define SKEY_CHANSERV "chanserv"		/* ChanServ bot mask */
 #define SKEY_IPSERV "ipserv"			/* IpServ bot mask */
 #define SKEY_CLONES "clones"			/* Global max clones (*N) */
-#define SKEY_QUIT_IPS "quit_ips"		/* Quit message for IP limit */
 #define SKEY_QUIT_CLONES "quit_clones"	/* Quit message for clone limit */
 #define SKEY_FLOOD "flood"				/* Password flood limit V:S */
 #define SKEY_PROPAGATOR "propagator"	/* Cluster authoritative propagator(s) */
@@ -449,7 +448,6 @@ typedef struct UdbContext
 	UdbStartupCandidate startup_candidates[UDB_NUM_BLOCKS];
 	char *startup_propagator_setting;
 	char *propagator_setting;
-	char *quit_ips;
 	char *quit_clones;
 	char *encryption_key;
 	char *suffix;
@@ -1062,10 +1060,11 @@ static UdbRecord *udb_hash_find(UdbContext *ctx, int block_idx, const char *key)
 static const char *udb_get_shared_subkey(const char *key)
 {
 	static const char *known_keys[] = {
-		"pass",	   "vhost",	   "oper",	   "swhois",  "snomasks",	   "modes",		  "access",		 "forbid",
-		"suspend", "founder",  "topic",	   "options", "clones",		   "nolines",	  "host",		 "encryption_key",
-		"suffix",  "nickserv", "chanserv", "ipserv",  "quit_ips",	   "quit_clones", "flood",		 "propagator",
-		"type",	   "action",   "expires",  "reason",  KKEY_MATCH_TYPE, KKEY_TARGETS,  KKEY_BAN_TIME, NULL};
+		"pass",		  "vhost",			"oper",	   "swhois",   "snomasks", "modes",	 "access",
+		"forbid",	  "suspend",		"founder", "topic",	   "options",  "clones", "nolines",
+		"host",		  "encryption_key", "suffix",  "nickserv", "chanserv", "ipserv", "quit_clones",
+		"flood",	  "propagator",		"type",	   "action",   "expires",  "reason", KKEY_MATCH_TYPE,
+		KKEY_TARGETS, KKEY_BAN_TIME,	NULL};
 
 	for (int i = 0; known_keys[i]; i++)
 		if (!strcasecmp(known_keys[i], key))
@@ -2084,7 +2083,6 @@ static void udb_config_free(UdbContext *ctx)
 {
 	if (ctx)
 	{
-		safe_free(ctx->quit_ips);
 		safe_free(ctx->quit_clones);
 		safe_free(ctx->encryption_key);
 		safe_free(ctx->suffix);
@@ -2215,7 +2213,6 @@ typedef struct UdbSettingOps
 #define UDB_SETTING_POLICY_CHANGED 0x8
 
 static const UdbSettingOps udb_setting_ops[] = {
-	{SKEY_QUIT_IPS, udb_setting_string_valid, offsetof(UdbContext, quit_ips), 0},
 	{SKEY_QUIT_CLONES, udb_setting_string_valid, offsetof(UdbContext, quit_clones), 0},
 	{SKEY_CLONES, NULL, 0, UDB_SETTING_NUMERIC_ONLY},
 	{SKEY_FLOOD, NULL, 0, UDB_SETTING_FLOOD},
@@ -3075,7 +3072,6 @@ static const UdbKeyDescriptor udb_schema_i_subkeys[] = {
 
 static const UdbKeyDescriptor udb_schema_s_subkeys[] = {
 	{SKEY_CLONES, UDB_VAL_NUMERIC, udb_clone_limit_valid, 0, NULL},
-	{SKEY_QUIT_IPS, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL},
 	{SKEY_QUIT_CLONES, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL},
 	{SKEY_FLOOD, UDB_VAL_STRING, udb_flood_setting_valid, 0, NULL},
 	{SKEY_CRYPT_KEY, UDB_VAL_STRING, udb_encryption_key_valid, 0, NULL},

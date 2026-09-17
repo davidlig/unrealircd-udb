@@ -737,7 +737,6 @@ static const UdbKeyDescriptor udb_schema_i_subkeys[] = {
 
 static const UdbKeyDescriptor udb_schema_s_subkeys[] = {
 	{SKEY_CLONES, UDB_VAL_NUMERIC, udb_clone_limit_valid, 0, NULL},
-	{SKEY_QUIT_IPS, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL},
 	{SKEY_QUIT_CLONES, UDB_VAL_STRING, udb_non_empty_string_valid, 0, NULL},
 	{SKEY_FLOOD, UDB_VAL_STRING, udb_flood_setting_valid, 0, NULL},
 	{SKEY_CRYPT_KEY, UDB_VAL_STRING, udb_encryption_key_valid, 0, NULL},
