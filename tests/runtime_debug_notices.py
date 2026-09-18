@@ -260,6 +260,32 @@ def test_node(ircd, module, enable_debug):
                 if not any("udb." in l for l in oper_notices):
                     raise AssertionError(f"Expected udb notice when UDB_LNKOPT_DEBUG is enabled, got lines: {lines[start_idx:]}")
                 print("PASS: IRCOP received standard UDB notices when UDB_LNKOPT_DEBUG (*1) is enabled")
+
+                server_log = node / "logs" / "ircd.log"
+                rehash_start = len(alice.lines)
+                alice.send("REHASH")
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    if process.poll() is not None:
+                        raise AssertionError(
+                            f"daemon exited during REHASH with a UDB-opered IRCOp online (exit={process.returncode})")
+                    content = server_log.read_text(errors="replace") if server_log.exists() else ""
+                    if content.count("config.CONFIG_LOADED") >= 2:
+                        break
+                    time.sleep(0.2)
+                else:
+                    raise AssertionError(
+                        f"REHASH with a UDB-opered IRCOp online did not complete; lines={alice.lines[rehash_start:]!r}")
+                alice.send("WHOIS alice")
+                alice.wait_for(lambda line: " 318 " in line, "WHOIS after REHASH", start=rehash_start, timeout=5)
+                post = alice.lines[rehash_start:]
+                if any("You have been renamed" in line or "has been registered or synced" in line for line in post):
+                    raise AssertionError(f"REHASH renamed the identified UDB holder: {post!r}")
+                if any(" MODE alice " in line and "-r" in line for line in post):
+                    raise AssertionError(f"REHASH revoked the UDB identity: {post!r}")
+                if not any(" 313 " in line for line in post):
+                    raise AssertionError(f"REHASH revoked the UDB oper state: {post!r}")
+                print("PASS: REHASH with a UDB-opered IRCOp online survives and UDB reloads")
             else:
                 if oper_notices:
                     raise AssertionError(f"Expected NO UDB notices when UDB_LNKOPT_DEBUG is disabled, but received: {oper_notices}")

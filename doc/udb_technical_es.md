@@ -296,7 +296,7 @@ Sólo existe el bit:
 0x01 = DEBUG
 ```
 
-El modo debug local se consulta específicamente en `L::<me.name>::options`. Al activarlo se habilita el flujo de debug de UDB y se retira el filtro que normalmente evita duplicar logs UDB hacia destinos snomask/oper.
+El modo debug local se consulta específicamente en `L::<me.name>::options`. Al activarlo se habilita el flujo de debug de UDB y se retira el filtro que normalmente evita duplicar logs UDB hacia destinos snomask/oper. Cuando el módulo se descarga (por ejemplo durante un REHASH), el filtro se reaplica durante toda la ventana de descarga aunque DEBUG esté activo, porque el core puede haber descargado ya ModData de otros módulos; los destinos de log a fichero no se ven afectados.
 
 Cualquier bit desconocido hace que el efecto se ignore con warning.
 
@@ -894,6 +894,7 @@ En rehash:
 - la configuración nueva no borra prematuramente el propagador activo si el rehash falla;
 - al completar con éxito, si desapareció `udb::propagator`, se elimina el override local y vuelve a aplicarse la precedencia normal;
 - se notifica el cambio de política y se cancelan sesiones que ya no pertenezcan a la fuente correcta;
+- los titulares identificados conservan nickname, cuenta y efectos: el bloque de nicks se preserva mientras el módulo se descarga y se reconcilia contra los registros recargados, y el estado preservado se revoca si la base recargada no queda READY o el módulo no consigue recargar;
 - se reconstruye el inventario OCL local y, si cambia, se publica una nueva generación.
 
 Cambios de `S::propagator` tienen el mismo efecto de re-evaluación en runtime después de que el nuevo bloque/registro haya sido comprometido.

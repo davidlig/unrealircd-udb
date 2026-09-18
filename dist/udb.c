@@ -576,7 +576,7 @@ static char *udb_block_filepath(char letter);
 static int udb_module_test(ModuleInfo *modinfo);
 static int udb_module_init(ModuleInfo *modinfo);
 static int udb_module_load(ModuleInfo *modinfo);
-static int udb_module_unload(void);
+static int udb_module_unload(ModuleInfo *modinfo);
 static int udb_engine_init(void);
 static void udb_engine_cleanup(UdbContext *ctx);
 static void udb_engine_shutdown(void);
@@ -734,6 +734,8 @@ static void udb_nick_pending_auth_clear(Client *client);
 static void udb_nick_prepare_tree_replace(UdbBlock *block, UdbRecord *candidate_tree);
 static void udb_nick_finish_tree_replace(void);
 static void udb_nick_remove_record(UdbBlock *block, UdbRecord *rec);
+static void udb_nick_preserve_on_rehash(int preserve);
+static void udb_nick_reconcile_after_reload(void);
 static void udb_nick_revoke_oper(Client *client);
 static int udb_oper_owned(Client *client);
 static void udb_nick_effects_revoke_oper_vhost(Client *client);
@@ -8654,6 +8656,7 @@ static ModDataInfo *udb_nick_effects_md = NULL;
 static ModDataInfo *udb_nick_oper_owned_md = NULL;
 /* Only set during a synchronous N-tree replacement; never retained per client. */
 static UdbRecord *udb_nick_replacement_tree = NULL;
+static int udb_nick_rehash_keep_identity = 0;
 
 static void udb_nick_password_cache_entry_free(UdbNickPasswordCache *cache)
 {
@@ -9938,6 +9941,11 @@ static void udb_nick_remove_record(UdbBlock *block, UdbRecord *rec)
 				candidate->nick_unsuspend_transition = 1;
 
 			udb_nick_pending_auth_clear(client);
+			if (udb_nick_rehash_keep_identity && udb_nick_identity_valid(client, rec))
+			{
+				udb_nick_revoke_effects(client);
+				return;
+			}
 			if (!keep_identity)
 			{
 				udb_nick_revoke_effects(client);
@@ -10464,6 +10472,28 @@ static int udb_hook_local_connect(Client *client)
 		udb_nick_identity_clear(client);
 	}
 	return 0;
+}
+
+static void udb_nick_preserve_on_rehash(int preserve)
+{
+	udb_nick_rehash_keep_identity = preserve;
+}
+
+static void udb_nick_reconcile_after_reload(void)
+{
+	Client *client;
+
+	list_for_each_entry(client, &lclient_list, lclient_node)
+	{
+		if (!MyUser(client))
+			continue;
+		if (udb_ready && udb_ctx && udb_record_find(udb_ctx, client->name, udb_ctx->nicks))
+			continue;
+		udb_nick_revoke_effects(client);
+		udb_nick_revoke_identity(client);
+		udb_nick_pending_auth_clear(client);
+		udb_nick_password_cache_clear(client);
+	}
 }
 
 int udb_nicks_init(ModuleInfo *modinfo)
@@ -13153,6 +13183,24 @@ static void udb_block_clear_pending(UdbBlock *block)
 	block->pending_round_id = 0;
 }
 
+static int udb_rehash_reload = 0;
+
+static int udb_module_reload_pending(ModuleInfo *modinfo)
+{
+	Module *m;
+
+	if (!modinfo || !modinfo->handle || !modinfo->handle->header)
+		return 0;
+	for (m = Modules; m; m = m->next)
+	{
+		if (m == modinfo->handle || !m->header || !m->header->name)
+			continue;
+		if (!strcmp(m->header->name, modinfo->handle->header->name))
+			return 1;
+	}
+	return 0;
+}
+
 static void udb_engine_cleanup(UdbContext *ctx)
 {
 	UdbBlock *b;
@@ -13161,8 +13209,10 @@ static void udb_engine_cleanup(UdbContext *ctx)
 		return;
 	/* Runtime callbacks need their source records; remove every UDB-owned
 	 * effect before releasing any block tree. */
+	udb_nick_preserve_on_rehash(udb_rehash_reload);
 	for (b = ctx->block_list; b; b = b->next)
 		udb_remove_tree_effects(ctx, b);
+	udb_nick_preserve_on_rehash(0);
 	udb_ips_shutdown();
 	udb_lines_shutdown();
 	udb_hello_cleanup_all();
@@ -13875,8 +13925,10 @@ static int udb_module_load(ModuleInfo *modinfo)
 	if (udb_engine_init() == 0)
 	{
 		config_error("[UDB] Failed to initialize database engine");
+		udb_nick_reconcile_after_reload();
 		return MOD_FAILED;
 	}
+	udb_nick_reconcile_after_reload();
 	udb_sync_snomask_filter();
 	udb_ocl_membership_rebuild();
 	udb_ocl_local_rebuild();
@@ -13893,11 +13945,14 @@ static int udb_module_load(ModuleInfo *modinfo)
 	return MOD_SUCCESS;
 }
 
-static int udb_module_unload(void)
+static int udb_module_unload(ModuleInfo *modinfo)
 {
+	udb_rehash_reload = (loop.rehashing && udb_module_reload_pending(modinfo)) ? 1 : 0;
+	udb_log_snomask_filter_init();
 	udb_log(ULOG_INFO, "UDB_UNLOADING", NULL, "Saving databases and shutting down...");
-	udb_log_snomask_filter_free();
 	udb_engine_shutdown();
+	udb_log_snomask_filter_free();
+	udb_rehash_reload = 0;
 	return MOD_SUCCESS;
 }
 
@@ -13944,5 +13999,5 @@ MOD_LOAD()
 
 MOD_UNLOAD()
 {
-	return udb_module_unload();
+	return udb_module_unload(modinfo);
 }

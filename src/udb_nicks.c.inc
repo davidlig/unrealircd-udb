@@ -72,6 +72,7 @@ static ModDataInfo *udb_nick_effects_md = NULL;
 static ModDataInfo *udb_nick_oper_owned_md = NULL;
 /* Only set during a synchronous N-tree replacement; never retained per client. */
 static UdbRecord *udb_nick_replacement_tree = NULL;
+static int udb_nick_rehash_keep_identity = 0;
 
 static void udb_nick_password_cache_entry_free(UdbNickPasswordCache *cache)
 {
@@ -1356,6 +1357,11 @@ static void udb_nick_remove_record(UdbBlock *block, UdbRecord *rec)
 				candidate->nick_unsuspend_transition = 1;
 
 			udb_nick_pending_auth_clear(client);
+			if (udb_nick_rehash_keep_identity && udb_nick_identity_valid(client, rec))
+			{
+				udb_nick_revoke_effects(client);
+				return;
+			}
 			if (!keep_identity)
 			{
 				udb_nick_revoke_effects(client);
@@ -1882,6 +1888,28 @@ static int udb_hook_local_connect(Client *client)
 		udb_nick_identity_clear(client);
 	}
 	return 0;
+}
+
+static void udb_nick_preserve_on_rehash(int preserve)
+{
+	udb_nick_rehash_keep_identity = preserve;
+}
+
+static void udb_nick_reconcile_after_reload(void)
+{
+	Client *client;
+
+	list_for_each_entry(client, &lclient_list, lclient_node)
+	{
+		if (!MyUser(client))
+			continue;
+		if (udb_ready && udb_ctx && udb_record_find(udb_ctx, client->name, udb_ctx->nicks))
+			continue;
+		udb_nick_revoke_effects(client);
+		udb_nick_revoke_identity(client);
+		udb_nick_pending_auth_clear(client);
+		udb_nick_password_cache_clear(client);
+	}
 }
 
 int udb_nicks_init(ModuleInfo *modinfo)

@@ -353,6 +353,24 @@ static void udb_block_clear_pending(UdbBlock *block)
 	block->pending_round_id = 0;
 }
 
+static int udb_rehash_reload = 0;
+
+static int udb_module_reload_pending(ModuleInfo *modinfo)
+{
+	Module *m;
+
+	if (!modinfo || !modinfo->handle || !modinfo->handle->header)
+		return 0;
+	for (m = Modules; m; m = m->next)
+	{
+		if (m == modinfo->handle || !m->header || !m->header->name)
+			continue;
+		if (!strcmp(m->header->name, modinfo->handle->header->name))
+			return 1;
+	}
+	return 0;
+}
+
 static void udb_engine_cleanup(UdbContext *ctx)
 {
 	UdbBlock *b;
@@ -361,8 +379,10 @@ static void udb_engine_cleanup(UdbContext *ctx)
 		return;
 	/* Runtime callbacks need their source records; remove every UDB-owned
 	 * effect before releasing any block tree. */
+	udb_nick_preserve_on_rehash(udb_rehash_reload);
 	for (b = ctx->block_list; b; b = b->next)
 		udb_remove_tree_effects(ctx, b);
+	udb_nick_preserve_on_rehash(0);
 	udb_ips_shutdown();
 	udb_lines_shutdown();
 	udb_hello_cleanup_all();
@@ -1075,8 +1095,10 @@ static int udb_module_load(ModuleInfo *modinfo)
 	if (udb_engine_init() == 0)
 	{
 		config_error("[UDB] Failed to initialize database engine");
+		udb_nick_reconcile_after_reload();
 		return MOD_FAILED;
 	}
+	udb_nick_reconcile_after_reload();
 	udb_sync_snomask_filter();
 	udb_ocl_membership_rebuild();
 	udb_ocl_local_rebuild();
@@ -1093,10 +1115,13 @@ static int udb_module_load(ModuleInfo *modinfo)
 	return MOD_SUCCESS;
 }
 
-static int udb_module_unload(void)
+static int udb_module_unload(ModuleInfo *modinfo)
 {
+	udb_rehash_reload = (loop.rehashing && udb_module_reload_pending(modinfo)) ? 1 : 0;
+	udb_log_snomask_filter_init();
 	udb_log(ULOG_INFO, "UDB_UNLOADING", NULL, "Saving databases and shutting down...");
-	udb_log_snomask_filter_free();
 	udb_engine_shutdown();
+	udb_log_snomask_filter_free();
+	udb_rehash_reload = 0;
 	return MOD_SUCCESS;
 }

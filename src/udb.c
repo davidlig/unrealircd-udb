@@ -112,5 +112,5 @@ MOD_LOAD()
 
 MOD_UNLOAD()
 {
-	return udb_module_unload();
+	return udb_module_unload(modinfo);
 }

@@ -290,7 +290,7 @@ Only one bit is defined:
 0x01 = DEBUG
 ```
 
-Local debug state is specifically read from `L::<me.name>::options`. Enabling it activates UDB debug flow and removes the filter that normally prevents UDB logs from being duplicated to snomask/oper log destinations.
+Local debug state is specifically read from `L::<me.name>::options`. Enabling it activates UDB debug flow and removes the filter that normally prevents UDB logs from being duplicated to snomask/oper log destinations. When the module is unloaded (for example during REHASH), the filter is re-applied for the entire unload window even if DEBUG is active, because the core may already have unloaded other modules' ModData; file log destinations are unaffected.
 
 Unknown bits cause the effect to be ignored with a warning.
 
@@ -888,6 +888,7 @@ During rehash:
 - new configuration does not prematurely erase the last known-good propagator override if rehash fails;
 - after successful completion, removal of `udb::propagator` removes the local override and restores normal precedence;
 - policy changes are announced internally and sessions owned by an invalid source are aborted;
+- identified holders keep nickname, account and effects: the nickname block is preserved while the module unloads and is reconciled against the reloaded records, and preserved state is revoked if the reloaded database is not READY or the module fails to reload;
 - the local OCL inventory is rebuilt and, when changed, a new generation is published.
 
 Runtime `S::propagator` changes trigger equivalent authority reevaluation after the new record/block has committed.
