@@ -588,12 +588,35 @@ CMD_FUNC(cmd_db)
 		else if (!strcasecmp(subcmd, "INS"))
 		{
 			uint64_t seq = 0;
-			if (parc != 7 || !udb_hello_epoch_valid(parv[3]) || !udb_parse_uint64_strict(parv[4], &seq) || seq == 0)
+			if (parc < 7 || !udb_hello_epoch_valid(parv[3]) || !udb_parse_uint64_strict(parv[4], &seq) || seq == 0)
 			{
 				udb_protocol_mutation_error(client, subcmd, UDB_ERR_PARAMS, '0');
 				return;
 			}
-			udb_mutation_ins(ctx, client, direct_peer, target, parv[3], seq, parv[5], parv[6], is_for_me, is_broadcast);
+			const char *data_val = parv[6];
+			char joined_val[UDB_RECORD_VALUE_MAX + 1];
+			if (parc > 7)
+			{
+				size_t cur_len = 0;
+				joined_val[0] = '\0';
+				for (int i = 6; i < parc; i++)
+				{
+					size_t wlen = strlen(parv[i]);
+					if (cur_len + wlen + (i > 6 ? 1 : 0) > UDB_RECORD_VALUE_MAX)
+					{
+						udb_protocol_mutation_error(client, subcmd, UDB_ERR_PARAMS, '0');
+						return;
+					}
+					if (i > 6)
+						joined_val[cur_len++] = ' ';
+					memcpy(joined_val + cur_len, parv[i], wlen);
+					cur_len += wlen;
+					joined_val[cur_len] = '\0';
+				}
+				data_val = joined_val;
+			}
+			udb_mutation_ins(ctx, client, direct_peer, target, parv[3], seq, parv[5], data_val, is_for_me,
+							 is_broadcast);
 		}
 		break;
 

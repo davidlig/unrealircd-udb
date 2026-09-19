@@ -90,7 +90,7 @@ static const char *udb_mutation_safe_value(const char *path, const char *value)
 static int udb_mutation_forward_ins(Client *source, Client *except, const char *target, const char *epoch, uint64_t seq,
 									const char *path, const char *data)
 {
-	return udb_sendto_confirmed_servers(except, ":%s DB %s INS %s %" PRIu64 " %s %s", source->id, target, epoch, seq,
+	return udb_sendto_confirmed_servers(except, ":%s DB %s INS %s %" PRIu64 " %s :%s", source->id, target, epoch, seq,
 										path, data);
 }
 

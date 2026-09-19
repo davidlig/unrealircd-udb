@@ -7242,7 +7242,7 @@ static const char *udb_mutation_safe_value(const char *path, const char *value)
 static int udb_mutation_forward_ins(Client *source, Client *except, const char *target, const char *epoch, uint64_t seq,
 									const char *path, const char *data)
 {
-	return udb_sendto_confirmed_servers(except, ":%s DB %s INS %s %" PRIu64 " %s %s", source->id, target, epoch, seq,
+	return udb_sendto_confirmed_servers(except, ":%s DB %s INS %s %" PRIu64 " %s :%s", source->id, target, epoch, seq,
 										path, data);
 }
 
@@ -8420,12 +8420,35 @@ CMD_FUNC(cmd_db)
 		else if (!strcasecmp(subcmd, "INS"))
 		{
 			uint64_t seq = 0;
-			if (parc != 7 || !udb_hello_epoch_valid(parv[3]) || !udb_parse_uint64_strict(parv[4], &seq) || seq == 0)
+			if (parc < 7 || !udb_hello_epoch_valid(parv[3]) || !udb_parse_uint64_strict(parv[4], &seq) || seq == 0)
 			{
 				udb_protocol_mutation_error(client, subcmd, UDB_ERR_PARAMS, '0');
 				return;
 			}
-			udb_mutation_ins(ctx, client, direct_peer, target, parv[3], seq, parv[5], parv[6], is_for_me, is_broadcast);
+			const char *data_val = parv[6];
+			char joined_val[UDB_RECORD_VALUE_MAX + 1];
+			if (parc > 7)
+			{
+				size_t cur_len = 0;
+				joined_val[0] = '\0';
+				for (int i = 6; i < parc; i++)
+				{
+					size_t wlen = strlen(parv[i]);
+					if (cur_len + wlen + (i > 6 ? 1 : 0) > UDB_RECORD_VALUE_MAX)
+					{
+						udb_protocol_mutation_error(client, subcmd, UDB_ERR_PARAMS, '0');
+						return;
+					}
+					if (i > 6)
+						joined_val[cur_len++] = ' ';
+					memcpy(joined_val + cur_len, parv[i], wlen);
+					cur_len += wlen;
+					joined_val[cur_len] = '\0';
+				}
+				data_val = joined_val;
+			}
+			udb_mutation_ins(ctx, client, direct_peer, target, parv[3], seq, parv[5], data_val, is_for_me,
+							 is_broadcast);
 		}
 		break;
 
@@ -10746,25 +10769,33 @@ static void udb_channel_remove_modes(Channel *channel)
 
 static int udb_channel_is_persistent(UdbContext *ctx, UdbRecord *chan_rec)
 {
-	UdbRecord *rec = chan_rec ? udb_record_find(ctx, CKEY_OPTIONS, chan_rec) : NULL;
+	if (!chan_rec || udb_record_find(ctx, CKEY_SUSPEND, chan_rec))
+		return 0;
+	UdbRecord *rec = udb_record_find(ctx, CKEY_OPTIONS, chan_rec);
 	return rec && !rec->data_str && (rec->data_num & UDB_CHOPT_PERSISTENT);
 }
 
 static int udb_channel_is_lock_modes(UdbContext *ctx, UdbRecord *chan_rec)
 {
-	UdbRecord *rec = chan_rec ? udb_record_find(ctx, CKEY_OPTIONS, chan_rec) : NULL;
+	if (!chan_rec || udb_record_find(ctx, CKEY_SUSPEND, chan_rec))
+		return 0;
+	UdbRecord *rec = udb_record_find(ctx, CKEY_OPTIONS, chan_rec);
 	return rec && !rec->data_str && (rec->data_num & UDB_CHOPT_LOCK_MODES);
 }
 
 static int udb_channel_is_lock_topic(UdbContext *ctx, UdbRecord *chan_rec)
 {
-	UdbRecord *rec = chan_rec ? udb_record_find(ctx, CKEY_OPTIONS, chan_rec) : NULL;
+	if (!chan_rec || udb_record_find(ctx, CKEY_SUSPEND, chan_rec))
+		return 0;
+	UdbRecord *rec = udb_record_find(ctx, CKEY_OPTIONS, chan_rec);
 	return rec && !rec->data_str && (rec->data_num & UDB_CHOPT_LOCK_TOPIC);
 }
 
 static int udb_channel_is_protect_bans(UdbContext *ctx, UdbRecord *chan_rec)
 {
-	UdbRecord *rec = chan_rec ? udb_record_find(ctx, CKEY_OPTIONS, chan_rec) : NULL;
+	if (!chan_rec || udb_record_find(ctx, CKEY_SUSPEND, chan_rec))
+		return 0;
+	UdbRecord *rec = udb_record_find(ctx, CKEY_OPTIONS, chan_rec);
 	return rec && !rec->data_str && (rec->data_num & UDB_CHOPT_PROTECT_BANS);
 }
 
@@ -10932,18 +10963,20 @@ static void udb_channel_apply_topic(Channel *channel, UdbRecord *topic_rec)
 static void udb_channel_apply_subrecord(UdbContext *ctx, Channel *channel, UdbRecord *chan_rec, const char *subkey,
 										int is_new)
 {
+	int suspended = udb_record_find(ctx, CKEY_SUSPEND, chan_rec) != NULL;
+
 	/* A channel-profile replacement revokes every UDB-owned channel state;
 	 * mirror that removal so the surviving profile restores it all. */
 	if (!strcasecmp(subkey, chan_rec->key))
 	{
 		UdbRecord *mode_rec = udb_record_find(ctx, CKEY_MODES, chan_rec);
 		UdbRecord *topic_rec = udb_record_find(ctx, CKEY_TOPIC, chan_rec);
-		int suspended = udb_record_find(ctx, CKEY_SUSPEND, chan_rec) != NULL;
 
 		udb_channel_reconcile_founder(channel, chan_rec, suspended);
-		if (mode_rec && mode_rec->data_str)
+		if (!suspended && mode_rec && mode_rec->data_str)
 			udb_channel_apply_modes(channel, mode_rec->data_str);
-		udb_channel_apply_topic(channel, topic_rec);
+		if (!suspended)
+			udb_channel_apply_topic(channel, topic_rec);
 		/* -P may destroy an empty channel, so it is applied last. */
 		udb_channel_set_persistent(channel, udb_channel_is_persistent(ctx, chan_rec));
 		return;
@@ -10961,19 +10994,25 @@ static void udb_channel_apply_subrecord(UdbContext *ctx, Channel *channel, UdbRe
 
 	if (!strcmp(subkey, CKEY_FOUNDER))
 	{
-		udb_channel_reconcile_founder(channel, chan_rec, udb_record_find(ctx, CKEY_SUSPEND, chan_rec) != NULL);
+		udb_channel_reconcile_founder(channel, chan_rec, suspended);
 	}
 	else if (!strcmp(subkey, CKEY_MODES))
 	{
-		udb_channel_apply_modes(channel, sub_rec->data_str);
+		if (!suspended)
+			udb_channel_apply_modes(channel, sub_rec->data_str);
 	}
 	else if (!strcmp(subkey, CKEY_TOPIC))
 	{
-		udb_channel_apply_topic(channel, sub_rec);
+		if (!suspended)
+			udb_channel_apply_topic(channel, sub_rec);
 	}
 	else if (!strcmp(subkey, CKEY_SUSPEND))
 	{
 		udb_channel_reconcile_founder(channel, chan_rec, 1);
+		udb_channel_reconcile_registered(channel, 1, 1, NULL);
+		udb_channel_remove_modes(channel);
+		udb_channel_clear_topic(channel);
+		udb_channel_set_persistent(channel, 0);
 	}
 }
 
@@ -10997,9 +11036,17 @@ static void udb_channel_remove_subrecord(UdbContext *ctx, Channel *channel, UdbR
 	}
 	else if (!strcmp(subkey, CKEY_SUSPEND))
 	{
-		/* Lifting a suspension restores the registered marker and founder +q. */
+		/* Lifting a suspension restores the registered marker, founder +q, modes, topic, and persistent +P. */
+		UdbRecord *mode_rec = udb_record_find(ctx, CKEY_MODES, chan_rec);
+		UdbRecord *topic_rec = udb_record_find(ctx, CKEY_TOPIC, chan_rec);
+
 		udb_channel_reconcile_founder(channel, chan_rec, 0);
 		udb_channel_reconcile_registered(channel, 1, 0, NULL);
+		if (mode_rec && mode_rec->data_str)
+			udb_channel_apply_modes(channel, mode_rec->data_str);
+		if (topic_rec)
+			udb_channel_apply_topic(channel, topic_rec);
+		udb_channel_set_persistent(channel, udb_channel_is_persistent(ctx, chan_rec));
 	}
 	else if (!strcasecmp(subkey, chan_rec->key))
 	{
@@ -11060,6 +11107,8 @@ static int udb_hook_pre_local_join(Client *client, Channel *channel, const char 
 		return HOOK_CONTINUE;
 	if (udb_record_find(udb_ctx, CKEY_FORBID, chan_rec))
 		return HOOK_CONTINUE; /* Let CAN_JOIN provide the numeric. */
+	if (udb_record_find(udb_ctx, CKEY_SUSPEND, chan_rec))
+		return HOOK_CONTINUE;
 	if (udb_channel_is_identified_founder(client, chan_rec))
 		return HOOK_ALLOW; /* Preserve the established founder exemption. */
 	return HOOK_CONTINUE;
@@ -11156,6 +11205,8 @@ static int udb_hook_can_join(Client *client, Channel *channel, const char *key, 
 		*errmsg = errbuf;
 		return ERR_FORBIDDENCHANNEL;
 	}
+	if (udb_record_find(udb_ctx, CKEY_SUSPEND, chan_rec))
+		return 0;
 	is_founder = udb_channel_is_identified_founder(client, chan_rec);
 	/* Native +k normally materializes after the first successful JOIN, but a
 	 * persistent empty channel can already have one.  Never let the persisted
@@ -11192,27 +11243,35 @@ static void handle_join(Client *client, Channel *channel, MessageTag *mtags)
 	UdbRecord *suspend_rec;
 	int suspended;
 
-	if (!chan_rec)
+	if (!client || !MyUser(client) || !chan_rec)
 		return;
 
 	suspend_rec = udb_record_find(udb_ctx, CKEY_SUSPEND, chan_rec);
 	suspended = suspend_rec != NULL;
-	if (suspended && MyUser(client) && !IsULine(client))
+	if (suspended && !IsULine(client))
 		udb_send_service_notice(client, SKEY_CHANSERV, "This channel is suspended. Reason: %s",
 								suspend_rec->data_str ? suspend_rec->data_str : "No reason given");
 
 	if (channel->users == 1)
 	{
-		/* A registered channel assigns founder authority exclusively as +q. */
-		if (!IsServer(client) && !IsULine(client))
+		if (!suspended)
 		{
-			udb_channel_do_mode(channel, mtags, "-o", client->name);
-		}
+			/* A registered channel assigns founder authority exclusively as +q. */
+			if (!IsServer(client) && !IsULine(client))
+			{
+				udb_channel_do_mode(channel, mtags, "-o", client->name);
+			}
 
-		udb_channel_reconcile_registered(channel, 1, suspended, mtags);
-		udb_channel_apply_subrecord(udb_ctx, channel, chan_rec, CKEY_MODES, 0);
-		udb_channel_apply_subrecord(udb_ctx, channel, chan_rec, CKEY_TOPIC, 0);
-		udb_channel_set_persistent(channel, udb_channel_is_persistent(udb_ctx, chan_rec));
+			udb_channel_reconcile_registered(channel, 1, 0, mtags);
+			udb_channel_apply_subrecord(udb_ctx, channel, chan_rec, CKEY_MODES, 0);
+			udb_channel_apply_subrecord(udb_ctx, channel, chan_rec, CKEY_TOPIC, 0);
+			udb_channel_set_persistent(channel, udb_channel_is_persistent(udb_ctx, chan_rec));
+		}
+		else
+		{
+			udb_channel_reconcile_registered(channel, 1, 1, mtags);
+			udb_channel_set_persistent(channel, 0);
+		}
 	}
 
 	/* Founder +q is UDB-owned and must have exactly one current holder. */
@@ -11339,7 +11398,7 @@ CMD_OVERRIDE_FUNC(udb_override_mode)
 	channel = find_channel(parv[1]);
 	chan_rec =
 		(channel && udb_ctx && udb_ctx->channels) ? udb_record_find(udb_ctx, channel->name, udb_ctx->channels) : NULL;
-	if (!chan_rec)
+	if (!chan_rec || udb_record_find(udb_ctx, CKEY_SUSPEND, chan_rec))
 	{
 		CALL_NEXT_COMMAND_OVERRIDE();
 		return;
@@ -11392,7 +11451,7 @@ CMD_OVERRIDE_FUNC(udb_override_topic)
 	channel = find_channel(parv[1]);
 	chan_rec =
 		(channel && udb_ctx && udb_ctx->channels) ? udb_record_find(udb_ctx, channel->name, udb_ctx->channels) : NULL;
-	if (!chan_rec)
+	if (!chan_rec || udb_record_find(udb_ctx, CKEY_SUSPEND, chan_rec))
 	{
 		CALL_NEXT_COMMAND_OVERRIDE();
 		return;
@@ -11422,7 +11481,7 @@ static const char *udb_hook_pre_topic(Client *client, Channel *channel, const ch
 		return topic;
 
 	UdbRecord *chan_rec = udb_record_find(udb_ctx, channel->name, udb_ctx->channels);
-	if (!chan_rec)
+	if (!chan_rec || udb_record_find(udb_ctx, CKEY_SUSPEND, chan_rec))
 		return topic;
 
 	if (udb_channel_is_lock_topic(udb_ctx, chan_rec))
