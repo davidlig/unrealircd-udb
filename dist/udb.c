@@ -11010,8 +11010,6 @@ static void udb_channel_apply_subrecord(UdbContext *ctx, Channel *channel, UdbRe
 	{
 		udb_channel_reconcile_founder(channel, chan_rec, 1);
 		udb_channel_reconcile_registered(channel, 1, 1, NULL);
-		udb_channel_remove_modes(channel);
-		udb_channel_clear_topic(channel);
 		udb_channel_set_persistent(channel, 0);
 	}
 }
