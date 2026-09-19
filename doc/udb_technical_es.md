@@ -198,7 +198,7 @@ Claves:
 | `topic` | texto | Topic gestionado por UDB. |
 | `access` | contenedor | Lista de nicks autorizados. |
 | `forbid` | texto | Rechaza el JOIN con el motivo almacenado. |
-| `suspend` | texto | Suprime el comportamiento de canal registrado/fundador: mientras existe retira el `+r` nativo y el `+q` del fundador; al levantarlo restaura ambos en un canal vivo. |
+| `suspend` | texto | Suprime el comportamiento de canal registrado/fundador: mientras existe retira el `+r` nativo y el `+q` del fundador; al levantarlo restaura ambos en un canal vivo. El valor almacenado se muestra como motivo a cada usuario local que entra al canal mientras está suspendido. |
 | `options` | numérico | Máscara de bits descrita abajo. |
 
 `C::<canal>::access::<nick>` acepta valor numérico o de texto por esquema, pero **el hook de JOIN actual sólo comprueba la existencia de la entrada y que el usuario tenga `+r`**. El valor de la entrada no se interpreta como rango en esta implementación.

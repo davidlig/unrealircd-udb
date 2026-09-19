@@ -48,7 +48,7 @@
 #define CKEY_TOPIC "topic"	   /* Persistent topic */
 #define CKEY_ACCESS "access"   /* Access list (has sub-records per nick) */
 #define CKEY_FORBID "forbid"   /* Forbidden channel (value = reason) */
-#define CKEY_SUSPEND "suspend" /* Suspended channel */
+#define CKEY_SUSPEND "suspend" /* Suspended channel (value = reason) */
 #define CKEY_OPTIONS "options" /* Channel option flags (*N) */
 
 /* IP sub-records: I::<ip|host>::<key> <value> */

@@ -192,7 +192,7 @@ Keys:
 | `topic` | string | UDB-managed topic. |
 | `access` | container | Authorized nickname list. |
 | `forbid` | string | Rejects JOIN with the stored reason. |
-| `suspend` | string | Suppresses registered-channel/founder behavior: while present it removes native `+r` and founder `+q`; lifting it restores both on a live channel. |
+| `suspend` | string | Suppresses registered-channel/founder behavior: while present it removes native `+r` and founder `+q`; lifting it restores both on a live channel. The stored value is reported as the reason to every local user who joins the channel while it is suspended. |
 | `options` | numeric | Bitmask described below. |
 
 `C::<channel>::access::<nick>` may carry a numeric or string value according to the schema, but **the current JOIN hook only checks that the child exists and that the user has `+r`**. The child value is not interpreted as a rank.

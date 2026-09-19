@@ -464,6 +464,8 @@ def exercise(host, client_port, server_port, c_db):
         alice.request("JOIN " + fresh, lambda line: " 366 " in line, "join unregistered channel")
         require(not any(f"MODE {fresh}" in line and "+r" in line for line in alice.lines[fresh_start:]),
                 f"unregistered channel received +r: {alice.lines[fresh_start:]!r}")
+        require(not any("This channel is suspended" in line for line in alice.lines[fresh_start:]),
+                f"an unsuspended channel emitted a suspension notice: {alice.lines[fresh_start:]!r}")
 
         start = len(alice.lines)
         services.send_ins(f"C::{fresh}::founder", "alice")
@@ -490,6 +492,12 @@ def exercise(host, client_port, server_port, c_db):
                 f"suspension did not revoke founder +q: {alice.lines[start:]!r}")
         require(wait_for_file_content(c_db, f"{fresh}::suspend maintenance", 5),
                 f"suspension was not persisted in {c_db}")
+
+        start = len(bob.lines)
+        bob.request("JOIN " + fresh, lambda line: " 366 " in line, "join a suspended channel")
+        bob.wait_for(lambda line: line.startswith(f"{CHANSERV_PREFIX} NOTICE bob :") and
+                     "This channel is suspended. Reason: maintenance" in line,
+                     "suspension reason notice to the joining user", start=start)
 
         start = len(alice.lines)
         services.send_del(f"C::{fresh}::suspend")

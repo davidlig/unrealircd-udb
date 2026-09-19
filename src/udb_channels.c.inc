@@ -644,10 +644,17 @@ static int udb_hook_can_join(Client *client, Channel *channel, const char *key, 
 static void handle_join(Client *client, Channel *channel, MessageTag *mtags)
 {
 	UdbRecord *chan_rec = udb_record_find(udb_ctx, channel->name, udb_ctx->channels);
+	UdbRecord *suspend_rec;
+	int suspended;
+
 	if (!chan_rec)
 		return;
 
-	int suspended = udb_record_find(udb_ctx, CKEY_SUSPEND, chan_rec) != NULL;
+	suspend_rec = udb_record_find(udb_ctx, CKEY_SUSPEND, chan_rec);
+	suspended = suspend_rec != NULL;
+	if (suspended && MyUser(client) && !IsULine(client))
+		udb_send_service_notice(client, SKEY_CHANSERV, "This channel is suspended. Reason: %s",
+								suspend_rec->data_str ? suspend_rec->data_str : "No reason given");
 
 	if (channel->users == 1)
 	{
