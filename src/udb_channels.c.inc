@@ -289,6 +289,17 @@ static void udb_channel_set_oper_only(Channel *channel, int enabled)
 	}
 }
 
+static void udb_channel_reconcile_options(Channel *channel, int oper_only, int persistent)
+{
+	/* +P must keep a newly created empty channel alive before +O is applied.
+	 * When removing +P, clear UDB-owned +O before -P can destroy it. */
+	if (persistent)
+		udb_channel_set_persistent(channel, 1);
+	udb_channel_set_oper_only(channel, oper_only);
+	if (!persistent)
+		udb_channel_set_persistent(channel, 0);
+}
+
 static int udb_hook_rehash_complete_oper_only(void)
 {
 	Cmode *oper_mode = find_channel_mode_handler('O');
@@ -488,16 +499,15 @@ static void udb_channel_apply_subrecord(UdbContext *ctx, Channel *channel, UdbRe
 			udb_channel_apply_modes(channel, mode_rec->data_str);
 		if (!suspended)
 			udb_channel_apply_topic(channel, topic_rec);
-		/* -P may destroy an empty channel, so +O/-O is always applied first. */
-		udb_channel_set_oper_only(channel, udb_channel_is_oper_only(ctx, chan_rec));
-		udb_channel_set_persistent(channel, udb_channel_is_persistent(ctx, chan_rec));
+		udb_channel_reconcile_options(channel, udb_channel_is_oper_only(ctx, chan_rec),
+									  udb_channel_is_persistent(ctx, chan_rec));
 		return;
 	}
 
 	if (!strcmp(subkey, CKEY_OPTIONS))
 	{
-		udb_channel_set_oper_only(channel, udb_channel_is_oper_only(ctx, chan_rec));
-		udb_channel_set_persistent(channel, udb_channel_is_persistent(ctx, chan_rec));
+		udb_channel_reconcile_options(channel, udb_channel_is_oper_only(ctx, chan_rec),
+									  udb_channel_is_persistent(ctx, chan_rec));
 		return;
 	}
 
@@ -562,8 +572,8 @@ static void udb_channel_remove_subrecord(UdbContext *ctx, Channel *channel, UdbR
 			udb_channel_apply_topic(channel, topic_rec);
 		/* DEL effects run before the candidate tree replaces the active tree,
 		 * so read the surviving option bits without consulting old suspend. */
-		udb_channel_set_oper_only(channel, udb_channel_option_enabled(ctx, chan_rec, UDB_CHOPT_OPER_ONLY));
-		udb_channel_set_persistent(channel, udb_channel_option_enabled(ctx, chan_rec, UDB_CHOPT_PERSISTENT));
+		udb_channel_reconcile_options(channel, udb_channel_option_enabled(ctx, chan_rec, UDB_CHOPT_OPER_ONLY),
+									  udb_channel_option_enabled(ctx, chan_rec, UDB_CHOPT_PERSISTENT));
 	}
 	else if (!strcasecmp(subkey, chan_rec->key))
 	{
@@ -896,8 +906,8 @@ static void handle_join(Client *client, Channel *channel, MessageTag *mtags)
 			udb_channel_reconcile_registered(channel, 1, 0, mtags);
 			udb_channel_apply_subrecord(udb_ctx, channel, chan_rec, CKEY_MODES, 0);
 			udb_channel_apply_subrecord(udb_ctx, channel, chan_rec, CKEY_TOPIC, 0);
-			udb_channel_set_oper_only(channel, udb_channel_is_oper_only(udb_ctx, chan_rec));
-			udb_channel_set_persistent(channel, udb_channel_is_persistent(udb_ctx, chan_rec));
+			udb_channel_reconcile_options(channel, udb_channel_is_oper_only(udb_ctx, chan_rec),
+										  udb_channel_is_persistent(udb_ctx, chan_rec));
 		}
 		else
 		{

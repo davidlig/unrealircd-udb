@@ -472,22 +472,21 @@ def exercise(host, client_port, server_port, config, tls_port, module, dbdir):
                 f"profile replacement did not revoke old +O first: {replacement_modes!r}")
         print("PASS: options *16 reconciled +O across DEL, suspend, unsuspend, and profile replacement")
 
-        # 7d. OPER_ONLY|PERSISTENT (*24) always reconciles +O/-O before
-        # +P/-P. Observe the order on the live channel, then exercise the
-        # empty-channel destruction path where -P invalidates Channel *.
+        # 7d. OPER_ONLY|PERSISTENT (*24) enables +P before +O so a new
+        # empty channel survives, then removes -O before -P can destroy it.
         start = len(alice.lines)
         services.send_del(f"C::{CHANNEL}::options")
         alice.wait_for(lambda line: f"MODE {CHANNEL} -O" in line,
                        "removal of +O before the combined option test", start=start)
         start = len(alice.lines)
         services.send_ins(f"C::{CHANNEL}::options", "*24")
-        alice.wait_for(lambda line: f"MODE {CHANNEL} +P" in line,
-                       "application of +P after +O", start=start)
+        alice.wait_for(lambda line: f"MODE {CHANNEL} +O" in line,
+                       "application of +O after +P", start=start)
         creation_modes = [line for line in alice.lines[start:] if f"MODE {CHANNEL}" in line]
         require(any("+O" in line for line in creation_modes) and
-                next(i for i, line in enumerate(creation_modes) if "+O" in line) <
-                next(i for i, line in enumerate(creation_modes) if "+P" in line),
-                f"*24 did not apply +O before +P: {creation_modes!r}")
+                next(i for i, line in enumerate(creation_modes) if "+P" in line) <
+                next(i for i, line in enumerate(creation_modes) if "+O" in line),
+                f"*24 did not apply +P before +O: {creation_modes!r}")
         start = len(alice.lines)
         services.send_del(f"C::{CHANNEL}::options")
         alice.wait_for(lambda line: f"MODE {CHANNEL} -P" in line,
@@ -509,7 +508,7 @@ def exercise(host, client_port, server_port, config, tls_port, module, dbdir):
                       "leave persistent oper-only channel empty")
         services.send_del(f"C::{empty_chan}::options")
         time.sleep(0.2)
-        print("PASS: options *24 ordered +O/-O before +P/-P and safely destroyed an empty channel")
+        print("PASS: options *24 applied +P before +O, removed -O before -P, and safely destroyed an empty channel")
 
         # An unrelated options update must not remove an independently set
         # native +O. External -O/+O also transfers ownership away from UDB.
