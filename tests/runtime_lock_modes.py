@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Integration tests for UDB modes validation, DEL non-reversal, channel options (*6 lock_modes/lock_topic, *8 persistent), and NickServ notice."""
+"""Integration tests for UDB mode validation and live channel option effects."""
 
 import argparse
 import hashlib
@@ -64,12 +64,15 @@ def sha256(password):
     return hashlib.sha256(password.encode("ascii")).hexdigest()
 
 
-def write_config(path, name, sid, client_port, server_port, tls_port, module, dbdir):
+def write_config(path, name, sid, client_port, server_port, tls_port, module, dbdir, operonly=True):
+    operonly_blacklist = '' if operonly else 'blacklist-module "chanmodes/operonly";\n'
     path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
 include "{RUNTIME_ROOT}/conf/snomasks.default.conf";
+include "{RUNTIME_ROOT}/conf/operclass.default.conf";
 blacklist-module "geoip_classic";
 blacklist-module "geoip_mmdb";
 blacklist-module "geoip_csv";
+{operonly_blacklist}
 
 me {{
     name "{name}";
@@ -87,6 +90,21 @@ set {{
 class clients {{ pingfreq 60; maxclients 20; sendq 1M; recvq 8000; }}
 class servers {{ pingfreq 60; connfreq 6; maxclients 4; sendq 20M; }}
 allow {{ mask "127.0.0.1"; class clients; maxperip 20; }}
+oper testoper {{
+    mask "*@*";
+    password "operpass";
+    operclass "netadmin-with-override";
+    class clients;
+}}
+operclass udb-limited {{
+    permissions {{ server {{ rehash {{ local; }} }} }}
+}}
+oper testlimited {{
+    mask "*@*";
+    password "limitedpass";
+    operclass "udb-limited";
+    class clients;
+}}
 listen {{ ip "127.0.0.1"; port {client_port}; }}
 listen {{ ip "127.0.0.1"; port {server_port}; options {{ serversonly; }} }}
 listen {{ ip "127.0.0.1"; port {tls_port}; options {{ tls; }} }}
@@ -221,6 +239,15 @@ class FakeServicesServer:
         self.send_uid("NickServ")
         self.send_uid("ChanServ")
 
+    def reconfirm_hel(self):
+        # UDB's in-memory mutation watermark restarts on module reload.
+        self.seq = 0
+        start = len(self.lines)
+        self.send(f"DB {self.ircd_sid} HEL 4 ? 0000000000000001 OCL")
+        self.wait_for(lambda line: " DB " in line and " HEL 4 " in line,
+                      "UDB HEL after rehash", start=start)
+        self.send(f"DB {self.ircd_sid} HEL 4 ACK ? 0000000000000001 OCL")
+
     def send(self, command):
         if not command.startswith(":"):
             command = ":" + self.sid + " " + command
@@ -293,7 +320,7 @@ def wait_for_daemon(process, host, port, timeout):
     raise RuntimeError("daemon did not open its client listener")
 
 
-def exercise(host, client_port, server_port):
+def exercise(host, client_port, server_port, config, tls_port, module, dbdir):
     clients = []
     services = None
     try:
@@ -412,22 +439,179 @@ def exercise(host, client_port, server_port):
                        "removal of -P after DEL options")
         print("PASS: DEL of options removed -P mode on active channel")
 
-        # 7c. INS options *8 on non-existent channel creates it with +P
-        empty_chan = "#emptyperm"
-        services.send_ins(f"C::{empty_chan}::options", "*8")
-        time.sleep(0.2)
-        # Bob joins #emptyperm and requests MODE to see +P in 324
-        bob.request(f"JOIN {empty_chan}", lambda line: " 366 " in line, "JOIN #emptyperm")
-        bob.request(f"MODE {empty_chan}", lambda line: " 324 " in line and "P" in line,
-                    "persistent channel instantiated with +P for empty channel")
-        print("PASS: INS options *8 instantiated empty channel with +P mode")
+        # 7c. OPER_ONLY (*16) is a live UDB-owned +O source across DEL,
+        # suspend/unsuspend, and whole-profile replacement.
+        start = len(alice.lines)
+        services.send_ins(f"C::{CHANNEL}::options", "*16")
+        alice.wait_for(lambda line: f"MODE {CHANNEL} +O" in line,
+                       "application of +O after INS options *16", start=start)
+        start = len(alice.lines)
+        services.send_del(f"C::{CHANNEL}::options")
+        alice.wait_for(lambda line: f"MODE {CHANNEL} -O" in line,
+                       "removal of -O after DEL options", start=start)
 
-        # 7d. DEL options on empty channel destroys it
-        bob.send(f"PART {empty_chan} :bye")
+        start = len(alice.lines)
+        services.send_ins(f"C::{CHANNEL}::options", "*16")
+        alice.wait_for(lambda line: f"MODE {CHANNEL} +O" in line,
+                       "restoration of +O before suspend", start=start)
+        start = len(alice.lines)
+        services.send_ins(f"C::{CHANNEL}::suspend", "maintenance")
+        alice.wait_for(lambda line: f"MODE {CHANNEL} -O" in line,
+                       "suspend removing +O", start=start)
+        start = len(alice.lines)
+        services.send_del(f"C::{CHANNEL}::suspend")
+        alice.wait_for(lambda line: f"MODE {CHANNEL} +O" in line,
+                       "unsuspend restoring +O", start=start)
+
+        start = len(alice.lines)
+        services.send_ins(f"C::{CHANNEL}", "*123")
+        alice.wait_for(lambda line: f"MODE {CHANNEL} +O" in line,
+                       "profile replacement restoring +O", start=start)
+        replacement_modes = [line for line in alice.lines[start:] if f"MODE {CHANNEL}" in line]
+        require(any("-O" in line for line in replacement_modes),
+                f"profile replacement did not revoke old +O first: {replacement_modes!r}")
+        print("PASS: options *16 reconciled +O across DEL, suspend, unsuspend, and profile replacement")
+
+        # 7d. OPER_ONLY|PERSISTENT (*24) always reconciles +O/-O before
+        # +P/-P. Observe the order on the live channel, then exercise the
+        # empty-channel destruction path where -P invalidates Channel *.
+        start = len(alice.lines)
+        services.send_del(f"C::{CHANNEL}::options")
+        alice.wait_for(lambda line: f"MODE {CHANNEL} -O" in line,
+                       "removal of +O before the combined option test", start=start)
+        start = len(alice.lines)
+        services.send_ins(f"C::{CHANNEL}::options", "*24")
+        alice.wait_for(lambda line: f"MODE {CHANNEL} +P" in line,
+                       "application of +P after +O", start=start)
+        creation_modes = [line for line in alice.lines[start:] if f"MODE {CHANNEL}" in line]
+        require(any("+O" in line for line in creation_modes) and
+                next(i for i, line in enumerate(creation_modes) if "+O" in line) <
+                next(i for i, line in enumerate(creation_modes) if "+P" in line),
+                f"*24 did not apply +O before +P: {creation_modes!r}")
+        start = len(alice.lines)
+        services.send_del(f"C::{CHANNEL}::options")
+        alice.wait_for(lambda line: f"MODE {CHANNEL} -P" in line,
+                       "removal of -P after -O", start=start)
+        removal_modes = [line for line in alice.lines[start:] if f"MODE {CHANNEL}" in line]
+        require(any("-O" in line for line in removal_modes) and
+                next(i for i, line in enumerate(removal_modes) if "-O" in line) <
+                next(i for i, line in enumerate(removal_modes) if "-P" in line),
+                f"options DEL did not remove -O before -P: {removal_modes!r}")
+
+        empty_chan = "#emptyperm"
+        services.send_ins(f"C::{empty_chan}::founder", "davidlig")
+        services.send_ins(f"C::{empty_chan}::options", "*24")
         time.sleep(0.2)
+        alice.request(f"JOIN {empty_chan}", lambda line: " 366 " in line, "founder JOIN #emptyperm")
+        alice.request(f"MODE {empty_chan}", lambda line: " 324 " in line and "O" in line and "P" in line,
+                      "persistent oper-only channel modes")
+        alice.request(f"PART {empty_chan} :bye", lambda line: f" PART {empty_chan} " in line,
+                      "leave persistent oper-only channel empty")
         services.send_del(f"C::{empty_chan}::options")
         time.sleep(0.2)
-        print("PASS: DEL of options on empty channel processed cleanly")
+        print("PASS: options *24 ordered +O/-O before +P/-P and safely destroyed an empty channel")
+
+        # An unrelated options update must not remove an independently set
+        # native +O. External -O/+O also transfers ownership away from UDB.
+        oper = IrcClient(host, client_port, "test-oper")
+        clients.append(oper)
+        oper.request("OPER testoper operpass", lambda line: " 381 " in line, "oper promotion")
+        oper.request(f"JOIN {CHANNEL}", lambda line: " 366 " in line, "oper JOIN for native +O")
+        oper.request(f"MODE {CHANNEL} +O", lambda line: f"MODE {CHANNEL} +O" in line,
+                     "independent native +O")
+        start = len(alice.lines)
+        services.send_ins(f"C::{CHANNEL}::options", "*1")
+        time.sleep(0.2)
+        alice.receive(time.monotonic() + 0.5)
+        require(not any(f"MODE {CHANNEL} -O" in line for line in alice.lines[start:]),
+                "unrelated options update removed independently set +O")
+        oper.request(f"MODE {CHANNEL}", lambda line: " 324 " in line and "O" in line,
+                     "external +O preserved")
+        oper.request(f"MODE {CHANNEL} -O", lambda line: f"MODE {CHANNEL} -O" in line,
+                     "clear external +O")
+        start = len(alice.lines)
+        services.send_ins(f"C::{CHANNEL}::options", "*16")
+        alice.wait_for(lambda line: f"MODE {CHANNEL} +O" in line,
+                       "UDB applies owned +O", start=start)
+        oper.request(f"MODE {CHANNEL} -O", lambda line: f"MODE {CHANNEL} -O" in line,
+                     "external removal of UDB +O")
+        start = len(alice.lines)
+        oper.request(f"MODE {CHANNEL} +O", lambda line: f"MODE {CHANNEL} +O" in line,
+                     "external replacement of +O")
+        alice.wait_for(lambda line: f"MODE {CHANNEL} +O" in line,
+                       "observer sees external +O replacement", start=start)
+        start = len(alice.lines)
+        services.send_del(f"C::{CHANNEL}::options")
+        time.sleep(0.2)
+        alice.receive(time.monotonic() + 0.5)
+        require(not any(f"MODE {CHANNEL} -O" in line for line in alice.lines[start:]),
+                f"UDB removed externally replaced +O: {alice.lines[start:]!r}")
+        oper.request(f"MODE {CHANNEL}", lambda line: " 324 " in line and "O" in line,
+                     "replaced external +O preserved")
+        oper.request(f"MODE {CHANNEL} -O", lambda line: f"MODE {CHANNEL} -O" in line,
+                     "clean up external +O")
+        print("PASS: unrelated options and ownership transfer preserve native +O")
+
+        # Removing chanmodes/operonly clears its bit without MODECHAR_DEL.
+        # Ownership must be invalidated before it is loaded again, while
+        # channels that still request OPER_ONLY regain native +O on reload.
+        restored_chan = "#operonly-reload"
+        external_chan = "#operonly-external"
+        for channel in (restored_chan, external_chan):
+            services.send_ins(f"C::{channel}::founder", "davidlig")
+            services.send_ins(f"C::{channel}::options", "*16")
+            alice.request(f"JOIN {channel}", lambda line: " 366 " in line,
+                          f"founder JOIN {channel} before native module unload")
+            alice.request(f"MODE {channel}", lambda line: " 324 " in line and "O" in line,
+                          f"UDB-owned +O on {channel}")
+
+        write_config(config, "udb-one.test", "001", client_port, server_port, tls_port,
+                     module, dbdir, operonly=False)
+        oper.request("REHASH", lambda line: " 382 " in line, "rehash without native +O")
+        alice.wait_for(lambda line: f"MODE {restored_chan} -O" in line,
+                       "native module unload removed +O", timeout=15)
+        alice.wait_for(lambda line: f"MODE {external_chan} -O" in line,
+                       "native module unload removed +O from external test", timeout=15)
+        denied_without_handler = bob.request(f"JOIN {restored_chan}", lambda line: " 520 " in line,
+                                             "OPER_ONLY remains closed without native +O")
+        require(any(" 520 " in line for line in denied_without_handler),
+                f"OPER_ONLY became joinable while native +O was unavailable: {denied_without_handler!r}")
+        services.reconfirm_hel()
+        services.send_del(f"C::{external_chan}::options")
+        time.sleep(0.5)
+        require(f"{external_chan}::options" not in (dbdir / "udb_C.db").read_text(),
+                "options DEL while native +O was unavailable was not committed")
+        write_config(config, "udb-one.test", "001", client_port, server_port, tls_port,
+                     module, dbdir, operonly=True)
+        start = len(alice.lines)
+        oper.request("REHASH", lambda line: " 382 " in line, "rehash with native +O")
+        alice.wait_for(lambda line: f"MODE {restored_chan} +O" in line,
+                       "UDB restored +O after native module reload", start=start, timeout=15)
+        services.reconfirm_hel()
+        start = len(alice.lines)
+        oper.request(f"JOIN {external_chan}", lambda line: " 366 " in line,
+                     "oper JOIN before independently setting +O")
+        oper.request(f"MODE {external_chan} +O", lambda line: f"MODE {external_chan} +O" in line,
+                     "independent +O after module reload")
+        alice.wait_for(lambda line: f"MODE {external_chan} +O" in line,
+                       "observer sees independent +O", start=start)
+        limited = IrcClient(host, client_port, "limited-oper")
+        clients.append(limited)
+        limited.request("OPER testlimited limitedpass", lambda line: " 381 " in line,
+                        "limited oper promotion")
+        limited.request(f"JOIN {restored_chan}", lambda line: " 366 " in line,
+                        "limited oper JOIN through restored UDB-owned +O")
+        rejected = limited.request(f"JOIN {external_chan}", lambda line: " 520 " in line,
+                                   "limited oper rejected by independent +O after reload")
+        require(any(" 520 " in line for line in rejected),
+                f"stale ownership bypassed independent +O: {rejected!r}")
+        start = len(alice.lines)
+        services.send_ins(f"C::{external_chan}::options", "*1")
+        time.sleep(0.2)
+        alice.receive(time.monotonic() + 0.5)
+        require(not any(f"MODE {external_chan} -O" in line for line in alice.lines[start:]),
+                "stale ownership removed independent +O after options update")
+        print("PASS: native +O unload/reload clears ownership and restores active OPER_ONLY")
 
         # 8. Channel options *1 (protect_bans):
         charlie = IrcClient(host, client_port, "charlie")
@@ -515,7 +699,7 @@ def main():
             process = subprocess.Popen(bwrap_command(node, args.ircd, config), stdout=output,
                                        stderr=subprocess.STDOUT, text=True)
         wait_for_daemon(process, "127.0.0.1", client_port, args.timeout)
-        exercise("127.0.0.1", client_port, server_port)
+        exercise("127.0.0.1", client_port, server_port, config, tls_port, args.module, data)
         return 0
     except EnvironmentUnavailable as exc:
         return skip(f"bwrap cannot create the required mount namespace: {exc}")

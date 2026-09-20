@@ -194,7 +194,7 @@ Claves:
 | Clave | Tipo | Efecto actual |
 |---|---|---|
 | `founder` | nick | Fundador identificado. Recibe `+q` gestionado por UDB. |
-| `modes` | texto | Modos de canal y parámetros validados contra los handlers cargados. El marcador de registro `r`, los rangos de miembro (`q`, `a`, `o`, `h`, `v`) y `P` se rechazan en mutaciones, sync staged y ficheros persistidos; la persistencia se expresa sólo con el bit `PERSISTENT` de `options`. |
+| `modes` | texto | Modos de canal y parámetros validados contra los handlers cargados. El marcador de registro `r`, los rangos de miembro (`q`, `a`, `o`, `h`, `v`), `P` y `O` se rechazan en mutaciones, sync staged y ficheros persistidos; la persistencia y la política sólo-oper se expresan únicamente con sus bits de `options`. |
 | `topic` | texto | Topic gestionado por UDB. |
 | `access` | contenedor | Lista de nicks autorizados. |
 | `forbid` | texto | Rechaza el JOIN con el motivo almacenado. |
@@ -211,16 +211,22 @@ Opciones (`options`):
 | `0x02` | 2 | `LOCK_MODES` | Bloquea cambios locales de modos excepto listas `b`, `e`, `I`. |
 | `0x04` | 4 | `LOCK_TOPIC` | Bloquea cambios locales de topic. |
 | `0x08` | 8 | `PERSISTENT` | Aplica `+P` si el modo nativo `P` existe; UDB no lo emula si falta. |
+| `0x10` | 16 | `OPER_ONLY` | Restringe el JOIN a operadores IRC y aplica el `+O` nativo cuando existe su handler. El JOIN sigue fail-closed si falta. |
 
-Los bits pueden combinarse. Por ejemplo `*15` habilita los cuatro.
+Los bits pueden combinarse. Por ejemplo, `*31` habilita los cinco. `suspend` retira el `+O` propiedad de UDB y levantarlo restaura `+O`; borrar `options` o el perfil lo retira. UDB siempre reconcilia `+O/-O` antes de `+P/-P`, porque retirar `+P` puede destruir un canal vacío.
 
 #### JOIN, fundador y clave nativa
 
-El fundador sólo se considera identificado si su nick coincide con `founder` y tiene `+r`. Puede saltarse bans/keys/invite de JOIN y recibe `+q` salvo que el perfil tenga `suspend`.
+El fundador sólo se considera identificado si su nick coincide con `founder` y tiene `+r`. Un fundador identificado se salta las restricciones de JOIN, incluidos `OPER_ONLY` y `+k`, salvo que el perfil tenga `suspend` o `forbid`; recibe `+q` salvo que esté suspendido. Un operador IRC se salta todas las restricciones JOIN de UDB, incluidos `forbid`, `OPER_ONLY` y el `+k` almacenado para el primer JOIN, pero las restricciones nativas independientes siguen ejecutándose y exigen sus propios permisos de override. `suspend` conserva su comportamiento actual y no bloquea el JOIN por sí solo.
 
-El `+r` nativo es el marcador de canal registrado propiedad de UDB: registrar un canal vivo lo aplica, `suspend` y la baja del perfil lo retiran, y levantar `suspend` lo restaura junto con el `+q` del fundador. `C::modes` nunca almacena `r`, rangos de miembro ni `P`.
+UDB retira el `+O` nativo sólo si fue quien lo aplicó. Si se descarga el handler nativo, UDB borra su propiedad antes de que UnrealIRCd retire directamente el modo; cuando el handler vuelve, los canales con `OPER_ONLY` activo recuperan `+O`. Un `+O` independiente, incluso uno establecido después de que otro actor retire el `+O` de UDB o después de que vuelva el handler, sobrevive a cambios ajenos de `options` y a la baja de opciones UDB.
+Con un `+O` propiedad de UDB, cualquier operador IRC puede entrar aunque su operclass carezca del permiso `channel:operonly:join` de UnrealIRCd; las demás comprobaciones JOIN nativas siguen ejecutándose. Un `+O` nativo independiente conserva la exigencia de ese permiso de operclass.
 
-`C::modes` es la fuente de clave: `+k` usa la semántica nativa de UnrealIRCd, incluida comparación exacta. UDB cubre el hueco del primer JOIN antes de materializar el modo; después la aplica UnrealIRCd.
+El `+r` nativo es el marcador de canal registrado propiedad de UDB: registrar un canal vivo lo aplica, `suspend` y la baja del perfil lo retiran, y levantar `suspend` lo restaura junto con el `+q` del fundador. `C::modes` nunca almacena `r`, rangos de miembro, `P` ni `O`.
+
+Antes de que el primer JOIN materialice `C::modes`, UDB aplica los `+i`, `+R`, `+z` y `+k` almacenados con sus numerics nativos y comparación exacta de clave. Los JOIN posteriores usan los handlers nativos de UnrealIRCd. `/INVITE` y un `+I` materializado conservan su semántica nativa, pero una invitación no puede eludir `forbid` ni `OPER_ONLY` de UDB.
+
+`O` deja de ser válido en `C::modes`. No hay migración automática: convierte cualquier registro existente `C::modes +O` al bit `0x10` `OPER_ONLY` antes de cargar esta versión.
 
 Los bans protegidos se rastrean en memoria por canal/ban/propietario. Ese propietario es estado runtime, no un registro persistente del bloque C.
 
@@ -967,8 +973,9 @@ Para diagnosticar un nodo:
 A fecha del commit documentado:
 
 - el valor de `C::<canal>::access::<nick>` no define rango; la presencia de la entrada + identificación `+r` es lo que autoriza el JOIN.
-- `C::<canal>::modes` rechaza el marcador de registro `r`, los rangos de miembro (`q`, `a`, `o`, `h`, `v`) y `P`; el `+r` nativo sigue el estado de registro y de `suspend`.
+- `C::<canal>::modes` rechaza el marcador de registro `r`, los rangos de miembro (`q`, `a`, `o`, `h`, `v`), `P` y `O`; el `+r` nativo sigue el estado de registro y de `suspend`, mientras que `P` y `O` proceden sólo de `C::options`.
 - las claves raíz del bloque I se buscan de forma exacta; no son reglas CIDR de matching.
 - `PERSISTENT` depende de que exista el modo nativo de canal `+P` en UnrealIRCd; UDB no crea un sustituto.
+- `OPER_ONLY` aplica el JOIN desde el estado UDB incluso cuando no está disponible el handler nativo `+O` de UnrealIRCd.
 
 Estas observaciones describen el comportamiento real del código y son deliberadamente explícitas para evitar documentar capacidades que aún no están conectadas a runtime.

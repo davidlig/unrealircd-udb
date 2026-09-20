@@ -148,6 +148,7 @@ module
 #define UDB_CHOPT_LOCK_MODES 0x2   /* Channel modes are locked */
 #define UDB_CHOPT_LOCK_TOPIC 0x4   /* Channel topic is locked */
 #define UDB_CHOPT_PERSISTENT 0x8   /* Keep the channel alive through native +P */
+#define UDB_CHOPT_OPER_ONLY 0x10   /* Restrict channel joins to IRC operators */
 
 /* ========================================================================
  * Link Option Flags (bitmask in L::<server>::options *<value>)
@@ -2698,9 +2699,9 @@ static int udb_channel_modes_record_valid(const char *value)
 			continue;
 		}
 
-		/* +r is UDB-owned registration state, +P is expressed by the
-		 * C::options PERSISTENT bit, and member ranks never live here. */
-		if (*c == 'r' || *c == 'P')
+		/* +r is UDB-owned registration state, +P and +O are expressed by
+		 * C::options bits, and member ranks never live here. */
+		if (*c == 'r' || *c == 'P' || *c == 'O')
 			return 0;
 
 		cm = find_channel_mode_handler(*c);
@@ -10600,6 +10601,7 @@ struct UdbBanSnapshot
 };
 
 static ModDataInfo *udb_channel_modes_md = NULL;
+static ModDataInfo *udb_channel_oper_only_md = NULL;
 static ModDataInfo *udb_channel_ban_owners_md = NULL;
 
 /* Forward declarations */
@@ -10767,12 +10769,26 @@ static void udb_channel_remove_modes(Channel *channel)
 	}
 }
 
+static int udb_channel_option_enabled(UdbContext *ctx, UdbRecord *chan_rec, unsigned long option)
+{
+	if (!chan_rec)
+		return 0;
+	UdbRecord *rec = udb_record_find(ctx, CKEY_OPTIONS, chan_rec);
+	return rec && !rec->data_str && (rec->data_num & option);
+}
+
 static int udb_channel_is_persistent(UdbContext *ctx, UdbRecord *chan_rec)
 {
 	if (!chan_rec || udb_record_find(ctx, CKEY_SUSPEND, chan_rec))
 		return 0;
-	UdbRecord *rec = udb_record_find(ctx, CKEY_OPTIONS, chan_rec);
-	return rec && !rec->data_str && (rec->data_num & UDB_CHOPT_PERSISTENT);
+	return udb_channel_option_enabled(ctx, chan_rec, UDB_CHOPT_PERSISTENT);
+}
+
+static int udb_channel_is_oper_only(UdbContext *ctx, UdbRecord *chan_rec)
+{
+	if (!chan_rec || udb_record_find(ctx, CKEY_SUSPEND, chan_rec))
+		return 0;
+	return udb_channel_option_enabled(ctx, chan_rec, UDB_CHOPT_OPER_ONLY);
 }
 
 static int udb_channel_is_lock_modes(UdbContext *ctx, UdbRecord *chan_rec)
@@ -10808,6 +10824,70 @@ static void udb_channel_set_persistent(Channel *channel, int enabled)
 		udb_channel_do_mode(channel, NULL, "+P", "");
 	else if (!enabled && has_channel_mode(channel, 'P'))
 		udb_channel_do_mode(channel, NULL, "-P", "");
+}
+
+static void udb_channel_set_oper_only(Channel *channel, int enabled)
+{
+	int *owned;
+	Cmode *oper_mode;
+
+	/* +O is supplied by an optional native module. JOIN policy remains
+	 * fail-closed from C::options even when the display mode is unavailable. */
+	if (!udb_channel_oper_only_md)
+		return;
+	owned = &moddata_channel(channel, udb_channel_oper_only_md).i;
+	oper_mode = find_channel_mode_handler('O');
+	if (!oper_mode || oper_mode->unloaded || oper_mode->type != CMODE_NORMAL)
+	{
+		*owned = 0;
+		return;
+	}
+	if (enabled && !has_channel_mode(channel, 'O'))
+	{
+		udb_channel_do_mode(channel, NULL, "+O", "");
+		*owned = has_channel_mode(channel, 'O');
+	}
+	else if (!enabled && *owned && has_channel_mode(channel, 'O'))
+	{
+		*owned = 0;
+		udb_channel_do_mode(channel, NULL, "-O", "");
+	}
+	else if (!enabled)
+	{
+		*owned = 0;
+	}
+}
+
+static int udb_hook_rehash_complete_oper_only(void)
+{
+	Cmode *oper_mode = find_channel_mode_handler('O');
+	Channel *channel;
+
+	if (!udb_ctx || !udb_channel_oper_only_md)
+		return 0;
+	for (channel = channels; channel; channel = channel->nextch)
+	{
+		UdbRecord *chan_rec;
+
+		/* The core clears +O directly after REHASH_COMPLETE if its handler
+		 * remains unloaded. MODECHAR_DEL is not emitted for that change. */
+		if (!oper_mode || oper_mode->unloaded || oper_mode->type != CMODE_NORMAL)
+		{
+			moddata_channel(channel, udb_channel_oper_only_md).i = 0;
+			continue;
+		}
+		chan_rec = udb_record_find(udb_ctx, channel->name, udb_ctx->channels);
+		if (chan_rec)
+			udb_channel_set_oper_only(channel, udb_channel_is_oper_only(udb_ctx, chan_rec));
+	}
+	return 0;
+}
+
+static int udb_hook_modechar_del(Channel *channel, int modechar)
+{
+	if (modechar == 'O' && udb_channel_oper_only_md)
+		moddata_channel(channel, udb_channel_oper_only_md).i = 0;
+	return 0;
 }
 
 static UdbBanOwner *udb_channel_ban_owner_find(Channel *channel, const char *ban)
@@ -10977,13 +11057,15 @@ static void udb_channel_apply_subrecord(UdbContext *ctx, Channel *channel, UdbRe
 			udb_channel_apply_modes(channel, mode_rec->data_str);
 		if (!suspended)
 			udb_channel_apply_topic(channel, topic_rec);
-		/* -P may destroy an empty channel, so it is applied last. */
+		/* -P may destroy an empty channel, so +O/-O is always applied first. */
+		udb_channel_set_oper_only(channel, udb_channel_is_oper_only(ctx, chan_rec));
 		udb_channel_set_persistent(channel, udb_channel_is_persistent(ctx, chan_rec));
 		return;
 	}
 
 	if (!strcmp(subkey, CKEY_OPTIONS))
 	{
+		udb_channel_set_oper_only(channel, udb_channel_is_oper_only(ctx, chan_rec));
 		udb_channel_set_persistent(channel, udb_channel_is_persistent(ctx, chan_rec));
 		return;
 	}
@@ -11010,6 +11092,7 @@ static void udb_channel_apply_subrecord(UdbContext *ctx, Channel *channel, UdbRe
 	{
 		udb_channel_reconcile_founder(channel, chan_rec, 1);
 		udb_channel_reconcile_registered(channel, 1, 1, NULL);
+		udb_channel_set_oper_only(channel, 0);
 		udb_channel_set_persistent(channel, 0);
 	}
 }
@@ -11026,6 +11109,7 @@ static void udb_channel_remove_subrecord(UdbContext *ctx, Channel *channel, UdbR
 	}
 	else if (!strcmp(subkey, CKEY_OPTIONS))
 	{
+		udb_channel_set_oper_only(channel, 0);
 		udb_channel_set_persistent(channel, 0);
 	}
 	else if (!strcmp(subkey, CKEY_TOPIC))
@@ -11034,7 +11118,8 @@ static void udb_channel_remove_subrecord(UdbContext *ctx, Channel *channel, UdbR
 	}
 	else if (!strcmp(subkey, CKEY_SUSPEND))
 	{
-		/* Lifting a suspension restores the registered marker, founder +q, modes, topic, and persistent +P. */
+		/* Lifting a suspension restores the registered marker, founder +q,
+		 * modes, topic, OPER_ONLY +O, and persistent +P. */
 		UdbRecord *mode_rec = udb_record_find(ctx, CKEY_MODES, chan_rec);
 		UdbRecord *topic_rec = udb_record_find(ctx, CKEY_TOPIC, chan_rec);
 
@@ -11044,7 +11129,10 @@ static void udb_channel_remove_subrecord(UdbContext *ctx, Channel *channel, UdbR
 			udb_channel_apply_modes(channel, mode_rec->data_str);
 		if (topic_rec)
 			udb_channel_apply_topic(channel, topic_rec);
-		udb_channel_set_persistent(channel, udb_channel_is_persistent(ctx, chan_rec));
+		/* DEL effects run before the candidate tree replaces the active tree,
+		 * so read the surviving option bits without consulting old suspend. */
+		udb_channel_set_oper_only(channel, udb_channel_option_enabled(ctx, chan_rec, UDB_CHOPT_OPER_ONLY));
+		udb_channel_set_persistent(channel, udb_channel_option_enabled(ctx, chan_rec, UDB_CHOPT_PERSISTENT));
 	}
 	else if (!strcasecmp(subkey, chan_rec->key))
 	{
@@ -11055,7 +11143,8 @@ static void udb_channel_remove_subrecord(UdbContext *ctx, Channel *channel, UdbR
 		udb_channel_remove_modes(channel);
 		if (had_topic)
 			udb_channel_clear_topic(channel);
-		/* -P may destroy an empty channel, so it is applied last. */
+		/* -P may destroy an empty channel, so -O is always applied first. */
+		udb_channel_set_oper_only(channel, 0);
 		udb_channel_set_persistent(channel, 0);
 	}
 }
@@ -11110,6 +11199,73 @@ static int udb_hook_pre_local_join(Client *client, Channel *channel, const char 
 	if (udb_channel_is_identified_founder(client, chan_rec))
 		return HOOK_ALLOW; /* Preserve the established founder exemption. */
 	return HOOK_CONTINUE;
+}
+
+static int udb_hook_pre_local_join_oper_only(Client *client, Channel *channel, const char *key)
+{
+	UdbRecord *chan_rec = udb_record_find(udb_ctx, channel->name, udb_ctx->channels);
+	if (!chan_rec)
+		return HOOK_CONTINUE;
+	if (IsOper(client) && udb_channel_is_oper_only(udb_ctx, chan_rec) && udb_channel_oper_only_md &&
+		moddata_channel(channel, udb_channel_oper_only_md).i && has_channel_mode(channel, 'O') &&
+		!ValidatePermissionsForPath("channel:operonly:join", client, NULL, channel, NULL))
+	{
+		Cmode *oper_mode = find_channel_mode_handler('O');
+		char *errmsg = NULL;
+		int result;
+
+		if (!oper_mode || oper_mode->unloaded || oper_mode->type != CMODE_NORMAL)
+			return HOOK_CONTINUE;
+		/* The native +O handler requires an operclass ACL that OPER_ONLY does
+		 * not require. Run the complete native JOIN check with only UDB's +O
+		 * hidden, then restore it before any join or error is emitted. */
+		channel->mode.mode &= ~oper_mode->mode;
+		result = can_join(client, channel, key, &errmsg);
+		channel->mode.mode |= oper_mode->mode;
+		if (result)
+		{
+			if (result != -1)
+			{
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-nonliteral"
+#endif
+				sendnumericfmt(client, result, errmsg, channel->name);
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+			}
+			return HOOK_DENY;
+		}
+		return HOOK_ALLOW;
+	}
+	return HOOK_CONTINUE;
+}
+
+static int udb_channel_modes_has_added(const char *value, char wanted)
+{
+	char modebuf[512];
+	char *p;
+	const char *modes;
+	int what = MODE_ADD;
+	int enabled = 0;
+
+	if (!value || !*value || strlen(value) >= sizeof(modebuf))
+		return 0;
+	strlcpy(modebuf, value, sizeof(modebuf));
+	modes = strtoken(&p, modebuf, " ");
+	if (!modes)
+		return 0;
+	for (; *modes; modes++)
+	{
+		if (*modes == '+')
+			what = MODE_ADD;
+		else if (*modes == '-')
+			what = MODE_DEL;
+		else if (*modes == wanted)
+			enabled = what == MODE_ADD;
+	}
+	return enabled;
 }
 
 static int udb_channel_modes_key(const char *value, char *key_out, size_t key_out_size)
@@ -11192,6 +11348,8 @@ static int udb_hook_can_join(Client *client, Channel *channel, const char *key, 
 
 	if (!chan_rec)
 		return 0;
+	if (IsOper(client))
+		return 0;
 	forbid_rec = udb_record_find(udb_ctx, CKEY_FORBID, chan_rec);
 	if (forbid_rec)
 	{
@@ -11206,6 +11364,35 @@ static int udb_hook_can_join(Client *client, Channel *channel, const char *key, 
 	if (udb_record_find(udb_ctx, CKEY_SUSPEND, chan_rec))
 		return 0;
 	is_founder = udb_channel_is_identified_founder(client, chan_rec);
+	if (udb_channel_is_oper_only(udb_ctx, chan_rec) && !is_founder)
+	{
+		*errmsg = STR_ERR_OPERONLY;
+		return ERR_OPERONLY;
+	}
+	if (channel->users == 0 && !is_founder)
+	{
+		UdbRecord *modes_rec = udb_record_find(udb_ctx, CKEY_MODES, chan_rec);
+		const char *configured_modes = modes_rec && modes_rec->data_str ? modes_rec->data_str : NULL;
+
+		if (!has_channel_mode(channel, 'i') && udb_channel_modes_has_added(configured_modes, 'i') &&
+			!find_invex(channel, client))
+		{
+			*errmsg = STR_ERR_INVITEONLYCHAN;
+			return ERR_INVITEONLYCHAN;
+		}
+		if (!has_channel_mode(channel, 'R') && udb_channel_modes_has_added(configured_modes, 'R') &&
+			!IsLoggedIn(client))
+		{
+			*errmsg = STR_ERR_NEEDREGGEDNICK;
+			return ERR_NEEDREGGEDNICK;
+		}
+		if (!has_channel_mode(channel, 'z') && udb_channel_modes_has_added(configured_modes, 'z') &&
+			!IsSecureConnect(client))
+		{
+			*errmsg = STR_ERR_SECUREONLYCHAN;
+			return ERR_SECUREONLYCHAN;
+		}
+	}
 	/* Native +k normally materializes after the first successful JOIN, but a
 	 * persistent empty channel can already have one.  Never let the persisted
 	 * C::modes key compete with the native mode when it is materialized. */
@@ -11233,6 +11420,21 @@ static int udb_hook_can_join(Client *client, Channel *channel, const char *key, 
 		}
 	}
 	return 0;
+}
+
+static int udb_hook_invite_bypass(Client *client, Channel *channel)
+{
+	UdbRecord *chan_rec = udb_record_find(udb_ctx, channel->name, udb_ctx->channels);
+
+	if (!chan_rec || IsOper(client))
+		return HOOK_CONTINUE;
+	if (udb_record_find(udb_ctx, CKEY_FORBID, chan_rec))
+		return HOOK_DENY;
+	if (udb_record_find(udb_ctx, CKEY_SUSPEND, chan_rec))
+		return HOOK_CONTINUE;
+	if (udb_channel_is_oper_only(udb_ctx, chan_rec) && !udb_channel_is_identified_founder(client, chan_rec))
+		return HOOK_DENY;
+	return HOOK_CONTINUE;
 }
 
 static void handle_join(Client *client, Channel *channel, MessageTag *mtags)
@@ -11263,11 +11465,13 @@ static void handle_join(Client *client, Channel *channel, MessageTag *mtags)
 			udb_channel_reconcile_registered(channel, 1, 0, mtags);
 			udb_channel_apply_subrecord(udb_ctx, channel, chan_rec, CKEY_MODES, 0);
 			udb_channel_apply_subrecord(udb_ctx, channel, chan_rec, CKEY_TOPIC, 0);
+			udb_channel_set_oper_only(channel, udb_channel_is_oper_only(udb_ctx, chan_rec));
 			udb_channel_set_persistent(channel, udb_channel_is_persistent(udb_ctx, chan_rec));
 		}
 		else
 		{
 			udb_channel_reconcile_registered(channel, 1, 1, mtags);
+			udb_channel_set_oper_only(channel, 0);
 			udb_channel_set_persistent(channel, 0);
 		}
 	}
@@ -11513,13 +11717,23 @@ static void udb_channels_init(ModuleInfo *modinfo)
 	udb_channel_modes_md = ModDataAdd(modinfo->handle, mreq);
 
 	memset(&mreq, 0, sizeof(mreq));
+	mreq.name = "udb_channel_oper_only";
+	mreq.type = MODDATATYPE_CHANNEL;
+	udb_channel_oper_only_md = ModDataAdd(modinfo->handle, mreq);
+
+	memset(&mreq, 0, sizeof(mreq));
 	mreq.name = "udb_channel_ban_owners";
 	mreq.type = MODDATATYPE_CHANNEL;
 	mreq.free = udb_channel_ban_owners_free;
 	udb_channel_ban_owners_md = ModDataAdd(modinfo->handle, mreq);
 
 	HookAdd(modinfo->handle, HOOKTYPE_CAN_JOIN, 0, udb_hook_can_join);
+	HookAdd(modinfo->handle, HOOKTYPE_INVITE_BYPASS, 0, udb_hook_invite_bypass);
+	HookAdd(modinfo->handle, HOOKTYPE_MODECHAR_DEL, 0, udb_hook_modechar_del);
+	HookAdd(modinfo->handle, HOOKTYPE_REHASH_COMPLETE, 0, udb_hook_rehash_complete_oper_only);
 	HookAdd(modinfo->handle, HOOKTYPE_PRE_LOCAL_JOIN, 0, udb_hook_pre_local_join);
+	/* Run after native pre-JOIN hooks before the scoped +O compatibility check. */
+	HookAdd(modinfo->handle, HOOKTYPE_PRE_LOCAL_JOIN, INT_MAX, udb_hook_pre_local_join_oper_only);
 	HookAdd(modinfo->handle, HOOKTYPE_LOCAL_JOIN, 0, udb_hook_local_join);
 	HookAdd(modinfo->handle, HOOKTYPE_REMOTE_JOIN, 0, udb_hook_remote_join);
 	HookAddConstString(modinfo->handle, HOOKTYPE_PRE_LOCAL_TOPIC, 0, udb_hook_pre_topic);

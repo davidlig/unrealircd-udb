@@ -58,6 +58,7 @@ def sha256(password):
 def write_config(path, name, sid, client_port, tls_port, module, dbdir):
     path.write_text(f'''include "{RUNTIME_ROOT}/conf/modules.default.conf";
 include "{RUNTIME_ROOT}/conf/snomasks.default.conf";
+include "{RUNTIME_ROOT}/conf/operclass.default.conf";
 blacklist-module "geoip_classic";
 blacklist-module "geoip_mmdb";
 blacklist-module "geoip_csv";
@@ -77,6 +78,21 @@ set {{
 }}
 class clients {{ pingfreq 60; maxclients 20; sendq 1M; recvq 8000; }}
 allow {{ mask "127.0.0.1"; class clients; maxperip 20; }}
+operclass udb-limited {{
+    permissions {{ server {{ rehash {{ local; }} }} }}
+}}
+oper testoper {{
+    mask "*@*";
+    password "operpass";
+    operclass "udb-limited";
+    class clients;
+}}
+oper testadmin {{
+    mask "*@*";
+    password "adminpass";
+    operclass "netadmin-with-override";
+    class clients;
+}}
 listen {{ ip "127.0.0.1"; port {client_port}; }}
 listen {{ ip "127.0.0.1"; port {tls_port}; options {{ tls; }} }}
 loadmodule "cloak_sha256";
@@ -347,6 +363,100 @@ def exercise(host, port):
         suspended_client.request("JOIN #firstkey firstsecret", lambda line: " 366 " in line, "first keyed JOIN")
         suspended_client.request("JOIN #vault chansecret", lambda line: " 366 " in line, "end of keyed JOIN")
 
+        rejected_oper_only = suspended_client.request("JOIN #operonly", lambda line: " 520 " in line,
+                                                       "first oper-only JOIN rejection")
+        require(any(" 520 " in line for line in rejected_oper_only),
+                f"first OPER_ONLY JOIN did not fail with 520: {rejected_oper_only!r}")
+        alice.request("JOIN #operonly", lambda line: " 366 " in line, "founder oper-only JOIN")
+        alice.request("INVITE suspended #operonly", lambda line: " 341 " in line,
+                      "invite to oper-only channel")
+        invited_oper_only = suspended_client.request("JOIN #operonly", lambda line: " 520 " in line,
+                                                      "invited oper-only JOIN rejection")
+        require(any(" 520 " in line for line in invited_oper_only),
+                f"INVITE bypassed OPER_ONLY: {invited_oper_only!r}")
+
+        invite_only = suspended_client.request("JOIN #inviteonly", lambda line: " 473 " in line,
+                                                "first invite-only JOIN rejection")
+        require(any(" 473 " in line for line in invite_only),
+                f"first stored +i JOIN did not use the native numeric: {invite_only!r}")
+        alice.request("JOIN #inviteonly", lambda line: " 366 " in line, "invite-only founder JOIN")
+        alice.request("INVITE suspended #inviteonly", lambda line: " 341 " in line,
+                      "native invite-only invitation")
+        suspended_client.request("JOIN #inviteonly", lambda line: " 366 " in line,
+                                 "invited JOIN to materialized +i channel")
+        suspended_client.request("PART #inviteonly :test +I", lambda line: " PART #inviteonly " in line,
+                                 "part before +I exemption")
+        alice.request("MODE #inviteonly +I suspended!*@*",
+                      lambda line: "MODE #inviteonly +I suspended!*@*" in line,
+                      "materialized +I exemption")
+        suspended_client.request("JOIN #inviteonly", lambda line: " 366 " in line,
+                                 "+I exempt JOIN to materialized +i channel")
+
+        registered_only = suspended_client.request("JOIN #regonly", lambda line: " 477 " in line,
+                                                    "first registered-only JOIN rejection")
+        require(any(" 477 " in line for line in registered_only),
+                f"first stored +R JOIN did not use the native numeric: {registered_only!r}")
+        secure_only = suspended_client.request("JOIN #secureonly", lambda line: " 489 " in line,
+                                               "first secure-only JOIN rejection")
+        require(any(" 489 " in line for line in secure_only),
+                f"first stored +z JOIN did not use the native numeric: {secure_only!r}")
+
+        alice.request("JOIN #founderkey", lambda line: " 366 " in line,
+                      "founder bypass of first stored +k")
+        founder_forbid = alice.request("JOIN #founderforbid", lambda line: " 448 " in line,
+                                       "founder forbid rejection")
+        require(any("founders remain forbidden" in line for line in founder_forbid),
+                f"founder bypassed forbid: {founder_forbid!r}")
+
+        oper = IrcClient(host, port, "test-oper")
+        clients.append(oper)
+        oper.request("OPER testoper operpass", lambda line: " 381 " in line, "oper promotion")
+        oper.request("JOIN #operonly", lambda line: " 366 " in line, "oper OPER_ONLY bypass")
+        alice.request("JOIN #operonly-nativekey", lambda line: " 366 " in line,
+                      "founder JOIN before independent native +k")
+        alice.request("MODE #operonly-nativekey +k native-secret",
+                      lambda line: "MODE #operonly-nativekey +k native-secret" in line,
+                      "independent native +k on UDB-owned +O")
+        native_key = oper.request("JOIN #operonly-nativekey", lambda line: " 475 " in line,
+                                  "native +k rejection despite oper-only bypass")
+        require(any(" 475 " in line for line in native_key),
+                f"UDB-owned +O compatibility bypassed native +k: {native_key!r}")
+        oper.request("JOIN #operonly-nativekey native-secret", lambda line: " 366 " in line,
+                     "oper JOIN with independent native key")
+        oper.request("JOIN #forbidden", lambda line: " 366 " in line, "oper forbid bypass")
+        oper.request("INVITE suspended #forbidden", lambda line: " 341 " in line,
+                     "invite to forbidden channel")
+        invited_forbid = suspended_client.request("JOIN #forbidden", lambda line: " 448 " in line,
+                                                   "invited forbidden JOIN rejection")
+        require(any("reserved for testing" in line for line in invited_forbid),
+                f"INVITE bypassed forbid: {invited_forbid!r}")
+        oper.request("JOIN #operkey", lambda line: " 366 " in line, "oper key bypass")
+
+        # An oper's UDB exemption must not skip native CAN_JOIN hooks.
+        alice.request("JOIN #native-secure", lambda line: " 366 " in line,
+                      "founder JOIN before native +z")
+        alice.request("MODE #native-secure +z", lambda line: "MODE #native-secure +z" in line,
+                      "independent native secure-only mode")
+        native_secure = oper.request("JOIN #native-secure", lambda line: " 489 " in line,
+                                     "native +z rejection of limited oper")
+        require(any(" 489 " in line for line in native_secure),
+                f"UDB oper exemption bypassed native +z: {native_secure!r}")
+
+        alice.request("JOIN #native-operonly", lambda line: " 366 " in line,
+                      "founder JOIN before external +O")
+        admin = IrcClient(host, port, "test-admin")
+        clients.append(admin)
+        admin.request("OPER testadmin adminpass", lambda line: " 381 " in line,
+                      "admin oper promotion")
+        admin.request("JOIN #native-operonly", lambda line: " 366 " in line,
+                      "admin JOIN before external +O")
+        admin.request("MODE #native-operonly +O", lambda line: "MODE #native-operonly +O" in line,
+                      "external native +O")
+        native_oper_only = oper.request("JOIN #native-operonly", lambda line: " 520 " in line,
+                                        "limited oper rejected by external +O")
+        require(any(" 520 " in line for line in native_oper_only),
+                f"UDB exemption bypassed independent native +O: {native_oper_only!r}")
+
         rejected_forbid = suspended_client.request("JOIN #forbidden", lambda line: " 448 " in line,
                                                    "forbidden channel rejection")
         require(any("This channel is forbidden. Reason: reserved for testing" in line
@@ -425,6 +535,21 @@ def main():
                    "#vault::founder alice\n"
                    "#vault::modes +ntk chansecret\n"
                    "#firstkey::modes +ntk firstsecret\n"
+                   "#operonly::founder alice\n"
+                   "#operonly::options *16\n"
+                   "#operonly-nativekey::founder alice\n"
+                   "#operonly-nativekey::options *16\n"
+                   "#inviteonly::founder alice\n"
+                   "#inviteonly::modes +nti\n"
+                   "#regonly::modes +ntR\n"
+                   "#secureonly::modes +ntz\n"
+                   "#founderkey::founder alice\n"
+                   "#founderkey::modes +ntk founder-secret\n"
+                   "#founderforbid::founder alice\n"
+                   "#founderforbid::forbid founders remain forbidden\n"
+                   "#operkey::modes +ntk oper-secret\n"
+                   "#native-secure::founder alice\n"
+                   "#native-operonly::founder alice\n"
                    "#forbidden::forbid reserved for testing\n"
                    "#percent::forbid Reserved %s for tests\n")
         seed_block(data / "udb_L.db", "L",

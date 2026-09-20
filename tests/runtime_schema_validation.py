@@ -784,7 +784,7 @@ def run_tests(ircd_bin, keep=False):
         # -------------------------------------------------------------
         # Test 8: C::modes reserved letters are rejected on file load too
         # -------------------------------------------------------------
-        for reserved_modes in ("+ntr", "+ntP", "+ntovh davidlig davidlig davidlig"):
+        for reserved_modes in ("+ntr", "+ntP", "+ntO", "+ntovh davidlig davidlig davidlig"):
             db_c.write_text(f"""; UDB Block C - Version 1
 ; Saved: 1787715840
 ; Records: 2
@@ -804,7 +804,7 @@ def run_tests(ircd_bin, keep=False):
             if db_c.read_bytes() != orig_bytes:
                 raise AssertionError(f"udb_C.db with reserved modes {reserved_modes!r} was overwritten after failed load!")
             proc = None
-        print("PASS: reserved C::modes letters (+r, +P, member ranks) abort startup transactionally")
+        print("PASS: reserved C::modes letters (+r, +P, +O, member ranks) abort startup transactionally")
 
     finally:
         if proc:

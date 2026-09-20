@@ -103,6 +103,7 @@
 #define UDB_CHOPT_LOCK_MODES 0x2   /* Channel modes are locked */
 #define UDB_CHOPT_LOCK_TOPIC 0x4   /* Channel topic is locked */
 #define UDB_CHOPT_PERSISTENT 0x8   /* Keep the channel alive through native +P */
+#define UDB_CHOPT_OPER_ONLY 0x10   /* Restrict channel joins to IRC operators */
 
 /* ========================================================================
  * Link Option Flags (bitmask in L::<server>::options *<value>)

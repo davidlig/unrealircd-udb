@@ -361,9 +361,9 @@ static int udb_channel_modes_record_valid(const char *value)
 			continue;
 		}
 
-		/* +r is UDB-owned registration state, +P is expressed by the
-		 * C::options PERSISTENT bit, and member ranks never live here. */
-		if (*c == 'r' || *c == 'P')
+		/* +r is UDB-owned registration state, +P and +O are expressed by
+		 * C::options bits, and member ranks never live here. */
+		if (*c == 'r' || *c == 'P' || *c == 'O')
 			return 0;
 
 		cm = find_channel_mode_handler(*c);

@@ -427,12 +427,16 @@ def exercise(host, client_port, server_port, c_db):
         services.send_ins(f"C::{CHANNEL}::modes", "+ovh bob bob bob")
         services.wait_for(lambda line: " DB " in line and " ERR INS " in line,
                           "rejection of member ranks in C::modes", start=services_start)
+        services_start = len(services.lines)
+        services.send_ins(f"C::{CHANNEL}::modes", "+ntO")
+        services.wait_for(lambda line: " DB " in line and " ERR INS " in line,
+                          "rejection of reserved +O in C::modes", start=services_start)
         time.sleep(0.5)
         bob.receive(time.monotonic() + 0.5)
         rank_traffic = [line for line in bob.lines[start:] if f"MODE {CHANNEL}" in line]
-        require(not rank_traffic, f"rejected C::modes ranks were applied: {rank_traffic!r}")
+        require(not rank_traffic, f"rejected C::modes ranks or +O were applied: {rank_traffic!r}")
         require(wait_for_file_content(c_db, f"{CHANNEL}::modes +ntkm chansecret", 5),
-                f"rejected C::modes ranks changed the persisted modes in {c_db}")
+                f"rejected C::modes ranks or +O changed the persisted modes in {c_db}")
 
         # A non-member mode change applies and reverts the removed mode.
         start = len(alice.lines)
@@ -477,7 +481,7 @@ def exercise(host, client_port, server_port, c_db):
         require(wait_for_file_content(c_db, f"{fresh}::founder alice", 5),
                 f"live channel registration was not persisted in {c_db}")
 
-        for invalid in ("+ntr", "+ntP"):
+        for invalid in ("+ntr", "+ntP", "+ntO"):
             services_start = len(services.lines)
             services.send_ins(f"C::{fresh}::modes", invalid)
             services.wait_for(lambda line: " DB " in line and " ERR INS " in line,
