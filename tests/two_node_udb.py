@@ -396,6 +396,7 @@ def runtime_rename_failure_observed(a_log, b_log, b_db, baseline):
     return ("INS" in udb_commands(b_log) and "ERR" in udb_commands(a_log) and
             read_bytes_lenient(b_db) == baseline and not db_contains(b_db, MUTATOR_RECORD) and
             not b_db.with_suffix(".db.tmp").exists() and
+            not b_db.with_suffix(".db.udb_previous").exists() and
             "UDB_TEST_SNAPSHOT_RENAME_FAIL:" in log_text(b_log))
 
 
@@ -403,6 +404,7 @@ def runtime_del_rename_failure_observed(a_log, b_log, b_db, baseline):
     return (ordered(udb_commands(b_log), ("INS", "DEL")) and "ERR" in udb_commands(a_log) and
             read_bytes_lenient(b_db) == baseline and db_contains(b_db, MUTATOR_RECORD) and
             not b_db.with_suffix(".db.tmp").exists() and
+            not b_db.with_suffix(".db.udb_previous").exists() and
             "UDB_TEST_SNAPSHOT_RENAME_FAIL:" in log_text(b_log) and
             ("cmd=DEL err=3" in log_text(a_log) or "cmd=DEL err=6" in log_text(a_log)))
 
@@ -411,6 +413,7 @@ def runtime_drp_rename_failure_observed(a_log, b_log, b_db, baseline):
     return ("DRP" in udb_commands(b_log) and "ERR" in udb_commands(a_log) and
             read_bytes_lenient(b_db) == baseline and db_contains(b_db, "harness-a::vhost winner.test") and
             not b_db.with_suffix(".db.tmp").exists() and
+            not b_db.with_suffix(".db.udb_previous").exists() and
             "UDB_TEST_SNAPSHOT_RENAME_FAIL:" in log_text(b_log) and
             ("cmd=DRP err=3" in log_text(a_log) or "cmd=DRP err=6" in log_text(a_log)))
 
@@ -442,8 +445,16 @@ def print_diagnostics(logs, b_db=None):
         print(f"--- {label} relevant log lines ({log}) ---", file=sys.stderr)
         print("\n".join(evidence) or "(none)", file=sys.stderr)
     if b_db:
+        previous = b_db.with_suffix(".db.udb_previous")
+        db_content = read_text_lenient(b_db)
+        if db_content:
+            status = db_content
+        elif previous.exists():
+            status = f"(missing: active snapshot is rotated to {previous.name})"
+        else:
+            status = "(missing)"
         print(f"--- node B database ({b_db}) ---", file=sys.stderr)
-        print(read_text_lenient(b_db) or "(missing)", file=sys.stderr)
+        print(status, file=sys.stderr)
 
 
 def stop(processes):

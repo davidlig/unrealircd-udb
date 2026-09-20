@@ -533,7 +533,10 @@ static int udb_reconcile_check(UdbContext *ctx)
 	int was_not_ready = !udb_ready;
 
 	if (!udb_transition_to_ready(ctx, now))
+	{
+		udb_reconcile_abort(ctx, "ready transition failed", 1);
 		return 0;
+	}
 
 	udb_sync_status = UDB_SYNC_OK;
 	udb_degraded_since = 0;

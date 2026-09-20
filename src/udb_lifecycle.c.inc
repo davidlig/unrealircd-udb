@@ -261,10 +261,12 @@ static int udb_blocks_save_all(UdbContext *ctx)
 {
 	UdbBlock *b;
 	UdbBlock *saved_blocks[UDB_NUM_BLOCKS];
+	unsigned char had_backup[UDB_NUM_BLOCKS] = {0};
 	unsigned int saved_count = 0;
 	unsigned int i;
 	int success = 1;
 	int cleanup_ok = 1;
+	int restore_ok = 1;
 	char backup_path[UDB_BLOCK_PATH_MAX];
 	struct stat st;
 
@@ -282,6 +284,7 @@ static int udb_blocks_save_all(UdbContext *ctx)
 		{
 			if (!S_ISREG(st.st_mode) || rename(b->filepath, backup_path) != 0)
 				goto rollback;
+			had_backup[saved_count] = 1;
 		}
 		else if (errno != ENOENT)
 			goto rollback;
@@ -325,15 +328,21 @@ rollback:
 	{
 		b = saved_blocks[i - 1];
 		if (snprintf(backup_path, sizeof(backup_path), "%s.udb_previous", b->filepath) >= (int)sizeof(backup_path))
+		{
+			restore_ok = 0;
 			continue;
+		}
 		if (unlink(b->filepath) != 0 && errno != ENOENT)
-			success = 0;
-		if (rename(backup_path, b->filepath) != 0)
-			success = 0;
+			restore_ok = 0;
+		if (had_backup[i - 1])
+		{
+			if (rename(backup_path, b->filepath) != 0)
+				restore_ok = 0;
+		}
 	}
 	if (saved_count && !udb_fsync_parent_directory(saved_blocks[0]->filepath))
-		success = 0;
-	if (!success)
+		restore_ok = 0;
+	if (!restore_ok)
 		udb_log(ULOG_ERROR, "UDB_BACKUP_RESTORE_FAILED", NULL,
 				"Cannot durably restore the previous UDB snapshot set; refusing READY");
 	return 0;
