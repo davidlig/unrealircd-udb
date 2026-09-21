@@ -35,11 +35,37 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertIn('EXTRAPARA="--with-show-opermot=no"', self.run_scripts)
 
     def test_runtime_paths_are_portable(self):
-        self.assertNotIn("/" + "home" + "/", self.text)
-        self.assertNotIn("/" + "Users" + "/", self.text)
-        self.assertNotRegex(self.text, re.compile(r"[A-Za-z]:\\Users\\"))
+        self.assertNotIn("/" + "home" + "/", self.run_scripts)
+        self.assertNotIn("/" + "Users" + "/", self.run_scripts)
+        self.assertNotRegex(self.run_scripts, re.compile(r"[A-Za-z]:\\Users\\"))
         self.assertIn('UDB_TEST_IRCD_ROOT=$RUNNER_TEMP/unrealircd', self.run_scripts)
         self.assertIn('UNREALIRCD_SOURCE=$RUNNER_TEMP/unrealircd-src', self.run_scripts)
+
+    def test_deployment_has_production_only_gate(self):
+        deploy = self.jobs["deploy"]
+        self.assertEqual(deploy["environment"], "production")
+        self.assertEqual(deploy["needs"], ["agentic", "release", "test"])
+        self.assertEqual(deploy["if"], "github.event_name == 'push' && github.ref == 'refs/heads/main'")
+        self.assertEqual(deploy["runs-on"], ["self-hosted", "linux", "x64", "udb-deploy"])
+        for job_name in ("agentic", "release", "test"):
+            self.assertEqual(self.jobs[job_name]["runs-on"], "ubuntu-latest")
+
+    def test_deployment_uses_protected_host_local_command_not_ssh(self):
+        steps = self.jobs["deploy"]["steps"]
+        checkout = steps[0]
+        self.assertEqual(checkout["uses"], "actions/checkout@v4")
+        self.assertEqual(checkout["with"]["persist-credentials"], False)
+        deploy_step = steps[-1]
+        self.assertEqual(deploy_step["env"]["DEPLOY_COMMAND"], "${{ secrets.DEPLOY_COMMAND }}")
+        self.assertIn('deploy_uid=$(id -u)', deploy_step["run"])
+        self.assertIn('"$(stat -c %u -- "$command_path")" == "$deploy_uid"', deploy_step["run"])
+        self.assertIn('"$DEPLOY_COMMAND" "$RELEASE_VERSION"', deploy_step["run"])
+        self.assertNotIn("DEPLOY_SCRIPT", self.text)
+        self.assertNotIn("ssh ", self.text)
+        self.assertNotIn("scp ", self.text)
+        self.assertNotIn("scripts/deploy-unrealircd.sh", self.text)
+        self.assertNotIn("/var/run/docker.sock", self.text)
+        self.assertNotIn("/home/", self.text)
 
     def test_runtime_and_sanitizer_builds_have_early_guards(self):
         self.assertIn('test -x "$UDB_TEST_IRCD_ROOT/bin/unrealircd"', self.run_scripts)

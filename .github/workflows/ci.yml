@@ -1,4 +1,7 @@
-name: UDB CI & Test Suite
+name: UDB CI & Production Deployment
+
+permissions:
+  contents: read
 
 on:
   push:
@@ -7,6 +10,30 @@ on:
     branches: [ main ]
 
 jobs:
+  release:
+    name: Resolve UnrealIRCd Stable
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      url: ${{ steps.resolve.outputs.url }}
+      sha256: ${{ steps.resolve.outputs.sha256 }}
+
+    steps:
+      - name: Checkout repository
+        run: |
+          git clone --depth 1 "https://github.com/$GITHUB_REPOSITORY.git" .
+          git fetch origin "$GITHUB_REF" --depth 1
+          git checkout --detach "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Test release selection
+        run: python3 tests/test_release_manifest.py
+
+      - name: Resolve and download supported Stable
+        id: resolve
+        run: python3 scripts/resolve_unrealircd_release.py --archive "$RUNNER_TEMP/unrealircd.tar.gz" --github-output "$GITHUB_OUTPUT"
+
   agentic:
     name: Agent Configuration
     runs-on: ubuntu-latest
@@ -14,9 +41,10 @@ jobs:
     steps:
       - name: Checkout repository
         run: |
-          git clone --depth 1 "https://github.com/${{ github.repository }}.git" .
-          git fetch origin "${{ github.sha }}" --depth 1 || true
-          git checkout "${{ github.sha }}" || true
+          git clone --depth 1 "https://github.com/$GITHUB_REPOSITORY.git" .
+          git fetch origin "$GITHUB_REF" --depth 1
+          git checkout --detach "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
 
       - name: Install generator dependencies
         run: python3 -m pip install --disable-pip-version-check --user -r .agentic/requirements.txt
@@ -27,7 +55,7 @@ jobs:
   test:
     name: ${{ matrix.name }}
     runs-on: ubuntu-latest
-    needs: agentic
+    needs: [agentic, release]
     strategy:
       fail-fast: false
       matrix:
@@ -41,13 +69,16 @@ jobs:
     env:
       ASAN_OPTIONS: detect_leaks=0:abort_on_error=1:detect_odr_violation=0
       UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+      UNREALIRCD_SOURCE_URL: ${{ needs.release.outputs.url }}
+      UNREALIRCD_SOURCE_SHA256: ${{ needs.release.outputs.sha256 }}
 
     steps:
       - name: Checkout repository
         run: |
-          git clone --depth 1 "https://github.com/${{ github.repository }}.git" .
-          git fetch origin "${{ github.sha }}" --depth 1 || true
-          git checkout "${{ github.sha }}" || true
+          git clone --depth 1 "https://github.com/$GITHUB_REPOSITORY.git" .
+          git fetch origin "$GITHUB_REF" --depth 1
+          git checkout --detach "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
 
       - name: Install dependencies & configure bubblewrap
         run: |
@@ -65,7 +96,8 @@ jobs:
       - name: Configure and build UnrealIRCd
         run: |
           mkdir -p "$UNREALIRCD_SOURCE"
-          wget -q https://www.unrealircd.org/downloads/unrealircd-6.2.6.tar.gz -O "$RUNNER_TEMP/unrealircd.tar.gz"
+          curl --fail --location --silent --show-error --retry 3 "$UNREALIRCD_SOURCE_URL" -o "$RUNNER_TEMP/unrealircd.tar.gz"
+          printf '%s  %s\n' "$UNREALIRCD_SOURCE_SHA256" "$RUNNER_TEMP/unrealircd.tar.gz" | sha256sum --check -
           tar -xzf "$RUNNER_TEMP/unrealircd.tar.gz" --strip-components=1 -C "$UNREALIRCD_SOURCE"
           cat > "$UNREALIRCD_SOURCE/config.settings" <<EOF
           BASEPATH="$UDB_TEST_IRCD_ROOT"
@@ -179,3 +211,65 @@ jobs:
           python3 tests/three_node_udb.py
           python3 tests/two_node_udb.py
           python3 tests/test_udb_consistency_closure.py
+
+  deploy:
+    name: Deploy UnrealIRCd and UDB
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [agentic, release, test]
+    runs-on: [self-hosted, linux, x64, udb-deploy]
+    timeout-minutes: 40
+    environment: production
+    concurrency:
+      group: production-unrealircd
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    env:
+      RELEASE_VERSION: ${{ needs.release.outputs.version }}
+      RELEASE_URL: ${{ needs.release.outputs.url }}
+      RELEASE_SHA256: ${{ needs.release.outputs.sha256 }}
+
+    steps:
+      - name: Checkout exact tested commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Verify checked-out commit
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Package verified sources
+        id: bundle
+        run: |
+          curl --fail --location --silent --show-error --retry 3 --max-time 120 "$RELEASE_URL" -o "$RUNNER_TEMP/unrealircd.tar.gz"
+          printf '%s  %s\n' "$RELEASE_SHA256" "$RUNNER_TEMP/unrealircd.tar.gz" | sha256sum --check -
+          git archive --format=tar --prefix=udb/ HEAD | gzip -9 > "$RUNNER_TEMP/udb.tar.gz"
+          echo "udb_sha256=$(sha256sum "$RUNNER_TEMP/udb.tar.gz" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy with protected host-local command
+        env:
+          DEPLOY_COMMAND: ${{ secrets.DEPLOY_COMMAND }}
+          UDB_SHA256: ${{ steps.bundle.outputs.udb_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$RELEASE_VERSION" =~ ^6\.2\.[0-9]+$ && "$RELEASE_SHA256" =~ ^[0-9a-f]{64}$ && "$UDB_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          deploy_uid=$(id -u)
+          [[ "$deploy_uid" -ne 0 ]]
+          [[ -n "$DEPLOY_COMMAND" && "$DEPLOY_COMMAND" == /* && -f "$DEPLOY_COMMAND" && -x "$DEPLOY_COMMAND" && ! -L "$DEPLOY_COMMAND" ]]
+          command_path=$(realpath -e -- "$DEPLOY_COMMAND")
+          workspace=$(realpath -e -- "$GITHUB_WORKSPACE")
+          [[ "$command_path" == "$DEPLOY_COMMAND" && "$command_path" != "$workspace" && "$command_path" != "$workspace/"* ]]
+          [[ "$(stat -c %u -- "$command_path")" == "$deploy_uid" ]]
+          probe=$command_path
+          while :; do
+            owner=$(stat -c %u -- "$probe")
+            [[ "$owner" == "$deploy_uid" || "$owner" == 0 ]]
+            mode=$(stat -c %a -- "$probe")
+            (( (8#$mode & 022) == 0 ))
+            [[ "$probe" == / ]] && break
+            probe=${probe%/*}
+            [[ -n "$probe" ]] || probe=/
+          done
+          "$DEPLOY_COMMAND" "$RELEASE_VERSION" "$RUNNER_TEMP/unrealircd.tar.gz" "$RELEASE_SHA256" "$RUNNER_TEMP/udb.tar.gz" "$UDB_SHA256" "$GITHUB_SHA"
