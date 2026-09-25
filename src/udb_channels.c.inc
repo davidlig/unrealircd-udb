@@ -951,8 +951,8 @@ static int udb_channel_mode_has_change(const char *modes)
 		}
 		if (what != 0)
 		{
-			/* List modes b, e, I are channel lists and are not locked by lock_modes */
-			if (*modes == 'b' || *modes == 'e' || *modes == 'I')
+			/* List modes and member ranks are not locked by lock_modes. */
+			if (*modes == 'b' || *modes == 'e' || *modes == 'I' || strchr("qaohv", *modes))
 				continue;
 			return 1;
 		}
@@ -972,6 +972,90 @@ static int udb_channel_mode_has_ban_add(const char *modes)
 			what = MODE_DEL;
 		else if (*modes == 'b' && what == MODE_ADD)
 			return 1;
+	}
+	return 0;
+}
+
+static int udb_channel_member_rank(Client *client, Channel *channel)
+{
+	if (check_channel_access(client, channel, "q"))
+		return RANK_CHANOWNER;
+	if (check_channel_access(client, channel, "a"))
+		return RANK_CHANADMIN;
+	if (check_channel_access(client, channel, "o"))
+		return RANK_CHANOP;
+	if (check_channel_access(client, channel, "h"))
+		return RANK_HALFOP;
+	if (check_channel_access(client, channel, "v"))
+		return RANK_VOICE;
+	return RANK_VOICE - 1;
+}
+
+static int udb_channel_blocks_secure_ops(Client *client, Channel *channel, int parc, const char *parv[])
+{
+	const char *modes = parv[2];
+	int what = MODE_ADD;
+	int param = 3;
+	int actor_rank = udb_channel_member_rank(client, channel);
+
+	for (; modes && *modes; modes++)
+	{
+		Cmode *handler;
+		int takes_parameter;
+		int mode_rank = 0;
+		const char *target_name = NULL;
+
+		if (*modes == '+')
+		{
+			what = MODE_ADD;
+			continue;
+		}
+		if (*modes == '-')
+		{
+			what = MODE_DEL;
+			continue;
+		}
+		if (*modes == 'b' || *modes == 'e' || *modes == 'I')
+			takes_parameter = 1;
+		else
+		{
+			handler = find_channel_mode_handler(*modes);
+			takes_parameter = handler && handler->paracount && (what == MODE_ADD || handler->unset_with_param);
+		}
+		if (takes_parameter && param < parc)
+			target_name = parv[param++];
+
+		switch (*modes)
+		{
+		case 'q':
+			mode_rank = RANK_CHANOWNER;
+			break;
+		case 'a':
+			mode_rank = RANK_CHANADMIN;
+			break;
+		case 'o':
+			mode_rank = RANK_CHANOP;
+			break;
+		case 'h':
+			mode_rank = RANK_HALFOP;
+			break;
+		case 'v':
+			mode_rank = RANK_VOICE;
+			break;
+		default:
+			continue;
+		}
+		if (!target_name)
+			continue; /* Native MODE reports or ignores missing parameters. */
+		if (actor_rank == RANK_CHANOWNER)
+			continue;
+		if (what == MODE_ADD)
+			return 1;
+		if (actor_rank > mode_rank)
+			continue;
+		if (find_user(target_name, NULL) == client)
+			continue; /* Preserve native self-demotion rules. */
+		return 1;
 	}
 	return 0;
 }
@@ -1052,6 +1136,13 @@ CMD_OVERRIDE_FUNC(udb_override_mode)
 	{
 		udb_send_service_notice(client, SKEY_CHANSERV,
 								"You do not have permission to change modes in %s (locked by UDB)", channel->name);
+		return;
+	}
+	if (strcmp(ovr->command->cmd, "SAMODE") && udb_channel_option_enabled(udb_ctx, chan_rec, UDB_CHOPT_SECURE_OPS) &&
+		udb_channel_blocks_secure_ops(client, channel, parc, parv))
+	{
+		udb_send_service_notice(client, SKEY_CHANSERV,
+								"You do not have permission to change member ranks in %s (SECURE_OPS)", channel->name);
 		return;
 	}
 	udb_channel_ban_owners_prune(channel);

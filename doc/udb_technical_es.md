@@ -208,12 +208,13 @@ Opciones (`options`):
 | Bit | Valor | Nombre | Comportamiento |
 |---|---:|---|---|
 | `0x01` | 1 | `PROTECT_BANS` | Un usuario normal no puede retirar un ban local creado por otro usuario; fundador y oper quedan exentos. |
-| `0x02` | 2 | `LOCK_MODES` | Bloquea cambios locales de modos excepto listas `b`, `e`, `I`. |
+| `0x02` | 2 | `LOCK_MODES` | Bloquea cambios locales de modos excepto listas `b`, `e`, `I` y rangos de miembro `q`, `a`, `o`, `h`, `v`. |
 | `0x04` | 4 | `LOCK_TOPIC` | Bloquea cambios locales de topic. |
 | `0x08` | 8 | `PERSISTENT` | Aplica `+P` si el modo nativo `P` existe; UDB no lo emula si falta. |
 | `0x10` | 16 | `OPER_ONLY` | Restringe el JOIN a operadores IRC y aplica el `+O` nativo cuando existe su handler. El JOIN sigue fail-closed si falta. |
+| `0x20` | 32 | `SECURE_OPS` | Sólo un miembro `+q` puede conceder rangos. Los demás pueden retirar rangos inferiores al máximo propio, o su propio rango cuando UnrealIRCd lo permite. `SAMODE` conserva el acceso administrativo nativo. |
 
-Los bits pueden combinarse. Por ejemplo, `*31` habilita los cinco. `suspend` retira el `+O` propiedad de UDB y levantarlo restaura `+O`; borrar `options` o el perfil lo retira. UDB siempre reconcilia `+O/-O` antes de `+P/-P`, porque retirar `+P` puede destruir un canal vacío.
+Los bits pueden combinarse: `*31` habilita los cinco originales y `*63` habilita los seis. Sin `SECURE_OPS`, los permisos nativos sobre rangos no cambian. `suspend` retira el `+O` propiedad de UDB y levantarlo restaura `+O`; borrar `options` o el perfil lo retira. UDB siempre reconcilia `+O/-O` antes de `+P/-P`, porque retirar `+P` puede destruir un canal vacío.
 
 #### JOIN, fundador y clave nativa
 

@@ -202,12 +202,13 @@ Options:
 | Bit | Value | Name | Behavior |
 |---|---:|---|---|
 | `0x01` | 1 | `PROTECT_BANS` | A normal user cannot remove a locally tracked ban created by another user; founder and oper bypass it. |
-| `0x02` | 2 | `LOCK_MODES` | Blocks local mode changes except list modes `b`, `e`, `I`. |
+| `0x02` | 2 | `LOCK_MODES` | Blocks local mode changes except list modes `b`, `e`, `I` and member ranks `q`, `a`, `o`, `h`, `v`. |
 | `0x04` | 4 | `LOCK_TOPIC` | Blocks local topic changes. |
 | `0x08` | 8 | `PERSISTENT` | Applies native `+P` if that channel mode exists; UDB does not emulate it. |
 | `0x10` | 16 | `OPER_ONLY` | Restricts JOIN to IRC operators and applies native `+O` when its handler exists. JOIN remains fail-closed if the handler is absent. |
+| `0x20` | 32 | `SECURE_OPS` | Only a `+q` member may grant ranks. Other members may remove ranks below their highest rank, or their own rank when UnrealIRCd permits it. `SAMODE` retains native administrator access. |
 
-Bits may be combined; `*31` enables all five. `suspend` removes UDB-owned `+O` and lifting it restores `+O`; deleting `options` or the profile removes it. UDB always reconciles `+O/-O` before `+P/-P`, because removing `+P` may destroy an empty channel.
+Bits may be combined; `*31` enables the original five and `*63` enables all six. With `SECURE_OPS` unset, native rank permissions are unchanged. `suspend` removes UDB-owned `+O` and lifting it restores `+O`; deleting `options` or the profile removes it. UDB always reconciles `+O/-O` before `+P/-P`, because removing `+P` may destroy an empty channel.
 
 #### JOIN, founder and native key
 

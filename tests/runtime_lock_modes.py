@@ -643,6 +643,93 @@ def exercise(host, client_port, server_port, config, tls_port, module, dbdir):
         alice.request(f"MODE {CHANNEL} -b *!*@other.test", lambda line: f"MODE {CHANNEL} -b *!*@other.test" in line, "founder ban remove")
         print("PASS: options protect_bans (*1) allowed ban removal by founder")
 
+        dave = IrcClient(host, client_port, "dave")
+        erin = IrcClient(host, client_port, "erin")
+        frank = IrcClient(host, client_port, "frank")
+        clients.extend((dave, erin, frank))
+        for peer in (dave, erin, frank):
+            peer.request(f"JOIN {CHANNEL}", lambda line: " 366 " in line, f"{peer.nick} JOIN")
+
+        # LOCK_MODES leaves member ranks to the native MODE handlers.
+        services.send_ins(f"C::{CHANNEL}::options", "*2")
+        time.sleep(0.2)
+        for rank in "aohvq":
+            alice.request(f"MODE {CHANNEL} +{rank} dave",
+                          lambda line, rank=rank: f"MODE {CHANNEL} +{rank} dave" in line,
+                          f"+{rank} allowed with LOCK_MODES")
+            alice.request(f"MODE {CHANNEL} -{rank} dave",
+                          lambda line, rank=rank: f"MODE {CHANNEL} -{rank} dave" in line,
+                          f"-{rank} allowed with LOCK_MODES")
+        print("PASS: LOCK_MODES permits all five member ranks")
+
+        # Without SECURE_OPS, UnrealIRCd's own permission checks apply.
+        bob.request(f"MODE {CHANNEL} +h dave", lambda line: f"MODE {CHANNEL} +h dave" in line,
+                    "native +o grants +h")
+        bob.request(f"MODE {CHANNEL} +a dave", lambda line: " 499 " in line,
+                    "native +o cannot grant +a")
+        alice.request(f"MODE {CHANNEL} -h dave", lambda line: f"MODE {CHANNEL} -h dave" in line,
+                      "remove native +h")
+        print("PASS: SECURE_OPS off preserves native rank grants")
+
+        alice.request(f"MODE {CHANNEL} +aa charlie bob",
+                      lambda line: f"MODE {CHANNEL} +aa charlie bob" in line, "grant two admins")
+        alice.request(f"MODE {CHANNEL} +o frank", lambda line: f"MODE {CHANNEL} +o frank" in line,
+                      "grant second op")
+        alice.request(f"MODE {CHANNEL} +h dave", lambda line: f"MODE {CHANNEL} +h dave" in line,
+                      "grant halfop")
+        alice.request(f"MODE {CHANNEL} +h frank", lambda line: f"MODE {CHANNEL} +h frank" in line,
+                      "grant halfop to op")
+        alice.request(f"MODE {CHANNEL} +v erin", lambda line: f"MODE {CHANNEL} +v erin" in line,
+                      "grant voice")
+
+        services.send_ins(f"C::{CHANNEL}::options", "*34")
+        time.sleep(0.2)
+
+        def secure_denied(actor, command, description):
+            start = len(actor.lines)
+            actor.send(command)
+            actor.wait_for(lambda line: "SECURE_OPS" in line and "ChanServ" in line,
+                           description, start=start)
+
+        secure_denied(bob, f"MODE {CHANNEL} +v frank", "admin cannot grant voice")
+        secure_denied(frank, f"MODE {CHANNEL} +h erin", "op cannot grant halfop")
+        secure_denied(dave, f"MODE {CHANNEL} +v frank", "halfop cannot grant voice")
+        secure_denied(oper, f"MODE {CHANNEL} +h erin", "IRC operator MODE override cannot grant rank")
+        secure_denied(bob, f"MODE {CHANNEL} -a charlie", "admin cannot remove peer admin")
+        secure_denied(frank, f"MODE {CHANNEL} -o bob", "op cannot remove peer op")
+        secure_denied(dave, f"MODE {CHANNEL} -h frank", "halfop cannot remove peer halfop")
+        secure_denied(frank, f"MODE {CHANNEL} -q davidlig", "op cannot remove owner")
+
+        # The requested mode determines the comparison, even when its target
+        # also has a higher rank.
+        bob.request(f"MODE {CHANNEL} -o charlie", lambda line: f"MODE {CHANNEL} -o charlie" in line,
+                    "admin removes op from another admin")
+        frank.request(f"MODE {CHANNEL} -h dave", lambda line: f"MODE {CHANNEL} -h dave" in line,
+                      "op removes halfop")
+        alice.request(f"MODE {CHANNEL} +h dave", lambda line: f"MODE {CHANNEL} +h dave" in line,
+                      "restore halfop")
+        dave.request(f"MODE {CHANNEL} -v erin", lambda line: f"MODE {CHANNEL} -v erin" in line,
+                     "halfop removes voice")
+        bob.request(f"MODE {CHANNEL} -a bob", lambda line: f"MODE {CHANNEL} -a bob" in line,
+                    "native self-demotion")
+
+        alice.request(f"MODE {CHANNEL} +q frank", lambda line: f"MODE {CHANNEL} +q frank" in line,
+                      "grant owner to non-founder")
+        frank.request(f"MODE {CHANNEL} +v erin", lambda line: f"MODE {CHANNEL} +v erin" in line,
+                      "non-founder owner grants voice")
+        alice.request(f"MODE {CHANNEL} -q frank", lambda line: f"MODE {CHANNEL} -q frank" in line,
+                      "remove temporary owner")
+
+        start = len(alice.lines)
+        secure_denied(charlie, f"MODE {CHANNEL} +bv *!*@secure-atomic.test frank",
+                      "mixed rank/list MODE rejected atomically")
+        alice.receive(time.monotonic() + 0.3)
+        require(not any("secure-atomic.test" in line for line in alice.lines[start:]),
+                "a rejected mixed MODE applied its allowed ban")
+        oper.request(f"SAMODE {CHANNEL} +v frank", lambda line: f"MODE {CHANNEL} +v frank" in line,
+                     "SAMODE bypasses SECURE_OPS")
+        print("PASS: SECURE_OPS protects grants, rank hierarchy, mixed MODE, and self-demotion")
+
 
     finally:
         for client in clients:
