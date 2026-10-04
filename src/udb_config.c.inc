@@ -179,12 +179,13 @@ static void udb_config_defaults(void)
 	udb_cfg->config_flood_period = udb_cfg->flood_period;
 }
 
+/* UnrealIRCd config-hook contract: 0 leaves unrelated blocks to other modules;
+ * 1 accepts udb, and -1 rejects it with the validation error count in errs. */
 static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
 {
 	int errors = 0;
 	ConfigEntry *cep;
 
-	/* We only handle CONFIG_MAIN blocks named "udb" */
 	if (type != CONFIG_MAIN)
 		return 0;
 	if (!ce || !ce->name || strcmp(ce->name, "udb"))
@@ -241,7 +242,6 @@ static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
 	if (!ce || !ce->name || strcmp(ce->name, "udb"))
 		return 0;
 
-	/* Allocate config if needed */
 	if (!udb_cfg)
 		udb_cfg = safe_alloc(sizeof(UdbConfig));
 

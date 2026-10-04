@@ -1,6 +1,6 @@
 /*
  * UDB 4 - Unreal Database System for UnrealIRCd 6
- * Subsystem: Nick Registration, SHA-256 Identification & Forced Nick Migrations
+ * Subsystem: Nick Authentication, Identity & Runtime Effect Ownership
  *
  * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
  * Based on the original UDB concept by Trocotronic.
@@ -232,10 +232,9 @@ static void udb_nick_finish_tree_replace(void)
 	udb_nick_replacement_tree = NULL;
 }
 
-/* Identity exists only while an active UDB authentication is bound to the
- * current nick. It is created after a confirmed nick change and destroyed by
- * suspend, policy changes and leaving the nick; it never carries proof across
- * a suspend. */
+/* Called only after a confirmed nick change or initial registration consumes
+ * valid pending auth. Policy checks and revocation belong to the callers;
+ * this setter must never turn a matching nick or +r into authentication. */
 static void udb_nick_identity_set(Client *client, UdbRecord *nick_rec)
 {
 	UdbNickIdentity *identity;
@@ -1716,7 +1715,7 @@ dispatch_clean_nick:;
 	new_parv[1] = clean_nick;
 	CallCommandOverride(ovr, clictx, client, recv_mtags, parc, new_parv);
 	/* The credential is bound to this attempt: a rejected change must not
-	 * leave a promvable pending proof behind for a later forced rename. */
+	 * leave a promotable pending proof behind for a later forced rename. */
 	udb_nick_pending_auth_expire(client, clean_nick);
 	return;
 
@@ -1757,7 +1756,8 @@ static int udb_hook_can_use_nick(Client *client, const char *newnick, const char
 			return HOOK_DENY;
 		}
 
-		/* If client is already this nick and identified with +r, allow without re-entering password */
+		/* A same-nick +r retry bypasses password entry here, but does not create
+		 * UDB identity; access restrictions still apply. */
 		if (!strcasecmp(client->name, newnick) && has_user_mode(client, 'r'))
 		{
 			udb_nick_password_cache_clear(client);

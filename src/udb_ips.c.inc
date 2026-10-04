@@ -1,6 +1,6 @@
 /*
  * UDB 4 - Unreal Database System for UnrealIRCd 6
- * Subsystem: IP Management, Cloaks, Clone Limits & Virtual Hosts
+ * Subsystem: Clone Limits, Protected Base Cloaks & IP Host Overlays
  *
  * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
  * Based on the original UDB concept by Trocotronic.
@@ -10,6 +10,8 @@
  */
 
 typedef struct UdbIpHostState UdbIpHostState;
+/* Track the I::host overlay UDB applied; revocation must preserve a later
+ * external host replacement and otherwise recover the protected base. */
 struct UdbIpHostState
 {
 	char key[256];
@@ -414,19 +416,16 @@ static int udb_hook_pre_connect(Client *client)
 	if (!client || !client->ip || !client->local)
 		return 0;
 
-	/* Lookup IP or Host in UDB */
 	ip_rec = udb_hash_find(udb_ctx, udb_block_letter_to_index(UDB_BLOCK_IPS), client->ip);
 	if (!ip_rec && client->user)
 		ip_rec = udb_hash_find(udb_ctx, udb_block_letter_to_index(UDB_BLOCK_IPS), client->user->realhost);
 
 	if (ip_rec)
 	{
-		/* Apply Clone Limit */
 		sub_rec = udb_record_find(udb_ctx, IKEY_CLONES, ip_rec);
 		if (sub_rec && sub_rec->data_num > 0)
 			limit = (int)sub_rec->data_num;
 
-		/* Apply Host Override */
 		sub_rec = udb_record_find(udb_ctx, IKEY_HOST, ip_rec);
 		if (sub_rec && sub_rec->data_str && *sub_rec->data_str && client->user)
 			udb_ip_apply_host(client, ip_rec->key, sub_rec->data_str);

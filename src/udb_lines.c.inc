@@ -1,6 +1,6 @@
 /*
  * UDB 4 - Unreal Database System for UnrealIRCd 6
- * Subsystem: Distributed *lines (K, Z, Shun, Q) and Spamfilter Rules
+ * Subsystem: Distributed G/Z/S/Q Lines, Spamfilters & Expiry
  *
  * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
  * Based on the original UDB concept by Trocotronic.

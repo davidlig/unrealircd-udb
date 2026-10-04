@@ -9,6 +9,8 @@
  * License: GNU General Public License v2+
  */
 
+/* Resolve a unique live ULine user for this operation; missing or ambiguous
+ * matches fall back to &me. The returned Client is borrowed, never cached. */
 static Client *udb_service_source(const char *service_key)
 {
 	const char *mask = udb_get_bot_mask(service_key, 0);

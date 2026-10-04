@@ -592,7 +592,6 @@ static int udb_persistence_load_state(UdbPersistentState *state_out, UdbPersiste
 	fp = fopen(state_path, "r");
 	if (!fp)
 	{
-		/* Missing .udb_state */
 		return 0;
 	}
 
@@ -627,7 +626,6 @@ static int udb_persistence_load_state(UdbPersistentState *state_out, UdbPersiste
 			}
 			else
 			{
-				/* Invalid state string */
 				goto invalid;
 			}
 			seen |= UDB_STATE_SEEN_STATE;

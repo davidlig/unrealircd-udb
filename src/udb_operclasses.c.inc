@@ -7,21 +7,20 @@
  *
  * (C) 2026 David Abuín Fontán
  * License: GNU General Public License v2+
- *
- * OCL is the distributed source of truth about the operclasses each
+ */
+
+/* OCL is the distributed source of truth about the operclasses each
  * participant IRCd currently has loaded.  OCLG is a derived projection (the
  * intersection of every participant inventory with matching effective
  * digests) published to explicit consumer subscribers such as Services.
  * Neither is ever persisted to the udb_*.db blocks.
  */
 
-/* ========================================================================
- * UnrealIRCd internals compatibility layer
+/* UnrealIRCd internals compatibility layer
  *
  * conf.c owns the active operclass list and does not export it through h.h.
  * Every direct reference to these internals is confined to this section so an
- * upstream layout change has a single place to adapt.
- * ======================================================================== */
+ * upstream layout change has a single place to adapt. */
 extern ConfigItem_operclass *conf_operclass;
 
 static ConfigItem_operclass *udb_compat_operclass_head(void)
@@ -247,7 +246,7 @@ static void udb_ocl_membership_rebuild(void)
 	udb_ocl_purge_nonmembers();
 }
 
-/* ---- Canonical serialization and digests ---- */
+/* Canonical serialization and digests */
 
 typedef struct UdbOclBuf
 {
@@ -496,7 +495,7 @@ static int udb_oclg_view_digest(UdbOclInventory *view, int ready, unsigned char 
 	return ok;
 }
 
-/* ---- Local inventory construction ---- */
+/* Local inventory construction */
 
 typedef struct UdbOclClassNode
 {
@@ -647,7 +646,7 @@ done:
 	return inv;
 }
 
-/* ---- Local publish, send and replay ---- */
+/* Local publish, send and replay */
 
 static void udb_ocl_send_inventory_to(Client *to, const char *origin_sid, UdbOclInventory *inv)
 {
@@ -754,7 +753,7 @@ static int udb_oclg_push(Client *to)
 	return 1;
 }
 
-/* ---- OCL receive path ---- */
+/* OCL receive path */
 
 static void udb_ocl_stage_discard(UdbOclOrigin *origin)
 {
@@ -1117,9 +1116,8 @@ static void udb_ocl_shutdown(void)
 	udb_ocl_epoch[0] = '\0';
 }
 
-/* ---- Instance epoch: generation is monotonic only within one epoch, so a
- * module reload with the same SID cannot make an old receiver reject a fresh
- * generation-1 snapshot as stale. ---- */
+/* Generation is monotonic only within an instance epoch. A fresh epoch lets
+ * receivers distinguish a reloaded module's generation-1 inventory from replay. */
 static void udb_ocl_ensure_epoch(void)
 {
 	unsigned char raw[8];
@@ -1139,7 +1137,7 @@ static void udb_ocl_ensure_epoch(void)
 	udb_ocl_epoch[UDB_OCL_EPOCH_LEN] = '\0';
 }
 
-/* ---- Registry completeness, OCLG projection ---- */
+/* Registry completeness, OCLG projection */
 
 static UdbOclEntry *udb_ocl_find_entry(UdbOclInventory *inv, const char *name)
 {

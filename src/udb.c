@@ -11,20 +11,12 @@
 
 #include "udb_internal.h"
 
-/* ========================================================================
- * Module Header
- * ======================================================================== */
-
 ModuleHeader MOD_HEADER = {"third/udb", UDB_VERSION,
 						   "UDB 4 - Unreal Database System (nick/channel/IP registration & sync)",
 						   "David Abuín Fontán ('davidlig')", "unrealircd-6"};
 
-/* ========================================================================
- * Implementation Files
- *
- * Each file implements a specific subsystem. They share the same compilation
- * unit, so all functions are static and can call each other freely.
- * ======================================================================== */
+/* Implementation units share one translation unit. Shared declarations in
+ * udb_internal.h allow static helpers to cross subsystem boundaries. */
 
 /* Record store: tree, hash, path, and file persistence primitives */
 #include "udb_store.c.inc"
@@ -71,44 +63,20 @@ ModuleHeader MOD_HEADER = {"third/udb", UDB_VERSION,
 /* Engine, block, configuration, and module lifecycle coordination */
 #include "udb_lifecycle.c.inc"
 
-/* ========================================================================
- * Configuration Test (MOD_TEST)
- *
- * Validates the udb { } configuration block at config load time.
- * ======================================================================== */
-
 MOD_TEST()
 {
 	return udb_module_test(modinfo);
 }
-
-/* ========================================================================
- * Module Initialization (MOD_INIT)
- *
- * Registers all commands, hooks, ModData, and initializes the DB engine.
- * ======================================================================== */
 
 MOD_INIT()
 {
 	return udb_module_init(modinfo);
 }
 
-/* ========================================================================
- * Module Load (MOD_LOAD)
- *
- * Called after all modules are initialized. Load database files.
- * ======================================================================== */
-
 MOD_LOAD()
 {
 	return udb_module_load(modinfo);
 }
-
-/* ========================================================================
- * Module Unload (MOD_UNLOAD)
- *
- * Save all data and free resources.
- * ======================================================================== */
 
 MOD_UNLOAD()
 {

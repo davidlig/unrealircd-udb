@@ -199,6 +199,8 @@ struct UdbBlock
 	UdbBlockLoadState load_state;
 };
 
+/* A receive session owns its private candidate tree and prepared index until
+ * validated publication transfers them, or abort releases them. */
 struct UdbSyncSession
 {
 	Client *peer;

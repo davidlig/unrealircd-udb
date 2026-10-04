@@ -254,7 +254,7 @@ static int udb_spamfilter_pattern_valid(const char *stored, const char *match_ty
 	if (!udb_spamfilter_pattern(stored, pattern, sizeof(pattern)))
 		return 0;
 	if (!match_type)
-		return 1; /* a partial F profile is stored but never materialized */
+		return 1; /* A partial F profile is stored but never materialized. */
 	match = unreal_create_match(udb_spamfilter_match_type_value(match_type), pattern, NULL);
 	if (!match)
 		return 0;
@@ -866,7 +866,7 @@ static int udb_record_validate(UdbBlock *block, const char *path, const char *va
 	if (depth < schema->min_depth || depth > schema->max_depth)
 		goto done;
 
-	/* Special handling for Block S: depth == 1 */
+	/* S keys live directly below the block root, without a profile container. */
 	if (block->letter == UDB_BLOCK_SETTINGS)
 	{
 		const char *key = parts[0];
@@ -941,7 +941,6 @@ static int udb_record_validate(UdbBlock *block, const char *path, const char *va
 		goto done;
 	}
 
-	/* Validate root container node */
 	if (schema->root_key_validator && !schema->root_key_validator(parts[0]))
 		goto done;
 
@@ -1047,9 +1046,7 @@ static void udb_block_replace_tree(UdbContext *ctx, UdbBlock *block, UdbRecord *
 		block->filesize = st.st_size;
 }
 
-/* ========================================================================
- * SHA-256 Digest Operations and Manifest
- * ======================================================================== */
+/* SHA-256 Digest Operations and Manifest */
 typedef struct UdbDigestLine
 {
 	char *line;
@@ -1387,9 +1384,7 @@ static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSessi
 	return 1;
 }
 
-/* ========================================================================
- * File I/O Operations
- * ======================================================================== */
+/* File I/O Operations */
 static int udb_record_path_valid(const char *path)
 {
 	const char *component;
@@ -1758,9 +1753,7 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 	return 1;
 }
 
-/* ========================================================================
- * Utility Functions
- * ======================================================================== */
+/* Utility Functions */
 static const char *udb_get_bot_nick(const char *service_key, int force_default)
 {
 	static char buf[64];
