@@ -35,7 +35,6 @@ static ModDataInfo *udb_channel_modes_md = NULL;
 static ModDataInfo *udb_channel_oper_only_md = NULL;
 static ModDataInfo *udb_channel_ban_owners_md = NULL;
 
-/* Forward declarations */
 static int udb_hook_can_join(Client *client, Channel *channel, const char *key, char **errmsg);
 static int udb_hook_pre_local_join(Client *client, Channel *channel, const char *key);
 static int udb_hook_local_join(Client *client, Channel *channel, MessageTag *mtags);

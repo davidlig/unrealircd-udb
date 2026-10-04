@@ -195,6 +195,7 @@ Las fuentes canónicas viven en `src/`. No se debe editar `dist/udb.c` como fuen
 Regenerar bundle:
 
 ```bash
+scripts/format-sources.sh
 python3 scripts/bundle.py
 ```
 
@@ -204,7 +205,7 @@ Comprobar drift sin modificar ficheros:
 python3 scripts/bundle.py --check
 ```
 
-El CI actual compila contra UnrealIRCd 6.2.6, valida el bundle y ejecuta suites normales y con ASan/UBSan para persistencia, bootstrap, sincronización, multihop, failover, OCL, límites y efectos runtime.
+El CI actual selecciona una versión Stable compatible de UnrealIRCd 6.2.x, valida el bundle y ejecuta suites normales y con ASan/UBSan para persistencia, bootstrap, sincronización, multihop, failover, OCL, límites y efectos runtime. La suite con cmocka + pytest es la ruta autoritativa de tests; los scripts independientes retirados ya no forman parte del descubrimiento ni del CI. Consulta la [guía de la suite](tests/README_ES.md).
 
 ## Documentación
 
@@ -214,8 +215,8 @@ El CI actual compila contra UnrealIRCd 6.2.6, valida el bundle y ejecuta suites 
 
 ### Privacidad del host y vhosts personalizados
 
-UDB usa el host derivado `.virtual` como cloak base (`+x`, sin `+t`), no como vhost retirable. Los hosts explícitos `N::vhost`, `I::host` y de oper son capas adicionales (`+xt`); `-t` vuelve a la base protegida. Un usuario local puede recuperar su `N::vhost` actual con `+t` sólo mientras esté autenticado por UDB, con `+r`, contraseña/acceso vigentes y sin suspend/forbid. Un `+r` externo no basta. Siguen aplicándose las restricciones nativas de cambio de host y los límites de flood. UDB rechaza `-x`, también mediante comandos de modos de servicios.
+UDB usa el host derivado `.virtual` como cloak base (`+x`, sin `+t`), no como vhost retirable. Los hosts explícitos `N::vhost`, `I::host` y de oper son capas adicionales (`+xt`); `-t` vuelve a la base protegida. Un usuario local puede recuperar su `N::vhost` actual con `+t` sólo mientras esté autenticado por UDB, con `+r`, contraseña/acceso vigentes y sin suspend/forbid. Un `+r` externo no basta. Siguen aplicándose las restricciones nativas de cambio de host y los límites de flood. El usuario puede retirar voluntariamente su propio `+x` mediante `MODE` o `UMODE2`, mostrando su host real; `+x` recupera la base UDB conservada, no el cloak nativo ni el vhost N. La autorización nativa de UnrealIRCd controla los cambios de otros emisores, incluidos servicios; UDB no añade restricciones a `-x`. Actualizar la base (también durante una recarga) conserva el estado actual de `x`; materializar un vhost personalizado del perfil sigue activando `+xt`.
 
-La desconexión nunca restaura el host real. Realhost/IP siguen disponibles internamente para matching y diagnósticos autorizados. Si desaparece la clave/sufijo de derivación, los usuarios existentes conservan su base protegida; los nuevos usan un cloak nativo validado o se rechazan si no existe uno seguro. Los hosts base se sincronizan como ModData temprano de cliente, propiedad de su servidor de origen, sin claves ni cambios al protocolo DB.
+La desconexión nunca cambia la visibilidad elegida: los usuarios ocultos siguen ocultos y el `-x` voluntario sigue siendo una exposición explícita. Realhost/IP siguen disponibles internamente para matching y diagnósticos autorizados. Si desaparece la clave/sufijo de derivación, los usuarios existentes conservan su base protegida; los nuevos usan un cloak nativo validado o se rechazan si no existe uno seguro. Los hosts base se sincronizan como ModData temprano de cliente, propiedad de su servidor de origen, sin claves ni cambios al protocolo DB.
 
 UDB puede recargarse, pero no descargarse en caliente. Actualiza todos los IRCd participantes. Para la primera actualización desde la implementación antigua, es preferible un reinicio controlado: la limpieza del módulo antiguo todavía se ejecuta durante una sustitución en caliente. Estas protecciones afectan al host público mostrado a usuarios normales, no al transporte entre servidores de confianza ni a diagnósticos autorizados de realhost/IP.

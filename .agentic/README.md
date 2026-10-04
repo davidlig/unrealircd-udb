@@ -38,12 +38,37 @@ Codex custom subagents are intentionally not generated. UDB specialization lives
 - `udb-documentation` owns evidence-driven synchronization of the English/Spanish README and technical docs.
 - `udb-security` owns strict wire parsing, root stream/watermark checks, bounded-state fail-closed behavior, secret redaction, and the server-link TLS trust boundary.
 
-## Verify in the full repository
+## Verify agentic contracts
+
+Use the authoritative pytest tooling suite. Install its pinned Python
+dependencies in the test virtualenv described in `tests/README.md`:
 
 ```bash
+python3 -m pip install -r tests/requirements.txt
 ./.agentic/ci-check.sh
+```
+
+The checker runs the focused agentic and CI contracts plus generator sync.
+It needs no cmocka build, installed daemon or installed UDB module. CLI-specific
+listing commands remain optional inspection tools:
+
+```bash
 opencode agent list
 agy agents
 ```
+
+Before runtime tests, build the checkout module as described in `udb-build-test`
+and run the separate freshness guard from the repository root:
+
+```bash
+export UDB_MODULE_PATH="$PWD/src/udb.so"
+python3 .agentic/test_runtime_module_fresh.py
+```
+
+The guard requires a checkout build, verifies source timestamps and the selected
+module's digest, and fails on missing/stale builds rather than skipping. Module
+selection matches the isolated harness: an existing `UDB_MODULE_PATH`, then
+`src/udb.so`, then `dist/udb.so`. Fixtures copy it into disposable nodes; never
+replace the user's installed module or restart existing servers for validation.
 
 For current model names use each CLI/provider's own model-listing command rather than committing transient model IDs to the repository.

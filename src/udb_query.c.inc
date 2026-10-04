@@ -9,6 +9,8 @@
  * License: GNU General Public License v2+
  */
 
+/* Secret status depends on block, depth and key, not just the leaf name.
+ * Without an active context, reserved secret keys remain conservatively hidden. */
 static int udb_query_is_secret(const UdbRecord *rec)
 {
 	const UdbRecord *root;
@@ -324,7 +326,6 @@ CMD_FUNC(cmd_dbq)
 		return;
 	}
 
-	/* Query for block summary only (e.g. "/DBQ N") */
 	if (query_str[1] == '\0')
 	{
 		sendto_one(client, NULL, ":%s 339 %s :%c %u %lu %lu %s %s", me.name, client->name, block->letter,
@@ -334,7 +335,6 @@ CMD_FUNC(cmd_dbq)
 		return;
 	}
 
-	/* Parse path (e.g. "N::davidlig::vhost") */
 	cur = query_str + 1;
 	if (cur[0] != ':' || cur[1] != ':' || cur[2] == '\0')
 	{
@@ -363,7 +363,6 @@ CMD_FUNC(cmd_dbq)
 		return;
 	}
 
-	/* Display the found record */
 	if (rec->data_str)
 	{
 		sendto_one(client, NULL, ":%s 339 %s :DBQ %s %s", me.name, client->name, query_str,

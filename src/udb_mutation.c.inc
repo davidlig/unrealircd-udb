@@ -58,7 +58,6 @@ static int udb_select_propagator(UdbContext *ctx, int require_hello, UdbPropagat
 	return 0;
 }
 
-/* Checks if a directly connected client is our authorized upstream propagator */
 static int udb_is_propagator(UdbContext *ctx, Client *server)
 {
 	UdbPropagatorSelection selected;
@@ -141,6 +140,9 @@ static void udb_mutation_trigger_gap_recovery(Client *direct_peer)
 		udb_reconcile.next_retry_at = time(NULL) + UDB_RECONCILE_RETRY_BASE;
 }
 
+/* Callers authorize the direct hop first. Stream identity is the original
+ * source SID plus epoch, not the relay's HEL epoch; mismatches trigger recovery
+ * without promoting the candidate stream here. */
 static UdbSeqCheckResult udb_mutation_check_sequence(UdbContext *ctx, Client *source, Client *direct_peer,
 													 const char *epoch, uint64_t seq)
 {

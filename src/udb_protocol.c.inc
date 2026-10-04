@@ -1,6 +1,6 @@
 /*
  * UDB 4 - Unreal Database System for UnrealIRCd 6
- * Subsystem: Server-to-Server (S2S) Protocol & HEL Capability Negotiation
+ * Subsystem: DB Frame Parsing, Routing & HEL Capability Negotiation
  *
  * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
  * Based on the original UDB concept by Trocotronic.
@@ -36,6 +36,8 @@ static int udb_send_db_to_one(Client *to, const char *fmt, ...)
 	return 1;
 }
 
+/* Relay only to HEL-confirmed direct peers, excluding the incoming direction.
+ * Reject an oversized frame as a whole rather than sending truncated grammar. */
 static int udb_sendto_confirmed_servers(Client *except, const char *fmt, ...)
 {
 	char *line;
@@ -172,8 +174,6 @@ int udb_hook_server_quit(Client *client, MessageTag *mtags)
 
 CMD_FUNC(cmd_db)
 {
-	/* Process DB protocol messages sent via server-to-server connection */
-
 	if (parc < 4)
 		return;
 

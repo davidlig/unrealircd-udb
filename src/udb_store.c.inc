@@ -1,6 +1,6 @@
 /*
  * UDB 4 - Unreal Database System for UnrealIRCd 6
- * Subsystem: Record Tree, Indexing, Hashing & File Persistence
+ * Subsystem: Record Trees, Path Encoding, Indexes & Snapshot Persistence
  *
  * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
  * Based on the original UDB concept by Trocotronic.
@@ -9,9 +9,7 @@
  * License: GNU General Public License v2+
  */
 
-/* ========================================================================
- * Block Index and Hash Operations
- * ======================================================================== */
+/* Block Index and Hash Operations */
 static void udb_hash_destroy(UdbContext *ctx);
 
 static int udb_hash_init(UdbContext *ctx)
@@ -218,9 +216,7 @@ static UdbRecord *udb_hash_find(UdbContext *ctx, int block_idx, const char *key)
 	return NULL;
 }
 
-/* ========================================================================
- * Record Tree and Path Operations
- * ======================================================================== */
+/* Record Tree and Path Operations */
 static const char *udb_get_shared_subkey(const char *key)
 {
 	static const char *known_keys[] = {
@@ -273,9 +269,7 @@ static UdbRecord *udb_record_find(UdbContext *ctx, const char *key, UdbRecord *p
 	return NULL;
 }
 
-/* ========================================================================
- * Record Limits and Feasibility Validation
- * ======================================================================== */
+/* Record Limits and Feasibility Validation */
 static int udb_path_component_noop(const char *decoded, unsigned int index, void *data)
 {
 	(void)decoded;
@@ -321,9 +315,7 @@ static int udb_record_fits_limits(const char *path, const char *value)
 	return 1;
 }
 
-/* ========================================================================
- * Path Component Encoding & Decoding
- * ======================================================================== */
+/* Path Component Encoding & Decoding */
 static int udb_path_encode_component(const char *raw, char *buf, size_t bufsz)
 {
 	static const char hex[] = "0123456789ABCDEF";
@@ -707,9 +699,7 @@ static void udb_record_delete_tree(UdbRecord *rec)
 		}
 }
 
-/* ========================================================================
- * File Persistence
- * ======================================================================== */
+/* File Persistence */
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -761,7 +751,6 @@ static int udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbuf
 			return 0;
 		}
 
-		/* path + space + value + newline */
 		line_len = strlen(pathbuf) + 1 + strlen(val_str) + 1;
 		if (line_len > UDB_RECORD_LINE_MAX)
 		{

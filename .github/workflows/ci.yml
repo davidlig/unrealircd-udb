@@ -27,9 +27,6 @@ jobs:
           git checkout --detach "$GITHUB_SHA"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
 
-      - name: Test release selection
-        run: python3 tests/test_release_manifest.py
-
       - name: Resolve and download supported Stable
         id: resolve
         run: python3 scripts/resolve_unrealircd_release.py --archive "$RUNNER_TEMP/unrealircd.tar.gz" --github-output "$GITHUB_OUTPUT"
@@ -46,8 +43,8 @@ jobs:
           git checkout --detach "$GITHUB_SHA"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
 
-      - name: Install generator dependencies
-        run: python3 -m pip install --disable-pip-version-check --user -r .agentic/requirements.txt
+      - name: Install agentic verification dependencies
+        run: python3 -m pip install --disable-pip-version-check --user -r .agentic/requirements.txt -r tests/requirements.txt
 
       - name: Verify agent configuration
         run: ./.agentic/ci-check.sh
@@ -83,7 +80,7 @@ jobs:
       - name: Install dependencies & configure bubblewrap
         run: |
           sudo apt-get update
-          sudo apt-get install -y bubblewrap libssl-dev libargon2-dev libsodium-dev libpcre2-dev libc-ares-dev libjansson-dev clang-format python3-pytest
+          sudo apt-get install -y bubblewrap libssl-dev libargon2-dev libsodium-dev libpcre2-dev libc-ares-dev libjansson-dev clang-format cmake python3-venv
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
           sudo chmod u+s $(which bwrap) || true
@@ -92,6 +89,13 @@ jobs:
         run: |
           echo "UNREALIRCD_SOURCE=$RUNNER_TEMP/unrealircd-src" >> "$GITHUB_ENV"
           echo "UDB_TEST_IRCD_ROOT=$RUNNER_TEMP/unrealircd" >> "$GITHUB_ENV"
+
+      - name: Bootstrap replacement suite dependencies
+        run: |
+          python3 -m venv "$RUNNER_TEMP/udb-test-venv"
+          "$RUNNER_TEMP/udb-test-venv/bin/python3" -m pip install --disable-pip-version-check -r tests/requirements.txt
+          "$RUNNER_TEMP/udb-test-venv/bin/python3" tests/support/bootstrap_cmocka.py
+          echo "$RUNNER_TEMP/udb-test-venv/bin" >> "$GITHUB_PATH"
 
       - name: Configure and build UnrealIRCd
         run: |
@@ -148,8 +152,6 @@ jobs:
           echo "UDB_MODULE_PATH=$UDB_MODULE_PATH" >> "$GITHUB_ENV"
           mkdir -p "$UDB_TEST_IRCD_ROOT/modules/third"
           cp src/modules/third/udb/src/udb.so "$UDB_TEST_IRCD_ROOT/modules/third/"
-          make custommodule MODULEFILE=udb/tests/udb_test_mutator
-          cp src/modules/third/udb/tests/udb_test_mutator.so "$UDB_TEST_IRCD_ROOT/modules/third/"
           make custommodule MODULEFILE=udb/tests/udb_test_state
           cp src/modules/third/udb/tests/udb_test_state.so "$UDB_TEST_IRCD_ROOT/modules/third/"
           if [ "${{ matrix.profile }}" = "asan" ]; then
@@ -157,60 +159,21 @@ jobs:
             grep -q '__asan_' "$RUNNER_TEMP/udb-symbols.txt"
           fi
 
+      - name: Run current C unit and tooling suite
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:detect_odr_violation=2
+        run: |
+          python3 -m pytest -q -m 'unit or tooling' --c-profile "${{ matrix.profile }}" --junitxml "$RUNNER_TEMP/udb-unit-${{ matrix.profile }}.xml"
+
+      - name: Run current runtime and protocol suite
+        run: |
+          python3 -m pytest -q -m 'integration or protocol or recovery or model' --junitxml "$RUNNER_TEMP/udb-runtime-${{ matrix.profile }}.xml"
+
       - name: Verify Bundle Integrity
         if: matrix.profile == 'normal'
         run: |
           python3 scripts/bundle.py --check
           git diff --exit-code
-
-      - name: Run Core Test Suites
-        run: |
-          python3 tests/test_loader_fail_safe.py
-          python3 tests/test_numeric_strict.py
-          python3 tests/test_ipv6_and_paths.py
-          python3 tests/test_staged_sync_caps.py
-          python3 tests/test_staged_sync_ownership.py
-          python3 tests/test_size_invariants.py
-          python3 tests/test_spamfilter_limits.py
-          python3 tests/test_propagator_validation.py
-          python3 tests/test_convergence_degraded_stale.py
-          python3 tests/test_bootstrap_readiness_and_convergence.py
-          python3 tests/test_hub_multihop_and_persistence.py
-          python3 tests/test_ocl_registry.py
-          python3 tests/test_ocl_rehash_replay.py
-          python3 tests/test_ocl_membership_multihop.py
-          python3 tests/test_hash_index_contract.py
-          python3 tests/test_post_review_corrections.py
-          python3 tests/test_block_n_ownership_model.py
-          python3 tests/test_block_k_expiration.py
-          python3 tests/test_block_k_schema.py
-          python3 tests/test_security_hardening.py
-          python3 tests/test_bundle_determinism.py
-
-      - name: Run Integration & Multi-Hop Test Suites
-        run: |
-          python3 tests/test_multihop_mutations.py
-          if [ "${{ matrix.profile }}" = "normal" ]; then
-            python3 tests/test_biglines_multihop.py
-          fi
-          python3 tests/test_propagator_failover.py
-          python3 tests/test_propagator_non_adjacent.py
-          python3 tests/test_propagator_runtime_failover.py
-          python3 tests/test_anti_entropy.py
-          python3 tests/test_mutation_gap_recovery.py
-          python3 tests/test_protocol_fault_qualification.py
-          python3 tests/runtime_clone_limit.py
-          python3 tests/runtime_channel_modes_ins.py
-          python3 tests/runtime_channel_nick.py
-          python3 tests/runtime_nick_auth.py
-          python3 tests/test_block_n_differential.py
-          python3 tests/runtime_debug_notices.py
-          python3 tests/runtime_lock_modes.py
-          python3 tests/runtime_schema_validation.py
-          python3 tests/staged_runtime_effects.py
-          python3 tests/three_node_udb.py
-          python3 tests/two_node_udb.py
-          python3 tests/test_udb_consistency_closure.py
 
   deploy:
     name: Deploy UnrealIRCd and UDB

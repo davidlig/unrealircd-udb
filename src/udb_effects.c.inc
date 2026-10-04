@@ -78,6 +78,8 @@ static void udb_remove_special_record(UdbContext *ctx, UdbBlock *block, UdbRecor
 	}
 }
 
+/* Walk children before their owner so callbacks can still inspect the full
+ * tree. This traversal applies/removes effects; it never frees source records. */
 static void udb_tree_effects_walk(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, unsigned int depth, int remove)
 {
 	UdbRecord *child;

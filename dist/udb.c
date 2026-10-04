@@ -60,9 +60,7 @@ module
 #define UDB_VERSION "4.0.0"
 #define UDB_PROTOCOL_HEL "4"
 
-/* ========================================================================
- * Block Identifiers
- * ======================================================================== */
+/* Block Identifiers */
 #define UDB_BLOCK_NICKS 'N'
 #define UDB_BLOCK_CHANNELS 'C'
 #define UDB_BLOCK_IPS 'I'
@@ -72,9 +70,7 @@ module
 
 #define UDB_NUM_BLOCKS 6
 
-/* ========================================================================
- * Sub-record Keys
- * ======================================================================== */
+/* Sub-record Keys */
 
 /* Nick sub-records: N::<nick>::<key> <value> */
 #define NKEY_ACCESS "access"	 /* IP/CIDR access restriction */
@@ -83,8 +79,8 @@ module
 #define NKEY_FORBID "forbid"	 /* Forbidden nick (value = reason) */
 #define NKEY_SUSPEND "suspend"	 /* Suspended nick (value = reason) */
 #define NKEY_OPER "oper"		 /* Operclass name string (e.g. "locop", "netadmin-with-override") */
-#define NKEY_MODES "modes"		 /* Allowed oper modes */
-#define NKEY_SNOMASKS "snomasks" /* Allowed snomasks */
+#define NKEY_MODES "modes"		 /* Profile user modes (never +o) */
+#define NKEY_SNOMASKS "snomasks" /* Desired snomask expression */
 #define NKEY_SWHOIS "swhois"	 /* Custom SWHOIS line */
 
 /* Channel sub-records: C::<#chan>::<key> <value> */
@@ -99,7 +95,7 @@ module
 /* IP sub-records: I::<ip|host>::<key> <value> */
 #define IKEY_CLONES "clones"   /* Max clones allowed (*N) */
 #define IKEY_NOLINES "nolines" /* Ban exception types (eg. GZQSTmc) */
-#define IKEY_HOST "host"	   /* Reverse DNS override */
+#define IKEY_HOST "host"	   /* Visible host overlay (never changes realhost) */
 
 /* Settings sub-records: S::<key> <value> */
 #define SKEY_CRYPT_KEY "encryption_key" /* Host cloaking key */
@@ -128,9 +124,7 @@ module
 #define UDB_SPAMFILTER_PATTERN_MAX 3072
 #define UDB_TKL_SET_BY "UDB:managed"
 
-/* ========================================================================
- * Error Codes (for DB ERR protocol messages)
- * ======================================================================== */
+/* Error Codes (for DB ERR protocol messages) */
 #define UDB_ERR_NO_BLOCK 1	  /* Block does not exist */
 #define UDB_ERR_PARAMS 2	  /* Missing parameters */
 #define UDB_ERR_FATAL 3		  /* Fatal / internal error */
@@ -141,9 +135,7 @@ module
 /* SHA-256 is deliberately handled by UDB, not Auth_Check(). */
 #define UDB_AUTHTYPE_SHA256 1001
 
-/* ========================================================================
- * Channel Option Flags (bitmask in C::<#chan>::options *<value>)
- * ======================================================================== */
+/* Channel Option Flags (bitmask in C::<#chan>::options *<value>) */
 #define UDB_CHOPT_PROTECT_BANS 0x1 /* Only ban author can remove their bans */
 #define UDB_CHOPT_LOCK_MODES 0x2   /* Channel modes are locked */
 #define UDB_CHOPT_LOCK_TOPIC 0x4   /* Channel topic is locked */
@@ -151,9 +143,7 @@ module
 #define UDB_CHOPT_OPER_ONLY 0x10   /* Restrict channel joins to IRC operators */
 #define UDB_CHOPT_SECURE_OPS 0x20  /* Restrict member rank changes */
 
-/* ========================================================================
- * Link Option Flags (bitmask in L::<server>::options *<value>)
- * ======================================================================== */
+/* Link Option Flags (bitmask in L::<server>::options *<value>) */
 #define UDB_LNKOPT_DEBUG 0x1 /* Debug: receives all UDB mode changes */
 
 #endif /* UDB_H */
@@ -344,6 +334,8 @@ struct UdbBlock
 	UdbBlockLoadState load_state;
 };
 
+/* A receive session owns its private candidate tree and prepared index until
+ * validated publication transfers them, or abort releases them. */
 struct UdbSyncSession
 {
 	Client *peer;
@@ -393,7 +385,7 @@ typedef struct UdbOclInventory
 	unsigned long generation;
 	unsigned int count;
 	char inventory_digest[UDB_OCL_DIGEST_HEX_LEN + 1];
-	UdbOclEntry *entries; /* sorted by name */
+	UdbOclEntry *entries;
 } UdbOclInventory;
 
 typedef struct UdbOclOrigin
@@ -822,26 +814,18 @@ static inline int udb_is_debug_enabled(void)
 #endif /* UDB_INTERNAL_H */
 
 
-/* ========================================================================
- * Module Header
- * ======================================================================== */
-
 ModuleHeader MOD_HEADER = {"third/udb", UDB_VERSION,
 						   "UDB 4 - Unreal Database System (nick/channel/IP registration & sync)",
 						   "David Abuín Fontán ('davidlig')", "unrealircd-6"};
 
-/* ========================================================================
- * Implementation Files
- *
- * Each file implements a specific subsystem. They share the same compilation
- * unit, so all functions are static and can call each other freely.
- * ======================================================================== */
+/* Implementation units share one translation unit. Shared declarations in
+ * udb_internal.h allow static helpers to cross subsystem boundaries. */
 
 /* Record store: tree, hash, path, and file persistence primitives */
 /* Inlined: udb_store.c.inc */
 /*
  * UDB 4 - Unreal Database System for UnrealIRCd 6
- * Subsystem: Record Tree, Indexing, Hashing & File Persistence
+ * Subsystem: Record Trees, Path Encoding, Indexes & Snapshot Persistence
  *
  * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
  * Based on the original UDB concept by Trocotronic.
@@ -850,9 +834,7 @@ ModuleHeader MOD_HEADER = {"third/udb", UDB_VERSION,
  * License: GNU General Public License v2+
  */
 
-/* ========================================================================
- * Block Index and Hash Operations
- * ======================================================================== */
+/* Block Index and Hash Operations */
 static void udb_hash_destroy(UdbContext *ctx);
 
 static int udb_hash_init(UdbContext *ctx)
@@ -1059,9 +1041,7 @@ static UdbRecord *udb_hash_find(UdbContext *ctx, int block_idx, const char *key)
 	return NULL;
 }
 
-/* ========================================================================
- * Record Tree and Path Operations
- * ======================================================================== */
+/* Record Tree and Path Operations */
 static const char *udb_get_shared_subkey(const char *key)
 {
 	static const char *known_keys[] = {
@@ -1114,9 +1094,7 @@ static UdbRecord *udb_record_find(UdbContext *ctx, const char *key, UdbRecord *p
 	return NULL;
 }
 
-/* ========================================================================
- * Record Limits and Feasibility Validation
- * ======================================================================== */
+/* Record Limits and Feasibility Validation */
 static int udb_path_component_noop(const char *decoded, unsigned int index, void *data)
 {
 	(void)decoded;
@@ -1162,9 +1140,7 @@ static int udb_record_fits_limits(const char *path, const char *value)
 	return 1;
 }
 
-/* ========================================================================
- * Path Component Encoding & Decoding
- * ======================================================================== */
+/* Path Component Encoding & Decoding */
 static int udb_path_encode_component(const char *raw, char *buf, size_t bufsz)
 {
 	static const char hex[] = "0123456789ABCDEF";
@@ -1548,9 +1524,7 @@ static void udb_record_delete_tree(UdbRecord *rec)
 		}
 }
 
-/* ========================================================================
- * File Persistence
- * ======================================================================== */
+/* File Persistence */
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -1602,7 +1576,6 @@ static int udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbuf
 			return 0;
 		}
 
-		/* path + space + value + newline */
 		line_len = strlen(pathbuf) + 1 + strlen(val_str) + 1;
 		if (line_len > UDB_RECORD_LINE_MAX)
 		{
@@ -2004,12 +1977,13 @@ static void udb_config_defaults(void)
 	udb_cfg->config_flood_period = udb_cfg->flood_period;
 }
 
+/* UnrealIRCd config-hook contract: 0 leaves unrelated blocks to other modules;
+ * 1 accepts udb, and -1 rejects it with the validation error count in errs. */
 static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
 {
 	int errors = 0;
 	ConfigEntry *cep;
 
-	/* We only handle CONFIG_MAIN blocks named "udb" */
 	if (type != CONFIG_MAIN)
 		return 0;
 	if (!ce || !ce->name || strcmp(ce->name, "udb"))
@@ -2066,7 +2040,6 @@ static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
 	if (!ce || !ce->name || strcmp(ce->name, "udb"))
 		return 0;
 
-	/* Allocate config if needed */
 	if (!udb_cfg)
 		udb_cfg = safe_alloc(sizeof(UdbConfig));
 
@@ -2594,7 +2567,7 @@ static int udb_spamfilter_pattern_valid(const char *stored, const char *match_ty
 	if (!udb_spamfilter_pattern(stored, pattern, sizeof(pattern)))
 		return 0;
 	if (!match_type)
-		return 1; /* a partial F profile is stored but never materialized */
+		return 1; /* A partial F profile is stored but never materialized. */
 	match = unreal_create_match(udb_spamfilter_match_type_value(match_type), pattern, NULL);
 	if (!match)
 		return 0;
@@ -3206,7 +3179,7 @@ static int udb_record_validate(UdbBlock *block, const char *path, const char *va
 	if (depth < schema->min_depth || depth > schema->max_depth)
 		goto done;
 
-	/* Special handling for Block S: depth == 1 */
+	/* S keys live directly below the block root, without a profile container. */
 	if (block->letter == UDB_BLOCK_SETTINGS)
 	{
 		const char *key = parts[0];
@@ -3281,7 +3254,6 @@ static int udb_record_validate(UdbBlock *block, const char *path, const char *va
 		goto done;
 	}
 
-	/* Validate root container node */
 	if (schema->root_key_validator && !schema->root_key_validator(parts[0]))
 		goto done;
 
@@ -3387,9 +3359,7 @@ static void udb_block_replace_tree(UdbContext *ctx, UdbBlock *block, UdbRecord *
 		block->filesize = st.st_size;
 }
 
-/* ========================================================================
- * SHA-256 Digest Operations and Manifest
- * ======================================================================== */
+/* SHA-256 Digest Operations and Manifest */
 typedef struct UdbDigestLine
 {
 	char *line;
@@ -3727,9 +3697,7 @@ static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSessi
 	return 1;
 }
 
-/* ========================================================================
- * File I/O Operations
- * ======================================================================== */
+/* File I/O Operations */
 static int udb_record_path_valid(const char *path)
 {
 	const char *component;
@@ -4098,9 +4066,7 @@ static int udb_file_load_block(UdbContext *ctx, UdbBlock *block)
 	return 1;
 }
 
-/* ========================================================================
- * Utility Functions
- * ======================================================================== */
+/* Utility Functions */
 static const char *udb_get_bot_nick(const char *service_key, int force_default)
 {
 	static char buf[64];
@@ -4188,6 +4154,8 @@ static void udb_send_to_debugs(Client *source, const char *fmt, ...)
  * License: GNU General Public License v2+
  */
 
+/* Resolve a unique live ULine user for this operation; missing or ambiguous
+ * matches fall back to &me. The returned Client is borrowed, never cached. */
 static Client *udb_service_source(const char *service_key)
 {
 	const char *mask = udb_get_bot_mask(service_key, 0);
@@ -4339,6 +4307,8 @@ static void udb_remove_special_record(UdbContext *ctx, UdbBlock *block, UdbRecor
 	}
 }
 
+/* Walk children before their owner so callbacks can still inspect the full
+ * tree. This traversal applies/removes effects; it never frees source records. */
 static void udb_tree_effects_walk(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, unsigned int depth, int remove)
 {
 	UdbRecord *child;
@@ -5848,21 +5818,20 @@ static void udb_sync_server_quit(Client *client)
  *
  * (C) 2026 David Abuín Fontán
  * License: GNU General Public License v2+
- *
- * OCL is the distributed source of truth about the operclasses each
+ */
+
+/* OCL is the distributed source of truth about the operclasses each
  * participant IRCd currently has loaded.  OCLG is a derived projection (the
  * intersection of every participant inventory with matching effective
  * digests) published to explicit consumer subscribers such as Services.
  * Neither is ever persisted to the udb_*.db blocks.
  */
 
-/* ========================================================================
- * UnrealIRCd internals compatibility layer
+/* UnrealIRCd internals compatibility layer
  *
  * conf.c owns the active operclass list and does not export it through h.h.
  * Every direct reference to these internals is confined to this section so an
- * upstream layout change has a single place to adapt.
- * ======================================================================== */
+ * upstream layout change has a single place to adapt. */
 extern ConfigItem_operclass *conf_operclass;
 
 static ConfigItem_operclass *udb_compat_operclass_head(void)
@@ -6088,7 +6057,7 @@ static void udb_ocl_membership_rebuild(void)
 	udb_ocl_purge_nonmembers();
 }
 
-/* ---- Canonical serialization and digests ---- */
+/* Canonical serialization and digests */
 
 typedef struct UdbOclBuf
 {
@@ -6337,7 +6306,7 @@ static int udb_oclg_view_digest(UdbOclInventory *view, int ready, unsigned char 
 	return ok;
 }
 
-/* ---- Local inventory construction ---- */
+/* Local inventory construction */
 
 typedef struct UdbOclClassNode
 {
@@ -6488,7 +6457,7 @@ done:
 	return inv;
 }
 
-/* ---- Local publish, send and replay ---- */
+/* Local publish, send and replay */
 
 static void udb_ocl_send_inventory_to(Client *to, const char *origin_sid, UdbOclInventory *inv)
 {
@@ -6595,7 +6564,7 @@ static int udb_oclg_push(Client *to)
 	return 1;
 }
 
-/* ---- OCL receive path ---- */
+/* OCL receive path */
 
 static void udb_ocl_stage_discard(UdbOclOrigin *origin)
 {
@@ -6958,9 +6927,8 @@ static void udb_ocl_shutdown(void)
 	udb_ocl_epoch[0] = '\0';
 }
 
-/* ---- Instance epoch: generation is monotonic only within one epoch, so a
- * module reload with the same SID cannot make an old receiver reject a fresh
- * generation-1 snapshot as stale. ---- */
+/* Generation is monotonic only within an instance epoch. A fresh epoch lets
+ * receivers distinguish a reloaded module's generation-1 inventory from replay. */
 static void udb_ocl_ensure_epoch(void)
 {
 	unsigned char raw[8];
@@ -6980,11 +6948,11 @@ static void udb_ocl_ensure_epoch(void)
 	udb_ocl_epoch[UDB_OCL_EPOCH_LEN] = '\0';
 }
 
-/* ---- Registry completeness, OCLG projection ---- */
+/* Registry completeness, OCLG projection */
 
 static UdbOclEntry *udb_ocl_find_entry(UdbOclInventory *inv, const char *name)
 {
-	unsigned int lo = 0, hi = inv ? inv->count : 0;
+	unsigned int i, lo = 0, hi = inv ? inv->count : 0;
 
 	while (lo < hi)
 	{
@@ -6998,6 +6966,10 @@ static UdbOclEntry *udb_ocl_find_entry(UdbOclInventory *inv, const char *name)
 		else
 			hi = mid;
 	}
+
+	for (i = 0; inv && i < inv->count; i++)
+		if (!strcmp(inv->entries[i].name, name))
+			return &inv->entries[i];
 	return NULL;
 }
 
@@ -7216,7 +7188,6 @@ static int udb_select_propagator(UdbContext *ctx, int require_hello, UdbPropagat
 	return 0;
 }
 
-/* Checks if a directly connected client is our authorized upstream propagator */
 static int udb_is_propagator(UdbContext *ctx, Client *server)
 {
 	UdbPropagatorSelection selected;
@@ -7299,6 +7270,9 @@ static void udb_mutation_trigger_gap_recovery(Client *direct_peer)
 		udb_reconcile.next_retry_at = time(NULL) + UDB_RECONCILE_RETRY_BASE;
 }
 
+/* Callers authorize the direct hop first. Stream identity is the original
+ * source SID plus epoch, not the relay's HEL epoch; mismatches trigger recovery
+ * without promoting the candidate stream here. */
 static UdbSeqCheckResult udb_mutation_check_sequence(UdbContext *ctx, Client *source, Client *direct_peer,
 													 const char *epoch, uint64_t seq)
 {
@@ -7838,7 +7812,7 @@ static void udb_mutation_drp(UdbContext *ctx, Client *client, Client *direct_pee
 /* Inlined: udb_protocol.c.inc */
 /*
  * UDB 4 - Unreal Database System for UnrealIRCd 6
- * Subsystem: Server-to-Server (S2S) Protocol & HEL Capability Negotiation
+ * Subsystem: DB Frame Parsing, Routing & HEL Capability Negotiation
  *
  * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
  * Based on the original UDB concept by Trocotronic.
@@ -7874,6 +7848,8 @@ static int udb_send_db_to_one(Client *to, const char *fmt, ...)
 	return 1;
 }
 
+/* Relay only to HEL-confirmed direct peers, excluding the incoming direction.
+ * Reject an oversized frame as a whole rather than sending truncated grammar. */
 static int udb_sendto_confirmed_servers(Client *except, const char *fmt, ...)
 {
 	char *line;
@@ -8010,8 +7986,6 @@ int udb_hook_server_quit(Client *client, MessageTag *mtags)
 
 CMD_FUNC(cmd_db)
 {
-	/* Process DB protocol messages sent via server-to-server connection */
-
 	if (parc < 4)
 		return;
 
@@ -8613,7 +8587,7 @@ static int udb_protocol_init(ModuleInfo *modinfo)
 /* Inlined: udb_nicks.c.inc */
 /*
  * UDB 4 - Unreal Database System for UnrealIRCd 6
- * Subsystem: Nick Registration, SHA-256 Identification & Forced Nick Migrations
+ * Subsystem: Nick Authentication, Identity & Runtime Effect Ownership
  *
  * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
  * Based on the original UDB concept by Trocotronic.
@@ -8845,10 +8819,9 @@ static void udb_nick_finish_tree_replace(void)
 	udb_nick_replacement_tree = NULL;
 }
 
-/* Identity exists only while an active UDB authentication is bound to the
- * current nick. It is created after a confirmed nick change and destroyed by
- * suspend, policy changes and leaving the nick; it never carries proof across
- * a suspend. */
+/* Called only after a confirmed nick change or initial registration consumes
+ * valid pending auth. Policy checks and revocation belong to the callers;
+ * this setter must never turn a matching nick or +r into authentication. */
 static void udb_nick_identity_set(Client *client, UdbRecord *nick_rec)
 {
 	UdbNickIdentity *identity;
@@ -9056,7 +9029,7 @@ static void udb_nick_effects_apply_modes(Client *client, UdbRecord *mode_rec)
 	old_umodes = client->umodes & ALL_UMODES;
 	removed = fx->modes_added & ~desired & ~(UMODE_HIDE | UMODE_SETHOST);
 	added = desired & ~old_umodes;
-	client->umodes = (client->umodes & ~removed) | desired | UMODE_HIDE;
+	client->umodes = (client->umodes & ~removed) | desired;
 	if ((client->umodes & ALL_UMODES) != old_umodes)
 		send_umode_out(client, 1, old_umodes);
 	fx->modes_added = (fx->modes_added & desired) | added;
@@ -9070,7 +9043,7 @@ static void udb_nick_effects_revoke_modes(Client *client)
 	if (!fx || !fx->modes_added)
 		return;
 	old_umodes = client->umodes & ALL_UMODES;
-	client->umodes = (client->umodes & ~(fx->modes_added & ~(UMODE_HIDE | UMODE_SETHOST))) | UMODE_HIDE;
+	client->umodes &= ~(fx->modes_added & ~(UMODE_HIDE | UMODE_SETHOST));
 	fx->modes_added = 0;
 	if ((client->umodes & ALL_UMODES) != old_umodes)
 		send_umode_out(client, 1, old_umodes);
@@ -10329,7 +10302,7 @@ dispatch_clean_nick:;
 	new_parv[1] = clean_nick;
 	CallCommandOverride(ovr, clictx, client, recv_mtags, parc, new_parv);
 	/* The credential is bound to this attempt: a rejected change must not
-	 * leave a promvable pending proof behind for a later forced rename. */
+	 * leave a promotable pending proof behind for a later forced rename. */
 	udb_nick_pending_auth_expire(client, clean_nick);
 	return;
 
@@ -10370,7 +10343,8 @@ static int udb_hook_can_use_nick(Client *client, const char *newnick, const char
 			return HOOK_DENY;
 		}
 
-		/* If client is already this nick and identified with +r, allow without re-entering password */
+		/* A same-nick +r retry bypasses password entry here, but does not create
+		 * UDB identity; access restrictions still apply. */
 		if (!strcasecmp(client->name, newnick) && has_user_mode(client, 'r'))
 		{
 			udb_nick_password_cache_clear(client);
@@ -10594,7 +10568,6 @@ static ModDataInfo *udb_channel_modes_md = NULL;
 static ModDataInfo *udb_channel_oper_only_md = NULL;
 static ModDataInfo *udb_channel_ban_owners_md = NULL;
 
-/* Forward declarations */
 static int udb_hook_can_join(Client *client, Channel *channel, const char *key, char **errmsg);
 static int udb_hook_pre_local_join(Client *client, Channel *channel, const char *key);
 static int udb_hook_local_join(Client *client, Channel *channel, MessageTag *mtags);
@@ -11844,7 +11817,7 @@ static int udb_channels_load(ModuleInfo *modinfo)
 /* Inlined: udb_ips.c.inc */
 /*
  * UDB 4 - Unreal Database System for UnrealIRCd 6
- * Subsystem: IP Management, Cloaks, Clone Limits & Virtual Hosts
+ * Subsystem: Clone Limits, Protected Base Cloaks & IP Host Overlays
  *
  * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
  * Based on the original UDB concept by Trocotronic.
@@ -11854,6 +11827,8 @@ static int udb_channels_load(ModuleInfo *modinfo)
  */
 
 typedef struct UdbIpHostState UdbIpHostState;
+/* Track the I::host overlay UDB applied; revocation must preserve a later
+ * external host replacement and otherwise recover the protected base. */
 struct UdbIpHostState
 {
 	char key[256];
@@ -11954,7 +11929,10 @@ static int udb_ip_install_base(Client *client)
 	if (!base || !valid_host(base->host, 0) || !udb_ip_safe_host(client, base->host))
 		return 0;
 	strlcpy(client->user->cloakedhost, base->host, sizeof(client->user->cloakedhost));
-	client->umodes |= UMODE_HIDE;
+	/* Existing users may have deliberately chosen -x. Keep their base
+	 * available for +x without cancelling that choice during refresh/burst. */
+	if (!IsUser(client))
+		client->umodes |= UMODE_HIDE;
 	if (!IsSetHost(client) || !udb_ip_safe_host(client, client->user->virthost))
 	{
 		safe_strdup(client->user->virthost, base->host);
@@ -12255,19 +12233,16 @@ static int udb_hook_pre_connect(Client *client)
 	if (!client || !client->ip || !client->local)
 		return 0;
 
-	/* Lookup IP or Host in UDB */
 	ip_rec = udb_hash_find(udb_ctx, udb_block_letter_to_index(UDB_BLOCK_IPS), client->ip);
 	if (!ip_rec && client->user)
 		ip_rec = udb_hash_find(udb_ctx, udb_block_letter_to_index(UDB_BLOCK_IPS), client->user->realhost);
 
 	if (ip_rec)
 	{
-		/* Apply Clone Limit */
 		sub_rec = udb_record_find(udb_ctx, IKEY_CLONES, ip_rec);
 		if (sub_rec && sub_rec->data_num > 0)
 			limit = (int)sub_rec->data_num;
 
-		/* Apply Host Override */
 		sub_rec = udb_record_find(udb_ctx, IKEY_HOST, ip_rec);
 		if (sub_rec && sub_rec->data_str && *sub_rec->data_str && client->user)
 			udb_ip_apply_host(client, ip_rec->key, sub_rec->data_str);
@@ -12349,29 +12324,22 @@ static int udb_ip_remote_connect(Client *client)
 	return 0;
 }
 
-static int udb_ip_mode_request(Client *source, Client *target, const char *modes, int *restore)
+static int udb_ip_restore_requested(const char *modes)
 {
-	int add = 1;
+	int add = 1, restore = 0;
 	const char *p;
-	*restore = 0;
-	if (!target || BadPtr(modes))
-		return 1;
+	if (BadPtr(modes))
+		return 0;
 	for (p = modes; *p; p++)
 	{
 		if (*p == '+')
 			add = 1;
 		else if (*p == '-')
 			add = 0;
-		else if (*p == 'x' && !add)
-		{
-			if (MyUser(source))
-				sendnotice(source, "UDB: -x is disabled; host privacy is permanent");
-			return 0;
-		}
 		else if (*p == 't')
-			*restore = add;
+			restore = add;
 	}
-	return 1;
+	return restore;
 }
 
 CMD_OVERRIDE_FUNC(udb_override_safe_sethost)
@@ -12419,31 +12387,25 @@ static void udb_ip_restore_nick_vhost(Client *client)
 CMD_OVERRIDE_FUNC(udb_override_host_mode)
 {
 	Client *target = parc > 2 ? find_user(parv[1], NULL) : NULL;
-	int restore;
-	if (!udb_ip_mode_request(client, target, parc > 2 ? parv[2] : NULL, &restore))
-		return;
+	int was_hidden = IsHidden(client);
+	int restore = udb_ip_restore_requested(parc > 2 ? parv[2] : NULL);
 	CALL_NEXT_COMMAND_OVERRIDE();
+	/* Native +x emits SETHOST, which adds +t on remote receivers. */
+	if (target == client && MyUser(client) && !was_hidden && IsHidden(client) && !IsSetHost(client))
+		sendto_server(NULL, 0, 0, NULL, ":%s UMODE2 -t", client->id);
 	if (target == client && restore && MyUser(client))
 		udb_ip_restore_nick_vhost(client);
 }
 
 CMD_OVERRIDE_FUNC(udb_override_host_umode2)
 {
-	int restore;
-	if (!udb_ip_mode_request(client, IsUser(client) ? client : NULL, parc > 1 ? parv[1] : NULL, &restore))
-		return;
+	int was_hidden = IsHidden(client);
+	int restore = udb_ip_restore_requested(parc > 1 ? parv[1] : NULL);
 	CALL_NEXT_COMMAND_OVERRIDE();
+	if (MyUser(client) && !was_hidden && IsHidden(client) && !IsSetHost(client))
+		sendto_server(NULL, 0, 0, NULL, ":%s UMODE2 -t", client->id);
 	if (restore && MyUser(client))
 		udb_ip_restore_nick_vhost(client);
-}
-
-CMD_OVERRIDE_FUNC(udb_override_host_svsmode)
-{
-	Client *target = parc > 2 ? find_user(parv[1], NULL) : NULL;
-	int restore;
-	if (!udb_ip_mode_request(client, target, parc > 2 ? parv[2] : NULL, &restore))
-		return;
-	CALL_NEXT_COMMAND_OVERRIDE();
 }
 
 CMD_OVERRIDE_FUNC(udb_override_base_md)
@@ -12463,16 +12425,16 @@ CMD_OVERRIDE_FUNC(udb_override_base_md)
 static int udb_ips_load(ModuleInfo *modinfo)
 {
 	Client *client;
-	const char *commands[] = {"MODE", "UMODE2", "SVSMODE", "SVS2MODE", "MD", "SETHOST", "CHGHOST"};
-	OverrideCmdFunc handlers[] = {udb_override_host_mode,	 udb_override_host_umode2, udb_override_host_svsmode,
-								  udb_override_host_svsmode, udb_override_base_md,	   udb_override_safe_sethost,
-								  udb_override_safe_chghost};
+	const char *commands[] = {"MODE", "UMODE2", "MD", "SETHOST", "CHGHOST"};
+	OverrideCmdFunc handlers[] = {udb_override_host_mode, udb_override_host_umode2, udb_override_base_md,
+								  udb_override_safe_sethost, udb_override_safe_chghost};
+
 	size_t i;
 	for (i = 0; i < sizeof(commands) / sizeof(commands[0]); i++)
 	{
 		if (!CommandExists(commands[i]))
 		{
-			if (i == 0 || i == 4)
+			if (i == 0 || i == 2)
 				return 0;
 			continue;
 		}
@@ -12522,7 +12484,7 @@ static int udb_ips_init(ModuleInfo *modinfo)
 /* Inlined: udb_lines.c.inc */
 /*
  * UDB 4 - Unreal Database System for UnrealIRCd 6
- * Subsystem: Distributed *lines (K, Z, Shun, Q) and Spamfilter Rules
+ * Subsystem: Distributed G/Z/S/Q Lines, Spamfilters & Expiry
  *
  * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
  * Based on the original UDB concept by Trocotronic.
@@ -12984,6 +12946,8 @@ static void udb_lines_init(ModuleInfo *modinfo)
  * License: GNU General Public License v2+
  */
 
+/* Secret status depends on block, depth and key, not just the leaf name.
+ * Without an active context, reserved secret keys remain conservatively hidden. */
 static int udb_query_is_secret(const UdbRecord *rec)
 {
 	const UdbRecord *root;
@@ -13299,7 +13263,6 @@ CMD_FUNC(cmd_dbq)
 		return;
 	}
 
-	/* Query for block summary only (e.g. "/DBQ N") */
 	if (query_str[1] == '\0')
 	{
 		sendto_one(client, NULL, ":%s 339 %s :%c %u %lu %lu %s %s", me.name, client->name, block->letter,
@@ -13309,7 +13272,6 @@ CMD_FUNC(cmd_dbq)
 		return;
 	}
 
-	/* Parse path (e.g. "N::davidlig::vhost") */
 	cur = query_str + 1;
 	if (cur[0] != ':' || cur[1] != ':' || cur[2] == '\0')
 	{
@@ -13338,7 +13300,6 @@ CMD_FUNC(cmd_dbq)
 		return;
 	}
 
-	/* Display the found record */
 	if (rec->data_str)
 	{
 		sendto_one(client, NULL, ":%s 339 %s :DBQ %s %s", me.name, client->name, query_str,
@@ -13975,7 +13936,6 @@ static int udb_persistence_load_state(UdbPersistentState *state_out, UdbPersiste
 	fp = fopen(state_path, "r");
 	if (!fp)
 	{
-		/* Missing .udb_state */
 		return 0;
 	}
 
@@ -14010,7 +13970,6 @@ static int udb_persistence_load_state(UdbPersistentState *state_out, UdbPersiste
 			}
 			else
 			{
-				/* Invalid state string */
 				goto invalid;
 			}
 			seen |= UDB_STATE_SEEN_STATE;
@@ -14527,44 +14486,20 @@ static int udb_module_unload(ModuleInfo *modinfo)
 
 /* End of udb_lifecycle.c.inc */
 
-/* ========================================================================
- * Configuration Test (MOD_TEST)
- *
- * Validates the udb { } configuration block at config load time.
- * ======================================================================== */
-
 MOD_TEST()
 {
 	return udb_module_test(modinfo);
 }
-
-/* ========================================================================
- * Module Initialization (MOD_INIT)
- *
- * Registers all commands, hooks, ModData, and initializes the DB engine.
- * ======================================================================== */
 
 MOD_INIT()
 {
 	return udb_module_init(modinfo);
 }
 
-/* ========================================================================
- * Module Load (MOD_LOAD)
- *
- * Called after all modules are initialized. Load database files.
- * ======================================================================== */
-
 MOD_LOAD()
 {
 	return udb_module_load(modinfo);
 }
-
-/* ========================================================================
- * Module Unload (MOD_UNLOAD)
- *
- * Save all data and free resources.
- * ======================================================================== */
 
 MOD_UNLOAD()
 {

@@ -9,49 +9,69 @@ description: Selects the smallest relevant UDB build/test command and bounded es
 
 Run synchronously in the foreground. No background jobs, subagents, status polling, or repeated unchanged tests. Use a finite timeout for commands that can hang.
 
-## Build
+## Setup and build
 
-From the UnrealIRCd source root where this repo is `src/modules/third/udb`:
+The authoritative suite is cmocka + pytest; see `tests/README.md` for prerequisites
+and environment overrides. From the UDB checkout:
 
 ```bash
-make custommodule MODULEFILE=udb/src/udb
+python3 -m venv tests/.build/venv
+. tests/.build/venv/bin/activate
+python3 -m pip install -r tests/requirements.txt
+# Only for canonical C cases: requires CMake, a compiler and configured daemon headers.
+python3 tests/support/bootstrap_cmocka.py
+export UNREALIRCD_SOURCE=/path/to/configured/unrealircd-source
+make -C "$UNREALIRCD_SOURCE" custommodule MODULEFILE=udb/src/udb
 ```
 
-Do not rebuild all UnrealIRCd unless evidence requires it.
+Tooling-only tests do not need cmocka, a daemon build or a runtime. Do not rebuild
+all UnrealIRCd unless evidence requires it.
 
 ## Runtime module freshness
 
-Runtime/integration tests load the installed test module, not necessarily the fresh build. After a build and before runtime/integration tests:
+After building, select and check the checkout module from the UDB repository root:
 
 ```bash
-cp src/udb.so "$HOME/unrealircd/modules/third/udb.so"
+export UDB_MODULE_PATH="$PWD/src/udb.so"
 python3 .agentic/test_runtime_module_fresh.py
 ```
 
-Honor `UDB_TEST_IRCD_ROOT` / `UDB_MODULE_PATH` overrides when present.
+Honor `UDB_MODULE_PATH` and `UDB_TEST_IRCD_ROOT` (installed test daemon root,
+default `$HOME/unrealircd`). Fixtures copy the selected module into disposable
+loopback nodes and mount the installed runtime read-only. Never overwrite a
+user's installed module or restart existing servers for tests. Missing mandatory
+runtime/C capabilities must fail, not skip. `--c-profile asan` instruments C test
+executables only; runtime sanitizers require a separately instrumented daemon/module.
 
 ## Focused test map
 
-Parsing/persistence/limits/security: `test_loader_fail_safe.py`, `test_numeric_strict.py`, `test_ipv6_and_paths.py`, `test_size_invariants.py`, `test_spamfilter_limits.py`, `test_security_hardening.py`, `test_protocol_fault_qualification.py`.
+Select one file or case with `python3 -m pytest -q -m '<family>' <path>`;
+use `-k` for an affected scenario. Canonical C cases are collected by pytest.
 
-DB sync/bootstrap/readiness/convergence: `test_staged_sync_caps.py`, `test_staged_sync_ownership.py`, `test_convergence_degraded_stale.py`, `test_bootstrap_readiness_and_convergence.py`, `test_mutation_gap_recovery.py`, `test_anti_entropy.py`; expand to multihop/runtime only when the invariant requires it.
+- Parsing/schema/store: `tests/unit/test_numeric.c`, `tests/unit/test_schema.c`, `tests/unit/test_store.c` (`unit`).
+- Limits/paths/framing: `tests/protocol/test_size_limits.py`, `tests/protocol/test_ipv6_paths.py`, `tests/protocol/test_numeric_frames.py` (`protocol`).
+- DB staging/persistence/recovery: `tests/unit/test_staging.c`, `tests/protocol/test_db_snapshots.py`, `tests/protocol/test_snapshot_ownership.py`, `tests/protocol/test_snapshot_persistence.py`, `tests/protocol/test_snapshot_faults.py`, `tests/recovery/test_startup_fail_closed.py`.
+- Mutation/convergence/authority: `tests/protocol/test_live_mutations.py`, `tests/protocol/test_multinode.py`, `tests/protocol/test_session_lifetime.py` (`protocol`). Expand topology only for the affected invariant.
+- Propagator: `tests/integration/test_propagator_config.py`, `tests/protocol/test_propagator_values.py`.
+- OCL/OCLG: `tests/unit/test_ocl_lookup.c`, `tests/protocol/test_ocl_inventory.py`; existing DB/host multihop tests do not prove OCL multihop coverage.
+- Nick/host/effect ownership: `tests/integration/test_nick_identity.py`, `tests/integration/test_host_privacy.py`, `tests/model/test_nick_effect_ownership.py`.
+- Channel JOIN/ranks/topic: `tests/integration/test_channel_profiles.py`.
+- K lines/expiry: `tests/integration/test_k_line_server_bans.py`, `tests/integration/test_k_line_expiry.py`.
+- Offline hash benchmark: `tests/perf/test_hash_index_benchmark.py`; opt in with `-m perf` or `--run-perf`.
 
-Propagator: `test_propagator_validation.py`, `test_propagator_failover.py`, `test_propagator_non_adjacent.py`, `test_propagator_runtime_failover.py`.
+If no current case covers the requested behavior, report the gap and select a
+source-grounded regression within authorized scope; do not infer coverage from
+retired script names.
 
-OCL/OCLG: `test_ocl_registry.py`, `test_ocl_rehash_replay.py`, `test_ocl_membership_multihop.py`. Start with the file owning the changed epoch, inventory, rehash/replay or topology behavior.
-
-Nick/channel: `runtime_channel_nick.py`, `runtime_channel_modes_ins.py`, `runtime_lock_modes.py`, `runtime_schema_validation.py`.
-
-Clone/IP: `runtime_clone_limit.py`. Runtime effects/notices: `runtime_debug_notices.py`, `staged_runtime_effects.py`.
-
-Agentic-only changes:
+Agentic-only changes (`tooling`):
 
 ```bash
-python3 -m unittest .agentic/test_generate.py
+python3 -m pytest -q -m tooling tests/tooling/test_agentic.py tests/tooling/test_ci.py
 python3 .agentic/generate.py --check
 ```
 
-Use `./.agentic/ci-check.sh` when generator/runtime-config contracts or CI assumptions also changed.
+`./.agentic/ci-check.sh` runs these contracts and generator sync without a runtime.
+Use `python3 -m pytest -q -m tooling` only when shared tooling also changed.
 
 ## Escalation
 

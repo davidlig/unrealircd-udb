@@ -199,6 +199,8 @@ struct UdbBlock
 	UdbBlockLoadState load_state;
 };
 
+/* A receive session owns its private candidate tree and prepared index until
+ * validated publication transfers them, or abort releases them. */
 struct UdbSyncSession
 {
 	Client *peer;
@@ -248,7 +250,7 @@ typedef struct UdbOclInventory
 	unsigned long generation;
 	unsigned int count;
 	char inventory_digest[UDB_OCL_DIGEST_HEX_LEN + 1];
-	UdbOclEntry *entries; /* sorted by name */
+	UdbOclEntry *entries;
 } UdbOclInventory;
 
 typedef struct UdbOclOrigin

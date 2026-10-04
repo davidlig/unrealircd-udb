@@ -40,9 +40,9 @@ Never weaken an invariant merely to make a test pass.
 
 - Start with the smallest relevant check described by `udb-build-test`.
 - Broaden only when a shared primitive changed, protocol/convergence crosses subsystems, targeted evidence requires it, or the user explicitly asks for full validation.
-- Before runtime/integration tests, rebuild and refresh the installed module as described by `udb-build-test`.
+- Before runtime/integration tests, rebuild the checkout module and select it with `UDB_MODULE_PATH` as described by `udb-build-test`; never replace the user's installed module.
 - After source changes that affect distribution, use `udb-bundle-release`.
-- After agentic changes, run `.agentic/generate.py --check` and the focused agentic contract tests.
+- After agentic changes, run `python3 .agentic/generate.py --check` and the focused pytest agentic contracts.
 - Final output should be compact: changed/found, validation run, and any concrete residual risk or unverified item.
 
 When the user writes in Spanish, answer in Spanish. Keep source identifiers and repository terminology unchanged.
