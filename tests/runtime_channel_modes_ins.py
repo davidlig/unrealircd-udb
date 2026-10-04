@@ -519,13 +519,13 @@ def exercise(host, client_port, server_port, c_db):
 
         services.send_del("N::alice::vhost")
         alice.wait_for(lambda line: line.startswith(f"{IPSERV_PREFIX} NOTICE alice :") and
-                       "IP-derived vhost has been restored" in line,
+                       "base cloak has been restored" in line,
                        "derived vhost restoration after explicit nick vhost removal")
 
         # IpServ must own live derived-vhost and I::host reconciliation notices.
         services.send_ins("S::suffix", ".changed.test")
         bob.wait_for(lambda line: line.startswith(f"{IPSERV_PREFIX} NOTICE bob :") and
-                     "IP-derived vhost is now" in line,
+                     "base cloak is now" in line,
                      "IP-derived vhost notice")
         services.send_ins("I::127.0.0.1::host", "explicit.test")
         bob.wait_for(lambda line: line.startswith(f"{IPSERV_PREFIX} NOTICE bob :") and
@@ -534,7 +534,7 @@ def exercise(host, client_port, server_port, c_db):
         services.send_del("I::127.0.0.1::host")
         bob.wait_for(lambda line: line.startswith(f"{IPSERV_PREFIX} NOTICE bob :") and
                      ("explicit IP vhost has been removed" in line or
-                      "IP-derived vhost is now" in line),
+                      "base cloak is now" in line),
                      "explicit IP vhost reversion")
         print("PASS: Identical INS avoided churn and preserved +q, only non-member modes are "
               "accepted, and +r/+q follow registration, suspension, and channel profile INS")

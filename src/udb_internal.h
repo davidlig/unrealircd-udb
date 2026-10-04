@@ -620,6 +620,7 @@ static Client *udb_service_source(const char *service_key);
 static void udb_send_service_notice(Client *target, const char *service_key, FORMAT_STRING(const char *pattern), ...)
 	__attribute__((format(printf, 3, 4)));
 static int udb_ip_reapply_vhost(Client *client);
+static int udb_ip_safe_host(Client *client, const char *host);
 /* Runtime dispatcher; concrete per-block effects stay in their own modules. */
 static void udb_apply_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new);
 static void udb_remove_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
@@ -645,7 +646,7 @@ static int udb_protocol_init(ModuleInfo *modinfo);
 int udb_nicks_init(ModuleInfo *modinfo);
 int udb_nicks_load(ModuleInfo *modinfo);
 static void udb_channels_init(ModuleInfo *modinfo);
-static void udb_ips_init(ModuleInfo *modinfo);
+static int udb_ips_init(ModuleInfo *modinfo);
 static void udb_lines_init(ModuleInfo *modinfo);
 static void udb_lines_shutdown(void);
 static void udb_lines_expiry_sweep(time_t now);

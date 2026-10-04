@@ -765,6 +765,7 @@ static Client *udb_service_source(const char *service_key);
 static void udb_send_service_notice(Client *target, const char *service_key, FORMAT_STRING(const char *pattern), ...)
 	__attribute__((format(printf, 3, 4)));
 static int udb_ip_reapply_vhost(Client *client);
+static int udb_ip_safe_host(Client *client, const char *host);
 /* Runtime dispatcher; concrete per-block effects stay in their own modules. */
 static void udb_apply_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new);
 static void udb_remove_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
@@ -790,7 +791,7 @@ static int udb_protocol_init(ModuleInfo *modinfo);
 int udb_nicks_init(ModuleInfo *modinfo);
 int udb_nicks_load(ModuleInfo *modinfo);
 static void udb_channels_init(ModuleInfo *modinfo);
-static void udb_ips_init(ModuleInfo *modinfo);
+static int udb_ips_init(ModuleInfo *modinfo);
 static void udb_lines_init(ModuleInfo *modinfo);
 static void udb_lines_shutdown(void);
 static void udb_lines_expiry_sweep(time_t now);
@@ -9050,11 +9051,12 @@ static void udb_nick_effects_apply_modes(Client *client, UdbRecord *mode_rec)
 	fx = udb_nick_effects_ensure(client);
 	if (!fx)
 		return;
-	desired = set_usermode(mode_rec->data_str) & ~UMODE_OPER;
+	/* Host privacy and custom-host state are not revocable profile modes. */
+	desired = set_usermode(mode_rec->data_str) & ~(UMODE_OPER | UMODE_HIDE | UMODE_SETHOST);
 	old_umodes = client->umodes & ALL_UMODES;
-	removed = fx->modes_added & ~desired;
+	removed = fx->modes_added & ~desired & ~(UMODE_HIDE | UMODE_SETHOST);
 	added = desired & ~old_umodes;
-	client->umodes = (client->umodes & ~removed) | desired;
+	client->umodes = (client->umodes & ~removed) | desired | UMODE_HIDE;
 	if ((client->umodes & ALL_UMODES) != old_umodes)
 		send_umode_out(client, 1, old_umodes);
 	fx->modes_added = (fx->modes_added & desired) | added;
@@ -9068,7 +9070,7 @@ static void udb_nick_effects_revoke_modes(Client *client)
 	if (!fx || !fx->modes_added)
 		return;
 	old_umodes = client->umodes & ALL_UMODES;
-	client->umodes &= ~fx->modes_added;
+	client->umodes = (client->umodes & ~(fx->modes_added & ~(UMODE_HIDE | UMODE_SETHOST))) | UMODE_HIDE;
 	fx->modes_added = 0;
 	if ((client->umodes & ALL_UMODES) != old_umodes)
 		send_umode_out(client, 1, old_umodes);
@@ -9188,7 +9190,7 @@ static void udb_nick_effects_apply_vhost(Client *client, UdbRecord *vhost_rec)
 	UdbNickEffects *fx;
 	const char *desired;
 
-	if (!client || !client->user || !vhost_rec || BadPtr(vhost_rec->data_str) || !MyUser(client))
+	if (!client || !client->user || !vhost_rec || !udb_ip_safe_host(client, vhost_rec->data_str) || !MyUser(client))
 		return;
 	fx = udb_nick_effects_ensure(client);
 	if (!fx)
@@ -9201,7 +9203,7 @@ static void udb_nick_effects_apply_vhost(Client *client, UdbRecord *vhost_rec)
 		/* Still materialized as UDB left it: nothing to do. If an external
 		 * source replaced it, the profile still desires this value, so fall
 		 * through and reassert it. */
-		if (client->user->virthost && !strcmp(client->user->virthost, desired))
+		if (client->user->virthost && !strcmp(client->user->virthost, desired) && IsHidden(client) && IsSetHost(client))
 		{
 			fx->oper_vhost_attempted = 0;
 			return;
@@ -9281,6 +9283,8 @@ static int udb_nick_expected_oper_vhost(Client *client, const char *format, char
 		{
 			hostpart = uhost;
 		}
+		if (!udb_ip_safe_host(client, hostpart))
+			return 0;
 		strlcpy(expected_vhost, hostpart, vhost_size);
 		*expected_sethost = 1;
 		return 1;
@@ -9353,15 +9357,18 @@ static void udb_nick_effects_revoke_oper_vhost(Client *client)
 	current_vhost = client->user->virthost;
 	if (fx->oper_vhost_owned && udb_nick_nullable_equal(current_vhost, fx->oper_applied_vhost))
 	{
-		if (fx->oper_previous_vhost)
+		if (udb_ip_safe_host(client, fx->oper_previous_vhost))
 		{
 			userhost_save_current(client);
 			safe_strdup(client->user->virthost, fx->oper_previous_vhost);
+			client->umodes |= UMODE_HIDE;
 			if (fx->oper_previous_sethost)
 				client->umodes |= UMODE_SETHOST;
 			else
 				client->umodes &= ~UMODE_SETHOST;
 			sendto_server(client, 0, 0, NULL, ":%s SETHOST %s", client->id, client->user->virthost);
+			if (!IsSetHost(client))
+				sendto_server(client, 0, 0, NULL, ":%s UMODE2 -t", client->id);
 			userhost_changed(client);
 		}
 		else
@@ -9552,7 +9559,7 @@ static void udb_nick_reconcile_effects(Client *client, UdbRecord *nick_rec)
 
 static void udb_nick_set_vhost(Client *client, const char *vhost)
 {
-	if (!client || !client->user || !vhost || !*vhost)
+	if (!client || !client->user || !udb_ip_safe_host(client, vhost))
 		return;
 
 	userhost_save_current(client);
@@ -9578,33 +9585,8 @@ static void udb_nick_remove_vhost(Client *client)
 {
 	if (!client || !client->user)
 		return;
-	if (udb_ip_reapply_vhost(client))
-		return;
-
-	userhost_save_current(client);
-
-	if (*client->user->cloakedhost)
-	{
-		safe_strdup(client->user->virthost, client->user->cloakedhost);
-	}
-	else
-	{
-		safe_strdup(client->user->virthost, client->user->realhost);
-	}
-
-	client->umodes &= ~UMODE_SETHOST;
-
-	if (IsUser(client))
-	{
-		sendto_server(client, 0, 0, NULL, ":%s SETHOST %s", client->id, client->user->virthost);
-	}
-	if (MyConnect(client))
-	{
-		sendto_one(client, NULL, ":%s MODE %s :-t", client->name, client->name);
-		udb_send_service_notice(client, SKEY_IPSERV, "*** Your vhost has been removed");
-	}
-
-	userhost_changed(client);
+	/* No realhost fallback: failed recovery leaves the protected overlay intact. */
+	udb_ip_reapply_vhost(client);
 }
 
 static int udb_oper_owned(Client *client)
@@ -9662,7 +9644,7 @@ static int udb_nick_grant_oper(Client *client, UdbRecord *nick_rec, UdbRecord *o
 	if (!IsOper(client))
 	{
 		vhost_rec = nick_rec ? udb_record_find(udb_ctx, NKEY_VHOST, nick_rec) : NULL;
-		has_profile_vhost = vhost_rec && !BadPtr(vhost_rec->data_str);
+		has_profile_vhost = vhost_rec && udb_ip_safe_host(client, vhost_rec->data_str);
 		if (has_profile_vhost)
 			oper_vhost = vhost_rec->data_str;
 		else if (udb_nick_expand_oper_vhost_default(client, operclass, expanded_default, sizeof(expanded_default)))
@@ -9675,6 +9657,10 @@ static int udb_nick_grant_oper(Client *client, UdbRecord *nick_rec, UdbRecord *o
 		expect_oper_vhost =
 			udb_nick_expected_oper_vhost(client, oper_vhost, expected_vhost, sizeof(expected_vhost), expected_username,
 										 sizeof(expected_username), &expected_sethost);
+		/* NULL asks native make_oper() to retry the global template. An
+		 * empty explicit template instead rejects it without changing host. */
+		if (oper_vhost && !expect_oper_vhost)
+			oper_vhost = "";
 		if (!make_oper(client, "UDB", operclass, NULL, 0, NULL, oper_vhost, NULL))
 		{
 			safe_free(previous_vhost);
@@ -11871,14 +11857,17 @@ typedef struct UdbIpHostState UdbIpHostState;
 struct UdbIpHostState
 {
 	char key[256];
-	char realhost[HOSTLEN + 1];
-	char cloakedhost[HOSTLEN + 1];
-	char *virthost;
-	long host_umodes;
-	int derived_vhost;
+	char applied_host[HOSTLEN + 1];
 };
 
 static ModDataInfo *udb_ip_host_md = NULL;
+static ModDataInfo *udb_base_cloak_md = NULL;
+
+typedef struct UdbBaseCloak
+{
+	Client *client; /* Bound only to the client that owns this ModData. */
+	char host[HOSTLEN + 1];
+} UdbBaseCloak;
 
 static void udb_ip_restore_host(Client *client, const char *ip_key);
 
@@ -11894,6 +11883,10 @@ static void udb_ip_notify_host_change(Client *client, const char *notice)
 	if (!MyUser(client))
 		return;
 	sendto_server(client, 0, 0, NULL, ":%s SETHOST %s", client->id, udb_ip_visible_host(client));
+	/* Native SETHOST implicitly adds +t on receivers. Base-host transitions
+	 * must explicitly leave the custom-host flag unset there too. */
+	if (!IsSetHost(client))
+		sendto_server(client, 0, 0, NULL, ":%s UMODE2 -t", client->id);
 	userhost_changed(client);
 	if (notice)
 		udb_send_service_notice(client, SKEY_IPSERV, "%s", notice);
@@ -11901,12 +11894,7 @@ static void udb_ip_notify_host_change(Client *client, const char *notice)
 
 static void udb_ip_host_state_free(ModData *m)
 {
-	UdbIpHostState *state = m->ptr;
-
-	if (!state)
-		return;
-	safe_free(state->virthost);
-	safe_free(state);
+	safe_free(m->ptr);
 }
 
 static void udb_ip_save_host_state(Client *client, const char *key)
@@ -11917,11 +11905,89 @@ static void udb_ip_save_host_state(Client *client, const char *key)
 		return;
 	state = safe_alloc(sizeof(*state));
 	strlcpy(state->key, key, sizeof(state->key));
-	strlcpy(state->realhost, client->user->realhost, sizeof(state->realhost));
-	strlcpy(state->cloakedhost, client->user->cloakedhost, sizeof(state->cloakedhost));
-	safe_strdup(state->virthost, client->user->virthost);
-	state->host_umodes = client->umodes & (UMODE_HIDE | UMODE_SETHOST);
 	moddata_local_client(client, udb_ip_host_md).ptr = state;
+}
+
+static int udb_ip_safe_host(Client *client, const char *host)
+{
+	unsigned char a[16], b[16];
+	const int families[] = {AF_INET, AF_INET6};
+	size_t i;
+
+	if (!udb_vhost_valid(host))
+		return 0;
+	if (!client || !client->user)
+		return 1;
+	if (!strcasecmp(host, client->user->realhost))
+		return 0;
+	if (!client->ip)
+		return 1;
+	if (!strcasecmp(host, client->ip))
+		return 0;
+	for (i = 0; i < sizeof(families) / sizeof(families[0]); i++)
+	{
+		if (inet_pton(families[i], host, a) == 1 && inet_pton(families[i], client->ip, b) == 1 &&
+			!memcmp(a, b, families[i] == AF_INET ? 4 : 16))
+			return 0;
+	}
+	return 1;
+}
+
+static UdbBaseCloak *udb_ip_base_state(Client *client, int create)
+{
+	UdbBaseCloak *base;
+
+	if (!client || !udb_base_cloak_md)
+		return NULL;
+	base = moddata_client(client, udb_base_cloak_md).ptr;
+	if (!base && create)
+		base = moddata_client(client, udb_base_cloak_md).ptr = safe_alloc(sizeof(*base));
+	if (base)
+		base->client = client;
+	return base;
+}
+
+static int udb_ip_install_base(Client *client)
+{
+	UdbBaseCloak *base = udb_ip_base_state(client, 0);
+
+	if (!base || !valid_host(base->host, 0) || !udb_ip_safe_host(client, base->host))
+		return 0;
+	strlcpy(client->user->cloakedhost, base->host, sizeof(client->user->cloakedhost));
+	client->umodes |= UMODE_HIDE;
+	if (!IsSetHost(client) || !udb_ip_safe_host(client, client->user->virthost))
+	{
+		safe_strdup(client->user->virthost, base->host);
+		client->umodes &= ~UMODE_SETHOST;
+	}
+	return 1;
+}
+
+static const char *udb_ip_base_serialize(ModData *m)
+{
+	UdbBaseCloak *base = m->ptr;
+	return base && valid_host(base->host, 0) && udb_ip_safe_host(base->client, base->host) ? base->host : NULL;
+}
+
+static void udb_ip_base_unserialize(const char *host, ModData *m)
+{
+	UdbBaseCloak *base = m->ptr;
+	char oldhost[HOSTLEN + 1];
+	Client *client = base ? base->client : NULL;
+
+	/* Invalid/empty updates never erase the last accepted protected base. */
+	if (!udb_ip_safe_host(client, host) || !valid_host(host, 0))
+		return;
+	if (!base)
+		base = m->ptr = safe_alloc(sizeof(*base));
+	if (client && client->user)
+	{
+		strlcpy(oldhost, udb_ip_visible_host(client), sizeof(oldhost));
+		userhost_save_current(client);
+	}
+	strlcpy(base->host, host, sizeof(base->host));
+	if (client && client->user && udb_ip_install_base(client) && strcmp(oldhost, udb_ip_visible_host(client)))
+		userhost_changed(client);
 }
 
 static int udb_ip_tkl_is_owned(TKL *tkl)
@@ -11951,14 +12017,13 @@ static int udb_ip_client_matches(Client *client, const char *ip_key)
 
 static void udb_ip_apply_host(Client *client, const char *ip_key, const char *host)
 {
-	UdbIpHostState *state = moddata_local_client(client, udb_ip_host_md).ptr;
+	UdbIpHostState *state;
 
-	if (state && state->derived_vhost)
-		udb_ip_restore_host(client, state->key);
+	if (!udb_ip_safe_host(client, host))
+		return;
 	udb_ip_save_host_state(client, ip_key);
-
-	strlcpy(client->user->realhost, host, sizeof(client->user->realhost));
-	strlcpy(client->user->cloakedhost, host, sizeof(client->user->cloakedhost));
+	state = moddata_local_client(client, udb_ip_host_md).ptr;
+	strlcpy(state->applied_host, host, sizeof(state->applied_host));
 	safe_strdup(client->user->virthost, host);
 	client->umodes |= UMODE_HIDE | UMODE_SETHOST;
 }
@@ -11969,10 +12034,16 @@ static void udb_ip_restore_host(Client *client, const char *ip_key)
 
 	if (!state || strcasecmp(state->key, ip_key))
 		return;
-	strlcpy(client->user->realhost, state->realhost, sizeof(client->user->realhost));
-	strlcpy(client->user->cloakedhost, state->cloakedhost, sizeof(client->user->cloakedhost));
-	safe_strdup(client->user->virthost, state->virthost);
-	client->umodes = (client->umodes & ~(UMODE_HIDE | UMODE_SETHOST)) | state->host_umodes;
+	/* Release only this I::host overlay, never an external replacement. */
+	if (client->user && client->user->virthost && !strcmp(client->user->virthost, state->applied_host))
+	{
+		UdbBaseCloak *base = udb_ip_base_state(client, 0);
+		if (base && udb_ip_safe_host(client, base->host))
+		{
+			safe_strdup(client->user->virthost, base->host);
+			client->umodes = (client->umodes | UMODE_HIDE) & ~UMODE_SETHOST;
+		}
+	}
 	udb_ip_host_state_free(&moddata_local_client(client, udb_ip_host_md));
 	moddata_local_client(client, udb_ip_host_md).ptr = NULL;
 }
@@ -11993,8 +12064,7 @@ static const char *udb_ip_explicit_vhost(Client *client)
 
 static int udb_ip_derive_vhost(Client *client, char *host, size_t hostlen)
 {
-	UdbIpHostState *state = moddata_local_client(client, udb_ip_host_md).ptr;
-	const char *realhost = state ? state->realhost : client->user->realhost;
+	const char *realhost = client->user->realhost;
 	unsigned char key[32], digest[EVP_MAX_MD_SIZE];
 	unsigned int digestlen;
 	char input[HOSTLEN + INET6_ADDRSTRLEN + 32];
@@ -12016,103 +12086,47 @@ static int udb_ip_derive_vhost(Client *client, char *host, size_t hostlen)
 
 static int udb_ip_reapply_vhost(Client *client)
 {
-	UdbIpHostState *state;
-	UdbRecord *ip_rec;
-	UdbRecord *host_rec;
-	char host[HOSTLEN + 1];
-	char notice[HOSTLEN + 96];
-
-	if (!client || !MyUser(client) || !udb_ip_host_md)
+	UdbBaseCloak *base;
+	if (!client || !MyUser(client))
 		return 0;
-	state = moddata_local_client(client, udb_ip_host_md).ptr;
-	if (!state)
-	{
-		if (!udb_ip_derive_vhost(client, host, sizeof(host)))
-			return 0;
-		userhost_save_current(client);
-		udb_ip_save_host_state(client, client->ip);
-		state = moddata_local_client(client, udb_ip_host_md).ptr;
-		safe_strdup(client->user->virthost, host);
-		client->umodes |= UMODE_HIDE | UMODE_SETHOST;
-		state->derived_vhost = 1;
-		snprintf(notice, sizeof(notice), "*** Your IP-derived vhost has been restored: %s", host);
-		udb_ip_notify_host_change(client, notice);
-		return 1;
-	}
-	if (state->derived_vhost)
-	{
-		if (!udb_ip_derive_vhost(client, host, sizeof(host)))
-			return 0;
-		userhost_save_current(client);
-		safe_strdup(client->user->virthost, host);
-		client->umodes |= UMODE_HIDE | UMODE_SETHOST;
-		snprintf(notice, sizeof(notice), "*** Your IP-derived vhost has been restored: %s", host);
-		udb_ip_notify_host_change(client, notice);
-		return 1;
-	}
-
-	ip_rec = udb_hash_find(udb_ctx, udb_block_letter_to_index(UDB_BLOCK_IPS), state->key);
-	host_rec = ip_rec ? udb_record_find(udb_ctx, IKEY_HOST, ip_rec) : NULL;
-	if (!host_rec || !host_rec->data_str || !*host_rec->data_str)
+	base = udb_ip_base_state(client, 0);
+	if (!base || !valid_host(base->host, 0) || !udb_ip_safe_host(client, base->host))
 		return 0;
 	userhost_save_current(client);
-	udb_ip_apply_host(client, state->key, host_rec->data_str);
-	snprintf(notice, sizeof(notice), "*** Your explicit IP vhost has been restored: %s", host_rec->data_str);
-	udb_ip_notify_host_change(client, notice);
+	safe_strdup(client->user->virthost, base->host);
+	client->umodes = (client->umodes | UMODE_HIDE) & ~UMODE_SETHOST;
+	udb_ip_notify_host_change(client, "*** Your base cloak has been restored");
 	return 1;
 }
 
 static void udb_ip_refresh_derived_host(Client *client)
 {
-	UdbIpHostState *state;
-	const char *explicit_vhost;
-	char host[HOSTLEN + 1];
+	UdbBaseCloak *base;
+	char host[HOSTLEN + 1], oldhost[HOSTLEN + 1];
+	int changed;
 
-	if (!udb_ip_host_md || !client->user || !MyConnect(client))
+	if (!udb_base_cloak_md || !client || !client->user || !MyConnect(client))
 		return;
-	state = moddata_local_client(client, udb_ip_host_md).ptr;
-	explicit_vhost = udb_ip_explicit_vhost(client);
-	if (explicit_vhost)
-	{
-		/* A nick vhost supersedes a derived vhost without restoring over it.
-		 * Keep the original state so removing the nick vhost can restore the
-		 * derived vhost instead of losing the precedence relationship. */
-		if ((!state || state->derived_vhost) && strcmp(udb_ip_visible_host(client), explicit_vhost))
-		{
-			char notice[HOSTLEN + 96];
-			userhost_save_current(client);
-			safe_strdup(client->user->virthost, explicit_vhost);
-			client->umodes |= UMODE_HIDE | UMODE_SETHOST;
-			snprintf(notice, sizeof(notice), "*** Your vhost is now %s", explicit_vhost);
-			udb_ip_notify_host_change(client, notice);
-		}
-		return;
-	}
+	base = udb_ip_base_state(client, 1);
 	if (!udb_ip_derive_vhost(client, host, sizeof(host)))
 	{
-		if (state && state->derived_vhost)
-		{
-			userhost_save_current(client);
-			udb_ip_restore_host(client, state->key);
-			udb_ip_notify_host_change(client, "*** Your IP-derived vhost has been removed");
-		}
-		return;
+		if (udb_ip_safe_host(client, base->host))
+			strlcpy(host, base->host, sizeof(host));
+		else
+			make_cloakedhost(client, client->user->realhost, host, sizeof(host));
 	}
-	if (state && !state->derived_vhost)
-		return; /* I::host remains a stronger, explicit IP override. */
-	if (state && state->derived_vhost && !strcmp(client->user->virthost, host))
+	if (!udb_ip_safe_host(client, host))
 		return;
-	userhost_save_current(client);
-	udb_ip_save_host_state(client, client->ip);
-	state = moddata_local_client(client, udb_ip_host_md).ptr;
-	safe_strdup(client->user->virthost, host);
-	client->umodes |= UMODE_HIDE | UMODE_SETHOST;
-	state->derived_vhost = 1;
-	{
-		char notice[HOSTLEN + 96];
-		snprintf(notice, sizeof(notice), "*** Your IP-derived vhost is now %s", host);
-		udb_ip_notify_host_change(client, notice);
-	}
+	changed = strcmp(base->host, host);
+	strlcpy(oldhost, udb_ip_visible_host(client), sizeof(oldhost));
+	if (MyUser(client))
+		userhost_save_current(client);
+	strlcpy(base->host, host, sizeof(base->host));
+	udb_ip_install_base(client);
+	if (MyUser(client) && changed)
+		broadcast_md_client_cmd(NULL, &me, client, "udb_base_cloak", base->host);
+	if (MyUser(client) && strcmp(oldhost, udb_ip_visible_host(client)))
+		udb_ip_notify_host_change(client, "*** Your base cloak is now active");
 }
 
 static void udb_ip_refresh_derived_hosts(void)
@@ -12262,6 +12276,11 @@ static int udb_hook_pre_connect(Client *client)
 			return HOOK_CONTINUE;
 	}
 	udb_ip_refresh_derived_host(client);
+	if (!udb_ip_base_state(client, 0) || !udb_ip_safe_host(client, udb_ip_base_state(client, 0)->host))
+	{
+		exit_client(client, NULL, "No safe cloak is available");
+		return HOOK_DENY;
+	}
 
 	/* Fallback to global clones if no specific IP limit */
 	if (limit == 0 && udb_ctx && udb_ctx->settings)
@@ -12298,32 +12317,17 @@ static int udb_hook_pre_connect(Client *client)
 
 static int udb_hook_local_quit(Client *client, MessageTag *mtags, const char *comment)
 {
-	UdbIpHostState *state;
-
+	(void)client;
 	(void)mtags;
 	(void)comment;
-	if (!client || !client->user || !udb_ip_host_md)
-		return HOOK_CONTINUE;
-	state = moddata_local_client(client, udb_ip_host_md).ptr;
-	if (state)
-		udb_ip_restore_host(client, state->key);
+	/* Client ModData callbacks free state after the QUIT has been serialized. */
 	return HOOK_CONTINUE;
 }
 
 static void udb_ips_shutdown(void)
 {
-	Client *client;
 	UdbRecord *ip_rec;
 
-	if (udb_ip_host_md)
-	{
-		list_for_each_entry(client, &lclient_list, lclient_node)
-		{
-			UdbIpHostState *state = moddata_local_client(client, udb_ip_host_md).ptr;
-			if (state && client->user)
-				udb_ip_restore_host(client, state->key);
-		}
-	}
 	if (udb_ctx && udb_ctx->ips)
 	{
 		for (ip_rec = udb_ctx->ips->child; ip_rec; ip_rec = ip_rec->sibling)
@@ -12331,7 +12335,160 @@ static void udb_ips_shutdown(void)
 	}
 }
 
-static void udb_ips_init(ModuleInfo *modinfo)
+static int udb_ip_welcome(Client *client, int after_numeric)
+{
+	if (!after_numeric)
+		udb_ip_install_base(client);
+	return 0;
+}
+
+static int udb_ip_remote_connect(Client *client)
+{
+	/* EARLY metadata has been extracted before this hook. */
+	udb_ip_install_base(client);
+	return 0;
+}
+
+static int udb_ip_mode_request(Client *source, Client *target, const char *modes, int *restore)
+{
+	int add = 1;
+	const char *p;
+	*restore = 0;
+	if (!target || BadPtr(modes))
+		return 1;
+	for (p = modes; *p; p++)
+	{
+		if (*p == '+')
+			add = 1;
+		else if (*p == '-')
+			add = 0;
+		else if (*p == 'x' && !add)
+		{
+			if (MyUser(source))
+				sendnotice(source, "UDB: -x is disabled; host privacy is permanent");
+			return 0;
+		}
+		else if (*p == 't')
+			*restore = add;
+	}
+	return 1;
+}
+
+CMD_OVERRIDE_FUNC(udb_override_safe_sethost)
+{
+	if (IsUser(client) && parc > 1 && !udb_ip_safe_host(client, parv[1]))
+		return;
+	CALL_NEXT_COMMAND_OVERRIDE();
+}
+
+CMD_OVERRIDE_FUNC(udb_override_safe_chghost)
+{
+	Client *target = parc > 2 ? find_user(parv[1], NULL) : NULL;
+	if (target && !udb_ip_safe_host(target, parv[2]))
+		return;
+	CALL_NEXT_COMMAND_OVERRIDE();
+}
+
+static void udb_ip_restore_nick_vhost(Client *client)
+{
+	UdbRecord *nick, *vhost;
+
+	if (!client || !MyUser(client) || IsDead(client))
+		return;
+	nick = udb_ready && udb_ctx ? udb_record_find(udb_ctx, client->name, udb_ctx->nicks) : NULL;
+	vhost = nick ? udb_record_find(udb_ctx, NKEY_VHOST, nick) : NULL;
+	if (!has_user_mode(client, 'r') || !nick || !udb_nick_identity_valid(client, nick) ||
+		udb_record_find(udb_ctx, NKEY_SUSPEND, nick) || udb_record_find(udb_ctx, NKEY_FORBID, nick) || !vhost ||
+		!udb_ip_safe_host(client, vhost->data_str))
+	{
+		sendnotice(client, "UDB: +t requires an authenticated nickname with an authorized N vhost");
+		return;
+	}
+	if (IsSetHost(client) && client->user->virthost && !strcmp(client->user->virthost, vhost->data_str))
+		return;
+	if (UHOST_ALLOWED == UHALLOW_NEVER || (UHOST_ALLOWED == UHALLOW_NOCHANS && client->user->joined) ||
+		(!ValidatePermissionsForPath("immune:vhost-flood", client, NULL, NULL, NULL) &&
+		 flood_limit_exceeded(client, FLD_VHOST)))
+	{
+		sendnotice(client, "UDB: vhost change is currently restricted");
+		return;
+	}
+	udb_nick_effects_apply_vhost(client, vhost);
+}
+
+CMD_OVERRIDE_FUNC(udb_override_host_mode)
+{
+	Client *target = parc > 2 ? find_user(parv[1], NULL) : NULL;
+	int restore;
+	if (!udb_ip_mode_request(client, target, parc > 2 ? parv[2] : NULL, &restore))
+		return;
+	CALL_NEXT_COMMAND_OVERRIDE();
+	if (target == client && restore && MyUser(client))
+		udb_ip_restore_nick_vhost(client);
+}
+
+CMD_OVERRIDE_FUNC(udb_override_host_umode2)
+{
+	int restore;
+	if (!udb_ip_mode_request(client, IsUser(client) ? client : NULL, parc > 1 ? parv[1] : NULL, &restore))
+		return;
+	CALL_NEXT_COMMAND_OVERRIDE();
+	if (restore && MyUser(client))
+		udb_ip_restore_nick_vhost(client);
+}
+
+CMD_OVERRIDE_FUNC(udb_override_host_svsmode)
+{
+	Client *target = parc > 2 ? find_user(parv[1], NULL) : NULL;
+	int restore;
+	if (!udb_ip_mode_request(client, target, parc > 2 ? parv[2] : NULL, &restore))
+		return;
+	CALL_NEXT_COMMAND_OVERRIDE();
+}
+
+CMD_OVERRIDE_FUNC(udb_override_base_md)
+{
+	if (parc > 3 && !strcmp(parv[1], "client") && !strcmp(parv[3], "udb_base_cloak"))
+	{
+		Client *target = find_user(parv[2], NULL);
+		/* Native MD blocks remote writes to local clients, but does not enforce
+		 * the origin of writes to remote clients. Protect that boundary here. */
+		if (!target || target->uplink != client || parc < 5 || !udb_ip_safe_host(target, parv[4]) ||
+			!valid_host(parv[4], 0))
+			return;
+	}
+	CALL_NEXT_COMMAND_OVERRIDE();
+}
+
+static int udb_ips_load(ModuleInfo *modinfo)
+{
+	Client *client;
+	const char *commands[] = {"MODE", "UMODE2", "SVSMODE", "SVS2MODE", "MD", "SETHOST", "CHGHOST"};
+	OverrideCmdFunc handlers[] = {udb_override_host_mode,	 udb_override_host_umode2, udb_override_host_svsmode,
+								  udb_override_host_svsmode, udb_override_base_md,	   udb_override_safe_sethost,
+								  udb_override_safe_chghost};
+	size_t i;
+	for (i = 0; i < sizeof(commands) / sizeof(commands[0]); i++)
+	{
+		if (!CommandExists(commands[i]))
+		{
+			if (i == 0 || i == 4)
+				return 0;
+			continue;
+		}
+		if (!CommandOverrideAdd(modinfo->handle, commands[i], -100, handlers[i]))
+			return 0;
+	}
+	udb_ip_refresh_derived_hosts();
+	list_for_each_entry(client, &client_list, client_node)
+	{
+		if (IsUser(client) && !MyUser(client))
+			udb_ip_install_base(client);
+	}
+	return 1;
+}
+
+static int udb_ips_init(ModuleInfo *modinfo)
 {
 	ModDataInfo mreq;
 
@@ -12341,9 +12498,22 @@ static void udb_ips_init(ModuleInfo *modinfo)
 	mreq.free = udb_ip_host_state_free;
 	udb_ip_host_md = ModDataAdd(modinfo->handle, mreq);
 	if (!udb_ip_host_md)
-		return;
+		return 0;
+	memset(&mreq, 0, sizeof(mreq));
+	mreq.name = "udb_base_cloak";
+	mreq.type = MODDATATYPE_CLIENT;
+	mreq.sync = MODDATA_SYNC_EARLY;
+	mreq.free = udb_ip_host_state_free;
+	mreq.serialize = udb_ip_base_serialize;
+	mreq.unserialize = udb_ip_base_unserialize;
+	udb_base_cloak_md = ModDataAdd(modinfo->handle, mreq);
+	if (!udb_base_cloak_md)
+		return 0;
 	HookAdd(modinfo->handle, HOOKTYPE_PRE_LOCAL_CONNECT, 0, udb_hook_pre_connect);
 	HookAdd(modinfo->handle, HOOKTYPE_LOCAL_QUIT, 0, udb_hook_local_quit);
+	HookAdd(modinfo->handle, HOOKTYPE_WELCOME, -100, udb_ip_welcome);
+	HookAdd(modinfo->handle, HOOKTYPE_REMOTE_CONNECT, -100, udb_ip_remote_connect);
+	return 1;
 }
 
 /* End of udb_ips.c.inc */
@@ -14298,12 +14468,14 @@ static int udb_module_test(ModuleInfo *modinfo)
 
 static int udb_module_init(ModuleInfo *modinfo)
 {
+	ModuleSetOptions(modinfo->handle, MOD_OPT_PERM_RELOADABLE, 1);
 	HookAdd(modinfo->handle, HOOKTYPE_CONFIGRUN, 0, udb_config_run);
 	udb_sync_snomask_filter();
 	udb_protocol_init(modinfo);
 	udb_nicks_init(modinfo);
 	udb_channels_init(modinfo);
-	udb_ips_init(modinfo);
+	if (!udb_ips_init(modinfo))
+		return MOD_FAILED;
 	udb_lines_init(modinfo);
 	udb_query_init(modinfo);
 	MARK_AS_GLOBAL_MODULE(modinfo);
@@ -14326,6 +14498,11 @@ static int udb_module_load(ModuleInfo *modinfo)
 	udb_ocl_local_rebuild();
 	udb_nicks_load(modinfo);
 	udb_channels_load(modinfo);
+	if (!udb_ips_load(modinfo))
+	{
+		config_error("[UDB] Failed to install host privacy protections");
+		return MOD_FAILED;
+	}
 	udb_log(ULOG_INFO, "UDB_LOADED", NULL, "Unreal Database System v" UDB_VERSION " loaded successfully");
 
 	list_for_each_entry(server, &server_list, special_node)

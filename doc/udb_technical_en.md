@@ -255,7 +255,15 @@ HMAC-SHA256(key, "UDB-vhost-v1|<ip>|<realhost>")
 
 The first 16 HMAC bytes become 32 lowercase hex characters followed by `suffix`. `encryption_key` must be exactly 64 hex characters; `suffix` must start with `.` and obey hostname restrictions.
 
-An active `I::host` is an explicit override and is not replaced by a derived vhost. UDB saves prior host state so it can restore it when its effect is removed.
+#### Host privacy and custom vhosts
+
+UDB uses the derived `.virtual` host as the base cloak (`+x`, without `+t`), not as a removable vhost. Explicit `N::vhost`, `I::host` and oper hosts are overlays (`+xt`); `-t` returns to the protected base. A local user can restore their current `N::vhost` with `+t` only while authenticated by UDB, with `+r`, valid password/access state and no suspend/forbid. External `+r` alone is insufficient. Native host-change restrictions and flood limits still apply. UDB rejects `-x`, including service mode commands.
+
+Disconnect never restores the real host. Realhost/IP remain available internally for matching and authorized diagnostics. If the derivation key/suffix disappears, existing users retain their protected base; new users use a validated native cloak or are rejected if none is safe. Base hostnames are synchronized as origin-owned early client ModData, without keys or a DB protocol change.
+
+UDB can be reloaded but cannot be hot-unloaded. Upgrade every participating IRCd. For the first upgrade from the old implementation, prefer a controlled restart: an old module's cleanup still executes during a hot replacement. These protections concern ordinary users' public host display, not trusted server transport or authorized realhost/IP diagnostics.
+
+`N::modes` does not own `x` or `t`; host state is managed separately.
 
 ### 4.4 S block — Settings
 

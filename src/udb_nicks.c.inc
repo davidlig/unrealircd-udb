@@ -438,11 +438,12 @@ static void udb_nick_effects_apply_modes(Client *client, UdbRecord *mode_rec)
 	fx = udb_nick_effects_ensure(client);
 	if (!fx)
 		return;
-	desired = set_usermode(mode_rec->data_str) & ~UMODE_OPER;
+	/* Host privacy and custom-host state are not revocable profile modes. */
+	desired = set_usermode(mode_rec->data_str) & ~(UMODE_OPER | UMODE_HIDE | UMODE_SETHOST);
 	old_umodes = client->umodes & ALL_UMODES;
-	removed = fx->modes_added & ~desired;
+	removed = fx->modes_added & ~desired & ~(UMODE_HIDE | UMODE_SETHOST);
 	added = desired & ~old_umodes;
-	client->umodes = (client->umodes & ~removed) | desired;
+	client->umodes = (client->umodes & ~removed) | desired | UMODE_HIDE;
 	if ((client->umodes & ALL_UMODES) != old_umodes)
 		send_umode_out(client, 1, old_umodes);
 	fx->modes_added = (fx->modes_added & desired) | added;
@@ -456,7 +457,7 @@ static void udb_nick_effects_revoke_modes(Client *client)
 	if (!fx || !fx->modes_added)
 		return;
 	old_umodes = client->umodes & ALL_UMODES;
-	client->umodes &= ~fx->modes_added;
+	client->umodes = (client->umodes & ~(fx->modes_added & ~(UMODE_HIDE | UMODE_SETHOST))) | UMODE_HIDE;
 	fx->modes_added = 0;
 	if ((client->umodes & ALL_UMODES) != old_umodes)
 		send_umode_out(client, 1, old_umodes);
@@ -576,7 +577,7 @@ static void udb_nick_effects_apply_vhost(Client *client, UdbRecord *vhost_rec)
 	UdbNickEffects *fx;
 	const char *desired;
 
-	if (!client || !client->user || !vhost_rec || BadPtr(vhost_rec->data_str) || !MyUser(client))
+	if (!client || !client->user || !vhost_rec || !udb_ip_safe_host(client, vhost_rec->data_str) || !MyUser(client))
 		return;
 	fx = udb_nick_effects_ensure(client);
 	if (!fx)
@@ -589,7 +590,7 @@ static void udb_nick_effects_apply_vhost(Client *client, UdbRecord *vhost_rec)
 		/* Still materialized as UDB left it: nothing to do. If an external
 		 * source replaced it, the profile still desires this value, so fall
 		 * through and reassert it. */
-		if (client->user->virthost && !strcmp(client->user->virthost, desired))
+		if (client->user->virthost && !strcmp(client->user->virthost, desired) && IsHidden(client) && IsSetHost(client))
 		{
 			fx->oper_vhost_attempted = 0;
 			return;
@@ -669,6 +670,8 @@ static int udb_nick_expected_oper_vhost(Client *client, const char *format, char
 		{
 			hostpart = uhost;
 		}
+		if (!udb_ip_safe_host(client, hostpart))
+			return 0;
 		strlcpy(expected_vhost, hostpart, vhost_size);
 		*expected_sethost = 1;
 		return 1;
@@ -741,15 +744,18 @@ static void udb_nick_effects_revoke_oper_vhost(Client *client)
 	current_vhost = client->user->virthost;
 	if (fx->oper_vhost_owned && udb_nick_nullable_equal(current_vhost, fx->oper_applied_vhost))
 	{
-		if (fx->oper_previous_vhost)
+		if (udb_ip_safe_host(client, fx->oper_previous_vhost))
 		{
 			userhost_save_current(client);
 			safe_strdup(client->user->virthost, fx->oper_previous_vhost);
+			client->umodes |= UMODE_HIDE;
 			if (fx->oper_previous_sethost)
 				client->umodes |= UMODE_SETHOST;
 			else
 				client->umodes &= ~UMODE_SETHOST;
 			sendto_server(client, 0, 0, NULL, ":%s SETHOST %s", client->id, client->user->virthost);
+			if (!IsSetHost(client))
+				sendto_server(client, 0, 0, NULL, ":%s UMODE2 -t", client->id);
 			userhost_changed(client);
 		}
 		else
@@ -940,7 +946,7 @@ static void udb_nick_reconcile_effects(Client *client, UdbRecord *nick_rec)
 
 static void udb_nick_set_vhost(Client *client, const char *vhost)
 {
-	if (!client || !client->user || !vhost || !*vhost)
+	if (!client || !client->user || !udb_ip_safe_host(client, vhost))
 		return;
 
 	userhost_save_current(client);
@@ -966,33 +972,8 @@ static void udb_nick_remove_vhost(Client *client)
 {
 	if (!client || !client->user)
 		return;
-	if (udb_ip_reapply_vhost(client))
-		return;
-
-	userhost_save_current(client);
-
-	if (*client->user->cloakedhost)
-	{
-		safe_strdup(client->user->virthost, client->user->cloakedhost);
-	}
-	else
-	{
-		safe_strdup(client->user->virthost, client->user->realhost);
-	}
-
-	client->umodes &= ~UMODE_SETHOST;
-
-	if (IsUser(client))
-	{
-		sendto_server(client, 0, 0, NULL, ":%s SETHOST %s", client->id, client->user->virthost);
-	}
-	if (MyConnect(client))
-	{
-		sendto_one(client, NULL, ":%s MODE %s :-t", client->name, client->name);
-		udb_send_service_notice(client, SKEY_IPSERV, "*** Your vhost has been removed");
-	}
-
-	userhost_changed(client);
+	/* No realhost fallback: failed recovery leaves the protected overlay intact. */
+	udb_ip_reapply_vhost(client);
 }
 
 static int udb_oper_owned(Client *client)
@@ -1050,7 +1031,7 @@ static int udb_nick_grant_oper(Client *client, UdbRecord *nick_rec, UdbRecord *o
 	if (!IsOper(client))
 	{
 		vhost_rec = nick_rec ? udb_record_find(udb_ctx, NKEY_VHOST, nick_rec) : NULL;
-		has_profile_vhost = vhost_rec && !BadPtr(vhost_rec->data_str);
+		has_profile_vhost = vhost_rec && udb_ip_safe_host(client, vhost_rec->data_str);
 		if (has_profile_vhost)
 			oper_vhost = vhost_rec->data_str;
 		else if (udb_nick_expand_oper_vhost_default(client, operclass, expanded_default, sizeof(expanded_default)))
@@ -1063,6 +1044,10 @@ static int udb_nick_grant_oper(Client *client, UdbRecord *nick_rec, UdbRecord *o
 		expect_oper_vhost =
 			udb_nick_expected_oper_vhost(client, oper_vhost, expected_vhost, sizeof(expected_vhost), expected_username,
 										 sizeof(expected_username), &expected_sethost);
+		/* NULL asks native make_oper() to retry the global template. An
+		 * empty explicit template instead rejects it without changing host. */
+		if (oper_vhost && !expect_oper_vhost)
+			oper_vhost = "";
 		if (!make_oper(client, "UDB", operclass, NULL, 0, NULL, oper_vhost, NULL))
 		{
 			safe_free(previous_vhost);

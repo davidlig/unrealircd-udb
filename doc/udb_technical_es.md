@@ -261,7 +261,15 @@ HMAC-SHA256(key, "UDB-vhost-v1|<ip>|<realhost>")
 
 Se usan los primeros 16 bytes del HMAC como 32 caracteres hexadecimales y se concatena `suffix`. `encryption_key` debe contener exactamente 64 hex y `suffix` debe empezar por `.` y cumplir las restricciones de hostname.
 
-Un `I::host` es un override explícito y bloquea el reemplazo por el vhost derivado mientras siga siendo el estado IP activo. UDB conserva el host anterior para poder restaurarlo al retirar su efecto.
+#### Privacidad del host y vhosts personalizados
+
+UDB usa el host derivado `.virtual` como cloak base (`+x`, sin `+t`), no como vhost retirable. Los hosts explícitos `N::vhost`, `I::host` y de oper son capas adicionales (`+xt`); `-t` vuelve a la base protegida. Un usuario local puede recuperar su `N::vhost` actual con `+t` sólo mientras esté autenticado por UDB, con `+r`, contraseña/acceso vigentes y sin suspend/forbid. Un `+r` externo no basta. Siguen aplicándose las restricciones nativas de cambio de host y los límites de flood. UDB rechaza `-x`, también mediante comandos de modos de servicios.
+
+La desconexión nunca restaura el host real. Realhost/IP siguen disponibles internamente para matching y diagnósticos autorizados. Si desaparece la clave/sufijo de derivación, los usuarios existentes conservan su base protegida; los nuevos usan un cloak nativo validado o se rechazan si no existe uno seguro. Los hosts base se sincronizan como ModData temprano de cliente, propiedad de su servidor de origen, sin claves ni cambios al protocolo DB.
+
+UDB puede recargarse, pero no descargarse en caliente. Actualiza todos los IRCd participantes. Para la primera actualización desde la implementación antigua, es preferible un reinicio controlado: la limpieza del módulo antiguo todavía se ejecuta durante una sustitución en caliente. Estas protecciones afectan al host público mostrado a usuarios normales, no al transporte entre servidores de confianza ni a diagnósticos autorizados de realhost/IP.
+
+`N::modes` no controla `x` ni `t`; el estado del host se gestiona por separado.
 
 ### 4.4 Bloque S — Settings
 

@@ -1085,12 +1085,14 @@ static int udb_module_test(ModuleInfo *modinfo)
 
 static int udb_module_init(ModuleInfo *modinfo)
 {
+	ModuleSetOptions(modinfo->handle, MOD_OPT_PERM_RELOADABLE, 1);
 	HookAdd(modinfo->handle, HOOKTYPE_CONFIGRUN, 0, udb_config_run);
 	udb_sync_snomask_filter();
 	udb_protocol_init(modinfo);
 	udb_nicks_init(modinfo);
 	udb_channels_init(modinfo);
-	udb_ips_init(modinfo);
+	if (!udb_ips_init(modinfo))
+		return MOD_FAILED;
 	udb_lines_init(modinfo);
 	udb_query_init(modinfo);
 	MARK_AS_GLOBAL_MODULE(modinfo);
@@ -1113,6 +1115,11 @@ static int udb_module_load(ModuleInfo *modinfo)
 	udb_ocl_local_rebuild();
 	udb_nicks_load(modinfo);
 	udb_channels_load(modinfo);
+	if (!udb_ips_load(modinfo))
+	{
+		config_error("[UDB] Failed to install host privacy protections");
+		return MOD_FAILED;
+	}
 	udb_log(ULOG_INFO, "UDB_LOADED", NULL, "Unreal Database System v" UDB_VERSION " loaded successfully");
 
 	list_for_each_entry(server, &server_list, special_node)

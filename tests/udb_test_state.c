@@ -63,6 +63,16 @@ CMD_FUNC(cmd_udbtest)
 
 	if (parc < 2)
 		return;
+	if (!strcasecmp(parv[1], "GETHOST") && parc >= 3)
+	{
+		target = find_user(parv[2], NULL);
+		if (!target || !target->user)
+			return;
+		sendto_one(target, NULL, ":%s NOTICE %s :UDBTEST REALHOST=%s IP=%s CLOAK=%s VHOST=%s",
+			me.name, target->name, target->user->realhost, target->ip ? target->ip : "-",
+			target->user->cloakedhost, target->user->virthost ? target->user->virthost : "-");
+		return;
+	}
 	if (!strcasecmp(parv[1], "SNOMASK") && parc >= 4)
 	{
 		target = find_user(parv[2], NULL);
