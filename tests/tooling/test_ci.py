@@ -14,6 +14,15 @@ def workflow():
     return yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
 
 
+def test_agentic_job_installs_test_dependencies_before_verification(workflow):
+    steps = workflow["jobs"]["agentic"]["steps"]
+    verify = next(i for i, step in enumerate(steps) if ".agentic/ci-check.sh" in step.get("run", ""))
+    installs = [step for step in steps[:verify] if "pip install" in step.get("run", "")]
+    assert any("-r tests/requirements.txt" in step["run"] for step in installs)
+    assert any("-r .agentic/requirements.txt" in step["run"] for step in installs)
+    assert all(not step.get("continue-on-error", False) and "if" not in step for step in installs)
+
+
 def test_current_suite_is_required_in_both_existing_build_profiles(workflow):
     job = workflow["jobs"]["test"]
     profiles = {item["profile"]: item for item in job["strategy"]["matrix"]["include"]}

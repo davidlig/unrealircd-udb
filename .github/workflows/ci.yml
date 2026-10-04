@@ -43,8 +43,8 @@ jobs:
           git checkout --detach "$GITHUB_SHA"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
 
-      - name: Install generator dependencies
-        run: python3 -m pip install --disable-pip-version-check --user -r .agentic/requirements.txt
+      - name: Install agentic verification dependencies
+        run: python3 -m pip install --disable-pip-version-check --user -r .agentic/requirements.txt -r tests/requirements.txt
 
       - name: Verify agent configuration
         run: ./.agentic/ci-check.sh
