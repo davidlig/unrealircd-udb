@@ -36,4 +36,8 @@ OCL uses broadcast-target frames `BEGIN`, `ITEM`, `END` carrying `originSID`, in
 - The global view is the intersection of operclasses whose name and effective digest match on every participant.
 - OCLG is sent only to explicit HEL `OCLG` subscribers. UnrealIRCd peers do not consume incoming OCLG as authoritative state.
 
-For tests, prefer `test_ocl_registry.py`, `test_ocl_rehash_replay.py`, and `test_ocl_membership_multihop.py` before broader suites.
+For tests, use `tests/unit/test_ocl_lookup.c` for order-preserving lookup,
+`tests/protocol/test_ocl_inventory.py` for epochs, staging, rehash/replay and
+completeness. `tests/protocol/test_multinode.py` supplies topology harness examples,
+not proof of OCL multihop membership coverage; add a focused OCL scenario when
+that invariant changes. Select the affected case through pytest before broader suites.
