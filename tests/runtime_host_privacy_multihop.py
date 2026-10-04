@@ -5,11 +5,17 @@ import shutil
 import subprocess
 import tempfile
 
-from runtime_host_privacy import whois, barrier
+from runtime_host_privacy import whois
 from runtime_channel_modes_ins import IrcClient, require, sha256, wait_for_daemon
 from test_ocl_membership_multihop import (DEFAULT_IRCD, RUNTIME_ROOT, free_ports,
                                         write_config, bwrap_command, stop, wait_until)
 from udb_state_seed import seed_block, seed_ready_state
+
+
+def barrier(client):
+    start = len(client.lines)
+    client.send('PING :privacy-barrier')
+    client.wait_for(lambda s: ' PONG ' in s, 'command barrier', start=start, timeout=15)
 
 
 def main():
@@ -37,6 +43,10 @@ def main():
                          [(names['A'], ports['A'][1], False), (names['C'], ports['C'][1], True)]
                          if n == 'B' else [(names['B'], ports['B'][1], False)])
                 write_config(node / "unrealircd.conf", names[n], f"0{n}1", ports[n], links, data)
+                config = node / "unrealircd.conf"
+                config.write_text(config.read_text() +
+                    '\nset { anti-flood { known-users { vhost-flood 100:60; } '
+                    'unknown-users { vhost-flood 100:60; } } }\n')
 
             def start(n):
                 node = nodes[n]
@@ -55,6 +65,10 @@ def main():
             alice.request('NICK alice:secret', lambda s: ' NICK :alice' in s, 'identify')
             alice.wait_for(lambda s: ' MODE alice ' in s and '+r' in s, 'identity')
             require(whois(alice, 'alice') == 'alice.test', 'custom host before late join')
+            opted = IrcClient('127.0.0.1', ports['A'][0], 'open-user')
+            clients.append(opted)
+            opted.send('MODE open-user -x')
+            barrier(opted)
             start('C')
             wait_until(lambda: names['C'] in (nodes['B'] / 'ircd.log').read_text(), 'late B-C link')
             observer = IrcClient('127.0.0.1', ports['C'][0], 'observer')
@@ -65,6 +79,10 @@ def main():
                 return any(' 311 ' in s for s in lines)
             wait_until(visible, 'late remote client')
             require(whois(observer, 'alice') == 'alice.test', 'late burst lost custom host')
+            require(whois(observer, 'open-user') == 'localhost', 'late burst cancelled voluntary -x')
+            opted.send('MODE open-user +x')
+            barrier(opted)
+            require(whois(observer, 'open-user') == base, 'late burst lost opted-out base')
             observer.request('JOIN #privacy', lambda s: ' 366 ' in s, 'remote join')
             alice.request('JOIN #privacy', lambda s: ' 366 ' in s, 'origin join')
             observer.wait_for(lambda s: s.startswith(':alice!') and ' JOIN ' in s, 'custom JOIN')
@@ -76,14 +94,20 @@ def main():
             require(whois(observer, 'alice') == 'alice.test', 'multihop +t failed')
             alice.send('MODE alice -x')
             barrier(alice)
-            require(whois(observer, 'alice') == 'alice.test', 'multihop -x disclosed host')
+            require(whois(observer, 'alice') == 'localhost', 'multihop voluntary -x rejected')
+            alice.send('MODE alice +x')
+            barrier(alice)
+            require(whois(observer, 'alice') == base, 'multihop +x lost origin base')
+            alice.send('MODE alice +t')
+            barrier(alice)
+            require(whois(observer, 'alice') == 'alice.test', 'multihop +t after +x failed')
             start_line = len(observer.lines)
             alice.close()
             clients.remove(alice)
             lines = observer.wait_for(lambda s: s.startswith(':alice!') and ' QUIT ' in s,
                                       'remote QUIT', start=start_line)
             require(any('@alice.test QUIT ' in s for s in lines), f'remote QUIT disclosure: {lines}')
-            print('PASS: A-B-C late burst, custom/base -t/+t, -x guard and protected QUIT')
+            print('PASS: A-B-C late burst, custom/base -t/+t, voluntary -x/+x and protected QUIT')
         except (AssertionError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
             print(f'FAIL: {exc}')
             for n in 'ABC':

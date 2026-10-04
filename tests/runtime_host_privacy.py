@@ -77,11 +77,22 @@ def exercise(port, server_port, case, config):
         base = whois(observer, "observer")
         observer.send("MODE observer -x")
         barrier(observer)
-        require("x" in modes(observer, "observer") and whois(observer, "observer") == base,
-                "-x removed privacy")
+        require("x" not in modes(observer, "observer") and whois(observer, "observer") == "localhost",
+                "voluntary MODE -x did not disclose the user's own realhost")
+        clear_start = len(services.lines)
+        observer.send("MODE observer +x")
+        barrier(observer)
+        services.wait_for(lambda s: " UMODE2 -t" in s,
+                          "base-only remote mode after +x", start=clear_start)
+        require(whois(observer, "observer") == base and "t" not in modes(observer, "observer"),
+                "+x did not restore the retained .virtual base")
         observer.send("UMODE2 -x")
         barrier(observer)
-        require("x" in modes(observer, "observer"), "UMODE2 bypassed privacy")
+        require("x" not in modes(observer, "observer") and whois(observer, "observer") == "localhost",
+                "voluntary UMODE2 -x rejected")
+        observer.send("UMODE2 +x")
+        barrier(observer)
+        require(whois(observer, "observer") == base, "UMODE2 +x lost the UDB base")
         services.send("SVS2MODE observer +r")
         observer.wait_for(lambda s: " MODE observer " in s and "+r" in s, "external +r")
         observer.send("MODE observer +t")
@@ -116,11 +127,26 @@ def exercise(port, server_port, case, config):
         require("REALHOST=localhost IP=127.0.0.1" in state and f"CLOAK={base}" in state,
                 f"original identity/base overwritten: {state}")
 
+        alice.request("MODE observer -x", lambda s: " 502 " in s, "native cross-user MODE rejection")
+        require("x" in modes(observer, "observer"), "unauthorized MODE removed another user's +x")
+        observer.send("SVSMODE alice -xt")
+        observer.send("SVS2MODE alice -xt")
+        barrier(observer)
+        require(whois(observer, "alice") == "alice.test", "native services authorization bypassed")
         services.send("SVSMODE alice -x")
+        service_barrier()
+        require("x" not in modes(alice, "alice") and whois(observer, "alice") == "localhost",
+                "UDB blocked authorized native SVSMODE -x")
         services.send("SVS2MODE alice -xt")
         service_barrier()
-        require("x" in modes(alice, "alice") and whois(observer, "alice") == "alice.test",
-                "services bypassed permanent +x")
+        require("x" not in modes(alice, "alice") and "t" not in modes(alice, "alice"),
+                "UDB blocked authorized native SVS2MODE -xt")
+        services.send("SVS2MODE alice +x")
+        service_barrier()
+        require(whois(observer, "alice") == base, "authorized services +x lost UDB base")
+        alice.send("MODE alice +t")
+        barrier(alice)
+        require(whois(observer, "alice") == "alice.test", "+t failed after authorized service modes")
 
         # Early metadata supplies the base of a remote custom-hosted client.
         uid = f"{SERVICES_SID}999999"
@@ -146,6 +172,10 @@ def exercise(port, server_port, case, config):
         service_barrier()
         require(whois(observer, "observer") == base, "I removal lost base")
 
+        voluntary = connect("voluntary")
+        voluntary.send("MODE voluntary -x")
+        barrier(voluntary)
+
         operator = connect("privacy-oper")
         operator.request("OPER privacy secret", lambda s: " 381 " in s, "OPER")
         hel_start = len(services.lines)
@@ -156,6 +186,8 @@ def exercise(port, server_port, case, config):
         barrier(operator)
         require(whois(observer, "alice") == "alice.test" and "x" in modes(alice, "alice"),
                 "reload lost the custom vhost or privacy")
+        require("x" not in modes(voluntary, "voluntary") and
+                whois(observer, "voluntary") == "localhost", "reload cancelled voluntary -x")
         alice.send("MODE alice -t")
         barrier(alice)
         require(whois(observer, "alice") == base, "reload lost the base cloak")
@@ -166,6 +198,10 @@ def exercise(port, server_port, case, config):
         services.send_ins("S::suffix", ".changed.virtual")
         observer.wait_for(lambda s: "Your base cloak is now active" in s, "base rotation")
         changed = whois(observer, "observer")
+        require("x" not in modes(voluntary, "voluntary"), "base rotation cancelled voluntary -x")
+        voluntary.send("MODE voluntary +x")
+        barrier(voluntary)
+        require(whois(observer, "voluntary") == changed, "+x restored a stale base after rotation")
         require(changed == base.removesuffix(".virtual") + ".changed.virtual", "incorrect base rotation")
         require(whois(observer, "alice") == "alice.test", "rotation replaced a custom host")
         alice.send("MODE alice -t")
@@ -192,10 +228,11 @@ def exercise(port, server_port, case, config):
         config.write_text(config.read_text().replace('loadmodule "third/udb";', ''))
         operator.request("REHASH", lambda s: " 382 " in s, "unload attempt")
         barrier(operator)
-        observer.send("MODE observer -x")
-        barrier(observer)
-        require("x" in modes(observer, "observer"), "hot unload disabled privacy")
-        print("PASS: permanent +x, derived base and authenticated -t/+t")
+        start = len(observer.lines)
+        observer.send("MODE observer +t")
+        observer.wait_for(lambda s: "UDB: +t requires" in s, "retained UDB recovery handler", start=start)
+        require("t" not in modes(observer, "observer"), "hot removal disabled UDB identity guard")
+        print("PASS: voluntary -x/+x, derived base and authenticated -t/+t")
         print("PASS: original host/IP, remote metadata, reload, rotation, fallback and revocation")
     finally:
         for c in clients:

@@ -110,7 +110,10 @@ static int udb_ip_install_base(Client *client)
 	if (!base || !valid_host(base->host, 0) || !udb_ip_safe_host(client, base->host))
 		return 0;
 	strlcpy(client->user->cloakedhost, base->host, sizeof(client->user->cloakedhost));
-	client->umodes |= UMODE_HIDE;
+	/* Existing users may have deliberately chosen -x. Keep their base
+	 * available for +x without cancelling that choice during refresh/burst. */
+	if (!IsUser(client))
+		client->umodes |= UMODE_HIDE;
 	if (!IsSetHost(client) || !udb_ip_safe_host(client, client->user->virthost))
 	{
 		safe_strdup(client->user->virthost, base->host);
@@ -505,29 +508,22 @@ static int udb_ip_remote_connect(Client *client)
 	return 0;
 }
 
-static int udb_ip_mode_request(Client *source, Client *target, const char *modes, int *restore)
+static int udb_ip_restore_requested(const char *modes)
 {
-	int add = 1;
+	int add = 1, restore = 0;
 	const char *p;
-	*restore = 0;
-	if (!target || BadPtr(modes))
-		return 1;
+	if (BadPtr(modes))
+		return 0;
 	for (p = modes; *p; p++)
 	{
 		if (*p == '+')
 			add = 1;
 		else if (*p == '-')
 			add = 0;
-		else if (*p == 'x' && !add)
-		{
-			if (MyUser(source))
-				sendnotice(source, "UDB: -x is disabled; host privacy is permanent");
-			return 0;
-		}
 		else if (*p == 't')
-			*restore = add;
+			restore = add;
 	}
-	return 1;
+	return restore;
 }
 
 CMD_OVERRIDE_FUNC(udb_override_safe_sethost)
@@ -575,31 +571,25 @@ static void udb_ip_restore_nick_vhost(Client *client)
 CMD_OVERRIDE_FUNC(udb_override_host_mode)
 {
 	Client *target = parc > 2 ? find_user(parv[1], NULL) : NULL;
-	int restore;
-	if (!udb_ip_mode_request(client, target, parc > 2 ? parv[2] : NULL, &restore))
-		return;
+	int was_hidden = IsHidden(client);
+	int restore = udb_ip_restore_requested(parc > 2 ? parv[2] : NULL);
 	CALL_NEXT_COMMAND_OVERRIDE();
+	/* Native +x emits SETHOST, which adds +t on remote receivers. */
+	if (target == client && MyUser(client) && !was_hidden && IsHidden(client) && !IsSetHost(client))
+		sendto_server(NULL, 0, 0, NULL, ":%s UMODE2 -t", client->id);
 	if (target == client && restore && MyUser(client))
 		udb_ip_restore_nick_vhost(client);
 }
 
 CMD_OVERRIDE_FUNC(udb_override_host_umode2)
 {
-	int restore;
-	if (!udb_ip_mode_request(client, IsUser(client) ? client : NULL, parc > 1 ? parv[1] : NULL, &restore))
-		return;
+	int was_hidden = IsHidden(client);
+	int restore = udb_ip_restore_requested(parc > 1 ? parv[1] : NULL);
 	CALL_NEXT_COMMAND_OVERRIDE();
+	if (MyUser(client) && !was_hidden && IsHidden(client) && !IsSetHost(client))
+		sendto_server(NULL, 0, 0, NULL, ":%s UMODE2 -t", client->id);
 	if (restore && MyUser(client))
 		udb_ip_restore_nick_vhost(client);
-}
-
-CMD_OVERRIDE_FUNC(udb_override_host_svsmode)
-{
-	Client *target = parc > 2 ? find_user(parv[1], NULL) : NULL;
-	int restore;
-	if (!udb_ip_mode_request(client, target, parc > 2 ? parv[2] : NULL, &restore))
-		return;
-	CALL_NEXT_COMMAND_OVERRIDE();
 }
 
 CMD_OVERRIDE_FUNC(udb_override_base_md)
@@ -619,16 +609,16 @@ CMD_OVERRIDE_FUNC(udb_override_base_md)
 static int udb_ips_load(ModuleInfo *modinfo)
 {
 	Client *client;
-	const char *commands[] = {"MODE", "UMODE2", "SVSMODE", "SVS2MODE", "MD", "SETHOST", "CHGHOST"};
-	OverrideCmdFunc handlers[] = {udb_override_host_mode,	 udb_override_host_umode2, udb_override_host_svsmode,
-								  udb_override_host_svsmode, udb_override_base_md,	   udb_override_safe_sethost,
-								  udb_override_safe_chghost};
+	const char *commands[] = {"MODE", "UMODE2", "MD", "SETHOST", "CHGHOST"};
+	OverrideCmdFunc handlers[] = {udb_override_host_mode, udb_override_host_umode2, udb_override_base_md,
+								  udb_override_safe_sethost, udb_override_safe_chghost};
+
 	size_t i;
 	for (i = 0; i < sizeof(commands) / sizeof(commands[0]); i++)
 	{
 		if (!CommandExists(commands[i]))
 		{
-			if (i == 0 || i == 4)
+			if (i == 0 || i == 2)
 				return 0;
 			continue;
 		}

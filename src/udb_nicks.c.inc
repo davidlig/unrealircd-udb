@@ -443,7 +443,7 @@ static void udb_nick_effects_apply_modes(Client *client, UdbRecord *mode_rec)
 	old_umodes = client->umodes & ALL_UMODES;
 	removed = fx->modes_added & ~desired & ~(UMODE_HIDE | UMODE_SETHOST);
 	added = desired & ~old_umodes;
-	client->umodes = (client->umodes & ~removed) | desired | UMODE_HIDE;
+	client->umodes = (client->umodes & ~removed) | desired;
 	if ((client->umodes & ALL_UMODES) != old_umodes)
 		send_umode_out(client, 1, old_umodes);
 	fx->modes_added = (fx->modes_added & desired) | added;
@@ -457,7 +457,7 @@ static void udb_nick_effects_revoke_modes(Client *client)
 	if (!fx || !fx->modes_added)
 		return;
 	old_umodes = client->umodes & ALL_UMODES;
-	client->umodes = (client->umodes & ~(fx->modes_added & ~(UMODE_HIDE | UMODE_SETHOST))) | UMODE_HIDE;
+	client->umodes &= ~(fx->modes_added & ~(UMODE_HIDE | UMODE_SETHOST));
 	fx->modes_added = 0;
 	if ((client->umodes & ALL_UMODES) != old_umodes)
 		send_umode_out(client, 1, old_umodes);
