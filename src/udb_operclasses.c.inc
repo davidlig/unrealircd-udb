@@ -1141,7 +1141,7 @@ static void udb_ocl_ensure_epoch(void)
 
 static UdbOclEntry *udb_ocl_find_entry(UdbOclInventory *inv, const char *name)
 {
-	unsigned int lo = 0, hi = inv ? inv->count : 0;
+	unsigned int i, lo = 0, hi = inv ? inv->count : 0;
 
 	while (lo < hi)
 	{
@@ -1155,6 +1155,10 @@ static UdbOclEntry *udb_ocl_find_entry(UdbOclInventory *inv, const char *name)
 		else
 			hi = mid;
 	}
+
+	for (i = 0; inv && i < inv->count; i++)
+		if (!strcmp(inv->entries[i].name, name))
+			return &inv->entries[i];
 	return NULL;
 }
 

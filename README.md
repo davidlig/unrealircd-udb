@@ -195,6 +195,7 @@ Canonical sources live in `src/`; do not edit `dist/udb.c` as the primary source
 Regenerate the bundle:
 
 ```bash
+scripts/format-sources.sh
 python3 scripts/bundle.py
 ```
 
@@ -204,7 +205,7 @@ Check for bundle drift without writing:
 python3 scripts/bundle.py --check
 ```
 
-Current CI builds UnrealIRCd 6.2.6, validates the deterministic bundle, and runs normal plus ASan/UBSan suites covering persistence, bootstrap, staged sync, multihop, failover, OCL, limits, and runtime effects.
+Current CI selects a compatible Stable UnrealIRCd 6.2.x release, validates the deterministic bundle, and runs normal plus ASan/UBSan suites covering persistence, bootstrap, staged sync, multihop, failover, OCL, limits, and runtime effects. The cmocka + pytest suite is the authoritative test path; the retired standalone scripts are not part of test discovery or CI. See the [test-suite guide](tests/README.md).
 
 ## Documentation
 

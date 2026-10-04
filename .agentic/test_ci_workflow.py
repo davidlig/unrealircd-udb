@@ -73,15 +73,21 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertIn("ldd \"$UDB_TEST_IRCD_ROOT/bin/unrealircd\"", self.run_scripts)
         self.assertIn("grep -q '__asan_'", self.run_scripts)
 
-    def test_protocol_security_qualification_is_in_ci(self):
+    def test_current_pytest_suites_are_the_authoritative_ci_gates(self):
+        pytest_runs = [step["run"] for step in self.test_job["steps"]
+                       if "python3 -m pytest" in step.get("run", "")]
+        self.assertEqual(len(pytest_runs), 2)
+        self.assertTrue(any("unit or tooling" in run for run in pytest_runs))
+        self.assertTrue(any("integration or protocol or recovery or model" in run for run in pytest_runs))
         for script in (
             "tests/test_security_hardening.py",
             "tests/test_anti_entropy.py",
             "tests/test_mutation_gap_recovery.py",
             "tests/test_protocol_fault_qualification.py",
+            "tests/test_release_manifest.py",
         ):
             with self.subTest(script=script):
-                self.assertIn(f"python3 {script}", self.run_scripts)
+                self.assertNotIn(f"python3 {script}", self.text)
 
 
 if __name__ == "__main__":

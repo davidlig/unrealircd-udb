@@ -195,6 +195,7 @@ Las fuentes canónicas viven en `src/`. No se debe editar `dist/udb.c` como fuen
 Regenerar bundle:
 
 ```bash
+scripts/format-sources.sh
 python3 scripts/bundle.py
 ```
 
@@ -204,7 +205,7 @@ Comprobar drift sin modificar ficheros:
 python3 scripts/bundle.py --check
 ```
 
-El CI actual compila contra UnrealIRCd 6.2.6, valida el bundle y ejecuta suites normales y con ASan/UBSan para persistencia, bootstrap, sincronización, multihop, failover, OCL, límites y efectos runtime.
+El CI actual selecciona una versión Stable compatible de UnrealIRCd 6.2.x, valida el bundle y ejecuta suites normales y con ASan/UBSan para persistencia, bootstrap, sincronización, multihop, failover, OCL, límites y efectos runtime. La suite con cmocka + pytest es la ruta autoritativa de tests; los scripts independientes retirados ya no forman parte del descubrimiento ni del CI. Consulta la [guía de la suite](tests/README_ES.md).
 
 ## Documentación
 
