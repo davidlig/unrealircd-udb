@@ -170,6 +170,8 @@ La clave de canal es exclusivamente el parámetro nativo `+k` de `C::<canal>::mo
 
 Las restricciones JOIN nativas independientes siguen aplicándose a operadores IRC salvo que tengan el permiso de override correspondiente. Cualquier operador IRC puede entrar con un `+O` propiedad de UDB sin el permiso nativo `channel:operonly:join`; un `+O` independiente sigue exigiéndolo. UDB retira el `+O` nativo sólo cuando lo aplicó UDB; un `+O` independiente sobrevive a cambios de opciones no relacionados.
 
+Un fundador identificado que ya está dentro de un canal registrado no suspendido puede recuperar su propio `+q` con `/MODE #canal +q nickname` sin rejoin, incluso con `LOCK_MODES` o `SECURE_OPS`. Esta excepción exige el nick actual del fundador, el modo de usuario `+r`, pertenencia al canal y un `+q` aislado con exactamente un destinatario que sea el propio emisor. No identifica al usuario ni amplía permisos para otros destinatarios, comandos de modos compuestos o `SAMODE`.
+
 ## Diagnóstico de operador
 
 ```text
