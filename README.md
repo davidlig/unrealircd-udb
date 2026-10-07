@@ -170,6 +170,8 @@ A channel key is exclusively the native `+k` parameter in `C::<channel>::modes`,
 
 Independent native JOIN restrictions still apply to IRC operators unless they have the relevant native override permission. Any IRC operator may join through UDB-owned `+O` without the native `channel:operonly:join` permission; independently set `+O` still requires it. UDB removes native `+O` only when UDB applied it; independently set `+O` survives unrelated option updates.
 
+An identified founder already in a non-suspended registered channel can recover their own `+q` with `/MODE #channel +q nickname` without rejoining, even with `LOCK_MODES` or `SECURE_OPS`. This exception requires the current founder nick, user mode `+r`, channel membership, and an isolated `+q` with exactly one self target. It does not identify the user or extend permissions for other targets, compound mode commands, or `SAMODE`.
+
 ## Operator diagnostics
 
 ```text

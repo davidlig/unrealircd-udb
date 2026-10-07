@@ -11670,6 +11670,15 @@ CMD_OVERRIDE_FUNC(udb_override_mode)
 								"You do not have permission to change modes in %s (locked by UDB)", channel->name);
 		return;
 	}
+	/* Late identification must not require a rejoin. Elevate only an isolated
+	 * self-recovery request, never the rest of a caller-supplied mode command. */
+	if (!strcmp(ovr->command->cmd, "MODE") && parc == 4 && !strcmp(parv[2], "+q") && !BadPtr(parv[3]) && is_founder &&
+		IsMember(client, channel) && find_user(parv[3], NULL) == client)
+	{
+		if (!check_channel_access(client, channel, "q"))
+			udb_channel_do_mode(channel, recv_mtags, "+q", client->name);
+		return;
+	}
 	if (strcmp(ovr->command->cmd, "SAMODE") && udb_channel_option_enabled(udb_ctx, chan_rec, UDB_CHOPT_SECURE_OPS) &&
 		udb_channel_blocks_secure_ops(client, channel, parc, parv))
 	{

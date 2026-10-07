@@ -206,13 +206,15 @@ Options:
 | `0x04` | 4 | `LOCK_TOPIC` | Blocks local topic changes. |
 | `0x08` | 8 | `PERSISTENT` | Applies native `+P` if that channel mode exists; UDB does not emulate it. |
 | `0x10` | 16 | `OPER_ONLY` | Restricts JOIN to IRC operators and applies native `+O` when its handler exists. JOIN remains fail-closed if the handler is absent. |
-| `0x20` | 32 | `SECURE_OPS` | Only a `+q` member may grant ranks. Other members may remove ranks below their highest rank, or their own rank when UnrealIRCd permits it. `SAMODE` retains native administrator access. |
+| `0x20` | 32 | `SECURE_OPS` | Only a `+q` member may grant ranks, except for the isolated founder self-recovery described below. Other members may remove ranks below their highest rank, or their own rank when UnrealIRCd permits it. `SAMODE` retains native administrator access. |
 
-Bits may be combined; `*31` enables the original five and `*63` enables all six. With `SECURE_OPS` unset, native rank permissions are unchanged. `suspend` removes UDB-owned `+O` and lifting it restores `+O`; deleting `options` or the profile removes it. UDB always reconciles `+O/-O` before `+P/-P`, because removing `+P` may destroy an empty channel.
+Bits may be combined; `*31` enables the original five and `*63` enables all six. With `SECURE_OPS` unset, native rank permissions are unchanged apart from the founder self-recovery described below. `suspend` removes UDB-owned `+O` and lifting it restores `+O`; deleting `options` or the profile removes it. UDB always reconciles `+O/-O` before `+P/-P`, because removing `+P` may destroy an empty channel.
 
 #### JOIN, founder and native key
 
 The founder is identified only when the nickname matches `founder` and the user has `+r`. An identified founder bypasses JOIN restrictions, including `OPER_ONLY` and `+k`, unless the profile has `suspend` or `forbid`; the founder receives `+q` unless suspended. An IRC operator bypasses all UDB JOIN restrictions, including `forbid`, `OPER_ONLY`, and the stored first-JOIN `+k`, but independent native restrictions still run and require their own override permission. `suspend` retains its existing non-blocking JOIN behavior.
+
+If identification occurs after JOIN, `/MODE #channel +q nickname` lets the local identified founder recover their own `+q` without rejoining. UDB requires channel membership, a non-suspended C profile, the current founder nick with user mode `+r`, and exactly the isolated `+q` mode with one parameter resolving to the issuer. The recovery works with or without `SECURE_OPS` and `LOCK_MODES`; repeating it while already holding `+q` emits no additional mode change. Other targets, compound or malformed commands, and `SAMODE` keep their existing handling. Removing a nick suspension still requires reauthentication; this command never authenticates the user.
 
 UDB removes native `+O` only when it applied that mode. If the native handler unloads, UDB clears its ownership before UnrealIRCd removes the mode directly; when the handler returns, active `OPER_ONLY` channels regain `+O`. An independent `+O`, including one set after another actor removes UDB's `+O` or after the handler returns, survives unrelated `options` changes and UDB option removal.
 For UDB-owned `+O`, any IRC operator may join even if their operclass lacks UnrealIRCd's `channel:operonly:join` permission; all other native JOIN checks still run. An independently set native `+O` retains UnrealIRCd's operclass permission requirement.

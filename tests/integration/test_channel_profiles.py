@@ -76,3 +76,127 @@ def test_unregistered_user_never_receives_configured_founder_rank(node_factory):
         replies = request(client, "NAMES #room", 366)
         assert any(" 353 " in line and "alice" in line for line in replies)
         assert not any(" 353 " in line and any(prefix + "alice" in line for prefix in ("~", "&", "@")) for line in replies)
+
+
+def channel_members(client):
+    replies = request(client, "NAMES #room", 366)
+    return {member for line in replies if " 353 " in line for member in line.split(" :", 1)[1].split()}
+
+
+@pytest.mark.parametrize("options", [0, 2, 32, 34])
+def test_identified_founder_recovers_own_rank_after_join_without_rejoin(node_factory, options):
+    node = node_factory(peers=["peer.test"], propagator="peer.test")
+    with Peer(node) as peer:
+        assert " ACK " in peer.transfer({"alice::pass": "sha256:" + hashlib.sha256(b"secret").hexdigest()})
+        assert " ACK " in peer.transfer({"#room::founder": "alice", "#room::options": f"*{options}"}, letter="C")
+        client = node.client("visitor")
+        request(client, "JOIN #room", 366)
+        assert channel_members(client) == {"visitor"}
+        start = len(client.lines)
+        replies = client.request("NICK alice:secret")
+        assert any("You are now identified" in line for line in replies), replies
+        assert channel_members(client) == {"alice"}
+        replies = client.request("MODE #room +q ALICE")
+        assert any(line.endswith(" MODE #room +q alice") for line in replies), replies
+        assert channel_members(client) == {"~alice"}
+        replies = client.request("MODE #room +q alice")
+        assert not any(" MODE #room " in line for line in replies), replies
+        assert channel_members(client) == {"~alice"}
+        assert not any(" JOIN " in line or " PART " in line for line in client.lines[start:])
+
+
+@pytest.mark.parametrize("options", [0, 32])
+@pytest.mark.parametrize("command", [
+    "MODE #room +q visitor2",
+    "MODE #room +qo alice visitor2",
+    "MODE #room -q+q alice alice",
+    "MODE #room +q",
+    "MODE #room +q alice visitor2",
+    "MODE #room +q :alice visitor2",
+    "MODE #room +q nobody",
+    "SAMODE #room +q alice",
+])
+def test_founder_recovery_does_not_elevate_other_mode_commands(node_factory, options, command):
+    node = node_factory(peers=["peer.test"], propagator="peer.test")
+    with Peer(node) as peer:
+        assert " ACK " in peer.transfer({"alice::pass": "sha256:" + hashlib.sha256(b"secret").hexdigest()})
+        assert " ACK " in peer.transfer({"#room::founder": "alice", "#room::options": f"*{options}"}, letter="C")
+        client = node.client("visitor")
+        request(client, "JOIN #room", 366)
+        other = node.client("visitor2")
+        request(other, "JOIN #room", 366)
+        assert any("You are now identified" in line for line in client.request("NICK alice:secret"))
+        assert channel_members(client) == {"alice", "visitor2"}
+        client.request(command)
+        assert channel_members(client) == {"alice", "visitor2"}
+
+
+@pytest.mark.parametrize("identified", [False, True])
+def test_self_recovery_requires_identified_founder(node_factory, identified):
+    node = node_factory(peers=["peer.test"], propagator="peer.test")
+    with Peer(node) as peer:
+        if identified:
+            assert " ACK " in peer.transfer({"alice::pass": "sha256:" + hashlib.sha256(b"secret").hexdigest()})
+        founder = "someoneelse" if identified else "alice"
+        assert " ACK " in peer.transfer({"#room::founder": founder, "#room::options": "*32"}, letter="C")
+        client = node.client("visitor" if identified else "alice")
+        request(client, "JOIN #room", 366)
+        if identified:
+            assert any("You are now identified" in line for line in client.request("NICK alice:secret"))
+        client.request("MODE #room +q alice")
+        assert channel_members(client) == {"alice"}
+
+
+def test_founder_self_recovery_requires_channel_membership(node_factory):
+    node = node_factory(peers=["peer.test"], propagator="peer.test")
+    with Peer(node) as peer:
+        assert " ACK " in peer.transfer({"alice::pass": "sha256:" + hashlib.sha256(b"secret").hexdigest()})
+        assert " ACK " in peer.transfer({"#room::founder": "alice"}, letter="C")
+        other = node.client("visitor2")
+        request(other, "JOIN #room", 366)
+        client = node.client("visitor")
+        assert any("You are now identified" in line for line in client.request("NICK alice:secret"))
+        replies = client.request("MODE #room +q alice")
+        assert not any(" MODE #room +q " in line for line in replies), replies
+        assert channel_members(other) == {"visitor2"}
+
+
+def test_founder_self_recovery_respects_channel_suspension(node_factory):
+    node = node_factory(peers=["peer.test"], propagator="peer.test")
+    with Peer(node) as peer:
+        assert " ACK " in peer.transfer({"alice::pass": "sha256:" + hashlib.sha256(b"secret").hexdigest()})
+        assert " ACK " in peer.transfer({"#room::founder": "alice", "#room::suspend": "review"}, letter="C")
+        other = node.client("visitor2")
+        request(other, "JOIN #room", 366)
+        client = node.client("visitor")
+        request(client, "JOIN #room", 366)
+        assert any("You are now identified" in line for line in client.request("NICK alice:secret"))
+        client.request("MODE #room +q alice")
+        assert "alice" in channel_members(client)
+        peer.mutation(1, "C::#room::suspend")
+        assert "~alice" in channel_members(client)
+
+
+def test_founder_recovers_after_nick_unsuspension_and_reauthentication_without_rejoin(node_factory):
+    node = node_factory(peers=["peer.test"], propagator="peer.test")
+    with Peer(node) as peer:
+        assert " ACK " in peer.transfer({"alice::pass": "sha256:" + hashlib.sha256(b"secret").hexdigest(),
+                                        "alice::suspend": "review"})
+        assert " ACK " in peer.transfer({"#room::founder": "alice", "#room::options": "*32"}, letter="C")
+        client = node.client("visitor")
+        request(client, "JOIN #room", 366)
+        start = len(client.lines)
+        replies = client.request("NICK alice:secret")
+        assert not any("You are now identified" in line for line in replies), replies
+        client.request("MODE #room +q alice")
+        assert channel_members(client) == {"alice"}
+        peer.mutation(1, "N::alice::suspend")
+        renamed = client.wait(lambda line: " NICK :Guest" in line, "unsuspend rename", start=start)
+        guest = renamed.rsplit(" :", 1)[-1]
+        client.request(f"MODE #room +q {guest}")
+        assert channel_members(client) == {guest}
+        assert any("You are now identified" in line for line in client.request("NICK alice:secret"))
+        assert channel_members(client) == {"alice"}
+        client.request("MODE #room +q alice")
+        assert channel_members(client) == {"~alice"}
+        assert not any(" JOIN " in line or " PART " in line for line in client.lines[start:])
