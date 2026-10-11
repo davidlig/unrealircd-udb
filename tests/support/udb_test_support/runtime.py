@@ -7,38 +7,21 @@ digests are independent references; canonical UDB behavior remains under test.
 from __future__ import annotations
 
 import hashlib
+import ctypes
 import os
 from pathlib import Path
 import signal
 import socket
 import subprocess
 import time
-from urllib.parse import quote
-
-
-def encode_component(value: str) -> str:
-    """Percent-encode a path component using UDB's canonical uppercase hex."""
-    if not isinstance(value, str):
-        raise TypeError("path component must be a string")
-    return quote(value, safe="-_.~", encoding="utf-8", errors="strict")
-
-
-def tree_digest(records: dict[str, str]) -> str:
-    """Return the independent SHA-256 reference for canonical path/value rows."""
-    if not isinstance(records, dict):
-        raise TypeError("records must map paths to values")
-    rows = []
-    for path, value in records.items():
-        if not isinstance(path, str) or not isinstance(value, str):
-            raise TypeError("record paths and values must be strings")
-        rows.append(f"{path} {value}\n".encode("utf-8"))
-    return hashlib.sha256(b"".join(sorted(rows))).hexdigest()
+from ctypes import wintypes
+from .native_reference import encode_component
 
 
 class Wire:
     """Incremental IRC line reader that answers PING and rejects bad framing."""
 
-    def __init__(self, sock: socket.socket, max_frame: int = 8192):
+    def __init__(self, sock: socket.socket, max_frame: int = 16384):
         if max_frame < 1:
             raise ValueError("maximum IRC frame size must be positive")
         self.sock = sock
@@ -131,6 +114,7 @@ class OwnedProcess:
         self.env = None if env is None else dict(env)
         self.process: subprocess.Popen | None = None
         self.log_handle = None
+        self.job = None
 
     def start(self) -> "OwnedProcess":
         if self.process is not None:
@@ -138,6 +122,7 @@ class OwnedProcess:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self.log_handle = self.log_path.open("w", encoding="utf-8")
         try:
+            flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
             self.process = subprocess.Popen(
                 self.argv,
                 cwd=self.cwd,
@@ -145,9 +130,36 @@ class OwnedProcess:
                 stdin=subprocess.DEVNULL,
                 stdout=self.log_handle,
                 stderr=subprocess.STDOUT,
-                start_new_session=True,
+                start_new_session=(os.name != "nt"),
+                creationflags=flags,
             )
+            if os.name == "nt":
+                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+                kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+                kernel32.OpenProcess.restype = wintypes.HANDLE
+                kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+                kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+                kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+                kernel32.CloseHandle.restype = wintypes.BOOL
+                self.job = kernel32.CreateJobObjectW(None, None)
+                process_handle = kernel32.OpenProcess(0x0100 | 0x0001, False, self.process.pid)
+                if not self.job or not process_handle:
+                    if process_handle:
+                        kernel32.CloseHandle(process_handle)
+                    raise OSError(ctypes.get_last_error(), "could not create the test process job")
+                try:
+                    if not kernel32.AssignProcessToJobObject(self.job, process_handle):
+                        raise OSError(ctypes.get_last_error(), "could not assign the test server to its job")
+                finally:
+                    kernel32.CloseHandle(process_handle)
         except BaseException:
+            if self.process is not None and self.process.poll() is None:
+                self.process.kill()
+                self.process.wait()
+            if self.job:
+                ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(self.job)
+                self.job = None
             self.log_handle.close()
             self.log_handle = None
             raise
@@ -157,6 +169,20 @@ class OwnedProcess:
         process = self.process
         try:
             if process is not None and process.poll() is None:
+                if os.name == "nt":
+                    try:
+                        process.send_signal(signal.CTRL_BREAK_EVENT)
+                    except OSError:
+                        pass
+                    try:
+                        process.wait(timeout=timeout)
+                    except subprocess.TimeoutExpired:
+                        if self.job:
+                            ctypes.WinDLL("kernel32", use_last_error=True).TerminateJobObject(self.job, 1)
+                        else:
+                            process.kill()
+                        process.wait()
+                    return
                 try:
                     os.killpg(process.pid, signal.SIGTERM)
                 except ProcessLookupError:
@@ -170,6 +196,9 @@ class OwnedProcess:
                         pass
                     process.wait()
         finally:
+            if self.job:
+                ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(self.job)
+                self.job = None
             if self.log_handle is not None:
                 self.log_handle.close()
                 self.log_handle = None

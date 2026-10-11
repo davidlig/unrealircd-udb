@@ -24,8 +24,8 @@ UDB **no es un NickServ/ChanServ de registro interactivo**. Normalmente una auto
 
 - Seis bloques persistentes con validación de esquema estricta.
 - Mutaciones copy-on-write: persistencia antes de publicar el nuevo estado runtime.
-- Snapshots atómicos mediante fichero temporal, `fsync`, `rename` y `fsync` del directorio.
-- Estado durable `.udb_state`: un READY sólo es válido cuando los seis bloques pertenecen a la misma generación.
+- Commit nativo sobre archivos estables; sin reescritura de bloques de texto.
+- Durabilidad de seis raíces mediante WAL global y dos slots de checkpoint.
 - Protocolo **HEL 4** obligatorio entre peers UDB, con capacidad **OCL** obligatoria.
 - Reconciliación `INF → RES → BEGIN/PUT/END → ACK` con manifiestos canónicos de estado SHA-256, límites de staging y timeouts de inactividad/absoluto.
 - Freshness autoritativo (Política A): el propagador seleccionado es la autoridad; los timestamps locales del sistema de archivos (`mtime`) nunca anulan el estado de la red ni deciden propiedad de registros.
@@ -73,10 +73,11 @@ Si no hay ninguna política de propagador, un directorio realmente nuevo se inic
 udb {
     propagator "ares-services.example.net";
     password-flood "5:60";
-    max-staged-records 500000;
-    max-staged-bytes 67108864;
+    cache-size 134217728;
+    max-staged-records 10000000;
+    max-staged-bytes 17179869184;
     sync-inactivity-timeout 60;
-    sync-absolute-timeout 300;
+    sync-absolute-timeout 3600;
     stale-timeout 300;
     anti-entropy-interval 1800;
 };
@@ -86,10 +87,11 @@ udb {
 |---|---:|---|
 | `propagator` | — | Un único nombre de servidor en configuración local |
 | `password-flood` | `5:60` | Intentos fallidos por perfil/IP y ventana temporal |
-| `max-staged-records` | 500000 | Máximo por snapshot entrante |
-| `max-staged-bytes` | 64 MiB | Máximo acumulado de payload staged |
+| `cache-size` | 128 MiB | Bytes decimales; local |
+| `max-staged-records` | 10,000,000 | Por bloque |
+| `max-staged-bytes` | 16 GiB | Cuota física |
 | `sync-inactivity-timeout` | 60 s | Se renueva con actividad PUT |
-| `sync-absolute-timeout` | 300 s | No se renueva con actividad |
+| `sync-absolute-timeout` | 3600 s | Absoluto |
 | `stale-timeout` | 300 s | Tiempo NOT_READY antes de STALE |
 | `anti-entropy-interval` | 1800 s | Cadencia de MANIFEST REQ con ±10% de jitter |
 
@@ -103,21 +105,28 @@ La configuración local tiene precedencia sobre el valor distribuido de S.
 
 ## Persistencia
 
-En `PERMDATADIR` de UnrealIRCd se mantienen:
+El almacén nuevo exclusivo está en **`PERMDATADIR/udb`**: seis contenedores binarios
+estables `udb_N/C/I/S/L/K.db`, `udb_wal.db` y dos slots `udb_meta0/1.db`.
+No hay migración ni lector compatible. Despliega el módulo nuevo en todos los nodos;
+no edites archivos activos ni restaures sólo parte del almacén.
 
-```text
-udb_N.db
-udb_C.db
-udb_I.db
-udb_S.db
-udb_L.db
-udb_K.db
-.udb_state
-```
+Las consultas indexadas leen páginas acotadas bajo demanda, no bloques completos.
+La caché usa 128 MiB por defecto y se configura por nodo en bytes decimales,
+por ejemplo `cache-size 268435456;` para 256 MiB. Más caché puede mejorar lecturas
+calientes repetidas, no necesariamente cargas masivas. Las asignaciones auxiliares
+de almacenamiento tienen un límite de 64 MiB, incluidos memtables y la cola total
+de entregas/jobs de 8 MiB.
 
-Los seis snapshots forman un único conjunto READY. Al arrancar, UDB no publica un READY persistido si falta un bloque, existe corrupción, la generación no coincide o quedan backups `.udb_previous` de una operación incompleta.
+El flush de datos y del WAL global precede a publicación, efectos, ACK y relay.
+El arranque recorre y valida los datos referenciados de las seis raíces antes de
+servir: escala con los datos en CPU/I/O, pero no carga millones de filas en RAM.
+La implementación Linux y las pruebas finales se ejecutan localmente; la rama
+Windows nativa x64 NTFS/ACL/I/O aún requiere validación real MSVC/NTFS.
 
-No edites estos ficheros con el daemon activo. Las mutaciones deben entrar por el protocolo autorizado para conservar esquema, checksums, atomicidad y efectos runtime.
+Las mediciones Linux de 1M/5M/10M con 128/256/512 MiB están en la
+[validación técnica](doc/udb_technical_es.md#21-evidencia-de-validación-en-linux)
+y el [informe estructurado](doc/native_storage_benchmarks.json). Miden el motor
+de almacenamiento, no el rendimiento IRC ni un dispositivo con caché fría.
 
 ## Protocolo y sincronización
 
@@ -129,7 +138,7 @@ DB <peer> HEL 4 <selector> <epoch> OCL [OCLG]
 
 Sin HEL 4/OCL confirmado no se acepta el resto del protocolo; un timeout de HEL puede provocar que UDB aborte el enlace. HEL negocia capacidad y autoridad, pero no autentica criptográficamente al peer: UDB hereda la frontera de confianza del enlace de servidores de UnrealIRCd. Usa enlaces TLS autenticados y con verificación de certificado en cada salto UDB; sin TLS, snapshots, hashes de contraseña, claves de canal y mutaciones quedan expuestos en tránsito.
 
-El bloque `K` usa `expires *<timestamp_unix>` para sanciones temporales G/Z/S/Q/F; sin `expires` es permanente. Los followers retransmiten solicitudes `EXP` dirigidas salto a salto hacia la autoridad raíz seleccionada y nunca borran persistencia autoritativa localmente; sólo esa autoridad elimina el subtree vencido y origina el `DEL` secuenciado.
+El bloque `K` usa `expires` como uint64 (`!u<timestamp_unix>` en protocolo) para sanciones temporales G/Z/S/Q/F; sin `expires` es permanente. Los followers retransmiten solicitudes `EXP` dirigidas salto a salto hacia la autoridad raíz seleccionada y nunca borran persistencia autoritativa localmente; sólo esa autoridad elimina el subtree vencido y origina el `DEL` secuenciado.
 
 
 ### Rutas IPv4/IPv6 del bloque K
@@ -137,7 +146,7 @@ El bloque `K` usa `expires *<timestamp_unix>` para sanciones temporales G/Z/S/Q/
 En una ruta UDB, `::` es el separador de componentes, por lo que cada `:` de IPv6 es `%3A`; `@` y `/` imprimibles permanecen literales. Por ejemplo: `K::Z::2001%3Adb8%3A%3A1::reason`, `K::Z::2001%3Adb8%3A1234%3A%3A/48::reason`, `K::G::*@2001%3Adb8%3A%3A1::reason` y `K::S::*@2001%3Adb8%3A%3A1::reason`. Z exige la grafía canónica de dirección de `inet_ntop()` y la dirección de red CIDR (sin bits de host); G/S mantienen `user@host` y todavía no canonicalizan hosts IPv6. Consulta la guía técnica para ejemplos `DB INS`/`DEL` y la política completa.
 
 
-La reconciliación compara los seis bloques mediante `INF`. Sólo los bloques divergentes se solicitan con `RES` y se reciben en un árbol privado con `BEGIN/PUT/END`. El `END` valida el checksum, persiste el snapshot y sólo después publica el nuevo árbol.
+INF vincula los seis digests/counts al mismo SID, epoch y watermark del origen. Los bloques divergentes usan staging de disco aislado BEGIN/PUT/END. END durable permite ACK, no READY; la promoción atómica y todo el replay/efectos retenido preceden a READY. Los valores usan `!n`, `!u<uint64>` o `!s<Base64>` explícitos. Se rechazan las formas antiguas de INF/valores.
 
 Las mutaciones en vivo son `INS`, `DEL` y `DRP`; `EXP` es una solicitud dirigida de expiración follower-a-autoridad. Las mutaciones conservan el SID/epoch/secuencia del origen raíz mientras cada relay las valida y retransmite; las transferencias staged siguen siendo salto a salto y nunca se reenvían.
 
@@ -207,7 +216,7 @@ Comprobar drift sin modificar ficheros:
 python3 scripts/bundle.py --check
 ```
 
-El CI actual selecciona una versión Stable compatible de UnrealIRCd 6.2.x, valida el bundle y ejecuta suites normales y con ASan/UBSan para persistencia, bootstrap, sincronización, multihop, failover, OCL, límites y efectos runtime. La suite con cmocka + pytest es la ruta autoritativa de tests; los scripts independientes retirados ya no forman parte del descubrimiento ni del CI. Consulta la [guía de la suite](tests/README_ES.md).
+CI compila UnrealIRCd Stable compatible y ejecuta pytest/cmocka y el motor nativo. Consulta la [guía de pruebas](tests/README.md) para la cobertura observada y los límites pendientes; una prueba Linux del motor no demuestra multihop ni Windows.
 
 ## Documentación
 

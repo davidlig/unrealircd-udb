@@ -34,8 +34,8 @@ def main():
     commands = [
         [args.cmake, "-S", str(cache / f"cmocka-{VERSION}"), "-B", str(cache / "cmocka-build"),
          f"-DCMAKE_INSTALL_PREFIX={prefix}", "-DWITH_EXAMPLES=OFF", "-DUNIT_TESTING=OFF", "-DCMAKE_BUILD_TYPE=Debug"],
-        [args.cmake, "--build", str(cache / "cmocka-build")],
-        [args.cmake, "--install", str(cache / "cmocka-build")],
+        [args.cmake, "--build", str(cache / "cmocka-build"), "--config", "Debug"],
+        [args.cmake, "--install", str(cache / "cmocka-build"), "--config", "Debug"],
     ]
     for command in commands:
         subprocess.run(command, check=True, timeout=180)

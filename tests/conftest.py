@@ -21,6 +21,13 @@ def pytest_collect_file(file_path: Path, parent):
         return CanonicalCFile.from_parent(parent, path=file_path)
 
 
+def _c_test_environment():
+    env = os.environ.copy()
+    if os.name == "nt" and env.get("UNREALIRCD_SOURCE"):
+        env["PATH"] = env["UNREALIRCD_SOURCE"] + os.pathsep + env.get("PATH", "")
+    return env
+
+
 class CanonicalCFile(pytest.File):
     def collect(self):
         profile = self.config.getoption("--c-profile")
@@ -37,8 +44,9 @@ class CanonicalCFile(pytest.File):
             except Exception as error:
                 self.config._udb_c_build_error = str(error)
                 raise
-        binary = self.config._udb_c_build / self.path.stem
-        listing = subprocess.run([str(binary), "--list"], text=True, capture_output=True, timeout=30)
+        binary = self.config._udb_c_build / (self.path.stem + (".exe" if os.name == "nt" else ""))
+        listing = subprocess.run([str(binary), "--list"], text=True, capture_output=True, timeout=30,
+                                 env=_c_test_environment())
         if listing.returncode:
             raise RuntimeError(f"C case listing failed ({listing.returncode}):\n{listing.stdout}{listing.stderr}")
         for case in parse_case_list(listing.stdout):
@@ -56,7 +64,7 @@ class CanonicalCItem(pytest.Item):
     def runtest(self):
         # A new process resets all canonical static/global state for each case.
         result = subprocess.run([str(self.binary), "--case", self.case],
-                                capture_output=True, text=True, timeout=60, env=os.environ.copy())
+                                capture_output=True, text=True, timeout=60, env=_c_test_environment())
         self.add_report_section("call", "C harness", result.stdout + result.stderr)
         if result.returncode:
             raise AssertionError(f"C case exited {result.returncode}:\n{result.stdout}{result.stderr}")

@@ -1,3 +1,4 @@
+# Windows/MSVC: use Makefile.windows (nmake cannot parse GNU make syntax).
 SHELL := /bin/sh
 ROOT := $(abspath ..)
 UNREALIRCD_SOURCE ?= $(abspath $(ROOT)/../../../..)
@@ -14,7 +15,7 @@ INCLUDES := -I$(ROOT) -I$(ROOT)/tests/support/c -I$(UNREALIRCD_SOURCE)/include \
 FLAGS := -std=gnu17 -funsigned-char -fno-strict-aliasing -g -O1 \
     -ffunction-sections -fdata-sections -Wno-format-truncation
 LINK := -Wl,--gc-sections -Wl,--wrap=safe_alloc -Wl,--wrap=our_strdup \
-    -L$(CMOCKA_PREFIX)/lib -Wl,-rpath,$(CMOCKA_PREFIX)/lib -lcmocka -lcrypto -lpcre2-8
+    -L$(CMOCKA_PREFIX)/lib -Wl,-rpath,$(CMOCKA_PREFIX)/lib -lcmocka -lcrypto -lpcre2-8 -pthread
 ifeq ($(PROFILE),asan)
 FLAGS += -fsanitize=address,undefined -fno-omit-frame-pointer
 LINK += -fsanitize=address,undefined

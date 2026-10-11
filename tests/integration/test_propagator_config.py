@@ -7,7 +7,7 @@ pytestmark = pytest.mark.integration
 
 
 def test_server_propagator_config_hostname_validation(node_factory):
-    node = node_factory(ready=True, peers=["peer.test"], propagator="peer.test")
+    node = node_factory(ready=False, expected_state=None, peers=["peer.test"], propagator="peer.test")
     node.close()
     original = node.config.read_text(encoding="ascii")
     marker = 'propagator "peer.test";'

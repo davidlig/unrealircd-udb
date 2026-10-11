@@ -159,15 +159,20 @@ def test_agentic_checker_runs_only_current_tooling_and_generator(tmp_path, fail)
     assert commands == expected
 
 
-@pytest.fixture
-def freshness_tree(tmp_path, monkeypatch):
+@pytest.fixture(params=[".so", ".dll"])
+def freshness_tree(tmp_path, monkeypatch, request):
     checker = repository_module(".agentic/test_runtime_module_fresh.py")
     source = tmp_path / "src/udb.c"
     source.parent.mkdir()
     source.write_text("source")
     os.utime(source, (1, 1))
-    candidates = (tmp_path / "src/udb.so", tmp_path / "dist/udb.so")
+    bundle = tmp_path / "dist/udb.c"
+    bundle.parent.mkdir()
+    bundle.write_text("generated source")
+    os.utime(bundle, (1, 1))
+    candidates = (tmp_path / f"src/udb{request.param}", tmp_path / f"dist/udb{request.param}")
     monkeypatch.setattr(checker, "ROOT", tmp_path)
+    monkeypatch.setattr(checker, "MODULE_EXTENSION", request.param)
     monkeypatch.setattr(checker, "MODULE_CANDIDATES", candidates)
     monkeypatch.delenv("UDB_MODULE_PATH", raising=False)
     runtime = tmp_path / "user-runtime"
@@ -227,3 +232,101 @@ def test_freshness_rejects_missing_or_stale_build_without_skips(freshness_tree, 
     result = run_freshness(checker)
     assert result.failures and not result.errors
     assert installed.read_bytes() == before
+
+
+@pytest.mark.parametrize("location", ["src", "dist", "copy_src", "copy_dist"])
+def test_freshness_checks_selected_artifact_when_build_hashes_differ(freshness_tree, monkeypatch, location):
+    checker, source, candidates, installed = freshness_tree
+    for index, built in enumerate(candidates):
+        built.write_bytes(f"build {index}".encode())
+        os.utime(built, (2, 2))
+    selected = candidates[1 if location.endswith("dist") else 0]
+    if location.startswith("copy_"):
+        copy = source.parent.parent / f"selected{checker.MODULE_EXTENSION}"
+        copy.write_bytes(selected.read_bytes())
+        selected = copy
+    monkeypatch.setenv("UDB_MODULE_PATH", str(selected))
+    result = run_freshness(checker)
+    assert result.wasSuccessful(), result.failures + result.errors
+    assert installed.read_bytes() == b"unrelated installed module"
+
+
+@pytest.mark.parametrize("index", [0, 1])
+def test_freshness_direct_stale_selection_cannot_use_other_fresh_build(freshness_tree, monkeypatch, index):
+    checker, source, candidates, installed = freshness_tree
+    os.utime(source, (3, 3))
+    for built in candidates:
+        built.write_bytes(b"identical builds")
+        os.utime(built, (4, 4))
+    os.utime(candidates[index], (2, 2))
+    monkeypatch.setenv("UDB_MODULE_PATH", str(candidates[index]))
+    result = run_freshness(checker)
+    assert result.failures and not result.errors
+    assert "Stale build" in result.failures[0][1]
+
+
+@pytest.mark.parametrize("fresh_copy", [False, True])
+def test_freshness_external_identical_copy_requires_a_fresh_matching_build(freshness_tree, monkeypatch, fresh_copy):
+    checker, source, candidates, installed = freshness_tree
+    os.utime(source, (3, 3))
+    for built in candidates:
+        built.write_bytes(b"identical builds")
+        os.utime(built, (2, 2))
+    if fresh_copy:
+        os.utime(candidates[1], (4, 4))
+    copy = source.parent.parent / f"selected{checker.MODULE_EXTENSION}"
+    copy.write_bytes(b"identical builds")
+    monkeypatch.setenv("UDB_MODULE_PATH", str(copy))
+    result = run_freshness(checker)
+    assert result.wasSuccessful() == fresh_copy, result.failures + result.errors
+    assert not result.errors
+
+
+@pytest.mark.parametrize("index", [0, 1])
+@pytest.mark.parametrize("suffix", [".c", ".h", ".inc"])
+def test_freshness_checks_all_canonical_inputs_for_each_artifact(freshness_tree, monkeypatch, index, suffix):
+    checker, source, candidates, installed = freshness_tree
+    built = candidates[index]
+    built.write_bytes(b"build")
+    os.utime(built, (2, 2))
+    dependency = source.parent / "nested" / f"input{suffix}"
+    dependency.parent.mkdir()
+    dependency.write_text("updated input")
+    os.utime(dependency, (3, 3))
+    monkeypatch.setenv("UDB_MODULE_PATH", str(built))
+    result = run_freshness(checker)
+    assert result.failures and not result.errors
+    assert "Stale build" in result.failures[0][1]
+
+
+@pytest.mark.parametrize("index", [0, 1])
+@pytest.mark.parametrize("bundle_fault", ["newer", "missing"])
+def test_freshness_requires_generated_input_only_for_dist(freshness_tree, monkeypatch, index, bundle_fault):
+    checker, source, candidates, installed = freshness_tree
+    for built in candidates:
+        built.write_bytes(b"identical builds")
+        os.utime(built, (2, 2))
+    bundle = source.parent.parent / "dist/udb.c"
+    if bundle_fault == "newer":
+        os.utime(bundle, (3, 3))
+    else:
+        bundle.unlink()
+    monkeypatch.setenv("UDB_MODULE_PATH", str(candidates[index]))
+    result = run_freshness(checker)
+    assert result.wasSuccessful() == (index == 0), result.failures + result.errors
+    assert not result.errors
+
+
+def test_freshness_rejects_stale_external_dist_even_with_fresh_src(freshness_tree, monkeypatch):
+    checker, source, candidates, installed = freshness_tree
+    os.utime(source, (3, 3))
+    for index, built in enumerate(candidates):
+        built.write_bytes(f"build {index}".encode())
+        timestamp = 4 if index == 0 else 2
+        os.utime(built, (timestamp, timestamp))
+    copy = source.parent.parent / f"selected{checker.MODULE_EXTENSION}"
+    copy.write_bytes(candidates[1].read_bytes())
+    monkeypatch.setenv("UDB_MODULE_PATH", str(copy))
+    result = run_freshness(checker)
+    assert result.failures and not result.errors
+    assert "Stale build" in result.failures[0][1]

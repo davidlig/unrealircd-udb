@@ -38,6 +38,5 @@ OCL uses broadcast-target frames `BEGIN`, `ITEM`, `END` carrying `originSID`, in
 
 For tests, use `tests/unit/test_ocl_lookup.c` for order-preserving lookup,
 `tests/protocol/test_ocl_inventory.py` for epochs, staging, rehash/replay and
-completeness. `tests/protocol/test_multinode.py` supplies topology harness examples,
-not proof of OCL multihop membership coverage; add a focused OCL scenario when
-that invariant changes. Select the affected case through pytest before broader suites.
+completeness. `tests/protocol/test_peer_harness.py` verifies the HEL fixture, not OCL
+multihop membership. Add a focused topology scenario when that invariant changes. Select the affected case through pytest before broader suites.

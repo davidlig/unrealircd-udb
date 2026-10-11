@@ -15,8 +15,7 @@ static const char *udb_propagator_policy(UdbContext *ctx)
 		return udb_cfg->propagator;
 	if (ctx && ctx->propagator_setting && *ctx->propagator_setting)
 		return ctx->propagator_setting;
-	return ctx && ctx->startup_propagator_setting && *ctx->startup_propagator_setting ? ctx->startup_propagator_setting
-																					  : NULL;
+	return NULL;
 }
 
 static int udb_propagator_policy_present(UdbContext *ctx)
@@ -67,71 +66,34 @@ static int udb_is_propagator(UdbContext *ctx, Client *server)
 	return udb_select_propagator(ctx, 1, &selected) && !selected.is_local && selected.peer == server;
 }
 
-static UdbBlock *udb_mutation_path_block(UdbContext *ctx, const char *path)
+/* Copied foreground delivery and replay envelopes share the engine's 8 MiB
+ * queue bound. Only stable IDs and revisions cross the writer boundary. */
+typedef struct UdbNativeDelivery
 {
-	size_t len;
+	struct UdbNativeDelivery *next;
+	UdbStorageEngine *engine;
+	uint64_t owner, job;
+	uint64_t module_revision, authority_revision;
+	uint64_t replay_round;
+	size_t length, reservation, credit;
+	uint32_t kind;
+	char peer_sid[4], peer_epoch[17];
+	int broadcast, local, replay, cancelled;
+	unsigned char bytes[1];
+} UdbNativeDelivery;
 
-	if (!path || !udb_record_fits_limits(path, NULL))
-		return NULL;
+static UdbNativeDelivery *udb_native_deliveries;
+static UdbNativeDelivery *udb_native_delivery_tail;
 
-	len = strlen(path);
-	if (len < 4 || len > UDB_RECORD_PATH_MAX || path[1] != ':' || path[2] != ':' || !path[3])
-		return NULL;
-
-	return udb_block_by_letter(ctx, path[0]);
+static int udb_native_deliveries_present(void)
+{
+	return udb_native_deliveries != NULL;
 }
 
-static const char *udb_mutation_safe_value(const char *path, const char *value)
+static void udb_mutation_trigger_gap_recovery(Client *peer)
 {
-	return udb_path_value_is_secret(path) ? "<redacted>" : (value ? value : "");
-}
-
-static int udb_mutation_forward_ins(Client *source, Client *except, const char *target, const char *epoch, uint64_t seq,
-									const char *path, const char *data)
-{
-	return udb_sendto_confirmed_servers(except, ":%s DB %s INS %s %" PRIu64 " %s :%s", source->id, target, epoch, seq,
-										path, data);
-}
-
-/* The stored value already equals the mutation payload, so no runtime effect
- * may change: an identical INS must never revoke and re-apply effects. */
-static int udb_record_data_equals(UdbRecord *rec, const char *data)
-{
-	unsigned long val;
-
-	if (!rec || !data)
-		return 0;
-	if (*data == '*')
-		return !rec->data_str && udb_strtoul_strict(data + 1, &val) && rec->data_num == val;
-	if (!rec->data_str)
-		return 0;
-	return !strcmp(rec->data_str, data);
-}
-
-static int udb_mutation_forward_del(Client *source, Client *except, const char *target, const char *epoch, uint64_t seq,
-									const char *path)
-{
-	return udb_sendto_confirmed_servers(except, ":%s DB %s DEL %s %" PRIu64 " %s", source->id, target, epoch, seq,
-										path);
-}
-
-static int udb_mutation_persist_error(Client *client, const char *subcmd, char letter)
-{
-	udb_protocol_mutation_error(client, subcmd, UDB_ERR_FATAL, letter);
-	return 1;
-}
-
-typedef enum UdbSeqCheckResult
-{
-	UDB_SEQ_APPLY,
-	UDB_SEQ_DUPLICATE,
-	UDB_SEQ_GAP,
-	UDB_SEQ_STALE_EPOCH
-} UdbSeqCheckResult;
-
-static void udb_mutation_trigger_gap_recovery(Client *direct_peer)
-{
-	(void)direct_peer;
+	(void)peer;
+	udb_ready = 0;
 	udb_sync_status = UDB_SYNC_DEGRADED;
 	if (!udb_degraded_since)
 		udb_degraded_since = time(NULL);
@@ -140,538 +102,590 @@ static void udb_mutation_trigger_gap_recovery(Client *direct_peer)
 		udb_reconcile.next_retry_at = time(NULL) + UDB_RECONCILE_RETRY_BASE;
 }
 
-/* Callers authorize the direct hop first. Stream identity is the original
- * source SID plus epoch, not the relay's HEL epoch; mismatches trigger recovery
- * without promoting the candidate stream here. */
-static UdbSeqCheckResult udb_mutation_check_sequence(UdbContext *ctx, Client *source, Client *direct_peer,
-													 const char *epoch, uint64_t seq)
+static void udb_native_delivery_drop(UdbNativeDelivery *delivery)
 {
-	const char *source_sid = source && IsServer(source) ? source->id : NULL;
-
-	if (!source_sid || !*source_sid)
-		return UDB_SEQ_STALE_EPOCH;
-	if (!ctx->authority_epoch_known)
+	UdbNativeDelivery **link = &udb_native_deliveries;
+	while (*link && *link != delivery)
+		link = &(*link)->next;
+	if (!*link)
+		abort();
+	*link = delivery->next;
+	if (udb_native_delivery_tail == delivery)
 	{
-		strlcpy(ctx->authority_sid, source_sid, sizeof(ctx->authority_sid));
-		strlcpy(ctx->authority_epoch, epoch, sizeof(ctx->authority_epoch));
-		ctx->authority_epoch_known = 1;
+		udb_native_delivery_tail = NULL;
+		for (UdbNativeDelivery *item = udb_native_deliveries; item; item = item->next)
+			udb_native_delivery_tail = item;
 	}
-	else if (strcmp(source_sid, ctx->authority_sid) != 0 || strcmp(epoch, ctx->authority_epoch) != 0)
-	{
-		udb_log(ULOG_WARNING, "UDB_MUTATION_EPOCH_MISMATCH", direct_peer,
-				"Mutation stream mismatch from $peer: got $source/$epoch, expected $expected_source/$expected_epoch",
-				log_data_string("peer", direct_peer ? direct_peer->name : "none"), log_data_string("epoch", epoch),
-				log_data_string("source", source_sid), log_data_string("expected_source", ctx->authority_sid),
-				log_data_string("expected_epoch", ctx->authority_epoch));
-		strlcpy(ctx->candidate_authority_sid, source_sid, sizeof(ctx->candidate_authority_sid));
-		strlcpy(ctx->candidate_authority_epoch, epoch, sizeof(ctx->candidate_authority_epoch));
-		ctx->candidate_authority_epoch_known = 1;
-		udb_mutation_trigger_gap_recovery(direct_peer);
-		return UDB_SEQ_STALE_EPOCH;
-	}
-
-	if (seq <= ctx->last_applied_seq)
-	{
-		udb_log(ULOG_DEBUG, "UDB_MUTATION_DUPLICATE", direct_peer,
-				"Dropping duplicate or stale mutation seq $seq (last applied is $last)",
-				log_data_integer("seq", (long)seq), log_data_integer("last", (long)ctx->last_applied_seq));
-		return UDB_SEQ_DUPLICATE;
-	}
-
-	uint64_t expected_seq = ctx->last_applied_seq + 1;
-	if (seq > expected_seq)
-	{
-		udb_log(
-			ULOG_WARNING, "UDB_MUTATION_GAP_DETECTED", direct_peer,
-			"Mutation sequence gap detected from $peer: got $seq, expected $expected_seq. Triggering reconciliation.",
-			log_data_string("peer", direct_peer ? direct_peer->name : "none"), log_data_integer("seq", (long)seq),
-			log_data_integer("expected_seq", (long)expected_seq));
-		udb_mutation_trigger_gap_recovery(direct_peer);
-		return UDB_SEQ_GAP;
-	}
-
-	return UDB_SEQ_APPLY;
+	if (udb_storage_engine_delivery_release(delivery->engine, delivery->reservation) != UDB_STORAGE_OK)
+		abort();
+	udb_storage_free(delivery);
 }
 
-static void udb_mutation_ins(UdbContext *ctx, Client *client, Client *direct_peer, const char *target,
-							 const char *epoch, uint64_t seq, const char *path, const char *data, int is_for_me,
-							 int is_broadcast)
+static int udb_native_delivery_current(UdbNativeDelivery *delivery)
 {
-	UdbBlock *block = udb_mutation_path_block(ctx, path);
-	char letter = path && *path ? path[0] : '0';
-
-	if (is_for_me)
+	UdbStorageEngine *engine = delivery->engine;
+	udb_storage_mutex_lock(&engine->mutex);
+	int current = !engine->failed && !engine->stopping && engine->admission &&
+				  delivery->module_revision == engine->module_revision &&
+				  delivery->authority_revision == engine->authority_revision;
+	udb_storage_mutex_unlock(&engine->mutex);
+	if (!current || delivery->cancelled || !udb_ctx || udb_ctx->storage != engine)
+		return 0;
+	if (delivery->local)
 	{
-		if (!udb_is_propagator(ctx, direct_peer))
-		{
-			udb_protocol_mutation_error(client, "INS", UDB_ERR_FORBIDDEN, letter);
-			return;
-		}
+		UdbPropagatorSelection selected;
+		return !udb_propagator_policy_present(udb_ctx) ||
+			   (udb_select_propagator(udb_ctx, 1, &selected) && selected.is_local);
+	}
+	Client *peer = udb_ocl_find_server(delivery->peer_sid);
+	UdbHelloPeer *hello = peer ? udb_hello_peer(peer, 0) : NULL;
+	return peer && !IsDead(peer) && !IsDeadSocket(peer) && MyConnect(peer) && hello && hello->remote_epoch_known &&
+		   !strcmp(hello->remote_epoch, delivery->peer_epoch) && udb_is_authorized_sync_source(udb_ctx, peer);
+}
 
-		UdbSeqCheckResult seq_res = udb_mutation_check_sequence(ctx, client, direct_peer, epoch, seq);
-		if (seq_res == UDB_SEQ_DUPLICATE || seq_res == UDB_SEQ_STALE_EPOCH)
-			return;
-		if (seq_res == UDB_SEQ_GAP)
-			return;
+static UdbStorageResult udb_native_delivery_submit(UdbNativeDelivery *delivery)
+{
+	if (delivery->job || !delivery->credit || !udb_native_delivery_current(delivery))
+		return UDB_STORAGE_BUSY;
+	UdbStorageResult result = udb_storage_engine_submit_credit(
+		delivery->engine, delivery->kind, delivery->owner, delivery->module_revision, delivery->authority_revision,
+		delivery->bytes, delivery->length, delivery->credit, &delivery->job);
+	if (result == UDB_STORAGE_OK)
+	{
+		delivery->reservation -= delivery->credit;
+		delivery->credit = 0;
+	}
+	return result;
+}
 
-		if (!block || !udb_record_fits_limits(path, data))
+static UdbStorageResult udb_native_delivery_create(UdbStorageEngine *engine, Client *peer, uint32_t kind,
+												   const void *bytes, size_t length, int broadcast, int local,
+												   int replay, UdbNativeDelivery **out)
+{
+	*out = NULL;
+	if (!engine || !bytes || length < UDB_STORAGE_MUTATION_HEADER ||
+		length > UDB_STORAGE_QUEUE_LIMIT - sizeof(UdbNativeDelivery))
+		return UDB_STORAGE_REJECTED;
+	size_t credit = udb_storage_engine_job_charge(length);
+	size_t envelope = udb_storage_allocation_charge(sizeof(UdbNativeDelivery) + length);
+	if (!credit || !envelope || envelope > UDB_STORAGE_QUEUE_LIMIT - credit)
+		return UDB_STORAGE_LIMIT;
+	uint64_t owner = udb_native_owner_next(), module_revision, authority_revision;
+	if (!owner)
+		return UDB_STORAGE_LIMIT;
+	udb_storage_mutex_lock(&engine->mutex);
+	module_revision = engine->module_revision;
+	authority_revision = engine->authority_revision;
+	udb_storage_mutex_unlock(&engine->mutex);
+	UdbStorageResult result =
+		udb_storage_engine_delivery_reserve(engine, module_revision, authority_revision, envelope + credit);
+	if (result != UDB_STORAGE_OK)
+		return result;
+	UdbNativeDelivery *delivery =
+		udb_storage_alloc(&engine->budget, UDB_STORAGE_MEMORY_AUX, sizeof(*delivery) + length);
+	if (!delivery)
+	{
+		udb_storage_engine_delivery_release(engine, envelope + credit);
+		return UDB_STORAGE_LIMIT;
+	}
+	delivery->engine = engine;
+	delivery->owner = owner;
+	delivery->module_revision = module_revision;
+	delivery->authority_revision = authority_revision;
+	delivery->reservation = envelope + credit;
+	delivery->credit = credit;
+	delivery->kind = kind;
+	delivery->length = length;
+	delivery->broadcast = broadcast;
+	delivery->local = local;
+	delivery->replay = replay;
+	memcpy(delivery->bytes, bytes, length);
+	if (peer)
+	{
+		UdbHelloPeer *hello = udb_hello_peer(peer, 0);
+		if (!hello || !hello->remote_epoch_known)
 		{
-			ctx->last_applied_seq = seq;
-			udb_protocol_mutation_error(client, "INS", UDB_ERR_PARAMS, letter);
-			return;
+			udb_storage_engine_delivery_release(engine, delivery->reservation);
+			udb_storage_free(delivery);
+			return UDB_STORAGE_REJECTED;
 		}
+		memcpy(delivery->peer_sid, peer->id, 4);
+		memcpy(delivery->peer_epoch, hello->remote_epoch, 17);
+	}
+	if (udb_native_delivery_tail)
+		udb_native_delivery_tail->next = delivery;
+	else
+		udb_native_deliveries = delivery;
+	udb_native_delivery_tail = delivery;
+	*out = delivery;
+	return UDB_STORAGE_OK;
+}
 
-		if (block->session || (block->syncing_from && block->syncing_from != direct_peer))
+/* Bind/prune copied live traffic against the first agreed INF origin and
+ * watermark. Pre-INF traffic is provisional, never an origin authority. */
+static int udb_native_mutation_bind(Client *peer, unsigned long round, const char *sid, const char *epoch,
+									uint64_t watermark)
+{
+	uint64_t expected = watermark;
+	uint64_t number = udb_native_epoch_number(epoch);
+	for (UdbNativeDelivery *item = udb_native_deliveries, *next; item; item = next)
+	{
+		next = item->next;
+		if (!item->replay || item->cancelled)
+			continue;
+		if (!udb_native_delivery_current(item) || strcmp(item->peer_sid, peer->id) || memcmp(item->bytes, sid, 4) ||
+			udb_storage_get_u64(item->bytes + 4) != number || (item->replay_round && item->replay_round != round))
+			return 0;
+		uint64_t sequence = udb_storage_get_u64(item->bytes + 12);
+		if (!item->job && sequence <= watermark)
 		{
-			ctx->last_applied_seq = seq;
-			udb_protocol_mutation_error(client, "INS", UDB_ERR_SYNC_ACTIVE, letter);
-			return;
+			udb_native_delivery_drop(item);
+			continue;
 		}
+		if (expected == UINT64_MAX || sequence != expected + 1)
+			return 0;
+		expected = sequence;
+		item->replay_round = round;
+	}
+	return 1;
+}
 
-		UdbRecord *old_rec;
-		UdbRecord *tree;
-		UdbRecord *rec = NULL;
-		UdbHashIndex hash_index;
-		int unchanged;
-		int nick_pass_added;
-		int nick_pass_changed;
+static int udb_native_mutation_pending(unsigned long round)
+{
+	for (UdbNativeDelivery *item = udb_native_deliveries; item; item = item->next)
+		if (!item->cancelled && item->replay && item->replay_round == round)
+			return 1;
+	return 0;
+}
 
-		if (!udb_record_validate(block, path + 3, data))
-		{
-			ctx->last_applied_seq = seq;
-			udb_log(ULOG_WARNING, "UDB_INS_SCHEMA_REJECT", client,
-					"Rejected S2S INS for invalid or unknown record: $path", log_data_string("path", path));
-			udb_protocol_mutation_error(client, "INS", UDB_ERR_PARAMS, letter);
-			return;
-		}
-		old_rec = udb_record_find_path(ctx, block, path + 3);
-		unchanged = old_rec && udb_record_data_equals(old_rec, data);
-		if (unchanged)
-		{
-			ctx->last_applied_seq = seq;
-			if (!is_broadcast)
-				return;
-			udb_mutation_forward_ins(client, direct_peer, target, epoch, seq, path, data);
-			return;
-		}
-		tree = udb_record_clone_tree(block->tree, old_rec, &rec);
-		rec = udb_record_insert_path(tree, path + 3, data);
-		nick_pass_added = rec && block->letter == UDB_BLOCK_NICKS && rec->parent && rec->parent != tree &&
-						  !strcmp(rec->key, NKEY_PASS) && !old_rec;
-		nick_pass_changed = old_rec && block->letter == UDB_BLOCK_NICKS && old_rec->parent &&
-							old_rec->parent != block->tree && !strcmp(old_rec->key, NKEY_PASS);
-		if (rec && block->letter == UDB_BLOCK_NICKS && rec->parent && rec->parent != tree)
-		{
-			if (!strcmp(rec->key, NKEY_FORBID))
-				udb_n_profile_canonicalize_forbid(rec->parent);
-			else if (udb_record_find(NULL, NKEY_FORBID, rec->parent))
-				rec = NULL;
-		}
-		if (!rec || (block->letter == UDB_BLOCK_LINES && !udb_k_profile_valid(rec->parent)) ||
-			(block->letter == UDB_BLOCK_NICKS && !udb_n_tree_profiles_valid(tree)))
-		{
-			const char *profile_kind = block->letter == UDB_BLOCK_NICKS ? "N" : "K";
+static int udb_native_mutation_replay(unsigned long round)
+{
+	for (UdbNativeDelivery *item = udb_native_deliveries; item; item = item->next)
+	{
+		if (item->cancelled || !item->replay || item->replay_round != round || item->job)
+			continue;
+		if (udb_native_delivery_submit(item) != UDB_STORAGE_OK)
+			return 0;
+	}
+	return 1;
+}
 
-			ctx->last_applied_seq = seq;
-			udb_record_free_tree(tree);
-			udb_log(ULOG_WARNING, "UDB_INS_PROFILE_REJECT", client,
-					"Rejected INS that would create an invalid complete $profile_kind profile: $path",
-					log_data_string("profile_kind", profile_kind), log_data_string("path", path));
-			udb_protocol_mutation_error(client, "INS", UDB_ERR_PARAMS, letter);
-			return;
-		}
-		if (!udb_hash_prepare_tree(tree, &hash_index))
+static void udb_native_mutation_abort(unsigned long round)
+{
+	for (UdbNativeDelivery *item = udb_native_deliveries, *next; item; item = next)
+	{
+		next = item->next;
+		if (round && (!item->replay || (item->replay_round && item->replay_round != round)))
+			continue;
+		if (item->job)
 		{
-			ctx->last_applied_seq = seq;
-			udb_record_free_tree(tree);
-			udb_protocol_mutation_error(client, "INS", UDB_ERR_PARAMS, letter);
-			return;
+			item->cancelled = 1;
+			udb_storage_engine_cancel_owner(item->engine, item->owner);
 		}
-		UdbSnapshotResult snap_res = udb_file_write_snapshot(block, tree, udb_record_count_tree(tree));
-		if (snap_res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
-		{
-			udb_hash_dispose_prepared(&hash_index);
-			udb_record_free_tree(tree);
-			udb_handle_persistence_failure(ctx, direct_peer, block, "INS snapshot", 0);
-			udb_mutation_trigger_gap_recovery(direct_peer);
-			udb_mutation_persist_error(client, "INS", letter);
-			return;
-		}
-		/* Revoke the old value's effects only when the value actually changes:
-		 * an identical INS must not churn channel modes nor revoke +q ranks. */
-		if (!unchanged && block->letter == UDB_BLOCK_NICKS && rec && !strcmp(rec->key, NKEY_FORBID))
-		{
-			UdbRecord *old_profile = old_rec ? old_rec->parent : udb_record_find(ctx, rec->parent->key, block->tree);
-			if (old_profile)
-				udb_remove_special_record(ctx, block, old_profile);
-		}
-		else if (old_rec && !unchanged)
-		{
-			/* Replacing an existing credential must not revoke the holder's
-			 * identity or effects: the active proof is checked live against the
-			 * new policy and the following apply reconciles effects. */
-			if (!nick_pass_changed && (block->letter != UDB_BLOCK_CHANNELS || old_rec->parent == block->tree ||
-									   (strcmp(old_rec->key, CKEY_MODES) && strcmp(old_rec->key, CKEY_TOPIC) &&
-										strcmp(old_rec->key, CKEY_OPTIONS) && strcmp(old_rec->key, CKEY_SUSPEND))))
-				udb_remove_special_record(ctx, block, old_rec);
-		}
-		if (block->letter == UDB_BLOCK_LINES)
-			udb_lines_expiry_pending_clear_record(old_rec ? old_rec : rec);
-		udb_block_replace_tree(ctx, block, tree, udb_record_count_tree(tree), &hash_index);
-		/* A newly added credential cannot inherit identity from an earlier
-		 * passless profile, a matching nick, or externally residual account/+r.
-		 * The following apply sees no identity marker and renames the holder.
-		 * Changing an existing credential does not come through here: live
-		 * policy checks preserve the holder's active identity. A passless
-		 * profile never applied runtime effects, so it must not revoke
-		 * externally supplied state either. */
-		if (nick_pass_added)
-		{
-			Client *profile_client = find_user(rec->parent->key, NULL);
+		else
+			udb_native_delivery_drop(item);
+	}
+}
 
-			if (profile_client && MyUser(profile_client))
-			{
-				udb_nick_identity_clear(profile_client);
-				udb_nick_pending_auth_clear(profile_client);
-			}
-		}
-		if (!unchanged)
+static void udb_native_mutation_round_begin(Client *peer)
+{
+	if (!udb_ctx || !udb_ctx->storage)
+		return;
+	UdbStorageEngine *engine = udb_ctx->storage;
+	uint64_t old_revision, revision;
+	udb_storage_mutex_lock(&engine->mutex);
+	old_revision = engine->authority_revision;
+	udb_storage_mutex_unlock(&engine->mutex);
+	if (udb_storage_engine_authority(engine, &revision) != UDB_STORAGE_OK)
+		return;
+	for (UdbNativeDelivery *item = udb_native_deliveries, *next; item; item = next)
+	{
+		next = item->next;
+		/* Only a provisional, unsubmitted tail from this still-selected peer
+		 * survives into the first INF-bound round. It grants no root lineage. */
+		UdbHelloPeer *hello = peer ? udb_hello_peer(peer, 0) : NULL;
+		if (!item->job && item->replay && !item->replay_round && !item->cancelled &&
+			item->authority_revision == old_revision && peer && !strcmp(peer->id, item->peer_sid) && hello &&
+			hello->remote_epoch_known && !strcmp(hello->remote_epoch, item->peer_epoch))
 		{
-			udb_apply_special_record(ctx, block, rec, 1);
-			if (block->letter == UDB_BLOCK_LINKS)
-				udb_sync_snomask_filter();
+			item->authority_revision = revision;
+			continue;
 		}
-		if (snap_res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
+		if (item->job)
 		{
-			udb_handle_persistence_failure(ctx, direct_peer, block, "INS snapshot", 1);
-			udb_mutation_trigger_gap_recovery(direct_peer);
-			udb_mutation_persist_error(client, "INS", letter);
-			return;
+			item->cancelled = 1;
+			udb_storage_engine_cancel_owner(engine, item->owner);
 		}
-		ctx->last_applied_seq = seq;
-		char logbuf[512];
-		snprintf(logbuf, sizeof(logbuf), "Inserted record via S2S: %s -> %s (seq=%" PRIu64 ")", path,
-				 udb_mutation_safe_value(path, data), seq);
-		udb_log(ULOG_INFO, "UDB_INS_RECEIVED", client, "$msg", log_data_string("msg", logbuf));
-		if (!is_broadcast)
-			return;
+		else
+			udb_native_delivery_drop(item);
+	}
+}
+
+static void udb_native_mutation_cleanup(void)
+{
+	/* Lifecycle stops/joins the writer before dropping submitted envelopes. */
+	while (udb_native_deliveries)
+	{
+		udb_storage_engine_cancel_owner(udb_native_deliveries->engine, udb_native_deliveries->owner);
+		udb_native_delivery_drop(udb_native_deliveries);
+	}
+}
+
+static int udb_native_mutation_ingress(UdbContext *ctx, Client *source, Client *peer, uint32_t kind, const char *epoch,
+									   uint64_t sequence, const char *path, const char *value, char block,
+									   int broadcast)
+{
+	if (!ctx || !ctx->storage || !source || !IsServer(source) || strlen(source->id) != 3 ||
+		!udb_storage_sid_valid(source->id) || !udb_hello_epoch_valid(epoch) || !sequence ||
+		!udb_is_authorized_sync_source(ctx, peer))
+		return UDB_ERR_FORBIDDEN;
+	UdbStorageEngine *engine = ctx->storage;
+	UdbNativeReceiveScratch *scratch = udb_storage_alloc(&engine->budget, UDB_STORAGE_MEMORY_AUX, sizeof(*scratch));
+	unsigned char *payload = NULL;
+	if (!scratch)
+		return UDB_ERR_FATAL;
+	size_t row_length = 0;
+	UdbStorageResult result = UDB_STORAGE_OK;
+	if (kind == UDB_STORAGE_JOB_DROP)
+	{
+		if (udb_storage_stage_block_index((unsigned char)block) < 0)
+			result = UDB_STORAGE_REJECTED;
 	}
 	else
 	{
-		if (!block || !udb_record_fits_limits(path, data))
+		result = udb_native_key_parse(path, &scratch->key);
+		if (result == UDB_STORAGE_OK && kind == UDB_STORAGE_JOB_POINT)
+			result = udb_native_value_decode(value, &scratch->key.row, scratch->value, sizeof(scratch->value));
+		UdbStorageRecord record = {0};
+		record.row = scratch->key.row;
+		record.operation = kind == UDB_STORAGE_JOB_POINT ? UDB_STORAGE_PUT : UDB_STORAGE_PREFIX_DELETE;
+		record.stamp.sequence = 1;
+		if (result == UDB_STORAGE_OK)
+			result = udb_native_row_validate(&record, &ctx->native_schema);
+		if (result == UDB_STORAGE_OK)
+			result = udb_storage_row_encode(&record.row, scratch->bytes, sizeof(scratch->bytes), &row_length);
+		block = (char)record.row.block;
+	}
+	if (result != UDB_STORAGE_OK)
+	{
+		udb_storage_free(scratch);
+		return result == UDB_STORAGE_REJECTED ? UDB_ERR_PARAMS : UDB_ERR_FATAL;
+	}
+	int replay = udb_reconcile.active || !udb_ready;
+	uint64_t number = udb_native_epoch_number(epoch);
+	uint64_t expected = ctx->last_applied_seq;
+	if (!replay)
+	{
+		if (!ctx->authority_epoch_known || strcmp(source->id, ctx->authority_sid) ||
+			strcmp(epoch, ctx->authority_epoch))
 		{
-			udb_protocol_mutation_error(client, "INS", UDB_ERR_PARAMS, letter);
-			return;
+			udb_storage_free(scratch);
+			udb_mutation_trigger_gap_recovery(peer);
+			return UDB_ERR_NO_SYNC;
+		}
+		if (sequence <= expected)
+		{
+			udb_storage_free(scratch);
+			return 0;
 		}
 	}
-	udb_mutation_forward_ins(client, direct_peer, target, epoch, seq, path, data);
-}
-
-static int udb_mutation_delete_local(UdbContext *ctx, UdbBlock *block, UdbRecord *old_rec, Client *direct_peer,
-									 const char *operation)
-{
-	UdbRecord *candidate_rec = NULL;
-	UdbRecord *candidate_line = NULL;
-	UdbRecord *candidate_nick_profile = NULL;
-	UdbRecord *tree;
-	UdbHashIndex hash_index;
-	unsigned int record_count;
-	UdbSnapshotResult snap_res;
-
-	if (!ctx || !block || !old_rec)
-		return 0;
-	tree = udb_record_clone_tree(block->tree, old_rec, &candidate_rec);
-	if (!tree || !candidate_rec)
+	else if (udb_reconcile.source_known)
 	{
-		udb_record_free_tree(tree);
-		return 0;
-	}
-	if (block->letter == UDB_BLOCK_LINES && candidate_rec->parent && candidate_rec->parent->parent &&
-		candidate_rec->parent->parent != tree)
-		candidate_line = candidate_rec->parent;
-	if (block->letter == UDB_BLOCK_NICKS && candidate_rec->parent && candidate_rec->parent != tree)
-		candidate_nick_profile = candidate_rec->parent;
-	if (candidate_nick_profile && !strcmp(old_rec->key, NKEY_SUSPEND))
-		candidate_nick_profile->nick_unsuspend_transition = 1;
-	udb_record_delete_tree(candidate_rec);
-	record_count = udb_record_count_tree(tree);
-	if (!udb_hash_prepare_tree(tree, &hash_index))
-	{
-		udb_record_free_tree(tree);
-		return 0;
-	}
-	snap_res = udb_file_write_snapshot(block, tree, record_count);
-	if (snap_res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
-	{
-		udb_hash_dispose_prepared(&hash_index);
-		udb_record_free_tree(tree);
-		udb_handle_persistence_failure(ctx, direct_peer, block, operation, 0);
-		return 0;
-	}
-	/* This is the common DEL transaction: persisted candidate first, then old
-	 * runtime effect removal, active-tree replacement, and candidate reapply. */
-	udb_remove_special_record(ctx, block, old_rec);
-	if (block->letter == UDB_BLOCK_LINES)
-		udb_lines_expiry_pending_clear_record(old_rec);
-	udb_block_replace_tree(ctx, block, tree, record_count, &hash_index);
-	if (candidate_nick_profile)
-		udb_apply_special_record(ctx, block, candidate_nick_profile, 1);
-	if (candidate_line)
-		udb_lines_apply_effect(ctx, block, candidate_line);
-	if (block->letter == UDB_BLOCK_LINKS)
-		udb_sync_snomask_filter();
-	if (snap_res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
-	{
-		udb_handle_persistence_failure(ctx, direct_peer, block, operation, 1);
-		return 2;
-	}
-	return 1;
-}
-
-static void udb_mutation_del(UdbContext *ctx, Client *client, Client *direct_peer, const char *target,
-							 const char *epoch, uint64_t seq, const char *path, int is_for_me, int is_broadcast)
-{
-	UdbBlock *block = udb_mutation_path_block(ctx, path);
-	char letter = path && *path ? path[0] : '0';
-
-	if (is_for_me)
-	{
-		UdbRecord *old_rec;
-		int result;
-		if (!udb_is_propagator(ctx, direct_peer))
+		if (udb_reconcile.authority_peer != peer || strcmp(source->id, udb_reconcile.source_sid) ||
+			strcmp(epoch, udb_reconcile.source_epoch))
 		{
-			udb_protocol_mutation_error(client, "DEL", UDB_ERR_FORBIDDEN, letter);
-			return;
+			udb_storage_free(scratch);
+			return UDB_ERR_FORBIDDEN;
 		}
-
-		UdbSeqCheckResult seq_res = udb_mutation_check_sequence(ctx, client, direct_peer, epoch, seq);
-		if (seq_res == UDB_SEQ_DUPLICATE || seq_res == UDB_SEQ_STALE_EPOCH)
-			return;
-		if (seq_res == UDB_SEQ_GAP)
-			return;
-
-		if (!block || !udb_record_fits_limits(path, NULL))
+		expected = udb_reconcile.watermark_seq;
+		if (sequence <= expected)
 		{
-			ctx->last_applied_seq = seq;
-			udb_protocol_mutation_error(client, "DEL", UDB_ERR_PARAMS, letter);
-			return;
+			udb_storage_free(scratch);
+			return 0;
 		}
-
-		if (block->session || (block->syncing_from && block->syncing_from != direct_peer))
-		{
-			ctx->last_applied_seq = seq;
-			udb_protocol_mutation_error(client, "DEL", UDB_ERR_SYNC_ACTIVE, letter);
-			return;
-		}
-
-		old_rec = udb_record_find_path(ctx, block, path + 3);
-		if (!old_rec)
-		{
-			ctx->last_applied_seq = seq;
-			if (!is_broadcast)
-				return;
-			udb_mutation_forward_del(client, direct_peer, target, epoch, seq, path);
-			return;
-		}
-		result = udb_mutation_delete_local(ctx, block, old_rec, direct_peer, "DEL snapshot");
-		if (result != 1)
-		{
-			udb_mutation_trigger_gap_recovery(direct_peer);
-			udb_mutation_persist_error(client, "DEL", letter);
-			return;
-		}
-		ctx->last_applied_seq = seq;
-		{
-			char logbuf[512];
-			snprintf(logbuf, sizeof(logbuf), "Deleted record via S2S: %s (seq=%" PRIu64 ")", path, seq);
-			udb_log(ULOG_INFO, "UDB_DEL_RECEIVED", client, "$msg", log_data_string("msg", logbuf));
-		}
-		if (!is_broadcast)
-			return;
 	}
 	else
+		expected = sequence - 1; /* Provisional until INF validates/prunes it. */
+	for (UdbNativeDelivery *item = udb_native_deliveries; item; item = item->next)
 	{
-		if (!block || !udb_record_fits_limits(path, NULL))
+		if (item->cancelled || item->local || item->replay != replay)
+			continue;
+		if (memcmp(item->bytes, source->id, 4) || udb_storage_get_u64(item->bytes + 4) != number ||
+			strcmp(item->peer_sid, peer->id) || !udb_native_delivery_current(item))
 		{
-			udb_protocol_mutation_error(client, "DEL", UDB_ERR_PARAMS, letter);
-			return;
+			udb_storage_free(scratch);
+			return UDB_ERR_FORBIDDEN;
 		}
+		expected = udb_storage_get_u64(item->bytes + 12);
 	}
-	udb_mutation_forward_del(client, direct_peer, target, epoch, seq, path);
+	if (expected == UINT64_MAX || sequence != expected + 1)
+	{
+		udb_storage_free(scratch);
+		udb_mutation_trigger_gap_recovery(peer);
+		return UDB_ERR_NO_SYNC;
+	}
+	size_t length = UDB_STORAGE_MUTATION_HEADER + row_length;
+	payload = udb_storage_alloc(&engine->budget, UDB_STORAGE_MEMORY_AUX, length);
+	if (!payload)
+	{
+		udb_storage_free(scratch);
+		return UDB_ERR_FATAL;
+	}
+	memcpy(payload, source->id, 4);
+	udb_storage_put_u64(payload + 4, number);
+	udb_storage_put_u64(payload + 12, sequence);
+	payload[20] = (unsigned char)block;
+	if (row_length)
+		memcpy(payload + UDB_STORAGE_MUTATION_HEADER, scratch->bytes, row_length);
+	UdbNativeDelivery *delivery = NULL;
+	result = udb_native_delivery_create(engine, peer, kind, payload, length, broadcast, 0, replay, &delivery);
+	udb_storage_free(payload);
+	udb_storage_free(scratch);
+	if (result != UDB_STORAGE_OK)
+		return UDB_ERR_FATAL;
+	if (replay && udb_reconcile.source_known)
+		delivery->replay_round = udb_reconcile.round_id;
+	if (!replay && udb_native_delivery_submit(delivery) != UDB_STORAGE_OK)
+	{
+		udb_native_delivery_drop(delivery);
+		return UDB_ERR_FATAL;
+	}
+	if (replay && delivery->replay_round)
+		udb_native_receive_replay_pump();
+	return 0;
 }
 
-static int udb_mutation_k_expiry_matches(UdbBlock *block, const char *path, time_t expected_expires, UdbRecord **record)
+static void udb_mutation_ins(UdbContext *ctx, Client *source, Client *peer, const char *target, const char *epoch,
+							 uint64_t sequence, const char *path, const char *value, int is_for_me, int broadcast)
 {
-	UdbRecord *line;
-	UdbRecord *expires;
-
-	if (!block || block->letter != UDB_BLOCK_LINES || !path || strncmp(path, "K::", 3))
-		return 0;
-	line = udb_record_find_path(udb_ctx, block, path + 3);
-	if (!line || !line->parent || line->parent->parent != block->tree)
-		return 0;
-	expires = udb_record_find(udb_ctx, KKEY_EXPIRES, line);
-	if (!expires || expires->data_str || !expires->data_num || expires->data_num != (unsigned long)expected_expires ||
-		expected_expires > TStime())
-		return 0;
-	if (record)
-		*record = line;
-	return 1;
-}
-
-/* Only an authority performs this operation.  It deliberately calls the same
- * transactional subtree DEL primitive used by the normal mutation path. */
-static int udb_mutation_expire_local(UdbContext *ctx, const char *path, time_t expected_expires)
-{
-	UdbBlock *block = udb_mutation_path_block(ctx, path);
-	UdbRecord *line;
-	uint64_t high;
-
-	if (!block || !udb_mutation_k_expiry_matches(block, path, expected_expires, &line))
-		return 0;
-	high = ctx->current_seq > ctx->last_applied_seq ? ctx->current_seq : ctx->last_applied_seq;
-	if (high == UINT64_MAX)
-		return 0;
-	if (udb_mutation_delete_local(ctx, block, line, NULL, "EXP snapshot") != 1)
-		return 0;
-	uint64_t seq = high + 1;
-	ctx->current_seq = seq;
-	const char *epoch = udb_ocl_epoch_value();
-	ctx->last_applied_seq = seq;
-	udb_sendto_confirmed_servers(NULL, ":%s DB * DEL %s %" PRIu64 " %s", me.id, epoch, seq, path);
-	return 1;
-}
-
-static void udb_mutation_exp(UdbContext *ctx, Client *client, Client *direct_peer, const char *target, const char *path,
-							 time_t expected_expires, int is_for_me, int is_broadcast)
-{
-	UdbBlock *block = udb_mutation_path_block(ctx, path);
-	UdbRecord *line;
-	UdbPropagatorSelection selected;
-	int has_selected;
-	uint64_t high;
-
 	(void)target;
-	if (!block || !path || expected_expires <= 0 || is_broadcast || !is_for_me || client != direct_peer ||
-		!udb_peer_authorizes_us(direct_peer))
+	int error = is_for_me ? udb_native_mutation_ingress(ctx, source, peer, UDB_STORAGE_JOB_POINT, epoch, sequence, path,
+														value, 0, broadcast)
+						  : UDB_ERR_FORBIDDEN;
+	if (error)
+		udb_protocol_mutation_error(source, "INS", error, path && *path ? *path : '0');
+}
+
+static void udb_mutation_del(UdbContext *ctx, Client *source, Client *peer, const char *target, const char *epoch,
+							 uint64_t sequence, const char *path, int is_for_me, int broadcast)
+{
+	(void)target;
+	int error = is_for_me ? udb_native_mutation_ingress(ctx, source, peer, UDB_STORAGE_JOB_PREFIX, epoch, sequence,
+														path, NULL, 0, broadcast)
+						  : UDB_ERR_FORBIDDEN;
+	if (error)
+		udb_protocol_mutation_error(source, "DEL", error, path && *path ? *path : '0');
+}
+
+static void udb_mutation_drp(UdbContext *ctx, Client *source, Client *peer, const char *target, const char *epoch,
+							 uint64_t sequence, char block, int is_for_me, int broadcast)
+{
+	(void)target;
+	int error = is_for_me ? udb_native_mutation_ingress(ctx, source, peer, UDB_STORAGE_JOB_DROP, epoch, sequence, NULL,
+														NULL, block, broadcast)
+						  : UDB_ERR_FORBIDDEN;
+	if (error)
+		udb_protocol_mutation_error(source, "DRP", error, block);
+}
+
+static int udb_mutation_expire_local(UdbContext *ctx, const char *path, time_t expected)
+{
+	UdbPropagatorSelection selected;
+	if (!ctx || !ctx->storage || !udb_ready || udb_reconcile.active || expected <= 0 || expected > TStime() ||
+		!ctx->authority_epoch_known || strcmp(ctx->authority_sid, me.id) ||
+		(udb_propagator_policy_present(ctx) && (!udb_select_propagator(ctx, 1, &selected) || !selected.is_local)))
+		return 0;
+	UdbNativeReceiveScratch *scratch =
+		udb_storage_alloc(&ctx->storage->budget, UDB_STORAGE_MEMORY_AUX, sizeof(*scratch));
+	if (!scratch)
+		return 0;
+	size_t row_length = 0;
+	UdbStorageResult result = udb_native_key_parse(path, &scratch->key);
+	if (result == UDB_STORAGE_OK && (scratch->key.row.block != 'K' || scratch->key.row.depth != 2))
+		result = UDB_STORAGE_REJECTED;
+	if (result == UDB_STORAGE_OK)
+		result = udb_storage_row_encode(&scratch->key.row, scratch->bytes, sizeof(scratch->bytes), &row_length);
+	size_t length = UDB_STORAGE_MUTATION_HEADER + 8 + row_length;
+	unsigned char *bytes =
+		result == UDB_STORAGE_OK ? udb_storage_alloc(&ctx->storage->budget, UDB_STORAGE_MEMORY_AUX, length) : NULL;
+	UdbNativeDelivery *delivery = NULL;
+	if (bytes)
+	{
+		memcpy(bytes, me.id, 4);
+		udb_storage_put_u64(bytes + 4, udb_native_epoch_number(ctx->authority_epoch));
+		bytes[20] = 'K';
+		bytes[21] = 1;
+		udb_storage_put_u64(bytes + UDB_STORAGE_MUTATION_HEADER, (uint64_t)expected);
+		memcpy(bytes + UDB_STORAGE_MUTATION_HEADER + 8, scratch->bytes, row_length);
+		result =
+			udb_native_delivery_create(ctx->storage, NULL, UDB_STORAGE_JOB_EXPIRE, bytes, length, 1, 1, 0, &delivery);
+	}
+	else
+		result = UDB_STORAGE_LIMIT;
+	udb_storage_free(bytes);
+	udb_storage_free(scratch);
+	if (result != UDB_STORAGE_OK)
+		return 0;
+	if (udb_native_delivery_submit(delivery) != UDB_STORAGE_OK)
+	{
+		udb_native_delivery_drop(delivery);
+		return 0;
+	}
+	return 1;
+}
+
+static void udb_mutation_exp(UdbContext *ctx, Client *client, Client *peer, const char *target, const char *path,
+							 time_t expected, int is_for_me, int broadcast)
+{
+	(void)target;
+	if (!is_for_me || broadcast || client != peer || !udb_peer_authorizes_us(peer) || expected <= 0)
 	{
 		udb_protocol_mutation_error(client, "EXP", UDB_ERR_FORBIDDEN, 'K');
 		return;
 	}
-	if (block->session || block->syncing_from)
+	UdbPropagatorSelection selected = {0};
+	if (udb_propagator_policy_present(ctx) && (!udb_select_propagator(ctx, 1, &selected) || !selected.is_local))
 	{
-		udb_protocol_mutation_error(client, "EXP", UDB_ERR_SYNC_ACTIVE, 'K');
+		if (!selected.peer)
+			return;
+		UdbNativeKey *key =
+			ctx && ctx->storage ? udb_storage_alloc(&ctx->storage->budget, UDB_STORAGE_MEMORY_AUX, sizeof(*key)) : NULL;
+		char pattern[UDB_STORAGE_COMPONENT_MAX + 1];
+		if (key && udb_native_key_parse(path, key) == UDB_STORAGE_OK && key->row.block == 'K' && key->row.depth == 2 &&
+			udb_native_span_string(key->row.components[1], pattern, sizeof(pattern)))
+		{
+			char type = (char)(key->row.components[0].data[0] - 'a' + 'A');
+			UdbLineExpiryPending *pending = udb_line_expiry_pending_add(type, pattern, expected);
+			if (pending && !pending->sent &&
+				udb_send_db_to_one(selected.peer, ":%s DB %s EXP %s %" PRIu64, me.id, selected.peer->id, path,
+								   (uint64_t)expected))
+				pending->sent = 1;
+		}
+		udb_storage_free(key);
 		return;
 	}
-	if (!udb_mutation_k_expiry_matches(block, path, expected_expires, &line))
-	{
-		udb_log(ULOG_INFO, "UDB_K_EXP_STALE", client, "Ignored stale K expiry request for $path",
-				log_data_string("path", path), NULL);
-		return;
-	}
-	has_selected = udb_select_propagator(ctx, 1, &selected);
-	if (udb_propagator_policy_present(ctx) && (!has_selected || !selected.is_local))
-	{
-		UdbLineExpiryPending *pending = udb_line_expiry_pending_add(line->parent->key[0], line->key, expected_expires);
-
-		if (has_selected && selected.peer && pending && !pending->sent &&
-			udb_send_db_to_one(selected.peer, ":%s DB %s EXP %s %lu", me.id, selected.peer->id, path,
-							   (unsigned long)expected_expires))
-			pending->sent = 1;
-		return;
-	}
-	high = ctx->current_seq > ctx->last_applied_seq ? ctx->current_seq : ctx->last_applied_seq;
-	if (high == UINT64_MAX)
-	{
-		udb_protocol_mutation_error(client, "EXP", UDB_ERR_FATAL, 'K');
-		return;
-	}
-	if (udb_mutation_delete_local(ctx, block, line, direct_peer, "EXP snapshot") != 1)
-	{
-		udb_protocol_mutation_error(client, "EXP", UDB_ERR_FATAL, 'K');
-		return;
-	}
-	uint64_t seq = high + 1;
-	ctx->current_seq = seq;
-	const char *epoch = udb_ocl_epoch_value();
-	ctx->last_applied_seq = seq;
-	udb_sendto_confirmed_servers(NULL, ":%s DB * DEL %s %" PRIu64 " %s", me.id, epoch, seq, path);
-	udb_log(ULOG_INFO, "UDB_K_EXP_ACCEPTED", client, "Accepted K expiry request and removed $path",
-			log_data_string("path", path), NULL);
+	udb_mutation_expire_local(ctx, path, expected);
 }
 
-static void udb_mutation_drp(UdbContext *ctx, Client *client, Client *direct_peer, const char *target,
-							 const char *epoch, uint64_t seq, char letter, int is_for_me, int is_broadcast)
+static void udb_native_mutation_relay(UdbNativeDelivery *delivery, UdbStorageJob *job)
 {
-	if (is_for_me)
+	if (!delivery->broadcast || !udb_native_delivery_current(delivery))
+		return;
+	Client *except = delivery->local ? NULL : udb_ocl_find_server(delivery->peer_sid);
+	char epoch[17];
+	snprintf(epoch, sizeof(epoch), "%016" PRIx64, job->committed_source_epoch);
+	if (job->kind == UDB_STORAGE_JOB_DROP)
 	{
-		UdbBlock *block = udb_block_by_letter(ctx, letter);
-		if (!block)
-		{
-			udb_protocol_mutation_error(client, "DRP", UDB_ERR_NO_BLOCK, letter);
-			return;
-		}
-		if (block->session || (block->syncing_from && block->syncing_from != direct_peer))
-		{
-			udb_protocol_mutation_error(client, "DRP", UDB_ERR_SYNC_ACTIVE, letter);
-			return;
-		}
-		if (!udb_is_propagator(ctx, direct_peer))
-		{
-			udb_protocol_mutation_error(client, "DRP", UDB_ERR_FORBIDDEN, letter);
-			return;
-		}
-
-		UdbSeqCheckResult seq_res = udb_mutation_check_sequence(ctx, client, direct_peer, epoch, seq);
-		if (seq_res == UDB_SEQ_DUPLICATE || seq_res == UDB_SEQ_STALE_EPOCH)
-			return;
-		if (seq_res == UDB_SEQ_GAP)
-			return;
-
-		if (!block->tree->child)
-		{
-			ctx->last_applied_seq = seq;
-			if (!is_broadcast)
-				return;
-			udb_sendto_confirmed_servers(direct_peer, ":%s DB %s DRP %s %" PRIu64 " %c", client->id, target, epoch, seq,
-										 letter);
-			return;
-		}
-		UdbRecord *tree = udb_record_clone_tree(block->tree, NULL, NULL);
-		UdbHashIndex hash_index;
-		while (tree->child)
-			udb_record_delete_tree(tree->child);
-		if (!udb_hash_prepare_tree(tree, &hash_index))
-		{
-			ctx->last_applied_seq = seq;
-			udb_record_free_tree(tree);
-			udb_protocol_mutation_error(client, "DRP", UDB_ERR_PARAMS, letter);
-			return;
-		}
-		UdbSnapshotResult snap_res = udb_file_write_snapshot(block, tree, 0);
-		if (snap_res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
-		{
-			udb_hash_dispose_prepared(&hash_index);
-			udb_record_free_tree(tree);
-			udb_handle_persistence_failure(ctx, direct_peer, block, "DRP snapshot", 0);
-			udb_mutation_trigger_gap_recovery(direct_peer);
-			udb_mutation_persist_error(client, "DRP", letter);
-			return;
-		}
-		/* Reset removes the old block's runtime effects only after persistence. */
-		udb_block_reset(ctx, block);
-		udb_block_replace_tree(ctx, block, tree, 0, &hash_index);
-		if (snap_res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
-		{
-			udb_handle_persistence_failure(ctx, direct_peer, block, "DRP snapshot", 1);
-			udb_mutation_trigger_gap_recovery(direct_peer);
-			udb_mutation_persist_error(client, "DRP", letter);
-			return;
-		}
-		ctx->last_applied_seq = seq;
-		if (!is_broadcast)
-			return;
+		udb_sendto_confirmed_servers(except, ":%s DB * DRP %s %" PRIu64 " %c", job->committed_source_sid, epoch,
+									 job->committed_source_sequence,
+									 *((const unsigned char *)job + offsetof(UdbStorageJob, payload) + 20));
+		return;
 	}
-	udb_sendto_confirmed_servers(direct_peer, ":%s DB %s DRP %s %" PRIu64 " %c", client->id, target, epoch, seq,
-								 letter);
+	size_t offset = UDB_STORAGE_MUTATION_HEADER + (job->kind == UDB_STORAGE_JOB_EXPIRE ? 8 : 0);
+	UdbStorageRow row;
+	if (job->length <= offset ||
+		udb_storage_row_decode(job->payload + offset, job->length - offset, &row) != UDB_STORAGE_OK)
+		return;
+	UdbNativeSendScratch *scratch = udb_storage_alloc(&job->engine->budget, UDB_STORAGE_MEMORY_AUX, sizeof(*scratch));
+	if (!scratch)
+	{
+		udb_mutation_trigger_gap_recovery(except);
+		return;
+	}
+	if (udb_native_key_path(&row, scratch->path, sizeof(scratch->path)) == UDB_STORAGE_OK)
+	{
+		if (job->kind == UDB_STORAGE_JOB_POINT &&
+			udb_native_value_encode(&row, scratch->value, sizeof(scratch->value)) == UDB_STORAGE_OK)
+			udb_sendto_confirmed_servers(except, ":%s DB * INS %s %" PRIu64 " %s :%s", job->committed_source_sid, epoch,
+										 job->committed_source_sequence, scratch->path, scratch->value);
+		else if (job->kind != UDB_STORAGE_JOB_POINT)
+			udb_sendto_confirmed_servers(except, ":%s DB * DEL %s %" PRIu64 " %s", job->committed_source_sid, epoch,
+										 job->committed_source_sequence, scratch->path);
+	}
+	udb_storage_free(scratch);
+}
+
+static int udb_native_local_bind(UdbContext *ctx)
+{
+	if (!ctx || !ctx->storage || udb_reconcile.active)
+		return 0;
+	UdbPropagatorSelection selected;
+	if (udb_propagator_policy_present(ctx) && (!udb_select_propagator(ctx, 1, &selected) || !selected.is_local))
+		return 0;
+	for (UdbNativeDelivery *item = udb_native_deliveries; item; item = item->next)
+		if (!item->cancelled && item->kind == UDB_STORAGE_JOB_BIND)
+			return 1;
+	unsigned char bytes[UDB_STORAGE_MUTATION_HEADER] = {0};
+	uint64_t epoch = 0;
+	if (RAND_bytes((unsigned char *)&epoch, sizeof(epoch)) != 1 || !epoch)
+		return 0;
+	memcpy(bytes, me.id, 4);
+	udb_storage_put_u64(bytes + 4, epoch);
+	UdbNativeDelivery *delivery = NULL;
+	if (udb_native_delivery_create(ctx->storage, NULL, UDB_STORAGE_JOB_BIND, bytes, sizeof(bytes), 0, 1, 0,
+								   &delivery) != UDB_STORAGE_OK)
+		return 0;
+	if (udb_native_delivery_submit(delivery) != UDB_STORAGE_OK)
+	{
+		udb_native_delivery_drop(delivery);
+		return 0;
+	}
+	return 1;
+}
+
+static void udb_native_mutation_complete(UdbStorageJob *job)
+{
+	UdbNativeDelivery *delivery = udb_native_deliveries;
+	while (delivery && (delivery->owner != job->owner || delivery->job != job->id))
+		delivery = delivery->next;
+	if (!delivery || delivery->engine != job->engine)
+		return;
+	int current = udb_native_delivery_current(delivery);
+	if (job->result == UDB_STORAGE_OK && job->committed_generation && job->before && job->after)
+	{
+		udb_policy_notify_deferred = 1;
+		UdbStorageResult result = udb_native_runtime_publication(job);
+		const UdbStorageState *state = &job->after->state;
+		memcpy(udb_ctx->authority_sid, state->source_sid, 4);
+		snprintf(udb_ctx->authority_epoch, sizeof(udb_ctx->authority_epoch), "%016" PRIx64, state->source_epoch);
+		udb_ctx->authority_epoch_known = 1;
+		udb_ctx->last_applied_seq = state->source_sequence;
+		udb_ctx->current_seq = !strcmp(state->source_sid, me.id) ? state->source_sequence : 0;
+		udb_policy_notify_deferred = 0;
+		udb_propagator_policy_flush(udb_ctx);
+		if (result == UDB_STORAGE_OK && current && udb_native_delivery_current(delivery))
+		{
+			if (job->kind == UDB_STORAGE_JOB_BIND && !udb_reconcile.active)
+			{
+				udb_ready = 1;
+				udb_last_successful_sync = time(NULL);
+				udb_sync_status = UDB_SYNC_OK;
+				udb_degraded_since = 0;
+				udb_bootstrap_peer = NULL;
+				udb_offer_reconciliation_to_downstreams();
+			}
+			else
+				udb_native_mutation_relay(delivery, job);
+		}
+		else
+		{
+			udb_ready = 0;
+			udb_sync_status = UDB_SYNC_DEGRADED;
+			udb_native_mutation_abort(0);
+			if (udb_reconcile.active)
+				udb_reconcile_abort(udb_ctx, "native durable mutation effects unavailable", 1);
+			udb_mutation_trigger_gap_recovery(NULL);
+		}
+	}
+	else if (job->result != UDB_STORAGE_STAGED && !delivery->cancelled)
+	{
+		Client *peer = udb_ocl_find_server(delivery->peer_sid);
+		udb_protocol_mutation_error(peer, job->kind == UDB_STORAGE_JOB_POINT ? "INS" : "DEL", UDB_ERR_FATAL,
+									*((const unsigned char *)job + offsetof(UdbStorageJob, payload) + 20));
+		udb_native_mutation_abort(0);
+		if (udb_reconcile.active)
+			udb_reconcile_abort(udb_ctx, "native live mutation failed", 1);
+		udb_mutation_trigger_gap_recovery(peer);
+	}
+	udb_native_delivery_drop(delivery);
 }

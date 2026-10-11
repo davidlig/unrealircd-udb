@@ -112,6 +112,8 @@ def build_bundle():
     clean_udb_c = re.sub(r'/\*.*?\*/', '', udb_c, count=1, flags=re.DOTALL).strip()
 
     udb_internal_h = replace_include(udb_internal_h, r'"udb\.h"', udb_h, "udb_internal.h")
+    udb_storage_h = read_source(os.path.join(SRC_DIR, "udb_storage.h"))
+    udb_internal_h = replace_include(udb_internal_h, r'"udb_storage\.h"', udb_storage_h, "udb_internal.h")
     clean_udb_c = replace_include(clean_udb_c, r'"udb_internal\.h"', udb_internal_h, "udb.c")
 
     included = set()

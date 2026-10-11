@@ -12,71 +12,35 @@ UDB does not implement an autonomous IRC registration service that creates accou
 
 ## 2. Architecture
 
-`src/udb.c` builds one compilation unit in this order:
-
-1. `udb_store.c.inc`: record tree, paths, persistence.
-2. `udb_config.c.inc`: `udb {}`, S settings, L options.
-3. `udb_core.c.inc`: validation, schemas, SHA-256 state manifests, tree operations.
-4. `udb_services.c.inc`: NickServ/ChanServ/IpServ source resolution.
-5. `udb_effects.c.inc`: runtime effect application/removal.
-6. `udb_sync.c.inc`: HEL, authority, reconciliation, staged snapshots.
-7. `udb_operclasses.c.inc`: OCL inventories and OCLG global view.
-8. `udb_mutation.c.inc`: `INS`, `DEL`, `DRP`, `EXP`.
-9. `udb_protocol.c.inc`: `DB` parsing and routing.
-10. `udb_nicks.c.inc`, `udb_channels.c.inc`, `udb_ips.c.inc`, `udb_lines.c.inc`: block-specific runtime behavior.
-11. `udb_query.c.inc`: `DBQ` and `UDB` diagnostics.
-12. `udb_lifecycle.c.inc`: startup, publication, shutdown, durable state.
-
-Logical data is split into six blocks, but **READY is a property of the complete set**, not of a single block.
-
-| Block | Name | Main purpose |
-|---|---|---|
-| `N` | Nicks | Nick registration, authentication, attributes |
-| `C` | Channels | Registered channels, access, channel policy |
-| `I` | IPs | Clone limits, exemptions, host policy |
-| `S` | Settings | Global settings and propagator selection |
-| `L` | Links | Local per-server options |
-| `K` | Lines | G/Z/Shun/Q and spamfilters |
+`src/udb.c` composes one translation unit. `udb_storage*.c.inc` implements the
+native binary engine; `udb_native*.c.inc` provides frozen schema, typed reads,
+wire codecs, staged send/receive and exact-generation runtime effects.
+`udb_store.c.inc` contains path encoding/secret classification only.
+`udb_core.c.inc` contains pure business schemas and parsing. The configuration,
+services, HEL/OCL, mutation, protocol, N/C/I/K consumers, diagnostics and lifecycle
+units coordinate foreground daemon behavior. `dist/udb.c` is generated.
+READY belongs to all six blocks N/C/I/S/L/K, not to an individual root.
 
 ## 3. Data model and paths
 
-Each block owns a `UdbRecord` tree. Path components are separated by `::` and canonically encoded when they contain reserved bytes. The encoder turns `:`, `%`, control/space bytes (`<= 0x20`) and non-ASCII bytes (`>= 0x7f`) into uppercase `%HH` sequences.
-
-Conceptual examples:
-
-```text
-N::alice::pass
-C::#chat::founder
-C::#chat::access::alice
-I::203.0.113.20::clones
-S::propagator
-K::F::<pattern>::action
-```
-
-On-disk block files omit the block letter because the file itself identifies the block:
-
-```text
-alice::pass sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-alice::modes +iw
-```
-
-Numeric values are serialized as `*<integer>`; strings are written literally after the first space. Numeric parsing is strict: no sign, whitespace, or trailing characters are accepted.
+Logical paths use `Block::component::property`, for example `N::alice::pass`,
+`C::#chat::access::alice`, `I::203.0.113.20::clones` and `S::propagator`.
+Components percent-encode `:`, `%`, space/control and non-ASCII bytes as uppercase
+`%HH`; literal printable `@`, `/` and `*` remain literal. Structural control bytes
+and NUL are rejected even if escaped. Keys fold ASCII case except exact K::F patterns.
+The binary row carries explicit NONE/STRING/uint64 types. Protocol values use
+`!n`, `!s<Base64>` and `!u<decimal>`, never text-file or untagged value syntax.
+Tables below describe logical values, not wire payload spellings.
 
 ### 3.1 Representation limits
 
-The implementation enforces, among others:
-
-- encoded logical path: **8192 bytes**;
-- raw component: **4608 bytes**;
-- encoded component: **4608 bytes**;
-- record value: **4096 bytes**;
-- snapshot `txid`: **31 characters**;
-- decoded spamfilter pattern: **3072 bytes**;
-- each logical record must also fit an UnrealIRCd S2S line with an internal 256-byte overhead budget;
-- top-level hash: dynamically sized per block, with a 2048-bucket minimum;
-  bucket counts are powers of two and grow with root-profile load.
-
-A record fitting on disk is not sufficient; it must also satisfy the S2S bound so it can be safely synchronized.
+- At most 8 structural components; business schemas currently allow at most 3.
+- Raw logical path under 8192 bytes; each raw component at most 4608 bytes.
+- Value at most 4096 bytes; snapshot txid at most 31 characters.
+- Decoded spamfilter pattern at most 3072 bytes.
+- Every actual wire row must additionally fit MAXLINELENGTH minus the reserved
+  256-byte S2S overhead; percent/Base64 expansion counts toward that bound.
+- Logical counts and numbers use uint64 with checked arithmetic and explicit LE encoding.
 
 ## 4. Six-block schema
 
@@ -152,7 +116,7 @@ Block N separates three planes and never infers one from another:
 | Identity | The client currently holds the profile identity and its public projection (`account=<nick>`, `+r`) | `UdbNickIdentity` marker |
 | Effect ownership | Exactly which runtime state (`vhost`, modes, snomasks, SWHOIS, oper) UDB changed | `UdbNickEffects` marker |
 
-Profile records are **desired state**: what UDB wants now. The ownership marker is **applied state**: what UDB actually changed. Cleanup never reads the profile to decide what to remove: the tree cannot describe the past because an external source may have replaced a value UDB once set.
+Profile records are **desired state**: what UDB wants now. The ownership marker is **applied state**: what UDB actually changed. Cleanup never reads the profile to decide what to remove: the current profile cannot describe the past because an external source may have replaced a value UDB once set.
 
 Per-effect ownership:
 
@@ -333,7 +297,7 @@ K::<type>::<pattern>::expires *<unix_timestamp>
 
 The pattern node is a container and has no direct value. `expires` is one absolute Unix timestamp chosen by the origin; its absence is the only representation of a permanent line. `expires *0` is invalid. A timestamp at or before the local time is never materialized as a TKL.
 
-Expiry is not derived from the TKL runtime state. The root authority sweeps expired K profiles and performs the canonical transactional `DEL K::<type>::<pattern>`, which removes the complete subtree from memory and `udb_K.db`; followers remove only their local runtime TKL and send or relay an `EXP <path> <expected-expires>` compare-and-delete request toward their selected upstream. Therefore restart, reload, snapshot, reconnect, or a change to a profile property cannot renew or resurrect a temporary line. Only an explicit `INS ...::expires` changes its lifetime; `DEL ...::expires` converts a valid remaining profile to permanent.
+Expiry is not derived from the TKL runtime state. The root authority sweeps expired K profiles and performs the canonical transactional `DEL K::<type>::<pattern>`, which removes the complete subtree from the active root and `udb_K.db`; followers remove only their local runtime TKL and send or relay an `EXP <path> <expected-expires>` compare-and-delete request toward their selected upstream. Therefore restart, reload, snapshot, reconnect, or a change to a profile property cannot renew or resurrect a temporary line. Only an explicit `INS ...::expires` changes its lifetime; `DEL ...::expires` converts a valid remaining profile to permanent.
 
 UDB tags managed TKLs with the reserved `set_by="UDB:managed"` marker and only removes matching UDB-owned lines.
 
@@ -393,12 +357,12 @@ Z has a dedicated validator. It accepts only one canonical IPv4/IPv6 address or 
 CIDR is also an identity. Z validates the prefix range and rejects host bits instead of masking them. For example, `2001:db8:1234:5678::1/48` is rejected; submit `2001:db8:1234::/48`. This policy applies to IPv4 and IPv6 Z networks.
 
 ```text
-DB * INS K::Z::2001%3Adb8%3A%3A1234::reason :IPv6 blocked
-DB * INS K::Z::2001%3Adb8%3A%3A1234::expires *<unix_timestamp>
-DB * DEL K::Z::2001%3Adb8%3A%3A1234
+:<root-SID> DB * INS <root-epoch> <seq> K::Z::2001%3Adb8%3A%3A1234::reason :!sSVB2NiBibG9ja2Vk
+:<root-SID> DB * INS <root-epoch> <seq> K::Z::2001%3Adb8%3A%3A1234::expires :!u<unix_timestamp>
+:<root-SID> DB * DEL <root-epoch> <seq> K::Z::2001%3Adb8%3A%3A1234
 
-DB * INS K::Z::2001%3Adb8%3A1234%3A%3A/48::reason :IPv6 network blocked
-DB * DEL K::Z::2001%3Adb8%3A1234%3A%3A/48
+:<root-SID> DB * INS <root-epoch> <seq> K::Z::2001%3Adb8%3A1234%3A%3A/48::reason :!sSVB2NiBuZXR3b3JrIGJsb2NrZWQ=
+:<root-SID> DB * DEL <root-epoch> <seq> K::Z::2001%3Adb8%3A1234%3A%3A/48
 ```
 
 #### G-Line and Shun IPv6
@@ -406,12 +370,12 @@ DB * DEL K::Z::2001%3Adb8%3A1234%3A%3A/48
 G and S preserve the `user@host` identity; an IPv6 address belongs in the `host` portion. The UDB path encoder only changes the colons:
 
 ```text
-DB * INS K::G::*@2001%3Adb8%3A%3A1234::reason :IPv6 G-Line
-DB * INS K::G::baduser@2001%3Adb8%3A%3A1234::reason :IPv6 G-Line by ident
-DB * DEL K::G::*@2001%3Adb8%3A%3A1234
+:<root-SID> DB * INS <root-epoch> <seq> K::G::*@2001%3Adb8%3A%3A1234::reason :!sSVB2NiBHLUxpbmU=
+:<root-SID> DB * INS <root-epoch> <seq> K::G::baduser@2001%3Adb8%3A%3A1234::reason :!sSVB2NiBHLUxpbmUgYnkgaWRlbnQ=
+:<root-SID> DB * DEL <root-epoch> <seq> K::G::*@2001%3Adb8%3A%3A1234
 
-DB * INS K::S::*@2001%3Adb8%3A%3A1234::reason :IPv6 Shun
-DB * DEL K::S::*@2001%3Adb8%3A%3A1234
+:<root-SID> DB * INS <root-epoch> <seq> K::S::*@2001%3Adb8%3A%3A1234::reason :!sSVB2NiBTaHVu
+:<root-SID> DB * DEL <root-epoch> <seq> K::S::*@2001%3Adb8%3A%3A1234
 ```
 
 The current G/S UDB schema checks that both `user` and `host` exist, that there is exactly one `@`, and that each component is at most 127 bytes. It forwards the decoded host to UnrealIRCd's native server-ban API. It does **not** parse, normalize, or reject alternative IPv6/CIDR spellings for G/S. Therefore an IPv6 CIDR such as `*@2001%3Adb8%3A1234%3A%3A/48` passes UDB's structural validation and is forwarded as `*@2001:db8:1234::/48`, but canonical identity guarantees documented above apply only to Z. Operators should use the same canonical `inet_ntop()` spelling for G/S to avoid textual aliases until G/S-specific canonicalization is implemented.
@@ -419,15 +383,15 @@ The current G/S UDB schema checks that both `user` and `host` exist, that there 
 Ready-to-send DB protocol examples:
 
 ```text
-DB * INS K::Z::2001%3Adb8%3A%3A1::reason :IPv6 Z test
-DB * INS K::Z::2001%3Adb8%3A1234%3A%3A/48::reason :IPv6 network test
-DB * INS K::G::*@2001%3Adb8%3A%3A1::reason :IPv6 G-Line test
-DB * INS K::S::*@2001%3Adb8%3A%3A1::reason :IPv6 Shun test
+:<root-SID> DB * INS <root-epoch> <seq> K::Z::2001%3Adb8%3A%3A1::reason :!sSVB2NiBaIHRlc3Q=
+:<root-SID> DB * INS <root-epoch> <seq> K::Z::2001%3Adb8%3A1234%3A%3A/48::reason :!sSVB2NiBuZXR3b3JrIHRlc3Q=
+:<root-SID> DB * INS <root-epoch> <seq> K::G::*@2001%3Adb8%3A%3A1::reason :!sSVB2NiBHLUxpbmUgdGVzdA==
+:<root-SID> DB * INS <root-epoch> <seq> K::S::*@2001%3Adb8%3A%3A1::reason :!sSVB2NiBTaHVuIHRlc3Q=
 
-DB * DEL K::Z::2001%3Adb8%3A%3A1
-DB * DEL K::Z::2001%3Adb8%3A1234%3A%3A/48
-DB * DEL K::G::*@2001%3Adb8%3A%3A1
-DB * DEL K::S::*@2001%3Adb8%3A%3A1
+:<root-SID> DB * DEL <root-epoch> <seq> K::Z::2001%3Adb8%3A%3A1
+:<root-SID> DB * DEL <root-epoch> <seq> K::Z::2001%3Adb8%3A1234%3A%3A/48
+:<root-SID> DB * DEL <root-epoch> <seq> K::G::*@2001%3Adb8%3A%3A1
+:<root-SID> DB * DEL <root-epoch> <seq> K::S::*@2001%3Adb8%3A%3A1
 ```
 ## 5. `udb {}` configuration
 
@@ -447,10 +411,11 @@ Accepted directives:
 |---|---|---|
 | `propagator` | one valid server name | unset |
 | `password-flood` | `attempts:seconds`, both > 0 | `5:60` |
-| `max-staged-records` | 1..10,000,000 | 500,000 |
-| `max-staged-bytes` | 1,024..1,073,741,824 bytes | 64 MiB |
+| `cache-size` | 16 MiB..SIZE_MAX/2 bytes | 128 MiB (local) |
+| `max-staged-records` | 1..10,000,000 | 10,000,000 |
+| `max-staged-bytes` | 1,024..SIZE_MAX/2 bytes | 16 GiB |
 | `sync-inactivity-timeout` | 1..86,400 s | 60 s |
-| `sync-absolute-timeout` | 1..86,400 s | 300 s |
+| `sync-absolute-timeout` | 1..86,400 s | 3600 s |
 | `stale-timeout` | 1..604,800 s | 300 s |
 | `anti-entropy-interval` | 1..86,400 s | 1800 s |
 
@@ -469,74 +434,79 @@ There is a deliberate difference: local `udb::propagator` validates **one server
 
 A remote candidate is selectable only when directly linked to the current node; when protocol availability is required it must also have confirmed HEL. A non-adjacent server does not become this node's snapshot source merely because it exists in the global topology.
 
-## 6. Persistence and atomicity
+## 6. Native persistence and durability
 
-Each block is stored at:
-
-```text
-PERMDATADIR/udb_N.db
-PERMDATADIR/udb_C.db
-PERMDATADIR/udb_I.db
-PERMDATADIR/udb_S.db
-PERMDATADIR/udb_L.db
-PERMDATADIR/udb_K.db
-```
-
-Files are stored under `PERMDATADIR` and created mode `0600`.
-
-Snapshot header:
+The exclusive new layout is `PERMDATADIR/udb/`:
 
 ```text
-; UDB Block N - Version 1
-; Generation: 12345
-; Saved: 1780000000
-; Records: 42
+udb_N.db  udb_C.db  udb_I.db  udb_S.db  udb_L.db  udb_K.db
+udb_wal.db  udb_meta0.db  udb_meta1.db
 ```
 
-`Records` counts persisted logical lines, not container nodes. The manifest digest excludes headers and file ordering. It is canonical SHA-256 over logical `path value\n` lines sorted lexicographically. An empty tree has digest `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+The six stable binary containers hold immutable 64 KiB integrity-checked pages,
+sorted fragments of at most 4 MiB, paged run indices and copy-on-write catalogs.
+There is no resident full block, full key directory, text snapshot reader,
+migration, or compatibility decoder. Deploy the new implementation on every node.
+Never edit or partially replace these files. Backups must capture the complete
+store from a stopped daemon, not independently copy live block files.
 
-### 6.1 Single-block commit
+### 6.1 Bounded indexed reads
 
-Snapshot writing performs:
+Exact reads route by a 4096-way entity partition and then a full-key SHA-256
+radix tree. Leaves split above 16 MiB of encoded rows plus 128 bytes per row and
+collapse when their visible content falls below that bound. Fragment/run indices
+locate data without loading an entire block. Prefix operations use bounded disk
+iterators. An immutable generation pin protects a reader's extents until release.
+Queries distinguish FOUND, NOT_FOUND and storage errors; errors never mean absence.
+Numeric zero is a value, not a missing field.
 
-1. exclusive `open(<file>.tmp, O_CREAT|O_EXCL, 0600)` with `O_NOFOLLOW` where available;
-2. full serialization;
-3. `fflush()`;
-4. file `fsync()`;
-5. `rename(.tmp, file)` as the visible commit point;
-6. parent-directory `fsync()`.
+The local LRU cache defaults to 128 MiB. `udb::cache-size` takes decimal bytes
+(minimum 16 MiB), may differ on every node, and is not replicated. For example,
+`cache-size 268435456;` selects 256 MiB. More cache can retain more hot data/index
+pages, reducing repeated I/O and validation, but does not remove startup validation
+or guarantee faster bulk builds. Rehash applies the local budget; a shrink blocked
+by pinned pages retains the current budget and requires a later rehash. Managed
+auxiliary allocations are capped at 64 MiB, including 16 MiB of memtables and an
+8 MiB total delivery/job/completion queue. Daemon-owned clients/TKLs and the OS
+page cache are outside that storage budget.
 
-Failure before rename does not publish the new active state. If rename succeeded but directory fsync/close fails, the result is **COMMITTED_DURABILITY_UNCERTAIN**: memory remains aligned with the visible file, but UDB forces `BOOTSTRAPPING` and recovery.
+### 6.2 Commit, checkpoint and recovery
 
-`INS`/`DEL` mutations are copy-on-write: clone the tree, validate/apply, write the snapshot, then replace the active tree and runtime effects.
+A single native writer receives copied jobs with stable owner IDs and module/
+authority revisions, never worker-owned `Client *` pointers. Groups target at most
+5 ms or 1 MiB of queued jobs. A final authorization barrier precedes durability.
+The order is data-file flush, global WAL root-set flush, immutable publication,
+then foreground effects, acknowledgements and relay. Receipts pin the exact
+before/after roots even when a later group is already published. Cancellation
+before the barrier cannot publish; cancellation after it cannot undo a durable
+transaction, but cannot grant stale READY or forwarding authority either.
 
-### 6.2 READY as a generation set
+Checkpoints use the inactive fixed 4 MiB metadata slot, flush/readback validation,
+a durable WAL floor, then retirement of covered log entries. Extent reuse follows
+a complete checkpoint-gated inventory of every active/staged/pinned generation.
+Cache identities include file identity and extent generation. Maintenance output
+is bounded to 64 MiB per private step. Prefix tombstones retain operation order;
+a newer PUT survives an older subtree delete. DRP publishes an empty block root.
 
-When entering READY all six blocks are written with one generation. Existing files are first renamed to `.udb_previous`; if any of the six writes fails, UDB attempts to restore the entire previous set.
+Startup validates the WAL/checkpoints and streams all referenced physical and
+logical data for all six blocks before service. This costs O(total referenced data)
+CPU/I/O, not O(total records) resident memory, and bypasses DATA cache admission.
+A warm indexed lookup after startup is not a substitute for that validation.
+Corrupt, incomplete, foreign or ambiguously provisioned stores fail closed rather
+than being silently replaced with empty data. Unreferenced incomplete WAL tails
+are retired only after the committed roots validate. Private orphan cleanup needs
+matching store identity, integrity-checked headers, ownership and held file identity;
+malformed/foreign/symlinked files are preserved. Admission stops and the writer is
+joined before pins, schema snapshots, effects or storage handles are freed.
 
-Then `.udb_state` is atomically published:
+### 6.3 Platform and evidence boundary
 
-```text
-FORMAT=1
-STATE=READY
-ORIGIN=FRESH
-GENERATION=12345
-LAST_SYNC=1780000000
-```
-
-Persistent states are `READY` and `BOOTSTRAPPING`; origins are `FRESH` and `RECOVERY`.
-
-At startup a persisted READY is accepted only if:
-
-- `.udb_state` is syntactically valid;
-- its generation is non-zero;
-- all six snapshots exist and parse successfully;
-- every snapshot has exactly the generation named by `.udb_state`;
-- no `.udb_previous` remains from an unfinished publication.
-
-Existing snapshots without `.udb_state`, corrupt state, an incomplete generation, or leftover backups **are not partially published**. Active roots remain empty and UDB stays NOT_READY/BOOTSTRAPPING until an authoritative database is recovered.
-
-For a truly fresh directory, when there is no propagator policy (standalone authority) or the selected primary is the local server, UDB may persist six empty blocks and enter READY locally.
+Linux uses positioned 64-bit I/O, owner-only files, exclusive locks and real flushes.
+The Windows branch uses wide paths, native positioned I/O/flushes, exclusive handles,
+owner ACLs, fixed local NTFS and reparse/hardlink checks. Commit never depends on
+unlink/rename or a simulated Windows directory fsync. The deployment targets are
+Windows 11 and Server 2022/2025 x64 with MSVC v142; actual MSVC/NTFS execution is
+not proven by the Linux checks. See `tests/README.md` for observed proof and limits.
 
 ## 7. HEL 4 negotiation
 
@@ -606,101 +576,72 @@ UDB operates under an explicit, deterministic authority model (**Policy A — Se
    - In policy-free deployments, the first directly connected peer confirmed during bootstrap becomes the exclusive bootstrap owner. Once `READY`, a policy-free node seals itself as a standalone authority and rejects incoming remote imports, preventing accidental state clobbering by newly linked neighbors.
 
 
-## 9. Snapshot reconciliation
+## 9. Native snapshot reconciliation
 
-Reconciliation is **inventory-driven pull**, hop-by-hop. Reconciliation frames are not forwarded through the network.
+Reconciliation is inventory-driven pull between eligible directly linked HEL 4/OCL
+peers. It is never forwarded as a snapshot through another hop. Sender manifests,
+INF and transferred rows derive from one pinned six-root generation.
 
-Typical round:
-
-```text
-Authority                                     Receiver
-    |                                            |
-    | INF round N block sha256 mtime watermark   |
-    |------------------------------------------->|
-    |                                            | compares sha256 digest
-    |            RES round N block               | if divergent
-    |<-------------------------------------------|
-    | BEGIN round N block txid sha256 watermark  |
-    |------------------------------------------->|
-    | PUT round N block txid path :value         |
-    |------------------------------------------->|
-    | ...                                        |
-    | END round N block txid sha256 watermark    |
-    |------------------------------------------->|
-    | ACK round N block txid sha256 watermark    |
-    |<-------------------------------------------|
-```
-
-The authority advertises `INF` for **all six blocks**. The receiver may transition to READY only after:
-
-1. N/C/I/S/L/K have all been compared in the round;
-2. every divergent block has completed its snapshot transfer;
-3. no staged sessions or pending `RES` remain;
-4. the complete READY generation and `.udb_state` can be durably committed.
-
-### 9.1 Frames
+### 9.1 Exact new grammar
 
 ```text
-INF   <round> <block> <sha256> <record_count> <modified_at> [<watermark_seq>]
-RES   <round> <block>
-BEGIN <round> <block> <txid> <sha256> [<watermark_seq>]
-PUT   <round> <block> <txid> <path> :<string>
-PUT   <round> <block> <txid> <path> *<number>
-END   <round> <block> <txid> <sha256> [<watermark_seq>]
-ACK   <round> <block> <txid> <sha256> [<watermark_seq>]
-ERR   <subcmd> <code> <round_or_seq> <block>
+:<peer-SID> DB <target> INF <round> <block> <sha256> <count> 0 <watermark> <root-SID> <root-epoch>
+:<peer-SID> DB <target> RES <round> <block>
+:<peer-SID> DB <target> BEGIN <round> <block> <txid> <sha256> <watermark>
+:<peer-SID> DB <target> PUT <round> <block> <txid> <Block::path> :<typed-value>
+:<peer-SID> DB <target> END <round> <block> <txid> <sha256> <watermark>
+:<receiver-SID> DB <peer> ACK <round> <block> <txid> <sha256> <watermark>
 ```
 
-Parameters:
-- Round IDs are non-zero decimal integers.
-- `txid` accepts only alphanumeric characters, `-`, `_`, maximum 31 characters.
-- `sha256` is a 64-character lowercase hexadecimal cryptographic digest of the block's canonical serialization.
-- `watermark_seq` is the 64-bit monotonic sequence number representing the latest mutation included in the snapshot.
-- Only the documented arities are accepted. `INF`, `BEGIN`, `END`, and `ACK` may omit the legacy-compatible optional watermark, but if present it must be a valid unsigned decimal value within the `uint64_t` range.
+`typed-value` is exactly `!n` (NONE), `!u<canonical uint64 decimal>` (including zero),
+or `!s<canonical Base64>` (string bytes). Untagged values and INF without origin
+are rejected. HEL remains 4; request and ACK forms remain unchanged. All six INF
+entries must agree on root SID, epoch and watermark. The neighboring HEL epoch
+identifies that peer instance, not necessarily the root mutation origin. The
+reserved timestamp is emitted as zero and is not freshness authority.
 
-`BEGIN` requires an active reconciliation with the same authority/round and a pending `RES` for that block. `PUT` must exactly match peer/round/txid. Invalid sequencing aborts the session and the reconciliation round.
+### 9.2 Private durable staging
 
-`END` recalculates the staged-tree canonical SHA-256 digest and requires an exact match with the received digest before persistence and atomic commit.
+BEGIN allocates a private writer owner; copied PUT rows feed bounded external sort.
+Duplicate canonical keys, schema failures, wrong ownership, count/digest mismatch,
+replay, quota exhaustion or invalid sequencing cannot publish active data. END
+seals and validates an isolated disk root, then durably records it as pending; only
+its durable receipt permits ACK. Matching active roots use durable REUSE. A
+six-root PROMOTE atomically publishes content and source lineage. One block ACK
+is not whole-database READY. All retained live-tail receipts and their effects
+must drain under the same current authority before READY.
 
-### 9.2 Staging limits
+Defaults per block: 10,000,000 rows, 16 GiB physical staging quota including sorting
+and output, 60 s inactivity and 3600 s absolute timeout. Snapshot sending is
+SendQ-aware and bounded. Disconnect/HEL restart cancels ownership without deriving
+a replacement root lineage. Recovery discards abandoned pending owners only after
+validating their referenced roots.
 
-Defaults:
+### 9.3 Logical checksums
 
-- 500,000 staged records;
-- 64 MiB accumulated `len(path)+len(data)`;
-- 60 s inactivity timeout;
-- 300 s absolute timeout.
+Hashes are domain-separated SHA-256 of explicit little-endian binary rows, sorted
+within canonical leaves, with position/count/weight binding. Entity partitions,
+full-key radix split/collapse, leaf/branch/block domains and empty positions are
+canonical: hashes do not depend on insertion order, cache size, physical page IDs
+or compaction history. Empty blocks have block-specific nonempty digest inputs,
+not SHA-256 of an empty byte string. ASCII keys fold except the exact K::F pattern.
+The independent reference lives in `tests/support/udb_test_support/native_reference.py`.
 
-The inactivity deadline is refreshed by PUT activity; the absolute deadline is not. Inventory/reconciliation and pending-RES timeouts also exist.
+### 9.4 Snapshot/live ordering
 
-Failed rounds schedule bounded retries (`UDB_RECONCILE_RETRY_MAX = 6`) with backoff.
-
-### 9.3 Strong identity and canonical serialization
-
-Convergence detection relies on deterministic SHA-256 digests rather than checksums:
-- Every record is serialized into canonical wire form: `<Block::path> <value>\n` (or `<Block::path>\n` when valueless).
-- Records are sorted strictly in lexicographical byte order (`strcmp`).
-- Empty blocks hash an empty byte string.
-- No C struct padding, pointers, uninitialized bytes, or hash-table iteration dependencies are included.
-- Any single-byte semantic divergence produces a completely different 64-hex SHA-256 digest.
-
-### 9.4 Watermark and snapshot/live mutation race resolution
-
-To eliminate race conditions between live mutations and background reconciliation snapshots:
-1. Every snapshot carries `watermark_seq` indicating the exact authority sequence number reflected in the dataset. All six `INF` entries and every `BEGIN`/`END` in one round must report the same watermark; inconsistent rounds abort fail closed.
-2. Upon committing the snapshot and entering `READY`, the node sets:
-   - `last_applied_seq = watermark_seq`
-   - `expected_seq = watermark_seq + 1`
-3. Live mutations received with `seq <= watermark_seq` are discarded as duplicates (`seq <= last_applied_seq`).
-4. Live mutations with `seq == watermark_seq + 1` apply cleanly on top of the committed state.
-5. Live mutations with `seq > watermark_seq + 1` trigger gap detection and a fresh reconciliation.
+The import binds the exact root SID/epoch/watermark. Covered provisional entries
+are discarded, and the retained tail must start at watermark+1 without gaps or
+wrong origins. Copied replay envelopes reserve their future job credits within
+the same 8 MiB queue limit, so a full ingress cannot deadlock its own drain.
+Promotion/effects precede replay; replay/effects precede READY. No partial or stale
+round can authorize READY, downstream serving or stale relay.
 
 ## 10. Live mutations and sequencing
 
 Authorized mutations originated by the selected authoritative propagator are:
 
 ```text
-INS <epoch> <seq> <Block::path> <value>
+INS <epoch> <seq> <Block::path> :<typed-value>
 DEL <epoch> <seq> <Block::path>
 DRP <epoch> <seq> <block>
 EXP <path> <expected-expires>
@@ -714,7 +655,7 @@ Semantics:
 
 - `INS`: insert/replace after limits and schema validation.
 - `DEL`: delete a path; deleting a missing path is idempotent.
-- `DRP`: drop a complete block, first persisting the empty snapshot.
+- `DRP`: drop a complete block, publishing a durable empty root.
 - `EXP`: point-to-point compare-and-delete request for an expired K line sent toward the selected direct authority (`DB <target> EXP <path> <expected-expires>`). A relay validates and deduplicates the request, then forwards it to its own selected upstream. Only the root authority deletes the profile, persists `udb_K.db`, allocates the next stream sequence, and broadcasts the transactional `DEL`; stale requests are ignored without error.
 
 ### 10.1 Monotonic sequence rules and gap recovery
@@ -777,6 +718,8 @@ Rules:
 - Propagator unavailability is tracked separately for observability and does **not** by itself degrade a READY node.
 
 The readiness `PRE_LOCAL_CONNECT` hook rejects **new local clients** whenever `udb_ready == 0`, with a temporary-unavailable disconnect message. This rule does not evict already-connected users.
+
+The initial `NICK` command applies the same readiness rejection before nickname policy lookup, including during CAP negotiation. An unnamed client receives an explicit `ERROR` and disconnect instead of silently waiting for a registration timeout; this does not bypass bootstrap or change authority selection.
 
 Persistence failures that prevent durability from being proven can revoke READY even when visible content has already changed; this is deliberately fail-closed.
 
@@ -889,14 +832,14 @@ The implementation follows several fail-closed rules:
 - temporary files use exclusive creation and mode `0600`;
 - `O_NOFOLLOW` is used for temporary snapshots where available;
 - defensive cleanup refuses to unlink a temporary path if it is a symlink or non-regular file;
-- durability uncertainty after rename revokes READY;
+- durability uncertainty during data/WAL flush poisons admission and revokes READY;
 - incompatible HEL/OCL can close a server link rather than silently form a mixed inconsistent network.
 
 ### 15.1 Trust and transport boundary
 
 HEL 4 authenticates neither a server nor a payload. UDB trusts UnrealIRCd's authenticated server link and then applies its own direct-peer authority policy, sequencing, staging, and schema checks. Every UDB hop should therefore use TLS with certificate verification and tightly controlled link credentials. Without TLS, the DB protocol exposes full snapshots and live values in transit, including password hashes, encryption material, and channel keys; integrity also depends on the underlying link authentication. UDB provides no end-to-end encryption or signature above the server link.
 
-Editing `udb_*.db` while the daemon is live is not recommended. Apart from bypassing the in-memory tree, manual edits can break generation invariants, schema, canonical digests, S2S size constraints, or the `.udb_state` generation set.
+Never edit native binary files while the daemon is live. Manual changes bypass immutable generation ownership and can corrupt page integrity, schemas, logical digests or the global WAL/checkpoint authority.
 
 ## 16. Rehash and policy changes
 
@@ -905,7 +848,7 @@ During rehash:
 - new configuration does not prematurely erase the last known-good propagator override if rehash fails;
 - after successful completion, removal of `udb::propagator` removes the local override and restores normal precedence;
 - policy changes are announced internally and sessions owned by an invalid source are aborted;
-- identified holders keep nickname, account and effects: the nickname block is preserved while the module unloads and is reconciled against the reloaded records, and preserved state is revoked if the reloaded database is not READY or the module fails to reload;
+- identified holders keep nickname, account and effects: applied identity markers are preserved during rehash reload and is reconciled against the reloaded records, and preserved state is revoked if the reloaded database is not READY or the module fails to reload;
 - the local OCL inventory is rebuilt and, when changed, a new generation is published.
 
 Runtime `S::propagator` changes trigger equivalent authority reevaluation after the new record/block has committed.
@@ -915,6 +858,7 @@ Runtime `S::propagator` changes trigger equivalent authority reevaluation after 
 Canonical sources: `src/`. Distribution artifact: `dist/udb.c`.
 
 ```bash
+scripts/format-sources.sh
 python3 scripts/bundle.py
 ```
 
@@ -926,7 +870,7 @@ python3 scripts/bundle.py --check
 
 Read-only verification that both artifacts exactly match current sources. The generator fails if a `.c.inc` unit is orphaned or included more than once.
 
-Current CI builds **UnrealIRCd 6.2.6**, compiles the modular UDB source, checks bundle determinism, and runs normal plus ASan/UBSan suites covering bootstrap, staged sync, persistence, multihop, failover, OCL, limits, spamfilter, channels, clones, and schema validation.
+CI builds a supported UnrealIRCd Stable and exercises the current pytest/cmocka/native contracts. See `tests/README.md` for measured evidence and unverified boundaries; removed text/tree test suites are not proof of this engine.
 
 ## 18. DB protocol quick reference
 
@@ -934,16 +878,15 @@ Current CI builds **UnrealIRCd 6.2.6**, compiles the modular UDB source, checks 
 HEL 4 <selector> <epoch> OCL [OCLG]
 HEL 4 ACK <selector> <epoch> OCL [OCLG]
 
-INF <round> <block> <sha256> <record_count> <mtime> [<watermark_seq>]
+INF <round> <block> <sha256> <record_count> 0 <watermark_seq> <root-SID> <root-epoch>
 RES <round> <block>
-BEGIN <round> <block> <txid> <sha256> [<watermark_seq>]
-PUT <round> <block> <txid> <path> :<string>
-PUT <round> <block> <txid> <path> *<number>
-END <round> <block> <txid> <sha256> [<watermark_seq>]
-ACK <round> <block> <txid> <sha256> [<watermark_seq>]
+BEGIN <round> <block> <txid> <sha256> <watermark_seq>
+PUT <round> <block> <txid> <Block::path> :<typed-value>
+END <round> <block> <txid> <sha256> <watermark_seq>
+ACK <round> <block> <txid> <sha256> <watermark_seq>
 ERR <subcmd> <code> <round/correlation> <block>
 
-INS <epoch> <seq> <Block::path> <value>
+INS <epoch> <seq> <Block::path> :<typed-value>
 DEL <epoch> <seq> <Block::path>
 DRP <epoch> <seq> <block>
 EXP <path> <expected-expires>
@@ -971,7 +914,7 @@ To diagnose a node:
 5. use `/UDB OPERCLASSES` to identify missing OCL inventories;
 6. use `/UDB OPERCLASS <name>` to identify definition/inheritance/ACL mismatches;
 7. inspect UnrealIRCd `udb` events, especially HEL, persistence, staged sync, READY, and OCL events;
-8. inspect `.udb_state` and all six generations for diagnosis only, without live editing.
+8. retain the complete stopped binary store and logs for diagnosis; never edit live data.
 
 ## 20. Verified current limitations
 
@@ -984,3 +927,52 @@ At the documented commit:
 - `OPER_ONLY` enforces JOIN from UDB state even when UnrealIRCd's native `+O` handler is unavailable.
 
 These notes intentionally describe real code behavior rather than capabilities inferred from the data model.
+
+## 21. Linux qualification evidence
+
+Recorded on Linux x86-64, 2026-10-10 UTC. The [JSON report](native_storage_benchmarks.json) contains all nine single-sample runs and the separate point-write probe.
+
+| Rows | Cache MiB | Recovery (s) | 10K repeated reads (ms) | Peak RSS (MiB) |
+|---:|---:|---:|---:|---:|
+| 1,000,000 | 128 | 2.400 | 1055 | 141.9 |
+| 1,000,000 | 256 | 2.415 | 845 | 273.9 |
+| 1,000,000 | 512 | 2.315 | 456 | 537.9 |
+| 5,000,000 | 128 | 6.398 | 1084 | 142.2 |
+| 5,000,000 | 256 | 5.900 | 878 | 273.9 |
+| 5,000,000 | 512 | 5.751 | 557 | 538.1 |
+| 10,000,000 | 128 | 12.597 | 1069 | 141.8 |
+| 10,000,000 | 256 | 10.443 | 879 | 273.9 |
+| 10,000,000 | 512 | 12.059 | 715 | 538.0 |
+
+Rows are unique nick vhost properties, not full profiles. Bulk creation uses the
+production sorter/rebuilder with a stopped, owner-serialized writer; it is not a
+10M-row protocol import. Recovery executes the full referenced-data validation.
+The first read pass starts with cold DATA cache but warmed indices and a retained
+OS page cache; the repeat pass uses the same 10K keys. Do not interpret these
+numbers as physical cold-disk latency or statistically controlled cache comparisons.
+
+The nine bulk/read runs peaked at 2.23–2.35 MiB of charged AUX memory. Stable-file
+sizes were 1.74/1.99/2.45 GiB for 1M/5M/10M, respectively, including metadata,
+physical COW/catalog pages and reusable dead extents, not just live row payload.
+The separate 10M/256 MiB probe performed ten real queued durable point mutations
+plus origin binding in 59 ms, wrote 4,653,056 bytes through the production positioned
+I/O backend and grew stable files by zero bytes through extent reuse. Its AUX peak
+was 2.89 MiB. It verifies the held prior snapshot still reads the original value;
+it is neither sustained write throughput nor evidence that every update has that cost.
+
+Final new-contract checks cover typed wire, corruption, incomplete WAL tails,
+EIO/ENOSPC, process exit before/partway through WAL and after WAL flush, pinned
+checkpoint safety, radix split/collapse, cache/queue bounds, all-six atomic import,
+rejected checksums, retained-tail replay, native effect publication, restart,
+local rehash, ordered authority failover/failback and A→B→C snapshots/multihop mutations with root lineage. OCL runtime
+inventory checks are separate; this is not exhaustive OCL multihop or all-topology failover proof.
+
+The cache/AUX caps bound managed storage allocations, not total daemon memory.
+Native TKL/spamfilters, persistent channels, connected users and runtime effect
+ownership allocate separately in UnrealIRCd; millions of active K bans or
+persistent C channels can therefore consume additional memory. The reported RSS
+belongs to the storage driver with N vhost properties, not that daemon workload.
+
+Actual MSVC v142/Windows 11 or Server 2022/2025 local NTFS execution, Windows ACL
+and crash qualification, real host power loss and sustained network-import/write
+load remain unverified. Linux success must not be presented as those guarantees.

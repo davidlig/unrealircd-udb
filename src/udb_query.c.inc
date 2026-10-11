@@ -9,29 +9,19 @@
  * License: GNU General Public License v2+
  */
 
-/* Secret status depends on block, depth and key, not just the leaf name.
- * Without an active context, reserved secret keys remain conservatively hidden. */
-static int udb_query_is_secret(const UdbRecord *rec)
+/* Secret classification uses the canonical block/depth/property tuple, never
+ * display text or a record's parent pointers. */
+static int udb_query_is_secret(const UdbStorageRow *row)
 {
-	const UdbRecord *root;
-	unsigned int depth = 0;
-	char letter;
-
-	if (!rec || !rec->key)
+	if (!row || !row->depth)
 		return 0;
-	if (!udb_ctx)
-		return udb_secret_key_is_reserved(rec->key);
-	for (root = rec; root->parent; root = root->parent)
-		depth++;
-	if (root == udb_ctx->nicks)
-		letter = UDB_BLOCK_NICKS;
-	else if (root == udb_ctx->channels)
-		letter = UDB_BLOCK_CHANNELS;
-	else if (root == udb_ctx->settings)
-		letter = UDB_BLOCK_SETTINGS;
-	else
-		return 0;
-	return udb_secret_key_matches(letter, depth, rec->key);
+	UdbStorageSpan part = row->components[row->depth - 1];
+	return (row->block == 'N' && row->depth == 2 && part.length == sizeof(NKEY_PASS) - 1 &&
+			!memcmp(part.data, NKEY_PASS, sizeof(NKEY_PASS) - 1)) ||
+		   (row->block == 'S' && row->depth == 1 && part.length == sizeof(SKEY_CRYPT_KEY) - 1 &&
+			!memcmp(part.data, SKEY_CRYPT_KEY, sizeof(SKEY_CRYPT_KEY) - 1)) ||
+		   (row->block == 'C' && row->depth == 2 && part.length == sizeof(CKEY_MODES) - 1 &&
+			!memcmp(part.data, CKEY_MODES, sizeof(CKEY_MODES) - 1));
 }
 
 static void udb_query_send_status(Client *client)
@@ -270,129 +260,168 @@ CMD_FUNC(cmd_udb)
 			   me.name, client->name);
 }
 
+#define UDB_QUERY_ROWS 64
+#define UDB_QUERY_BYTES ((size_t)32 * 1024)
+
+typedef struct UdbQueryScratch
+{
+	UdbNativeKey key;
+	UdbStorageField field;
+	char path[UDB_STORAGE_PATH_MAX * 3 + 1];
+	char value[UDB_STORAGE_VALUE_MAX + 1];
+} UdbQueryScratch;
+
+static UdbStorageResult udb_query_send_row(Client *client, const UdbStorageRow *row, UdbQueryScratch *scratch,
+										   size_t *bytes)
+{
+	UdbStorageResult result = udb_native_key_path(row, scratch->path, sizeof(scratch->path));
+	const char *value = scratch->value;
+	if (result != UDB_STORAGE_OK)
+		return result;
+	if (udb_query_is_secret(row))
+		value = "<redacted>";
+	else if (row->kind == UDB_STORAGE_VALUE_STRING)
+	{
+		memcpy(scratch->value, row->value.data, row->value.length);
+		scratch->value[row->value.length] = 0;
+	}
+	else if (row->kind == UDB_STORAGE_VALUE_NUMBER)
+		snprintf(scratch->value, sizeof(scratch->value), "%" PRIu64, row->number);
+	else
+		value = "(empty)";
+	size_t size = strlen(scratch->path) + strlen(value) + UDB_S2S_OVERHEAD_MAX;
+	if (size > UDB_S2S_LINE_MAX || size > UDB_QUERY_BYTES - *bytes)
+		return UDB_STORAGE_LIMIT;
+	*bytes += size;
+	sendto_one(client, NULL, ":%s 339 %s :DBQ %s %s", me.name, client->name, scratch->path, value);
+	return UDB_STORAGE_OK;
+}
+
 CMD_FUNC(cmd_dbq)
 {
-	char *query_str = NULL;
-	char *cur, *ds;
-	UdbBlock *block;
-	UdbRecord *rec;
+	const char *query;
+	UdbStorageRead *read = NULL;
+	UdbStorageBlockIterator *iterator = NULL;
+	UdbQueryScratch *scratch = NULL;
+	UdbStorageResult result;
+	UdbStorageRecord record;
+	size_t bytes = 0;
+	unsigned int shown = 0;
+	int index;
 
 	if (!IsUser(client) && !IsServer(client))
 		return;
-
 	if (IsUser(client) && !IsOper(client))
 	{
 		sendnumeric(client, ERR_NOPRIVILEGES);
 		return;
 	}
-
 	if (parc < 2)
 	{
-		sendto_one(client, NULL, ":%s 339 %s :Insufficient parameters. Syntax: /DBQ [server] <block>[::path]", me.name,
-				   client->name);
+		sendto_one(client, NULL, ":%s 339 %s :Syntax: /DBQ [server] <block>[::path]", me.name, client->name);
 		return;
 	}
-
-	if (parc >= 3)
+	if (parc >= 3 && !match_simple(parv[1], me.name))
 	{
-		if (!match_simple(parv[1], me.name))
-		{
-			Client *target_server = find_server_quick(parv[1]);
-			if (target_server)
-				sendto_one(target_server, NULL, ":%s DBQ %s %s", client->id, parv[1], parv[2]);
-			else
-				sendnumeric(client, ERR_NOSUCHSERVER, parv[1]);
-			return;
-		}
-		safe_strdup(query_str, parv[2]);
+		Client *server = find_server_quick(parv[1]);
+		if (server)
+			sendto_one(server, NULL, ":%s DBQ %s %s", client->id, parv[1], parv[2]);
+		else
+			sendnumeric(client, ERR_NOSUCHSERVER, parv[1]);
+		return;
 	}
-	else
-	{
-		safe_strdup(query_str, parv[1]);
-	}
-
-	if (!strcasecmp(query_str, "STATUS"))
+	query = parv[parc >= 3 ? 2 : 1];
+	if (!strcasecmp(query, "STATUS"))
 	{
 		udb_query_send_status(client);
-		safe_free(query_str);
 		return;
 	}
-
-	block = udb_block_by_letter(udb_ctx, query_str[0]);
-	if (!block)
+	index = *query ? udb_storage_stage_block_index((unsigned char)*query) : -1;
+	if (index < 0)
 	{
-		sendto_one(client, NULL, ":%s 339 %s :Block %c does not exist.", me.name, client->name, query_str[0]);
-		safe_free(query_str);
+		sendto_one(client, NULL, ":%s 339 %s :Invalid block", me.name, client->name);
 		return;
 	}
-
-	if (query_str[1] == '\0')
+	if (!udb_ctx || !udb_ctx->storage)
 	{
-		sendto_one(client, NULL, ":%s 339 %s :%c %u %lu %lu %s %s", me.name, client->name, block->letter,
-				   block->record_count, block->filesize, (unsigned long)block->modified_at, block->sha256,
-				   block->syncing_from ? "*" : "");
-		safe_free(query_str);
+		sendto_one(client, NULL, ":%s 339 %s :Native database unavailable", me.name, client->name);
 		return;
 	}
-
-	cur = query_str + 1;
-	if (cur[0] != ':' || cur[1] != ':' || cur[2] == '\0')
+	result = udb_storage_read_open(udb_ctx->storage, &read);
+	if (result != UDB_STORAGE_OK)
+		goto finish;
+	if (!query[1])
 	{
-		sendto_one(client, NULL, ":%s 339 %s :Invalid block format.", me.name, client->name);
-		safe_free(query_str);
-		return;
+		const UdbStorageBlockRoot *root = read->generation->state.blocks + index;
+		char digest[65];
+		for (unsigned int i = 0; i < 32; i++)
+			snprintf(digest + 2 * i, 3, "%02x", root->summary.digest[i]);
+		sendto_one(client, NULL, ":%s 339 %s :%c rows=%" PRIu64 " generation=%" PRIu64 " watermark=%" PRIu64 " %s",
+				   me.name, client->name, root->block, root->summary.count, read->generation->state.generation,
+				   read->generation->state.source_sequence, digest);
+		goto finish;
 	}
-	cur += 2;
-
-	rec = block->tree;
-	while ((ds = strstr(cur, "::")))
+	scratch = udb_storage_alloc(&read->engine->budget, UDB_STORAGE_MEMORY_AUX, sizeof(*scratch));
+	if (!scratch)
 	{
-		*ds = '\0';
-		rec = udb_record_find(udb_ctx, cur, rec);
-		if (!rec)
-			goto notfound;
-		cur = ds + 2;
+		result = UDB_STORAGE_LIMIT;
+		goto finish;
 	}
-	rec = udb_record_find(udb_ctx, cur, rec);
-
-	if (!rec)
+	result = udb_native_key_parse(query, &scratch->key);
+	if (result != UDB_STORAGE_OK)
+		goto finish;
+	result = udb_storage_read_field(read, &scratch->key.row, &scratch->field);
+	if (result < UDB_STORAGE_NOT_FOUND)
+		goto finish;
+	if (result == UDB_STORAGE_OK && scratch->field.kind != UDB_STORAGE_VALUE_NONE)
 	{
-	notfound:
-		sendto_one(client, NULL, ":%s 339 %s :Block not found: %s", me.name, client->name, query_str);
-		safe_free(query_str);
-		return;
+		UdbStorageRow row = scratch->key.row;
+		row.kind = scratch->field.kind;
+		row.number = scratch->field.number;
+		row.value.data = (const unsigned char *)scratch->field.string;
+		row.value.length = scratch->field.kind == UDB_STORAGE_VALUE_STRING ? scratch->field.length : 0;
+		result = udb_query_send_row(client, &row, scratch, &bytes);
+		goto finish;
 	}
-
-	if (rec->data_str)
+	result = udb_storage_read_iterator(read, scratch->key.row.block, &scratch->key.row, &iterator);
+	if (result != UDB_STORAGE_OK)
+		goto finish;
+	while ((result = udb_storage_block_iterator_next(iterator, &record)) == UDB_STORAGE_OK)
 	{
-		sendto_one(client, NULL, ":%s 339 %s :DBQ %s %s", me.name, client->name, query_str,
-				   udb_query_is_secret(rec) ? "<redacted>" : rec->data_str);
-	}
-	else if (rec->data_num)
-	{
-		sendto_one(client, NULL, ":%s 339 %s :DBQ %s %lu", me.name, client->name, query_str, rec->data_num);
-	}
-	else
-	{
-		UdbRecord *child;
-		for (child = rec->child; child; child = child->sibling)
+		if (shown == UDB_QUERY_ROWS)
 		{
-			if (child->data_str)
-				sendto_one(client, NULL, ":%s 339 %s :DBQ %s::%s %s", me.name, client->name, query_str, child->key,
-						   udb_query_is_secret(child) ? "<redacted>" : child->data_str);
-			else if (child->data_num)
-				sendto_one(client, NULL, ":%s 339 %s :DBQ %s::%s %lu", me.name, client->name, query_str, child->key,
-						   child->data_num);
-			else if (child->child)
-				sendto_one(client, NULL, ":%s 339 %s :DBQ %s::%s (has sub-records)", me.name, client->name, query_str,
-						   child->key);
-			else
-				sendto_one(client, NULL, ":%s 339 %s :DBQ %s::%s (empty)", me.name, client->name, query_str,
-						   child->key);
+			result = UDB_STORAGE_LIMIT;
+			break;
 		}
+		result = udb_query_send_row(client, &record.row, scratch, &bytes);
+		if (result != UDB_STORAGE_OK)
+			break;
+		shown++;
 	}
-
-	safe_free(query_str);
+	if (result == UDB_STORAGE_NOT_FOUND && shown)
+		result = UDB_STORAGE_OK;
+finish:
+	if (iterator)
+	{
+		UdbStorageResult closed = udb_storage_block_iterator_close(&iterator);
+		if (closed != UDB_STORAGE_OK)
+			result = closed;
+	}
+	udb_storage_free(scratch);
+	if (read)
+	{
+		UdbStorageResult closed = udb_storage_read_close(&read);
+		if (closed != UDB_STORAGE_OK)
+			result = closed;
+	}
+	if (result == UDB_STORAGE_NOT_FOUND)
+		sendto_one(client, NULL, ":%s 339 %s :No records found", me.name, client->name);
+	else if (result == UDB_STORAGE_LIMIT)
+		sendto_one(client, NULL, ":%s 339 %s :Query limit reached; narrow the prefix (maximum 64 rows / 32 KiB)",
+				   me.name, client->name);
+	else if (result != UDB_STORAGE_OK)
+		sendto_one(client, NULL, ":%s 339 %s :Database query failed (%d); results may be incomplete", me.name,
+				   client->name, (int)result);
 }
 
 static void udb_query_init(ModuleInfo *modinfo)

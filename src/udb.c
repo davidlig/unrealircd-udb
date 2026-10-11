@@ -18,23 +18,54 @@ ModuleHeader MOD_HEADER = {"third/udb", UDB_VERSION,
 /* Implementation units share one translation unit. Shared declarations in
  * udb_internal.h allow static helpers to cross subsystem boundaries. */
 
-/* Record store: tree, hash, path, and file persistence primitives */
+/* Exclusive native binary persistence and bounded immutable queries. */
+#include "udb_storage_cache.c.inc"
+#include "udb_storage_catalog.c.inc"
+#include "udb_storage_codec.c.inc"
+#include "udb_storage_engine.c.inc"
+#include "udb_storage_fragments.c.inc"
+#include "udb_storage_hash.c.inc"
+#include "udb_storage_io.c.inc"
+#include "udb_storage_jobs.c.inc"
+#include "udb_storage_journal.c.inc"
+#include "udb_storage_nodes.c.inc"
+#include "udb_storage_orphans.c.inc"
+#include "udb_storage_point.c.inc"
+#include "udb_storage_prefix.c.inc"
+#include "udb_storage_queries.c.inc"
+#include "udb_storage_raw.c.inc"
+#include "udb_storage_read.c.inc"
+#include "udb_storage_rebuild.c.inc"
+#include "udb_storage_reclaim.c.inc"
+#include "udb_storage_runs.c.inc"
+#include "udb_storage_sort.c.inc"
+#include "udb_storage_stage_jobs.c.inc"
+#include "udb_storage_stages.c.inc"
+#include "udb_storage_state.c.inc"
+#include "udb_storage_validate.c.inc"
+
+/* Canonical wire path encoding and secret tuple classification */
 #include "udb_store.c.inc"
 
 /* Configuration: daemon block parsing and UDB settings state */
 #include "udb_config.c.inc"
 
-/* Core database engine: records, checksums, sync staging, and file I/O */
+/* Pure business schema, bounded parsing, and foreground session lifetime */
 #include "udb_core.c.inc"
+#include "udb_native_read.c.inc"
+#include "udb_native_schema.c.inc"
 
 /* Dynamic connected service clients and service-originated notices */
 #include "udb_services.c.inc"
 
-/* Runtime effects: special-record dispatch only */
-#include "udb_effects.c.inc"
-
 /* Staged synchronization sessions: HEL capability and transfer state */
 #include "udb_sync.c.inc"
+
+/* Pinned native snapshot senders and typed wire values. */
+#include "udb_native_effects.c.inc"
+#include "udb_native_receive.c.inc"
+#include "udb_native_sync.c.inc"
+#include "udb_native_wire.c.inc"
 
 /* Operclass registry: local inventory, OCL propagation and OCLG view */
 #include "udb_operclasses.c.inc"

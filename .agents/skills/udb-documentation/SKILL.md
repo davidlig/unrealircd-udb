@@ -17,12 +17,12 @@ Use for `README.md`, `README_ES.md`, `doc/udb_technical_en.md`, or `doc/udb_tech
 ## Evidence map
 
 - version/module constants and hard limits: `src/udb.h`, `src/udb_internal.h`;
-- database format/persistence: `udb_store.c.inc`, `udb_core.c.inc`;
+- database format/persistence: `udb_storage*.c.inc`, `udb_storage.h`, `udb_native*.c.inc`;
 - config and S/L behavior: `udb_config.c.inc`;
 - HEL/propagator/readiness/reconciliation: `udb_sync.c.inc`;
 - live writes: `udb_mutation.c.inc`;
 - OCL/OCLG: `udb_operclasses.c.inc`;
-- N/C/I/K schemas/effects: owning block units plus `udb_effects.c.inc`;
+- N/C/I/K schemas/effects: owning block units plus `udb_native_effects.c.inc`;
 - operator diagnostics: `udb_query.c.inc`;
 - distribution/version compatibility: `scripts/bundle.py`, `modules.list`, CI.
 

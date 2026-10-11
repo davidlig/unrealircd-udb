@@ -5,7 +5,8 @@ import socket
 import struct
 import time
 
-from .runtime import Wire, tree_digest
+from .runtime import Wire
+from .native_reference import logical_digest, wire_value
 
 EMPTY_DIGEST = hashlib.sha256(b"").hexdigest()
 
@@ -63,42 +64,51 @@ class Peer:
         self.send(f"DB {self.node.sid} HEL 4 ACK {policy} {self.epoch} {capabilities}")
         self.barrier()
 
-    def inventory(self, blocks=None, *, watermark=0):
-        """One complete six-block inventory, including the mutation watermark."""
+    def inventory(self, blocks=None, *, watermark=0, source_sid=None, source_epoch=None):
+        """Strict origin-bearing six-block INF; values have explicit types."""
         blocks = {} if blocks is None else blocks
         self.round += 1
+        source_sid = self.sid if source_sid is None else source_sid
+        source_epoch = self.epoch if source_epoch is None else source_epoch
         for letter in "NCISLK":
             records = blocks.get(letter, {})
-            self.send(f"DB {self.node.sid} INF {self.round} {letter} {tree_digest(records)} {len(records)} {int(time.time()) + 1000 if records else 0} {watermark}")
+            self.send(f"DB {self.node.sid} INF {self.round} {letter} {logical_digest(records, letter)} {len(records)} 0 {watermark} {source_sid} {source_epoch}")
         self.barrier()
         return self.round
 
-    def mutation(self, sequence, path, value=None, *, epoch=None):
-        command = "DEL" if value is None else "INS"
-        suffix = "" if value is None else f" :{value}"
-        self.send(f"DB * {command} {self.epoch if epoch is None else epoch} {sequence} {path}{suffix}")
+    def mutation(self, sequence, path, value=None, *, source_sid=None, epoch=None, delete=False):
+        source_sid = self.sid if source_sid is None else source_sid
+        epoch = self.epoch if epoch is None else epoch
+        command = "DEL" if delete else "INS"
+        suffix = "" if delete else f" :{wire_value(value)}"
+        self.send(f":{source_sid} DB * {command} {epoch} {sequence} {path}{suffix}")
         self.barrier()
 
-    def offer(self, records, *, letter="N", digest=None, count=None, watermark=None):
-        self.round += 1
-        checksum = tree_digest(records) if digest is None else digest
-        start = len(self.lines)
-        suffix = "" if watermark is None else f" {watermark}"
-        self.send(f"DB {self.node.sid} INF {self.round} {letter} {checksum} {len(records) if count is None else count} {int(time.time()) + 1000}{suffix}")
-        self.wait(lambda line: f" RES {self.round} {letter}" in line, "requested snapshot", start=start)
-        return self.round, checksum
+    def synchronize(self, blocks=None, *, watermark=0, source_sid=None, source_epoch=None):
+        blocks = {} if blocks is None else blocks
+        round_id = self.inventory(blocks, watermark=watermark, source_sid=source_sid, source_epoch=source_epoch)
+        self.transfer_round(round_id, blocks, watermark=watermark)
+        return round_id
 
-    def transfer(self, records, *, letter="N", txid="snapshot", digest=None, end_digest=None, watermark=None):
-        round_id, checksum = self.offer(records, letter=letter, digest=digest, watermark=watermark)
-        suffix = "" if watermark is None else f" {watermark}"
-        self.send(f"DB {self.node.sid} BEGIN {round_id} {letter} {txid} {checksum}{suffix}")
-        for path, value in records.items():
-            self.send(f"DB {self.node.sid} PUT {round_id} {letter} {txid} {path} :{value}")
-        start = len(self.lines)
-        self.send(f"DB {self.node.sid} END {round_id} {letter} {txid} {checksum if end_digest is None else end_digest}{suffix}")
-        reply = self.wait(lambda line: f" {round_id} {letter} {txid} " in line and (" ACK " in line or " ABORT " in line), "snapshot result", start=start)
+    def transfer_round(self, round_id, blocks, *, watermark=0, only=False):
+        """Send requested blocks of an already advertised round."""
+        for letter in (blocks if only else "NCISLK"):
+            records = blocks.get(letter, {})
+            if not any(f" RES {round_id} {letter}" in line for line in self.lines):
+                continue  # Matching roots use durable REUSE, even when nonempty.
+            start = len(self.lines)
+            self.wait(lambda line: f" RES {round_id} {letter}" in line, "requested native snapshot")
+            digest = logical_digest(records, letter)
+            txid = f"native-{round_id}-{letter}"
+            self.send(f"DB {self.node.sid} BEGIN {round_id} {letter} {txid} {digest} {watermark}")
+            for path, value in records.items():
+                self.send(f"DB {self.node.sid} PUT {round_id} {letter} {txid} {letter}::{path} :{wire_value(value)}")
+            self.send(f"DB {self.node.sid} END {round_id} {letter} {txid} {digest} {watermark}")
+            reply = self.wait(lambda line: f" {round_id} {letter} {txid} " in line and (" ACK " in line or " ABORT " in line),
+                              "durable native snapshot result", start=start, timeout=15)
+            if " ACK " not in reply:
+                raise AssertionError(reply)
         self.barrier()
-        return reply
 
     def ocl(self, entries, *, generation=1, epoch=None, digest=None, count=None):
         epoch = self.epoch if epoch is None else epoch

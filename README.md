@@ -24,8 +24,8 @@ UDB is **not an interactive NickServ/ChanServ registration service**. A selected
 
 - Six persistent blocks with strict schema validation.
 - Copy-on-write mutations: persistence occurs before new runtime state is published.
-- Atomic snapshots using a temporary file, `fsync`, `rename`, and parent-directory `fsync`.
-- Durable `.udb_state`: READY is valid only when all six blocks belong to one generation.
+- Native stable-file commits; no whole-block text rewrite.
+- Six-root durability through one global WAL and two checkpoint slots.
 - Mandatory **HEL 4** negotiation and mandatory **OCL** capability between UDB peers.
 - `INF → RES → BEGIN/PUT/END → ACK` reconciliation with canonical SHA-256 state manifests, staging caps, inactivity and absolute timeouts.
 - Authoritative freshness (Policy A): selected propagator is authoritative; local filesystem timestamps (`mtime`) never override network state or decide record ownership.
@@ -73,10 +73,11 @@ With no propagator policy, a truly fresh database directory initializes as a **s
 udb {
     propagator "ares-services.example.net";
     password-flood "5:60";
-    max-staged-records 500000;
-    max-staged-bytes 67108864;
+    cache-size 134217728;
+    max-staged-records 10000000;
+    max-staged-bytes 17179869184;
     sync-inactivity-timeout 60;
-    sync-absolute-timeout 300;
+    sync-absolute-timeout 3600;
     stale-timeout 300;
     anti-entropy-interval 1800;
 };
@@ -86,10 +87,11 @@ udb {
 |---|---:|---|
 | `propagator` | — | One server name in local configuration |
 | `password-flood` | `5:60` | Failed attempts per profile/IP and time window |
-| `max-staged-records` | 500000 | Incoming snapshot cap |
-| `max-staged-bytes` | 64 MiB | Accumulated staged payload cap |
+| `cache-size` | 128 MiB | Decimal bytes; local |
+| `max-staged-records` | 10,000,000 | Per block |
+| `max-staged-bytes` | 16 GiB | Physical quota |
 | `sync-inactivity-timeout` | 60 s | Refreshed by PUT activity |
-| `sync-absolute-timeout` | 300 s | Never refreshed by activity |
+| `sync-absolute-timeout` | 3600 s | Absolute |
 | `stale-timeout` | 300 s | NOT_READY age before STALE |
 | `anti-entropy-interval` | 1800 s | MANIFEST REQ cadence with ±10% jitter |
 
@@ -103,21 +105,27 @@ Local configuration takes precedence over S.
 
 ## Persistence
 
-UnrealIRCd `PERMDATADIR` contains:
+The exclusive new store lives in **`PERMDATADIR/udb`**: six stable binary
+`udb_N/C/I/S/L/K.db` containers, `udb_wal.db` and two `udb_meta0/1.db` slots.
+There is no migration or compatibility reader. Deploy the new module on all nodes;
+never edit live files or restore only part of a store.
 
-```text
-udb_N.db
-udb_C.db
-udb_I.db
-udb_S.db
-udb_L.db
-udb_K.db
-.udb_state
-```
+Indexed queries read bounded pages on demand, not entire blocks. Cache defaults
+to 128 MiB and is independently configurable per node in decimal bytes, for
+example `cache-size 268435456;` for 256 MiB. More cache can improve repeated hot
+reads, not necessarily bulk writes. Auxiliary storage allocations are capped at
+64 MiB, including memtables and the complete 8 MiB delivery/job queue.
 
-All six snapshots form one READY generation set. On startup UDB refuses automatic READY if a block is missing/corrupt, generations differ, `.udb_state` is invalid, or `.udb_previous` backups indicate an unfinished transaction.
+Data flush and global WAL flush precede publication, effects, ACK and relay.
+Startup streams and validates all referenced data for all six roots before serving:
+it scales with data size in CPU/I/O, but does not load millions of rows into RAM.
+Linux implementation and final tests are locally exercised; Windows native x64
+NTFS/ACL/I/O code still requires actual MSVC/NTFS qualification.
 
-Do not edit these files while the daemon is running. Authorized protocol mutations preserve schema, checksums, atomicity, and runtime effects.
+Observed Linux 1M/5M/10M results at 128/256/512 MiB are recorded in the
+[technical qualification](doc/udb_technical_en.md#21-linux-qualification-evidence)
+and [machine-readable report](doc/native_storage_benchmarks.json). These are
+storage-core measurements, not IRC throughput or cold-device guarantees.
 
 ## Protocol and synchronization
 
@@ -129,7 +137,7 @@ DB <peer> HEL 4 <selector> <epoch> OCL [OCLG]
 
 The rest of the protocol is not accepted until HEL 4/OCL is confirmed; HEL timeout can cause UDB to abort the server link. HEL is capability/authority negotiation, not cryptographic peer authentication: UDB inherits the UnrealIRCd server-link trust boundary. Use authenticated TLS links with certificate verification on every UDB hop; without TLS, snapshots, password hashes, channel keys, and mutations are exposed in transit.
 
-Block `K` uses `expires *<unix_timestamp>` for temporary G/Z/S/Q/F sanctions; no `expires` means permanent. Followers relay directed `EXP` requests hop by hop toward the selected root authority and never delete authoritative persistence locally; only that authority removes the expired subtree and originates the sequenced `DEL`.
+Block `K` uses `expires` as a uint64 (`!u<unix_timestamp>` on wire) for temporary G/Z/S/Q/F sanctions; no `expires` means permanent. Followers relay directed `EXP` requests hop by hop toward the selected root authority and never delete authoritative persistence locally; only that authority removes the expired subtree and originates the sequenced `DEL`.
 
 
 ### Block K IPv4/IPv6 routes
@@ -137,7 +145,7 @@ Block `K` uses `expires *<unix_timestamp>` for temporary G/Z/S/Q/F sanctions; no
 In a UDB path, `::` is the component separator, so every IPv6 `:` is `%3A`; printable `@` and `/` remain literal. For example, use `K::Z::2001%3Adb8%3A%3A1::reason`, `K::Z::2001%3Adb8%3A1234%3A%3A/48::reason`, `K::G::*@2001%3Adb8%3A%3A1::reason`, and `K::S::*@2001%3Adb8%3A%3A1::reason`. Z requires the canonical `inet_ntop()` address spelling and CIDR network address (no host bits); G/S retain `user@host` and do not yet canonicalize IPv6 hosts. See the technical guide for `DB INS`/`DEL` examples and the full policy.
 
 
-Reconciliation compares all six blocks with `INF`. Only divergent blocks are requested through `RES` and received into a private staged tree using `BEGIN/PUT/END`. END validates the checksum, persists the snapshot, and only then publishes the new tree.
+INF binds all six block digests/counts to one root SID, epoch and watermark. Divergent blocks use isolated disk BEGIN/PUT/END staging. Durable END permits ACK, not READY; atomic six-root promotion and complete retained-tail replay/effects precede READY. Values use explicit `!n`, `!u<uint64>` or `!s<Base64>` tags. Old INF/value forms are rejected.
 
 Live mutations are `INS`, `DEL`, and `DRP`; `EXP` is a directed follower-to-authority expiry request. Mutations retain the root origin SID/epoch/sequence while relays validate and forward them; staged snapshot transfers remain hop by hop and are never forwarded.
 
@@ -207,7 +215,7 @@ Check for bundle drift without writing:
 python3 scripts/bundle.py --check
 ```
 
-Current CI selects a compatible Stable UnrealIRCd 6.2.x release, validates the deterministic bundle, and runs normal plus ASan/UBSan suites covering persistence, bootstrap, staged sync, multihop, failover, OCL, limits, and runtime effects. The cmocka + pytest suite is the authoritative test path; the retired standalone scripts are not part of test discovery or CI. See the [test-suite guide](tests/README.md).
+CI builds a compatible UnrealIRCd Stable and runs pytest/cmocka plus native engine checks. See the [test guide](tests/README.md) for observed coverage and unverified platform/performance boundaries; do not infer multihop or Windows proof from a successful Linux storage check.
 
 ## Documentation
 
