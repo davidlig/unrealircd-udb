@@ -12,7 +12,7 @@
 #ifndef UDB_H
 #define UDB_H
 
-#define UDB_VERSION "4.0.0"
+#define UDB_VERSION "4.0.0-rc1"
 #define UDB_PROTOCOL_HEL "4"
 
 /* Block Identifiers */

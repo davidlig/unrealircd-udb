@@ -1,10 +1,10 @@
-# UDB 4 — Documentación técnica
+# UDB — Documentación técnica
 
-> Documento reconstruido desde la implementación actual de `davidlig/unrealircd-udb` en la rama `main` y revisado el 11 de septiembre de 2026. El código, no las versiones anteriores de esta documentación, se ha utilizado como fuente de verdad.
+> Este documento describe la implementación canónica de `src/` preparada para la release del módulo `4.0.0-rc1` el 11 de octubre de 2026. La versión del módulo es independiente de HEL 4 y de la generación 4 del almacenamiento nativo. Consulta las [notas de lanzamiento](releases/4.0.0-rc1_es.md) para conocer el alcance de la validación y los requisitos de despliegue.
 
 ## 1. Alcance
 
-UDB (Unreal DataBase) es un módulo global para UnrealIRCd 6 que mantiene y aplica una base de datos distribuida para registros de nick, canales, políticas por IP, ajustes, opciones por servidor y sanciones. La versión del módulo es **4.0.0** y el metadato de distribución declara **UnrealIRCd 6.2.x** como versión mínima (`min-unrealircd-version "6.2.*"`).
+UDB (Unreal DataBase) es un módulo global para UnrealIRCd 6 que mantiene y aplica una base de datos distribuida para registros de nick, canales, políticas por IP, ajustes, opciones por servidor y sanciones. La versión del módulo es **4.0.0-rc1** y el metadato de distribución declara **UnrealIRCd 6.2.x** como versión mínima (`min-unrealircd-version "6.2.*"`).
 
 La implementación canónica está dividida en `src/` y se amalgama de forma determinista en `dist/udb.c`. El módulo se registra como `third/udb` y utiliza el comando S2S `DB` como protocolo propio.
 
