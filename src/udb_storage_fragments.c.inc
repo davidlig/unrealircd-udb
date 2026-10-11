@@ -364,25 +364,23 @@ static UdbStorageResult udb_storage_fragment_slots(const UdbStoragePage *page, u
 	return UDB_STORAGE_OK;
 }
 
-static UdbStorageSpan udb_storage_fragment_slot(const UdbStoragePage *page, uint32_t slot)
+static void udb_storage_fragment_slot(const UdbStoragePage *page, uint32_t slot, UdbStorageSpan *span)
 {
 	uint32_t begin = udb_storage_get_u32(page->payload.data + 8 + 4 * slot);
 	uint32_t end = udb_storage_get_u32(page->payload.data + 8 + 4 * (slot + 1));
-	UdbStorageSpan span;
-
-	span.data = page->payload.data + begin;
-	span.length = end - begin;
-	return span;
+	span->data = page->payload.data + begin;
+	span->length = end - begin;
 }
 
 static UdbStorageResult udb_storage_fragment_index_key(const UdbStoragePage *page, uint32_t slot,
 													   const UdbStorageFragment *fragment, uint64_t page_offset,
 													   uint32_t level, UdbStorageRow *key, uint64_t *child)
 {
-	UdbStorageSpan span = udb_storage_fragment_slot(page, slot);
+	UdbStorageSpan span;
 	UdbStorageResult result;
 	uint64_t offset, generation, data_end;
 
+	udb_storage_fragment_slot(page, slot, &span);
 	if (span.length < 16)
 		return UDB_STORAGE_CORRUPT;
 	offset = udb_storage_get_u64(span.data);
@@ -507,7 +505,7 @@ static UdbStorageResult udb_storage_fragment_get(UdbStorageCache *cache, UdbStor
 		UdbStorageSpan span;
 
 		slot = begin + (end - begin) / 2;
-		span = udb_storage_fragment_slot(&page, slot);
+		udb_storage_fragment_slot(&page, slot, &span);
 		result = udb_storage_record_decode(span.data, span.length, &candidate);
 		if (result != UDB_STORAGE_OK)
 			goto fail;
@@ -523,9 +521,10 @@ static UdbStorageResult udb_storage_fragment_get(UdbStorageCache *cache, UdbStor
 	}
 	if (begin < count)
 	{
-		UdbStorageSpan span = udb_storage_fragment_slot(&page, begin);
+		UdbStorageSpan span;
 		UdbStorageRecord candidate;
 
+		udb_storage_fragment_slot(&page, begin, &span);
 		result = udb_storage_record_decode(span.data, span.length, &candidate);
 		if (result != UDB_STORAGE_OK)
 			goto fail;
@@ -693,7 +692,7 @@ static UdbStorageResult udb_storage_fragment_iterator_next(UdbStorageFragmentIte
 		if (page.kind != UDB_STORAGE_PAGE_DATA || page.object != iterator->fragment.object || page.level ||
 			iterator->slot >= page.items)
 			return udb_storage_fragment_iterator_fail(iterator, UDB_STORAGE_CORRUPT);
-		span = udb_storage_fragment_slot(&page, iterator->slot++);
+		udb_storage_fragment_slot(&page, iterator->slot++, &span);
 		result = udb_storage_record_decode(span.data, span.length, &candidate);
 		if (result != UDB_STORAGE_OK)
 			return udb_storage_fragment_iterator_fail(iterator, result);
@@ -815,9 +814,10 @@ static UdbStorageResult udb_storage_fragment_validate(UdbStorageFile *file, cons
 
 			if (data)
 			{
-				UdbStorageSpan span = udb_storage_fragment_slot(&page, j);
+				UdbStorageSpan span;
 				UdbStorageRecord record;
 
+				udb_storage_fragment_slot(&page, j, &span);
 				result = udb_storage_record_decode(span.data, span.length, &record);
 				if (result != UDB_STORAGE_OK)
 					goto cleanup;

@@ -13,8 +13,9 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <openssl/evp.h>
 #include <openssl/rand.h>
-#include <openssl/sha.h>
+#include <openssl/sha.h> /* SHA256() one-shot remains supported. */
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>

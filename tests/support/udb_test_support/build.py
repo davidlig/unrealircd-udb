@@ -53,7 +53,7 @@ def build_storage_driver(output: Path, environment=None, profile: str = "normal"
                    f"/I{openssl / 'include'}", f"/Fo{obj_dir / ''}", f"/Fe{output}", str(source),
                    "/link", f"/LIBPATH:{openssl / 'lib'}", "libcrypto.lib", "advapi32.lib", "psapi.lib"]
     else:
-        command = [env.get("CC", "cc"), "-std=gnu17", "-O1", "-g", "-Wno-deprecated-declarations",
+        command = [env.get("CC", "cc"), "-std=gnu17", "-O1", "-g", "-Werror=deprecated-declarations",
                    str(source), "-pthread", "-lcrypto", "-o", str(output)]
         if profile == "asan" or env.get("UDB_NATIVE_ASAN") == "1":
             command[1:1] = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer"]

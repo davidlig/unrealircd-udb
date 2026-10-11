@@ -1,6 +1,8 @@
 """Final new-contract checks against the canonical production storage engine."""
 from pathlib import Path
 import os
+import hashlib
+import struct
 import subprocess
 import pytest
 from udb_test_support.build import build_storage_driver
@@ -72,3 +74,52 @@ def test_real_io_failure_and_process_crash(storage_driver, tmp_path, mode, recov
                             text=True, capture_output=True, timeout=90)
     assert result.returncode == 86, result.stdout + result.stderr
     run_driver(storage_driver, recovery, tmp_path)
+
+
+@pytest.mark.unit
+def test_sha256_storage_domains_match_independent_vectors(storage_driver, tmp_path):
+    """Pin existing on-disk/key digests, including domain NULs and byte order."""
+    result = subprocess.run([str(storage_driver), "hash-vectors", str(tmp_path)],
+                            text=True, capture_output=True, timeout=90)
+    assert result.returncode == 0, result.stdout + result.stderr
+    actual = dict(line.split() for line in result.stdout.splitlines())
+    sha = lambda data: hashlib.sha256(data).digest()
+    u32 = lambda number: struct.pack("<I", number)
+    totals = lambda count, weight: struct.pack("<QQ", count, weight)
+
+    def key_digest(block, components, domain, depth):
+        return sha(domain + b"\0" + block + u32(depth) + b"".join(
+            u32(len(component)) + component for component in components[:depth]))
+
+    expected = {}
+    for label, block, components, entity_depth in [
+        ("nick", b"N", [b"alice", b"created"], 1),
+        ("spamfilter", b"K", [b"f", b"CaseSensitive", b"reason"], 2),
+        ("long", b"N", [b"a" * 600, b"created"], 1),
+    ]:
+        digest = key_digest(block, components, b"UDB4/key", len(components))
+        entity = key_digest(block, components, b"UDB4/entity", entity_depth)
+        expected[label + "-key"] = digest.hex()
+        expected[label + "-partition"] = str((entity[0] << 4) | (entity[1] >> 4))
+    partition = int(expected["nick-partition"])
+    position = b"N" + struct.pack("<HH", partition, 0) + bytes(32)
+    expected["empty-leaf"] = sha(b"UDB4/leaf\0" + position + totals(0, 0)).hex()
+    components = u32(5) + b"alice" + u32(7) + b"created"
+    length = 16 + len(components) + 8
+    row = b"N\x02\x02\0" + u32(length) + u32(8) + bytes(4) + components + struct.pack("<Q", 2**64 - 1)
+    expected["leaf"] = sha(b"UDB4/leaf\0" + position + u32(length) + row + totals(1, length + 128)).hex()
+    weight = 16 * 1024 * 1024
+    expected["branch"] = sha(b"UDB4/branch\0" + position + b"\x11" * 32 + totals(1, weight)
+                             + b"\x22" * 32 + totals(1, weight) + totals(2, 2 * weight)).hex()
+    page = bytes((i * 17) & 255 for i in range(65536))
+    expected["page"] = sha(b"UDB4/page\0" + page[:48] + page[80:]).hex()
+    expected["page-excluded-field"] = expected["page"]
+    for block in b"NCISLK":
+        block_byte = bytes([block])
+        data = bytearray(b"UDB4/block\0" + block_byte)
+        for i in range(4096):
+            position = block_byte + struct.pack("<HH", i, 0) + bytes(32)
+            empty = sha(b"UDB4/leaf\0" + position + totals(0, 0))
+            data += struct.pack("<H", i) + totals(0, 0) + empty
+        expected["block-" + chr(block)] = sha(data + totals(0, 0)).hex()
+    assert actual == expected

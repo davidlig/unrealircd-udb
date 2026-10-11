@@ -164,8 +164,9 @@ module
 
 #include <errno.h>
 #include <limits.h>
+#include <openssl/evp.h>
 #include <openssl/rand.h>
-#include <openssl/sha.h>
+#include <openssl/sha.h> /* SHA256() one-shot remains supported. */
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -3282,23 +3283,34 @@ static int udb_storage_key_has_prefix(const UdbStorageRow *row, const UdbStorage
 	return 1;
 }
 
-static int udb_storage_hash_components(const UdbStorageRow *row, unsigned int depth, const char *domain,
-									   size_t domain_length, unsigned char hash[32])
+/* Finalize into a full EVP buffer; only publish an exact SHA-256 digest. */
+static int udb_storage_digest_final(EVP_MD_CTX *context, unsigned char digest[32])
 {
-	SHA256_CTX context;
+	unsigned char candidate[EVP_MAX_MD_SIZE];
+	unsigned int length = 0;
+
+	if (!EVP_DigestFinal_ex(context, candidate, &length) || length != 32)
+		return 0;
+	memcpy(digest, candidate, 32);
+	return 1;
+}
+
+static int udb_storage_hash_components(EVP_MD_CTX *context, const UdbStorageRow *row, unsigned int depth,
+									   const char *domain, size_t domain_length, unsigned char hash[32])
+{
 	unsigned char size[4];
 	unsigned char normalized[256];
 
-	if (!SHA256_Init(&context) || !SHA256_Update(&context, domain, domain_length) ||
-		!SHA256_Update(&context, &row->block, 1))
+	if (!EVP_DigestInit_ex(context, EVP_sha256(), NULL) || !EVP_DigestUpdate(context, domain, domain_length) ||
+		!EVP_DigestUpdate(context, &row->block, 1))
 		return 0;
 	udb_storage_put_u32(size, depth);
-	if (!SHA256_Update(&context, size, sizeof(size)))
+	if (!EVP_DigestUpdate(context, size, sizeof(size)))
 		return 0;
 	for (unsigned int i = 0; i < depth; i++)
 	{
 		udb_storage_put_u32(size, row->components[i].length);
-		if (!SHA256_Update(&context, size, sizeof(size)))
+		if (!EVP_DigestUpdate(context, size, sizeof(size)))
 			return 0;
 		for (uint32_t j = 0; j < row->components[i].length;)
 		{
@@ -3311,16 +3323,18 @@ static int udb_storage_hash_components(const UdbStorageRow *row, unsigned int de
 
 				normalized[k] = udb_storage_exact_component(row, i) ? c : udb_storage_fold(c);
 			}
-			if (!SHA256_Update(&context, normalized, chunk))
+			if (!EVP_DigestUpdate(context, normalized, chunk))
 				return 0;
 			j += (uint32_t)chunk;
 		}
 	}
-	return SHA256_Final(hash, &context) == 1;
+	return udb_storage_digest_final(context, hash);
 }
 
 static UdbStorageResult udb_storage_key_hash(const UdbStorageRow *row, unsigned char hash[32], unsigned int *partition)
 {
+	EVP_MD_CTX *context;
+	int success;
 	unsigned char entity[32];
 	unsigned char key[32];
 	unsigned int depth;
@@ -3330,8 +3344,14 @@ static UdbStorageResult udb_storage_key_hash(const UdbStorageRow *row, unsigned 
 	if (!hash || !partition || !udb_storage_row_valid(row) || (row->block == 'K' && row->depth < 2))
 		return UDB_STORAGE_ERROR;
 	depth = row->block == 'K' ? 2 : 1;
-	if (!udb_storage_hash_components(row, depth, entity_domain, sizeof(entity_domain), entity) ||
-		!udb_storage_hash_components(row, row->depth, key_domain, sizeof(key_domain), key))
+	context = EVP_MD_CTX_new();
+	if (!context)
+		return UDB_STORAGE_ERROR;
+	/* Reuse one context for both domains; no per-component allocations. */
+	success = udb_storage_hash_components(context, row, depth, entity_domain, sizeof(entity_domain), entity) &&
+			  udb_storage_hash_components(context, row, row->depth, key_domain, sizeof(key_domain), key);
+	EVP_MD_CTX_free(context);
+	if (!success)
 		return UDB_STORAGE_ERROR;
 	memcpy(hash, key, sizeof(key));
 	*partition = ((unsigned int)entity[0] << 4) | ((unsigned int)entity[1] >> 4);
@@ -3340,12 +3360,18 @@ static UdbStorageResult udb_storage_key_hash(const UdbStorageRow *row, unsigned 
 
 static int udb_storage_page_digest(const unsigned char *bytes, unsigned char digest[32])
 {
-	SHA256_CTX context;
+	EVP_MD_CTX *context = EVP_MD_CTX_new();
 	static const char domain[] = "UDB4/page";
+	int success;
 
-	return SHA256_Init(&context) && SHA256_Update(&context, domain, sizeof(domain)) &&
-		   SHA256_Update(&context, bytes, 48) && SHA256_Update(&context, bytes + 80, UDB_STORAGE_PAGE_SIZE - 80) &&
-		   SHA256_Final(digest, &context);
+	if (!context)
+		return 0;
+	success = EVP_DigestInit_ex(context, EVP_sha256(), NULL) && EVP_DigestUpdate(context, domain, sizeof(domain)) &&
+			  EVP_DigestUpdate(context, bytes, 48) &&
+			  EVP_DigestUpdate(context, bytes + 80, UDB_STORAGE_PAGE_SIZE - 80) &&
+			  udb_storage_digest_final(context, digest);
+	EVP_MD_CTX_free(context);
+	return success;
 }
 
 static UdbStorageResult udb_storage_page_encode(const UdbStoragePage *page, unsigned char *out, size_t capacity)
@@ -4833,25 +4859,23 @@ static UdbStorageResult udb_storage_fragment_slots(const UdbStoragePage *page, u
 	return UDB_STORAGE_OK;
 }
 
-static UdbStorageSpan udb_storage_fragment_slot(const UdbStoragePage *page, uint32_t slot)
+static void udb_storage_fragment_slot(const UdbStoragePage *page, uint32_t slot, UdbStorageSpan *span)
 {
 	uint32_t begin = udb_storage_get_u32(page->payload.data + 8 + 4 * slot);
 	uint32_t end = udb_storage_get_u32(page->payload.data + 8 + 4 * (slot + 1));
-	UdbStorageSpan span;
-
-	span.data = page->payload.data + begin;
-	span.length = end - begin;
-	return span;
+	span->data = page->payload.data + begin;
+	span->length = end - begin;
 }
 
 static UdbStorageResult udb_storage_fragment_index_key(const UdbStoragePage *page, uint32_t slot,
 													   const UdbStorageFragment *fragment, uint64_t page_offset,
 													   uint32_t level, UdbStorageRow *key, uint64_t *child)
 {
-	UdbStorageSpan span = udb_storage_fragment_slot(page, slot);
+	UdbStorageSpan span;
 	UdbStorageResult result;
 	uint64_t offset, generation, data_end;
 
+	udb_storage_fragment_slot(page, slot, &span);
 	if (span.length < 16)
 		return UDB_STORAGE_CORRUPT;
 	offset = udb_storage_get_u64(span.data);
@@ -4976,7 +5000,7 @@ static UdbStorageResult udb_storage_fragment_get(UdbStorageCache *cache, UdbStor
 		UdbStorageSpan span;
 
 		slot = begin + (end - begin) / 2;
-		span = udb_storage_fragment_slot(&page, slot);
+		udb_storage_fragment_slot(&page, slot, &span);
 		result = udb_storage_record_decode(span.data, span.length, &candidate);
 		if (result != UDB_STORAGE_OK)
 			goto fail;
@@ -4992,9 +5016,10 @@ static UdbStorageResult udb_storage_fragment_get(UdbStorageCache *cache, UdbStor
 	}
 	if (begin < count)
 	{
-		UdbStorageSpan span = udb_storage_fragment_slot(&page, begin);
+		UdbStorageSpan span;
 		UdbStorageRecord candidate;
 
+		udb_storage_fragment_slot(&page, begin, &span);
 		result = udb_storage_record_decode(span.data, span.length, &candidate);
 		if (result != UDB_STORAGE_OK)
 			goto fail;
@@ -5162,7 +5187,7 @@ static UdbStorageResult udb_storage_fragment_iterator_next(UdbStorageFragmentIte
 		if (page.kind != UDB_STORAGE_PAGE_DATA || page.object != iterator->fragment.object || page.level ||
 			iterator->slot >= page.items)
 			return udb_storage_fragment_iterator_fail(iterator, UDB_STORAGE_CORRUPT);
-		span = udb_storage_fragment_slot(&page, iterator->slot++);
+		udb_storage_fragment_slot(&page, iterator->slot++, &span);
 		result = udb_storage_record_decode(span.data, span.length, &candidate);
 		if (result != UDB_STORAGE_OK)
 			return udb_storage_fragment_iterator_fail(iterator, result);
@@ -5284,9 +5309,10 @@ static UdbStorageResult udb_storage_fragment_validate(UdbStorageFile *file, cons
 
 			if (data)
 			{
-				UdbStorageSpan span = udb_storage_fragment_slot(&page, j);
+				UdbStorageSpan span;
 				UdbStorageRecord record;
 
+				udb_storage_fragment_slot(&page, j, &span);
 				result = udb_storage_record_decode(span.data, span.length, &record);
 				if (result != UDB_STORAGE_OK)
 					goto cleanup;
@@ -5407,7 +5433,7 @@ cleanup:
 
 struct UdbStorageLeafHasher
 {
-	SHA256_CTX context;
+	EVP_MD_CTX *context;
 	UdbStorageLogicalPosition position;
 	UdbStorageLogicalSummary summary;
 	unsigned char last_key[UDB_STORAGE_KEY_MAX];
@@ -5448,7 +5474,7 @@ static UdbStorageResult udb_storage_logical_child(const UdbStorageLogicalPositio
 	return UDB_STORAGE_OK;
 }
 
-static int udb_storage_logical_hash_begin(SHA256_CTX *context, const char *domain, size_t domain_length,
+static int udb_storage_logical_hash_begin(EVP_MD_CTX *context, const char *domain, size_t domain_length,
 										  const UdbStorageLogicalPosition *position)
 {
 	unsigned char header[37];
@@ -5456,16 +5482,16 @@ static int udb_storage_logical_hash_begin(SHA256_CTX *context, const char *domai
 	udb_storage_put_u16(header + 1, position->partition);
 	udb_storage_put_u16(header + 3, position->depth);
 	memcpy(header + 5, position->prefix, 32);
-	return SHA256_Init(context) && SHA256_Update(context, domain, domain_length) &&
-		   SHA256_Update(context, header, sizeof(header));
+	return EVP_DigestInit_ex(context, EVP_sha256(), NULL) && EVP_DigestUpdate(context, domain, domain_length) &&
+		   EVP_DigestUpdate(context, header, sizeof(header));
 }
 
-static int udb_storage_logical_hash_finish(SHA256_CTX *context, UdbStorageLogicalSummary *summary)
+static int udb_storage_logical_hash_finish(EVP_MD_CTX *context, UdbStorageLogicalSummary *summary)
 {
 	unsigned char totals[16];
 	udb_storage_put_u64(totals, summary->count);
 	udb_storage_put_u64(totals + 8, summary->weight);
-	return SHA256_Update(context, totals, sizeof(totals)) && SHA256_Final(summary->digest, context);
+	return EVP_DigestUpdate(context, totals, sizeof(totals)) && udb_storage_digest_final(context, summary->digest);
 }
 
 static int udb_storage_logical_summary_valid(const UdbStorageLogicalSummary *summary)
@@ -5498,9 +5524,11 @@ static UdbStorageResult udb_storage_leaf_hasher_create(UdbStorageBudget *budget,
 	hasher = udb_storage_alloc(budget, UDB_STORAGE_MEMORY_AUX, sizeof(*hasher));
 	if (!hasher)
 		return UDB_STORAGE_LIMIT;
+	hasher->context = EVP_MD_CTX_new();
 	hasher->position = *position;
-	if (!udb_storage_logical_hash_begin(&hasher->context, domain, sizeof(domain), position))
+	if (!hasher->context || !udb_storage_logical_hash_begin(hasher->context, domain, sizeof(domain), position))
 	{
+		EVP_MD_CTX_free(hasher->context);
 		udb_storage_free(hasher);
 		return UDB_STORAGE_ERROR;
 	}
@@ -5545,7 +5573,8 @@ static UdbStorageResult udb_storage_leaf_hasher_add(UdbStorageLeafHasher *hasher
 	if (result != UDB_STORAGE_OK)
 		return hasher->failed = result;
 	udb_storage_put_u32(size, (uint32_t)length);
-	if (!SHA256_Update(&hasher->context, size, sizeof(size)) || !SHA256_Update(&hasher->context, encoded_row, length))
+	if (!EVP_DigestUpdate(hasher->context, size, sizeof(size)) ||
+		!EVP_DigestUpdate(hasher->context, encoded_row, length))
 		return hasher->failed = UDB_STORAGE_ERROR;
 	hasher->summary.count++;
 	hasher->summary.weight += length + UINT64_C(128);
@@ -5559,7 +5588,7 @@ static UdbStorageResult udb_storage_leaf_hasher_finish(UdbStorageLeafHasher *has
 		return UDB_STORAGE_ERROR;
 	if (hasher->failed)
 		return hasher->failed;
-	if (!udb_storage_logical_hash_finish(&hasher->context, &hasher->summary))
+	if (!udb_storage_logical_hash_finish(hasher->context, &hasher->summary))
 		return hasher->failed = UDB_STORAGE_ERROR;
 	hasher->finished = 1;
 	*summary = hasher->summary;
@@ -5570,22 +5599,36 @@ static void udb_storage_leaf_hasher_free(UdbStorageLeafHasher **hasher)
 {
 	if (hasher && *hasher)
 	{
+		EVP_MD_CTX_free((*hasher)->context);
 		udb_storage_free(*hasher);
 		*hasher = NULL;
 	}
 }
 
+/* Caller-owned scratch permits block hashing to reuse the empty-leaf context. */
+static int udb_storage_logical_empty_digest(EVP_MD_CTX *context, const UdbStorageLogicalPosition *position,
+											UdbStorageLogicalSummary *summary)
+{
+	static const char domain[] = "UDB4/leaf";
+	memset(summary, 0, sizeof(*summary));
+	return udb_storage_logical_hash_begin(context, domain, sizeof(domain), position) &&
+		   udb_storage_logical_hash_finish(context, summary);
+}
+
 static UdbStorageResult udb_storage_logical_empty(const UdbStorageLogicalPosition *position,
 												  UdbStorageLogicalSummary *summary)
 {
-	static const char domain[] = "UDB4/leaf";
-	SHA256_CTX context;
+	EVP_MD_CTX *context;
 	UdbStorageLogicalSummary candidate;
+	int success;
 	if (!summary || !udb_storage_logical_position_valid(position))
 		return UDB_STORAGE_ERROR;
-	memset(&candidate, 0, sizeof(candidate));
-	if (!udb_storage_logical_hash_begin(&context, domain, sizeof(domain), position) ||
-		!udb_storage_logical_hash_finish(&context, &candidate))
+	context = EVP_MD_CTX_new();
+	if (!context)
+		return UDB_STORAGE_ERROR;
+	success = udb_storage_logical_empty_digest(context, position, &candidate);
+	EVP_MD_CTX_free(context);
+	if (!success)
 		return UDB_STORAGE_ERROR;
 	*summary = candidate;
 	return UDB_STORAGE_OK;
@@ -5597,8 +5640,9 @@ static UdbStorageResult udb_storage_logical_branch(const UdbStorageLogicalPositi
 												   UdbStorageLogicalSummary *summary)
 {
 	static const char domain[] = "UDB4/branch";
-	SHA256_CTX context;
+	EVP_MD_CTX *context;
 	UdbStorageLogicalSummary candidate, empty;
+	UdbStorageResult result = UDB_STORAGE_ERROR;
 	UdbStorageLogicalPosition child;
 	const UdbStorageLogicalSummary *children[2] = {left, right};
 	if (!summary || !udb_storage_logical_position_valid(position) || position->depth == 256 ||
@@ -5621,27 +5665,34 @@ static UdbStorageResult udb_storage_logical_branch(const UdbStorageLogicalPositi
 		if (memcmp(empty.digest, children[i]->digest, sizeof(empty.digest)))
 			return UDB_STORAGE_CORRUPT;
 	}
-	if (!udb_storage_logical_hash_begin(&context, domain, sizeof(domain), position))
+	context = EVP_MD_CTX_new();
+	if (!context)
 		return UDB_STORAGE_ERROR;
+	if (!udb_storage_logical_hash_begin(context, domain, sizeof(domain), position))
+		goto cleanup;
 	for (unsigned int i = 0; i < 2; i++)
 	{
 		unsigned char totals[16];
 		udb_storage_put_u64(totals, children[i]->count);
 		udb_storage_put_u64(totals + 8, children[i]->weight);
-		if (!SHA256_Update(&context, children[i]->digest, 32) || !SHA256_Update(&context, totals, sizeof(totals)))
-			return UDB_STORAGE_ERROR;
+		if (!EVP_DigestUpdate(context, children[i]->digest, 32) || !EVP_DigestUpdate(context, totals, sizeof(totals)))
+			goto cleanup;
 	}
-	if (!udb_storage_logical_hash_finish(&context, &candidate))
-		return UDB_STORAGE_ERROR;
+	if (!udb_storage_logical_hash_finish(context, &candidate))
+		goto cleanup;
 	*summary = candidate;
-	return UDB_STORAGE_OK;
+	result = UDB_STORAGE_OK;
+cleanup:
+	EVP_MD_CTX_free(context);
+	return result;
 }
 
 static UdbStorageResult udb_storage_logical_block(unsigned char block, UdbStoragePartitionReader reader, void *context,
 												  UdbStorageLogicalSummary *summary)
 {
 	static const char domain[] = "UDB4/block";
-	SHA256_CTX hash;
+	EVP_MD_CTX *hash, *empty_context;
+	UdbStorageResult result = UDB_STORAGE_ERROR;
 	UdbStorageLogicalSummary candidate, partition;
 	UdbStorageLogicalPosition position;
 	if (!summary || !reader || !udb_storage_block_valid(block))
@@ -5649,44 +5700,67 @@ static UdbStorageResult udb_storage_logical_block(unsigned char block, UdbStorag
 	memset(&candidate, 0, sizeof(candidate));
 	memset(&position, 0, sizeof(position));
 	position.block = block;
-	if (!SHA256_Init(&hash) || !SHA256_Update(&hash, domain, sizeof(domain)) || !SHA256_Update(&hash, &block, 1))
-		return UDB_STORAGE_ERROR;
+	hash = EVP_MD_CTX_new();
+	empty_context = EVP_MD_CTX_new();
+	if (!hash || !empty_context || !EVP_DigestInit_ex(hash, EVP_sha256(), NULL) ||
+		!EVP_DigestUpdate(hash, domain, sizeof(domain)) || !EVP_DigestUpdate(hash, &block, 1))
+		goto cleanup;
 	for (unsigned int i = 0; i < UDB_STORAGE_BASE_PARTITIONS; i++)
 	{
 		unsigned char header[18];
-		UdbStorageResult result;
 		memset(&partition, 0, sizeof(partition));
 		position.partition = (uint16_t)i;
 		result = reader(i, &partition, context);
 		if (result == UDB_STORAGE_NOT_FOUND)
-			result = udb_storage_logical_empty(&position, &partition);
+			result = udb_storage_logical_empty_digest(empty_context, &position, &partition) ? UDB_STORAGE_OK
+																							: UDB_STORAGE_ERROR;
 		if (result != UDB_STORAGE_OK)
-			return result;
+			goto cleanup;
 		if (!udb_storage_logical_summary_valid(&partition))
-			return UDB_STORAGE_CORRUPT;
+		{
+			result = UDB_STORAGE_CORRUPT;
+			goto cleanup;
+		}
 		if (!partition.count)
 		{
 			UdbStorageLogicalSummary empty;
-			result = udb_storage_logical_empty(&position, &empty);
+			result =
+				udb_storage_logical_empty_digest(empty_context, &position, &empty) ? UDB_STORAGE_OK : UDB_STORAGE_ERROR;
 			if (result != UDB_STORAGE_OK)
-				return result;
+				goto cleanup;
 			if (memcmp(empty.digest, partition.digest, sizeof(empty.digest)))
-				return UDB_STORAGE_CORRUPT;
+			{
+				result = UDB_STORAGE_CORRUPT;
+				goto cleanup;
+			}
 		}
 		if (candidate.count > UINT64_MAX - partition.count || candidate.weight > UINT64_MAX - partition.weight)
-			return UDB_STORAGE_LIMIT;
+		{
+			result = UDB_STORAGE_LIMIT;
+			goto cleanup;
+		}
 		candidate.count += partition.count;
 		candidate.weight += partition.weight;
 		udb_storage_put_u16(header, (uint16_t)i);
 		udb_storage_put_u64(header + 2, partition.count);
 		udb_storage_put_u64(header + 10, partition.weight);
-		if (!SHA256_Update(&hash, header, sizeof(header)) || !SHA256_Update(&hash, partition.digest, 32))
-			return UDB_STORAGE_ERROR;
+		if (!EVP_DigestUpdate(hash, header, sizeof(header)) || !EVP_DigestUpdate(hash, partition.digest, 32))
+		{
+			result = UDB_STORAGE_ERROR;
+			goto cleanup;
+		}
 	}
-	if (!udb_storage_logical_hash_finish(&hash, &candidate))
-		return UDB_STORAGE_ERROR;
+	if (!udb_storage_logical_hash_finish(hash, &candidate))
+	{
+		result = UDB_STORAGE_ERROR;
+		goto cleanup;
+	}
 	*summary = candidate;
-	return UDB_STORAGE_OK;
+	result = UDB_STORAGE_OK;
+cleanup:
+	EVP_MD_CTX_free(empty_context);
+	EVP_MD_CTX_free(hash);
+	return result;
 }
 
 /* End of udb_storage_hash.c.inc */

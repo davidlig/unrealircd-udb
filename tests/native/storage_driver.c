@@ -281,6 +281,99 @@ static void codec(void)
     page[UDB_STORAGE_PAGE_HEADER]^=1;
     EXPECT(udb_storage_page_decode(page,UDB_STORAGE_PAGE_SIZE,&q),UDB_STORAGE_CORRUPT); free(page);
 }
+static void print_digest(const char *label, const unsigned char digest[32])
+{
+    printf("%s ", label);
+    for (unsigned int i = 0; i < 32; i++) printf("%02x", digest[i]);
+    putchar('\n');
+}
+static UdbStorageResult empty_partition(unsigned int partition, UdbStorageLogicalSummary *summary, void *context)
+{
+    (void)partition; (void)summary; (void)context;
+    return UDB_STORAGE_NOT_FOUND;
+}
+static UdbStorageResult failed_partition(unsigned int partition, UdbStorageLogicalSummary *summary, void *context)
+{
+    (void)partition; (void)summary;
+    return *(UdbStorageResult *)context;
+}
+static void hash_vectors(void)
+{
+    unsigned char digest[32], bytes[UDB_STORAGE_ROW_MAX];
+    unsigned int partition;
+    size_t length;
+    UdbStorageRow row = key('N', "ALIce", "Created", NULL);
+    UdbStorageLogicalPosition position = {0};
+    UdbStorageLogicalSummary summary, left = {0}, right = {0};
+    UdbStorageLeafHasher *hasher = NULL;
+    UdbStorageBudget budget = {0};
+    row.kind = UDB_STORAGE_VALUE_NUMBER; row.number = UINT64_MAX;
+    EXPECT(udb_storage_key_hash(&row, digest, &partition), UDB_STORAGE_OK);
+    print_digest("nick-key", digest); printf("nick-partition %u\n", partition);
+    position.block = 'N'; position.partition = (uint16_t)partition;
+    EXPECT(udb_storage_logical_empty(&position, &summary), UDB_STORAGE_OK);
+    print_digest("empty-leaf", summary.digest);
+    EXPECT(udb_storage_budget_init(&budget, UDB_STORAGE_CACHE_DEFAULT), UDB_STORAGE_OK);
+    EXPECT(udb_storage_leaf_hasher_create(&budget, &position, &hasher), UDB_STORAGE_OK);
+    EXPECT(udb_storage_row_encode(&row, bytes, sizeof(bytes), &length), UDB_STORAGE_OK);
+    EXPECT(udb_storage_leaf_hasher_add(hasher, bytes, length), UDB_STORAGE_OK);
+    EXPECT(udb_storage_leaf_hasher_finish(hasher, &summary), UDB_STORAGE_OK);
+    print_digest("leaf", summary.digest);
+    EXPECT(udb_storage_leaf_hasher_finish(hasher, &summary), UDB_STORAGE_ERROR);
+    udb_storage_leaf_hasher_free(&hasher);
+    EXPECT(udb_storage_leaf_hasher_create(&budget, &position, &hasher), UDB_STORAGE_OK);
+    EXPECT(udb_storage_leaf_hasher_add(hasher, bytes, length), UDB_STORAGE_OK);
+    EXPECT(udb_storage_leaf_hasher_add(hasher, bytes, length), UDB_STORAGE_CORRUPT);
+    EXPECT(udb_storage_leaf_hasher_finish(hasher, &summary), UDB_STORAGE_CORRUPT);
+    udb_storage_leaf_hasher_free(&hasher);
+    EXPECT(udb_storage_budget_destroy(&budget), UDB_STORAGE_OK);
+    left.count = right.count = 1;
+    left.weight = right.weight = UDB_STORAGE_LEAF_WEIGHT_MAX;
+    memset(left.digest, 0x11, 32); memset(right.digest, 0x22, 32);
+    EXPECT(udb_storage_logical_branch(&position, &left, &right, &summary), UDB_STORAGE_OK);
+    print_digest("branch", summary.digest);
+    row = key('K', "F", "CaseSensitive", "Reason");
+    EXPECT(udb_storage_key_hash(&row, digest, &partition), UDB_STORAGE_OK);
+    print_digest("spamfilter-key", digest); printf("spamfilter-partition %u\n", partition);
+    char long_component[601]; memset(long_component, 'A', sizeof(long_component)-1); long_component[600] = 0;
+    row = key('N', long_component, "CREATED", NULL);
+    EXPECT(udb_storage_key_hash(&row, digest, &partition), UDB_STORAGE_OK);
+    print_digest("long-key", digest); printf("long-partition %u\n", partition);
+    unsigned char *page = malloc(UDB_STORAGE_PAGE_SIZE); CHECK(page);
+    for (size_t i = 0; i < UDB_STORAGE_PAGE_SIZE; i++) page[i] = (unsigned char)(i * 17);
+    CHECK(udb_storage_page_digest(page, digest)); print_digest("page", digest);
+    memset(page + 48, 0xa5, 32);
+    CHECK(udb_storage_page_digest(page, digest)); print_digest("page-excluded-field", digest);
+    free(page);
+    for (const char *block = "NCISLK"; *block; block++) {
+        char label[16]; snprintf(label, sizeof(label), "block-%c", *block);
+        EXPECT(udb_storage_logical_block((unsigned char)*block, empty_partition, NULL, &summary), UDB_STORAGE_OK);
+        print_digest(label, summary.digest);
+    }
+    UdbStorageResult failure = UDB_STORAGE_ERROR;
+    memset(&summary, 0xa5, sizeof(summary));
+    EXPECT(udb_storage_logical_block('N', failed_partition, &failure, &summary), UDB_STORAGE_ERROR);
+    CHECK(summary.digest[0] == 0xa5 && summary.count == UINT64_C(0xa5a5a5a5a5a5a5a5));
+    failure = UDB_STORAGE_LIMIT;
+    EXPECT(udb_storage_logical_block('N', failed_partition, &failure, &summary), UDB_STORAGE_LIMIT);
+    /* A missing crypto provider must never produce a successful digest or leak. */
+    CHECK(EVP_set_default_properties(NULL, "provider=udb-test-missing") == 1);
+    memset(digest, 0xa5, sizeof(digest)); partition = 777;
+    EXPECT(udb_storage_key_hash(&row, digest, &partition), UDB_STORAGE_ERROR);
+    CHECK(digest[0] == 0xa5 && partition == 777);
+    unsigned char *failed_page = calloc(1, UDB_STORAGE_PAGE_SIZE); CHECK(failed_page);
+    CHECK(!udb_storage_page_digest(failed_page, digest)); CHECK(digest[0] == 0xa5);
+    free(failed_page);
+    EXPECT(udb_storage_logical_empty(&position, &summary), UDB_STORAGE_ERROR);
+    EXPECT(udb_storage_logical_branch(&position, &left, &right, &summary), UDB_STORAGE_ERROR);
+    EXPECT(udb_storage_logical_block('N', empty_partition, NULL, &summary), UDB_STORAGE_ERROR);
+    EXPECT(udb_storage_budget_init(&budget, UDB_STORAGE_CACHE_DEFAULT), UDB_STORAGE_OK);
+    EXPECT(udb_storage_leaf_hasher_create(&budget, &position, &hasher), UDB_STORAGE_ERROR);
+    CHECK(hasher == NULL);
+    EXPECT(udb_storage_budget_destroy(&budget), UDB_STORAGE_OK);
+    CHECK(EVP_set_default_properties(NULL, "") == 1);
+    EXPECT(udb_storage_key_hash(&row, digest, &partition), UDB_STORAGE_OK);
+}
 static void mutations(const char *path)
 {
     UdbStorageEngine e; open_engine(&e,path,UDB_STORAGE_CACHE_DEFAULT); bind_source(&e);
@@ -849,6 +942,7 @@ static int storage_driver_main(int argc, char **argv)
         benchmark(argv[2],count,(size_t)cache,argc==6 && !strcmp(argv[5],"points")); return 0;
     }
     CHECK(argc==3);
+    if (!strcmp(argv[1],"hash-vectors")) { hash_vectors(); return 0; }
     if (!strcmp(argv[1],"codec")) codec();
     else if (!strcmp(argv[1],"mutations")) mutations(argv[2]);
     else if (!strcmp(argv[1],"credits")) credits(argv[2]);

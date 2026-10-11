@@ -273,23 +273,34 @@ static int udb_storage_key_has_prefix(const UdbStorageRow *row, const UdbStorage
 	return 1;
 }
 
-static int udb_storage_hash_components(const UdbStorageRow *row, unsigned int depth, const char *domain,
-									   size_t domain_length, unsigned char hash[32])
+/* Finalize into a full EVP buffer; only publish an exact SHA-256 digest. */
+static int udb_storage_digest_final(EVP_MD_CTX *context, unsigned char digest[32])
 {
-	SHA256_CTX context;
+	unsigned char candidate[EVP_MAX_MD_SIZE];
+	unsigned int length = 0;
+
+	if (!EVP_DigestFinal_ex(context, candidate, &length) || length != 32)
+		return 0;
+	memcpy(digest, candidate, 32);
+	return 1;
+}
+
+static int udb_storage_hash_components(EVP_MD_CTX *context, const UdbStorageRow *row, unsigned int depth,
+									   const char *domain, size_t domain_length, unsigned char hash[32])
+{
 	unsigned char size[4];
 	unsigned char normalized[256];
 
-	if (!SHA256_Init(&context) || !SHA256_Update(&context, domain, domain_length) ||
-		!SHA256_Update(&context, &row->block, 1))
+	if (!EVP_DigestInit_ex(context, EVP_sha256(), NULL) || !EVP_DigestUpdate(context, domain, domain_length) ||
+		!EVP_DigestUpdate(context, &row->block, 1))
 		return 0;
 	udb_storage_put_u32(size, depth);
-	if (!SHA256_Update(&context, size, sizeof(size)))
+	if (!EVP_DigestUpdate(context, size, sizeof(size)))
 		return 0;
 	for (unsigned int i = 0; i < depth; i++)
 	{
 		udb_storage_put_u32(size, row->components[i].length);
-		if (!SHA256_Update(&context, size, sizeof(size)))
+		if (!EVP_DigestUpdate(context, size, sizeof(size)))
 			return 0;
 		for (uint32_t j = 0; j < row->components[i].length;)
 		{
@@ -302,16 +313,18 @@ static int udb_storage_hash_components(const UdbStorageRow *row, unsigned int de
 
 				normalized[k] = udb_storage_exact_component(row, i) ? c : udb_storage_fold(c);
 			}
-			if (!SHA256_Update(&context, normalized, chunk))
+			if (!EVP_DigestUpdate(context, normalized, chunk))
 				return 0;
 			j += (uint32_t)chunk;
 		}
 	}
-	return SHA256_Final(hash, &context) == 1;
+	return udb_storage_digest_final(context, hash);
 }
 
 static UdbStorageResult udb_storage_key_hash(const UdbStorageRow *row, unsigned char hash[32], unsigned int *partition)
 {
+	EVP_MD_CTX *context;
+	int success;
 	unsigned char entity[32];
 	unsigned char key[32];
 	unsigned int depth;
@@ -321,8 +334,14 @@ static UdbStorageResult udb_storage_key_hash(const UdbStorageRow *row, unsigned 
 	if (!hash || !partition || !udb_storage_row_valid(row) || (row->block == 'K' && row->depth < 2))
 		return UDB_STORAGE_ERROR;
 	depth = row->block == 'K' ? 2 : 1;
-	if (!udb_storage_hash_components(row, depth, entity_domain, sizeof(entity_domain), entity) ||
-		!udb_storage_hash_components(row, row->depth, key_domain, sizeof(key_domain), key))
+	context = EVP_MD_CTX_new();
+	if (!context)
+		return UDB_STORAGE_ERROR;
+	/* Reuse one context for both domains; no per-component allocations. */
+	success = udb_storage_hash_components(context, row, depth, entity_domain, sizeof(entity_domain), entity) &&
+			  udb_storage_hash_components(context, row, row->depth, key_domain, sizeof(key_domain), key);
+	EVP_MD_CTX_free(context);
+	if (!success)
 		return UDB_STORAGE_ERROR;
 	memcpy(hash, key, sizeof(key));
 	*partition = ((unsigned int)entity[0] << 4) | ((unsigned int)entity[1] >> 4);
@@ -331,12 +350,18 @@ static UdbStorageResult udb_storage_key_hash(const UdbStorageRow *row, unsigned 
 
 static int udb_storage_page_digest(const unsigned char *bytes, unsigned char digest[32])
 {
-	SHA256_CTX context;
+	EVP_MD_CTX *context = EVP_MD_CTX_new();
 	static const char domain[] = "UDB4/page";
+	int success;
 
-	return SHA256_Init(&context) && SHA256_Update(&context, domain, sizeof(domain)) &&
-		   SHA256_Update(&context, bytes, 48) && SHA256_Update(&context, bytes + 80, UDB_STORAGE_PAGE_SIZE - 80) &&
-		   SHA256_Final(digest, &context);
+	if (!context)
+		return 0;
+	success = EVP_DigestInit_ex(context, EVP_sha256(), NULL) && EVP_DigestUpdate(context, domain, sizeof(domain)) &&
+			  EVP_DigestUpdate(context, bytes, 48) &&
+			  EVP_DigestUpdate(context, bytes + 80, UDB_STORAGE_PAGE_SIZE - 80) &&
+			  udb_storage_digest_final(context, digest);
+	EVP_MD_CTX_free(context);
+	return success;
 }
 
 static UdbStorageResult udb_storage_page_encode(const UdbStoragePage *page, unsigned char *out, size_t capacity)
