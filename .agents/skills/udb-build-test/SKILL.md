@@ -45,23 +45,32 @@ executables only; runtime sanitizers require a separately instrumented daemon/mo
 
 ## Focused test map
 
-Select one file or case with `python3 -m pytest -q -m '<family>' <path>`;
-use `-k` for an affected scenario. Canonical C cases are collected by pytest.
+Select one path/case with `python3 -m pytest -q <path>` and optionally `-k`.
 
-- Parsing/schema/store: `tests/unit/test_numeric.c`, `tests/unit/test_schema.c`, `tests/unit/test_store.c` (`unit`).
-- Limits/paths/framing: `tests/protocol/test_size_limits.py`, `tests/protocol/test_ipv6_paths.py`, `tests/protocol/test_numeric_frames.py` (`protocol`).
-- DB staging/persistence/recovery: `tests/unit/test_staging.c`, `tests/protocol/test_db_snapshots.py`, `tests/protocol/test_snapshot_ownership.py`, `tests/protocol/test_snapshot_persistence.py`, `tests/protocol/test_snapshot_faults.py`, `tests/recovery/test_startup_fail_closed.py`.
-- Mutation/convergence/authority: `tests/protocol/test_live_mutations.py`, `tests/protocol/test_multinode.py`, `tests/protocol/test_session_lifetime.py` (`protocol`). Expand topology only for the affected invariant.
-- Propagator: `tests/integration/test_propagator_config.py`, `tests/protocol/test_propagator_values.py`.
-- OCL/OCLG: `tests/unit/test_ocl_lookup.c`, `tests/protocol/test_ocl_inventory.py`; existing DB/host multihop tests do not prove OCL multihop coverage.
-- Nick/host/effect ownership: `tests/integration/test_nick_identity.py`, `tests/integration/test_host_privacy.py`, `tests/model/test_nick_effect_ownership.py`.
-- Channel JOIN/ranks/topic: `tests/integration/test_channel_profiles.py`.
-- K lines/expiry: `tests/integration/test_k_line_server_bans.py`, `tests/integration/test_k_line_expiry.py`.
-- Offline hash benchmark: `tests/perf/test_hash_index_benchmark.py`; opt in with `-m perf` or `--run-perf`.
+- Native engine codecs, queue credits, source ordering, receipts, prefix delete,
+  conditional expiry, disk staging and recovery: `tests/native/test_storage.py`.
+  Its driver includes all production storage units, not a model store. It does
+  not validate daemon business profiles or Windows. Use `--c-profile asan` or
+  `UDB_NATIVE_ASAN=1` for ASan/UBSan.
+- New typed wire/path syntax: `tests/unit/test_native_wire.c`.
+- Strict numeric bounds: `tests/unit/test_numeric.c`.
+- Native module files, six-root import, origin binding, durable mutations and
+  restart: `tests/protocol/test_native_persistence.py`.
+- HEL fixture: `tests/protocol/test_peer_harness.py`.
+- OCL lookup: `tests/unit/test_ocl_lookup.c`; runtime OCL/OCLG inventory:
+  `tests/protocol/test_ocl_inventory.py`. These are not OCL multihop proof.
+- Configuration: `tests/integration/test_propagator_config.py`.
 
-If no current case covers the requested behavior, report the gap and select a
-source-grounded regression within authorized scope; do not infer coverage from
-retired script names.
+Retired text/tree/single-block-publication tests are not validation targets.
+Never reintroduce compatibility helpers to make old fixtures pass. Add a focused
+new-contract case when runtime ownership, convergence or a failure boundary lacks
+coverage; report actual missing proof rather than implying retired coverage.
+
+The opt-in `tests/perf/benchmark_native.py` builds the production storage engine,
+uses owned scratch stores, and reports bulk build/recovery/indexed-read timings
+for 1M/5M/10M rows and 128/256/512 MiB caches. Run a finite foreground timeout;
+OS caches are retained, so it is not a cold-device, power-loss or IRC-throughput
+benchmark. Actual Windows/MSVC/NTFS checks require that platform.
 
 Agentic-only changes (`tooling`):
 

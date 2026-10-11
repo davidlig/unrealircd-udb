@@ -11,6 +11,8 @@
 
 static UdbConfig *udb_cfg = NULL;
 static int udb_config_seen_propagator = 0;
+static int udb_config_seen_cache;
+static int udb_config_seen_flood;
 
 static int udb_flood_valid(const char *value, int *attempts, int *period);
 
@@ -33,12 +35,14 @@ typedef struct UdbConfigDirective
 	unsigned int max;
 	size_t size_min;
 	size_t size_max;
-	unsigned int fallback;
+	size_t fallback;
 } UdbConfigDirective;
 
 static const UdbConfigDirective udb_config_directives[] = {
 	{"propagator", UDB_CFG_SERVER_NAME, "", 0, 0, 0, 0, 0, 0},
 	{"password-flood", UDB_CFG_FLOOD, "", 0, 0, 0, 0, 0, 0},
+	{"cache-size", UDB_CFG_SIZE, "bytes", offsetof(UdbConfig, cache_size), 0, 0, (size_t)16 * 1024 * 1024, SIZE_MAX / 2,
+	 (size_t)128 * 1024 * 1024},
 	{"max-staged-records", UDB_CFG_UINT, "records", offsetof(UdbConfig, max_staged_records), UDB_MIN_MAX_STAGED_RECORDS,
 	 UDB_MAX_MAX_STAGED_RECORDS, 0, 0, UDB_DEFAULT_MAX_STAGED_RECORDS},
 	{"max-staged-bytes", UDB_CFG_SIZE, "bytes", offsetof(UdbConfig, max_staged_bytes), 0, 0, UDB_MIN_MAX_STAGED_BYTES,
@@ -129,7 +133,7 @@ static void udb_config_error_entry(const UdbConfigDirective *directive, ConfigEn
 		if (directive->fallback)
 			config_error("%s:%i: udb::%s must be between %u and %u %s (default %u)", cep->file->filename,
 						 cep->line_number, directive->name, directive->min, directive->max, directive->unit,
-						 directive->fallback);
+						 (unsigned int)directive->fallback);
 		else
 			config_error("%s:%i: udb::%s must be between %u and %u %s", cep->file->filename, cep->line_number,
 						 directive->name, directive->min, directive->max, directive->unit);
@@ -175,8 +179,11 @@ static void udb_config_defaults(void)
 		udb_cfg->flood_attempts = 5;
 	if (udb_cfg->flood_period == 0)
 		udb_cfg->flood_period = 60;
-	udb_cfg->config_flood_attempts = udb_cfg->flood_attempts;
-	udb_cfg->config_flood_period = udb_cfg->flood_period;
+	if (udb_config_seen_flood || !udb_cfg->config_flood_attempts || !udb_cfg->config_flood_period)
+	{
+		udb_cfg->config_flood_attempts = udb_cfg->flood_attempts;
+		udb_cfg->config_flood_period = udb_cfg->flood_period;
+	}
 }
 
 /* UnrealIRCd config-hook contract: 0 leaves unrelated blocks to other modules;
@@ -218,15 +225,45 @@ static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
 static int udb_config_rehash(void)
 {
 	udb_config_seen_propagator = 0;
+	udb_config_seen_cache = 0;
+	udb_config_seen_flood = 0;
 	return 0;
 }
 
 static int udb_config_postconf(void)
 {
+	if (udb_cfg && !udb_config_seen_cache)
+		udb_cfg->cache_size = UDB_STORAGE_CACHE_DEFAULT;
+	if (udb_cfg && !udb_config_seen_flood)
+	{
+		udb_cfg->config_flood_attempts = 5;
+		udb_cfg->config_flood_period = 60;
+	}
 	if (udb_cfg && !udb_config_seen_propagator)
 		safe_free(udb_cfg->propagator);
-	if (udb_ctx)
+	if (udb_ctx && udb_ctx->storage)
+	{
+		UdbStorageEngine *engine = udb_ctx->storage;
+		UdbStorageResult resized = udb_storage_cache_resize(engine->cache, udb_cfg->cache_size);
+		if (resized != UDB_STORAGE_OK)
+			udb_log(ULOG_WARNING, "UDB_CACHE_RESIZE_DEFERRED", NULL,
+					"Cannot apply local cache-size while pages are pinned; retaining the current cache budget until a "
+					"later rehash");
+		UdbStorageRead *read = NULL;
+		UdbStorageResult result = udb_storage_read_open(engine, &read);
+		udb_policy_notify_deferred = 1;
+		if (result == UDB_STORAGE_OK)
+			result = udb_native_settings_apply(udb_ctx, read);
+		if (read && udb_storage_read_close(&read) != UDB_STORAGE_OK)
+			result = UDB_STORAGE_ERROR;
+		udb_policy_notify_deferred = 0;
 		udb_propagator_policy_changed(udb_ctx);
+		if (result != UDB_STORAGE_OK)
+		{
+			udb_ready = 0;
+			udb_sync_status = UDB_SYNC_DEGRADED;
+		}
+	}
 	/* HOOKTYPE_REHASH_COMPLETE: the new configuration is active, so rebuild
 	 * the local operclass inventory and publish any changes. */
 	udb_ocl_local_rebuild();
@@ -250,7 +287,13 @@ static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type)
 		const UdbConfigDirective *directive = udb_config_directive_find(cep->name);
 
 		if (directive)
+		{
+			if (!strcmp(directive->name, "cache-size"))
+				udb_config_seen_cache = 1;
+			if (!strcmp(directive->name, "password-flood"))
+				udb_config_seen_flood = 1;
 			(void)udb_config_apply_entry(directive, cep, 1);
+		}
 	}
 
 	/* Persistent files always live in UnrealIRCd PERMDATADIR. */
@@ -263,13 +306,20 @@ static void udb_config_free(UdbContext *ctx)
 {
 	if (ctx)
 	{
-		safe_free(ctx->quit_clones);
-		safe_free(ctx->encryption_key);
-		safe_free(ctx->suffix);
-		safe_free(ctx->nickserv_mask);
-		safe_free(ctx->chanserv_mask);
-		safe_free(ctx->ipserv_mask);
-		safe_free(ctx->propagator_setting);
+		udb_storage_free(ctx->quit_clones);
+		ctx->quit_clones = NULL;
+		udb_storage_free(ctx->encryption_key);
+		ctx->encryption_key = NULL;
+		udb_storage_free(ctx->suffix);
+		ctx->suffix = NULL;
+		udb_storage_free(ctx->nickserv_mask);
+		ctx->nickserv_mask = NULL;
+		udb_storage_free(ctx->chanserv_mask);
+		ctx->chanserv_mask = NULL;
+		udb_storage_free(ctx->ipserv_mask);
+		ctx->ipserv_mask = NULL;
+		udb_storage_free(ctx->propagator_setting);
+		ctx->propagator_setting = NULL;
 	}
 	if (udb_cfg)
 	{
@@ -364,13 +414,6 @@ static int udb_flood_valid(const char *value, int *attempts, int *period)
 	return 1;
 }
 
-static void udb_settings_replace(char **destination, const char *value)
-{
-	safe_free(*destination);
-	if (value)
-		safe_strdup(*destination, value);
-}
-
 static void udb_settings_restore_flood(void)
 {
 	if (!udb_cfg)
@@ -417,94 +460,91 @@ static char **udb_setting_slot(UdbContext *ctx, const UdbSettingOps *ops)
 	return (char **)((char *)ctx + ops->value_offset);
 }
 
-static int udb_settings_apply_record(UdbContext *ctx, UdbRecord *rec)
+/* Prepare every derived setting before replacing any foreground slot. A
+ * multi-setting import never exposes a transient encryption-key/suffix pair. */
+static UdbStorageResult udb_native_settings_apply(UdbContext *ctx, UdbStorageRead *read)
 {
-	const UdbSettingOps *ops;
-	int attempts;
-	int period;
-
-	if (!ctx || !rec || !rec->key)
-		return 0;
-	ops = udb_setting_ops_find(rec->key);
-	if (!ops)
-		return 0;
-	if (ops->flags & UDB_SETTING_NUMERIC_ONLY)
-		return !rec->data_str && rec->data_num != 0;
-	if (ops->flags & UDB_SETTING_FLOOD)
+	char *values[sizeof(udb_setting_ops) / sizeof(udb_setting_ops[0])] = {0};
+	UdbStorageField *field;
+	UdbStorageResult result = UDB_STORAGE_OK;
+	int attempts = udb_cfg ? udb_cfg->config_flood_attempts : 5;
+	int period = udb_cfg ? udb_cfg->config_flood_period : 60;
+	int refresh = 0, policy = 0;
+	if (!ctx || !ctx->storage || !read)
+		return UDB_STORAGE_ERROR;
+	field = udb_storage_alloc(&ctx->storage->budget, UDB_STORAGE_MEMORY_AUX, sizeof(*field));
+	if (!field)
+		return UDB_STORAGE_LIMIT;
+	for (size_t i = 0; i < sizeof(udb_setting_ops) / sizeof(udb_setting_ops[0]); i++)
 	{
-		if (!udb_flood_valid(rec->data_str, &attempts, &period))
-			return 0;
-		if (udb_cfg)
+		const UdbSettingOps *ops = udb_setting_ops + i;
+		result = udb_native_read_scalar(read, UDB_BLOCK_SETTINGS, NULL, ops->key, field);
+		if (result < UDB_STORAGE_NOT_FOUND)
+			goto finish;
+		if (ops->flags & UDB_SETTING_NUMERIC_ONLY)
 		{
-			udb_cfg->flood_attempts = attempts;
-			udb_cfg->flood_period = period;
+			if (result == UDB_STORAGE_OK && (field->kind != UDB_STORAGE_VALUE_NUMBER || !field->number))
+			{
+				result = UDB_STORAGE_CORRUPT;
+				goto finish;
+			}
+			continue;
 		}
-		return 1;
+		if (ops->flags & UDB_SETTING_FLOOD)
+		{
+			if (result == UDB_STORAGE_OK &&
+				(field->kind != UDB_STORAGE_VALUE_STRING || !udb_flood_valid(field->string, &attempts, &period)))
+			{
+				result = UDB_STORAGE_CORRUPT;
+				goto finish;
+			}
+			continue;
+		}
+		if (result == UDB_STORAGE_OK)
+		{
+			if (field->kind != UDB_STORAGE_VALUE_STRING || (ops->validator && !ops->validator(field->string)))
+			{
+				result = UDB_STORAGE_CORRUPT;
+				goto finish;
+			}
+			values[i] = udb_storage_alloc(&ctx->storage->budget, UDB_STORAGE_MEMORY_AUX, (size_t)field->length + 1);
+			if (!values[i])
+			{
+				result = UDB_STORAGE_LIMIT;
+				goto finish;
+			}
+			memcpy(values[i], field->string, (size_t)field->length + 1);
+		}
+		const char *old = *udb_setting_slot(ctx, ops);
+		int changed = (old != NULL) != (values[i] != NULL) || (old && values[i] && strcmp(old, values[i]));
+		if (changed && (ops->flags & UDB_SETTING_REFRESH_HOSTS))
+			refresh = 1;
+		if (changed && (ops->flags & UDB_SETTING_POLICY_CHANGED))
+			policy = 1;
 	}
-	if (ops->validator && !ops->validator(rec->data_str))
-		return 0;
-	udb_settings_replace(udb_setting_slot(ctx, ops), rec->data_str);
-	if (ops->flags & UDB_SETTING_REFRESH_HOSTS)
+	for (size_t i = 0; i < sizeof(udb_setting_ops) / sizeof(udb_setting_ops[0]); i++)
+	{
+		const UdbSettingOps *ops = udb_setting_ops + i;
+		if (ops->flags & (UDB_SETTING_NUMERIC_ONLY | UDB_SETTING_FLOOD))
+			continue;
+		char **slot = udb_setting_slot(ctx, ops);
+		udb_storage_free(*slot);
+		*slot = values[i];
+		values[i] = NULL;
+	}
+	if (udb_cfg)
+	{
+		udb_cfg->flood_attempts = attempts;
+		udb_cfg->flood_period = period;
+	}
+	if (refresh)
 		udb_ip_refresh_derived_hosts();
-	if (ops->flags & UDB_SETTING_POLICY_CHANGED)
+	if (policy)
 		udb_propagator_policy_changed(ctx);
-	return 1;
-}
-
-static void udb_settings_remove_record(UdbContext *ctx, UdbRecord *rec)
-{
-	const UdbSettingOps *ops;
-
-	if (!ctx || !rec || !rec->key)
-		return;
-	ops = udb_setting_ops_find(rec->key);
-	if (!ops || (ops->flags & UDB_SETTING_NUMERIC_ONLY))
-		return;
-	if (ops->flags & UDB_SETTING_FLOOD)
-	{
-		udb_settings_restore_flood();
-		return;
-	}
-	udb_settings_replace(udb_setting_slot(ctx, ops), NULL);
-	if (ops->flags & UDB_SETTING_REFRESH_HOSTS)
-		udb_ip_refresh_derived_hosts();
-	if (ops->flags & UDB_SETTING_POLICY_CHANGED)
-		udb_propagator_policy_changed(ctx);
-}
-
-static void udb_link_apply_record(UdbContext *ctx, UdbRecord *rec)
-{
-	if (!rec || !rec->parent || !rec->key || strcmp(rec->key, LKEY_OPTIONS))
-		return;
-	if (rec->data_str || (rec->data_num & ~UDB_LNKOPT_DEBUG))
-		udb_log(ULOG_WARNING, "UDB_LINK_OPTIONS", NULL, "Ignoring invalid L::options for $server",
-				log_data_string("server", rec->parent->key));
-}
-
-static void udb_link_remove_record(UdbContext *ctx, UdbRecord *rec)
-{
-	(void)ctx;
-	(void)rec;
-}
-
-static void udb_config_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec)
-{
-	if (block->letter == UDB_BLOCK_SETTINGS)
-	{
-		if (!udb_settings_apply_record(ctx, rec))
-			udb_log(ULOG_WARNING, "UDB_SETTING_INVALID", NULL, "Ignoring invalid or unsupported S::$setting",
-					log_data_string("setting", rec->key));
-	}
-	else if (block->letter == UDB_BLOCK_LINKS)
-	{
-		udb_link_apply_record(ctx, rec);
-	}
-}
-
-static void udb_config_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec)
-{
-	if (block->letter == UDB_BLOCK_SETTINGS)
-		udb_settings_remove_record(ctx, rec);
-	else if (block->letter == UDB_BLOCK_LINKS)
-		udb_link_remove_record(ctx, rec);
+	result = UDB_STORAGE_OK;
+finish:
+	for (size_t i = 0; i < sizeof(udb_setting_ops) / sizeof(udb_setting_ops[0]); i++)
+		udb_storage_free(values[i]);
+	udb_storage_free(field);
+	return result;
 }

@@ -1,0 +1,22 @@
+# Native Windows entry points. Run under an x64 Visual Studio developer prompt.
+!IFNDEF PYTHON
+PYTHON=py -3
+!ENDIF
+
+!IFNDEF PYTEST_ARGS
+PYTEST_ARGS=
+!ENDIF
+
+all: native unit
+
+native:
+	$(PYTHON) -m pytest $(PYTEST_ARGS) -q tests/native/test_storage.py tests/native/test_windows_storage.py
+
+unit:
+	$(PYTHON) -m pytest $(PYTEST_ARGS) -q tests/unit
+
+protocol:
+	$(PYTHON) -m pytest $(PYTEST_ARGS) -q tests/protocol tests/integration
+
+freshness:
+	$(PYTHON) .agentic/test_runtime_module_fresh.py

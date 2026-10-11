@@ -153,27 +153,8 @@ static void udb_ip_base_unserialize(const char *host, ModData *m)
 
 static int udb_ip_tkl_is_owned(TKL *tkl)
 {
-	return tkl && tkl->set_by && tkl->ptr.banexception && tkl->ptr.banexception->reason &&
+	return tkl && TKLIsBanException(tkl) && tkl->set_by && tkl->ptr.banexception && tkl->ptr.banexception->reason &&
 		   !strcmp(tkl->set_by, "UDB") && !strcmp(tkl->ptr.banexception->reason, "UDB Nolines Exemption");
-}
-
-static int udb_ip_is_throttle_exempt(UdbRecord *ip_rec)
-{
-	UdbRecord *nolines = udb_record_find(udb_ctx, IKEY_NOLINES, ip_rec);
-
-	/* 'c' is UnrealIRCd's connect-flood exception type. */
-	return nolines && nolines->data_str && (strchr(nolines->data_str, 'c') || strchr(nolines->data_str, 'C'));
-}
-
-static int udb_ip_client_matches(Client *client, const char *ip_key)
-{
-	UdbIpHostState *state;
-
-	if (!client || !MyConnect(client) || !client->user)
-		return 0;
-	state = udb_ip_host_md ? moddata_local_client(client, udb_ip_host_md).ptr : NULL;
-	return (client->ip && !strcasecmp(client->ip, ip_key)) || (state && !strcasecmp(state->key, ip_key)) ||
-		   (!state && !strcasecmp(client->user->realhost, ip_key));
 }
 
 static void udb_ip_apply_host(Client *client, const char *ip_key, const char *host)
@@ -207,20 +188,6 @@ static void udb_ip_restore_host(Client *client, const char *ip_key)
 	}
 	udb_ip_host_state_free(&moddata_local_client(client, udb_ip_host_md));
 	moddata_local_client(client, udb_ip_host_md).ptr = NULL;
-}
-
-static const char *udb_ip_explicit_vhost(Client *client)
-{
-	UdbRecord *nick_rec;
-	UdbRecord *vhost_rec;
-
-	if (!client || !client->user || !has_user_mode(client, 'r') || !udb_ctx || !udb_ctx->nicks)
-		return NULL;
-	nick_rec = udb_record_find(udb_ctx, client->name, udb_ctx->nicks);
-	if (!nick_rec && strcmp(client->user->account, "*"))
-		nick_rec = udb_record_find(udb_ctx, client->user->account, udb_ctx->nicks);
-	vhost_rec = nick_rec ? udb_record_find(udb_ctx, NKEY_VHOST, nick_rec) : NULL;
-	return vhost_rec ? vhost_rec->data_str : NULL;
 }
 
 static int udb_ip_derive_vhost(Client *client, char *host, size_t hostlen)
@@ -299,177 +266,276 @@ static void udb_ip_refresh_derived_hosts(void)
 	list_for_each_entry(client, &lclient_list, lclient_node) udb_ip_refresh_derived_host(client);
 }
 
-static void udb_ip_reconcile_host(const char *ip_key, const char *host)
+static void udb_ip_set_nolines(const char *key, const char *value)
 {
-	Client *client;
+	TKL *tkl = find_tkl_banexception(TKL_EXCEPTION, "*", key, 0);
+	if (tkl && !udb_ip_tkl_is_owned(tkl))
+		return; /* Never replace an externally owned exemption. */
+	if (tkl && value && tkl->ptr.banexception->bantypes && !strcmp(tkl->ptr.banexception->bantypes, value))
+		return;
+	if (tkl)
+		tkl_del_line(tkl);
+	if (value && *value)
+		tkl_add_banexception(TKL_EXCEPTION, "*", key, NULL, "UDB Nolines Exemption", "UDB", 0, TStime(), 0, value, 0);
+}
 
-	list_for_each_entry(client, &lclient_list, lclient_node)
+/* Visit exactly one nolines scalar per key, with no resident mask inventory. */
+static UdbStorageResult udb_ip_nolines_scan(UdbStorageRead *source, UdbStorageRead *replacement, int remove_missing)
+{
+	UdbStorageBlockIterator *iterator = NULL;
+	UdbStorageField *field = NULL;
+	UdbStorageRecord record;
+	UdbStorageResult result = udb_storage_read_iterator(source, UDB_BLOCK_IPS, NULL, &iterator);
+	if (result != UDB_STORAGE_OK)
+		return result;
+	if (remove_missing)
 	{
-		char oldhost[HOSTLEN + 1];
-		char notice[HOSTLEN + 96];
-
-		if (!udb_ip_client_matches(client, ip_key))
-			continue;
-		strlcpy(oldhost, udb_ip_visible_host(client), sizeof(oldhost));
-		if (host)
+		field = udb_storage_alloc(&source->engine->budget, UDB_STORAGE_MEMORY_AUX, sizeof(*field));
+		if (!field)
 		{
-			if (MyUser(client))
-				userhost_save_current(client);
-			udb_ip_apply_host(client, ip_key, host);
-			if (MyUser(client) && strcmp(oldhost, udb_ip_visible_host(client)))
-			{
-				snprintf(notice, sizeof(notice), "*** Your explicit IP vhost is now %s", host);
-				udb_ip_notify_host_change(client, notice);
-			}
+			result = UDB_STORAGE_LIMIT;
+			goto finish;
+		}
+	}
+	while ((result = udb_storage_block_iterator_next(iterator, &record)) == UDB_STORAGE_OK)
+	{
+		const UdbStorageRow *row = &record.row;
+		if (row->depth != 2 || row->components[1].length != strlen(IKEY_NOLINES) ||
+			memcmp(row->components[1].data, IKEY_NOLINES, row->components[1].length))
+			continue;
+		char key[HOSTLEN + 1], value[UDB_STORAGE_VALUE_MAX + 1];
+		if (row->kind != UDB_STORAGE_VALUE_STRING || !udb_native_span_string(row->components[0], key, sizeof(key)) ||
+			!udb_native_span_string(row->value, value, sizeof(value)))
+		{
+			result = UDB_STORAGE_CORRUPT;
+			break;
+		}
+		if (remove_missing)
+		{
+			result = udb_storage_read_field(replacement, row, field);
+			if (result < UDB_STORAGE_NOT_FOUND)
+				break;
+			if (result == UDB_STORAGE_NOT_FOUND)
+				udb_ip_set_nolines(key, NULL);
 		}
 		else
-		{
-			if (MyUser(client))
-				userhost_save_current(client);
-			udb_ip_restore_host(client, ip_key);
-			if (MyUser(client) && strcmp(oldhost, udb_ip_visible_host(client)))
-				udb_ip_notify_host_change(client, "*** Your explicit IP vhost has been removed");
-		}
+			udb_ip_set_nolines(key, value);
 	}
+	if (result == UDB_STORAGE_NOT_FOUND)
+		result = UDB_STORAGE_OK;
+finish:
+	udb_storage_free(field);
+	if (udb_storage_block_iterator_close(&iterator) != UDB_STORAGE_OK)
+		result = UDB_STORAGE_ERROR;
+	return result;
 }
 
-static void udb_ip_apply_record(const char *ip_key, UdbRecord *ip_rec, const char *subkey)
+static UdbStorageResult udb_ip_client_profile(UdbStorageRead *read, Client *client, UdbStorageProfile **out)
 {
-	if (!strcmp(subkey, IKEY_NOLINES))
+	static const char *const fields[] = {IKEY_CLONES, IKEY_HOST, IKEY_NOLINES};
+	*out = NULL;
+	if (!client || !client->ip || !client->user)
+		return UDB_STORAGE_NOT_FOUND;
+	UdbStorageRow entity = {0};
+	entity.block = UDB_BLOCK_IPS;
+	entity.depth = 1;
+	entity.components[0].data = (const unsigned char *)client->ip;
+	entity.components[0].length = (uint32_t)strlen(client->ip);
+	UdbStorageResult result = udb_storage_profile_load(read, &entity, fields, 3, out);
+	if (result == UDB_STORAGE_NOT_FOUND && client->user->realhost[0])
 	{
-		UdbRecord *nolines = udb_record_find(udb_ctx, IKEY_NOLINES, ip_rec);
-		TKL *tkl = find_tkl_banexception(TKL_EXCEPTION, "*", ip_key, 0);
-
-		if (udb_ip_tkl_is_owned(tkl))
-		{
-			tkl_del_line(tkl);
-			tkl = NULL;
-		}
-		if (!tkl && nolines && nolines->data_str && *nolines->data_str)
-		{
-			tkl_add_banexception(TKL_EXCEPTION, "*", ip_key, NULL, "UDB Nolines Exemption", "UDB", 0, TStime(), 0,
-								 nolines->data_str, 0);
-		}
+		entity.components[0].data = (const unsigned char *)client->user->realhost;
+		entity.components[0].length = (uint32_t)strlen(client->user->realhost);
+		result = udb_storage_profile_load(read, &entity, fields, 3, out);
 	}
-	else if (!strcmp(subkey, IKEY_HOST))
-	{
-		UdbRecord *host = udb_record_find(udb_ctx, IKEY_HOST, ip_rec);
-		if (host && host->data_str && *host->data_str)
-			udb_ip_reconcile_host(ip_key, host->data_str);
-	}
+	return result;
 }
 
-static void udb_ip_remove_record(const char *ip_key, UdbRecord *ip_rec, const char *subkey)
+static UdbStorageResult udb_ip_reconcile_scope(UdbStorageRead *before, UdbStorageRead *after, const char *entity)
 {
-	if (!strcmp(subkey, IKEY_NOLINES))
+	UdbStorageResult result = UDB_STORAGE_OK;
+	if (entity)
 	{
-		TKL *tkl;
-		if ((tkl = find_tkl_banexception(TKL_EXCEPTION, "*", ip_key, 0)) && udb_ip_tkl_is_owned(tkl))
+		UdbStorageField *field = udb_storage_alloc(&after->engine->budget, UDB_STORAGE_MEMORY_AUX, sizeof(*field));
+		if (!field)
+			return UDB_STORAGE_LIMIT;
+		result = udb_native_read_scalar(after, UDB_BLOCK_IPS, entity, IKEY_NOLINES, field);
+		if (result == UDB_STORAGE_OK && field->kind != UDB_STORAGE_VALUE_STRING)
+			result = UDB_STORAGE_CORRUPT;
+		if (result >= UDB_STORAGE_NOT_FOUND)
 		{
-			tkl_del_line(tkl);
+			udb_ip_set_nolines(entity, result == UDB_STORAGE_OK ? field->string : NULL);
+			result = UDB_STORAGE_OK;
 		}
-	}
-	else if (!strcmp(subkey, IKEY_HOST))
-	{
-		udb_ip_reconcile_host(ip_key, NULL);
-		udb_ip_refresh_derived_hosts();
-	}
-}
-
-static void udb_ips_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec)
-{
-	UdbRecord *ip_rec;
-
-	if (!ctx || !block || !rec)
-		return;
-	ip_rec = rec->parent == block->tree ? rec : rec->parent;
-	udb_ip_apply_record(ip_rec->key, ip_rec, rec->key);
-}
-
-static void udb_ips_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec)
-{
-	UdbRecord *ip_rec;
-
-	if (!ctx || !block || !rec)
-		return;
-	ip_rec = rec->parent == block->tree ? rec : rec->parent;
-	if (rec->parent == block->tree)
-	{
-		/* Deleting I::<key> must remove effects owned by every child. */
-		UdbRecord *child;
-
-		for (child = ip_rec->child; child; child = child->sibling)
-			udb_ip_remove_record(ip_rec->key, ip_rec, child->key);
+		udb_storage_free(field);
 	}
 	else
+		result = udb_ip_nolines_scan(before, after, 1);
+	if (result == UDB_STORAGE_OK && !entity)
+		result = udb_ip_nolines_scan(after, NULL, 0);
+	if (result != UDB_STORAGE_OK)
+		return result;
+	Client *client, *next;
+	list_for_each_entry_safe(client, next, &lclient_list, lclient_node)
 	{
-		udb_ip_remove_record(ip_rec->key, ip_rec, rec->key);
+		if (!MyUser(client) || (entity && (!client->ip || strcasecmp(entity, client->ip)) &&
+								(!client->user || strcasecmp(entity, client->user->realhost))))
+			continue;
+		UdbStorageProfile *old = NULL, *current = NULL;
+		UdbStorageResult prior = udb_ip_client_profile(before, client, &old);
+		UdbStorageResult loaded = udb_ip_client_profile(after, client, &current);
+		if (prior < UDB_STORAGE_NOT_FOUND || loaded < UDB_STORAGE_NOT_FOUND)
+		{
+			result = prior < UDB_STORAGE_NOT_FOUND ? prior : loaded;
+			udb_storage_profile_free(&old);
+			udb_storage_profile_free(&current);
+			continue;
+		}
+		const UdbStorageField *oldhost = old && old->fields[1].present ? old->fields + 1 : NULL;
+		const UdbStorageField *host = current && current->fields[1].present ? current->fields + 1 : NULL;
+		int changed = (oldhost != NULL) != (host != NULL) ||
+					  (oldhost && host &&
+					   (oldhost->kind != host->kind || strcmp(oldhost->string, host->string) ||
+						strcmp(old->entity, current->entity)));
+		if (changed)
+		{
+			char visible[HOSTLEN + 1];
+			strlcpy(visible, udb_ip_visible_host(client), sizeof(visible));
+			userhost_save_current(client);
+			UdbIpHostState *owned = udb_ip_host_md ? moddata_local_client(client, udb_ip_host_md).ptr : NULL;
+			if (owned)
+			{
+				char key[HOSTLEN + 1];
+				strlcpy(key, owned->key, sizeof(key));
+				udb_ip_restore_host(client, key);
+			}
+			if (host && host->kind == UDB_STORAGE_VALUE_STRING)
+				udb_ip_apply_host(client, current->entity, host->string);
+			else if (host)
+				result = UDB_STORAGE_CORRUPT;
+			if (strcmp(visible, udb_ip_visible_host(client)))
+				udb_ip_notify_host_change(client, "*** Your IP host policy has changed");
+		}
+		udb_storage_profile_free(&old);
+		udb_storage_profile_free(&current);
 	}
+	return result;
+}
+
+static UdbStorageResult udb_ip_reconcile_generations(UdbStorageRead *before, UdbStorageRead *after)
+{
+	return udb_ip_reconcile_scope(before, after, NULL);
 }
 
 static int udb_hook_pre_connect(Client *client)
 {
-	UdbRecord *ip_rec;
-	UdbRecord *sub_rec;
-	int limit = 0;
+	static const char *const fields[] = {IKEY_CLONES, IKEY_HOST, IKEY_NOLINES};
+	UdbStorageRead *read = NULL;
+	UdbStorageProfile *profile = NULL;
+	UdbStorageField *globals = NULL;
+	UdbStorageResult result;
+	int limit = 0, exempt = 0;
+	char host[HOSTLEN + 1] = "", ip_key[HOSTLEN + 1] = "";
+	char quit[UDB_STORAGE_VALUE_MAX + 1] = "Too many connections from your IP";
 
 	if (!client || !client->ip || !client->local)
-		return 0;
-
-	ip_rec = udb_hash_find(udb_ctx, udb_block_letter_to_index(UDB_BLOCK_IPS), client->ip);
-	if (!ip_rec && client->user)
-		ip_rec = udb_hash_find(udb_ctx, udb_block_letter_to_index(UDB_BLOCK_IPS), client->user->realhost);
-
-	if (ip_rec)
+		return HOOK_CONTINUE;
+	if (!udb_ctx || !udb_ctx->storage || !udb_ready)
+		goto unavailable;
+	result = udb_storage_read_open(udb_ctx->storage, &read);
+	if (result != UDB_STORAGE_OK)
+		goto unavailable;
+	UdbStorageRow entity = {0};
+	entity.block = 'I';
+	entity.depth = 1;
+	entity.components[0].data = (const unsigned char *)client->ip;
+	entity.components[0].length = (uint32_t)strlen(client->ip);
+	result = udb_storage_profile_load(read, &entity, fields, 3, &profile);
+	if (result == UDB_STORAGE_NOT_FOUND && client->user && client->user->realhost[0])
 	{
-		sub_rec = udb_record_find(udb_ctx, IKEY_CLONES, ip_rec);
-		if (sub_rec && sub_rec->data_num > 0)
-			limit = (int)sub_rec->data_num;
-
-		sub_rec = udb_record_find(udb_ctx, IKEY_HOST, ip_rec);
-		if (sub_rec && sub_rec->data_str && *sub_rec->data_str && client->user)
-			udb_ip_apply_host(client, ip_rec->key, sub_rec->data_str);
-
-		if (udb_ip_is_throttle_exempt(ip_rec))
-			return HOOK_CONTINUE;
+		entity.components[0].data = (const unsigned char *)client->user->realhost;
+		entity.components[0].length = (uint32_t)strlen(client->user->realhost);
+		result = udb_storage_profile_load(read, &entity, fields, 3, &profile);
 	}
+	if (result < UDB_STORAGE_NOT_FOUND)
+		goto unavailable;
+	if (profile)
+	{
+		UdbStorageField *clones = profile->fields, *vhost = profile->fields + 1, *nolines = profile->fields + 2;
+		if ((clones->present && (clones->kind != UDB_STORAGE_VALUE_NUMBER || clones->number > INT_MAX)) ||
+			(vhost->present && (vhost->kind != UDB_STORAGE_VALUE_STRING || vhost->length > HOSTLEN)) ||
+			(nolines->present && nolines->kind != UDB_STORAGE_VALUE_STRING) || entity.components[0].length > HOSTLEN)
+			goto unavailable;
+		limit = clones->present ? (int)clones->number : 0;
+		if (vhost->present)
+			memcpy(host, vhost->string, vhost->length + 1);
+		memcpy(ip_key, entity.components[0].data, entity.components[0].length);
+		ip_key[entity.components[0].length] = 0;
+		exempt = nolines->present && (strchr(nolines->string, 'c') || strchr(nolines->string, 'C'));
+	}
+	if (!exempt)
+	{
+		globals = udb_storage_alloc(&read->engine->budget, UDB_STORAGE_MEMORY_AUX, 2 * sizeof(*globals));
+		if (!globals)
+			goto unavailable;
+		if (!limit)
+		{
+			result = udb_native_read_scalar(read, 'S', NULL, SKEY_CLONES, globals);
+			if (result < UDB_STORAGE_NOT_FOUND ||
+				(result == UDB_STORAGE_OK &&
+				 (globals[0].kind != UDB_STORAGE_VALUE_NUMBER || globals[0].number > INT_MAX)))
+				goto unavailable;
+			limit = result == UDB_STORAGE_OK ? (int)globals[0].number : 0;
+		}
+		if (limit)
+		{
+			result = udb_native_read_scalar(read, 'S', NULL, SKEY_QUIT_CLONES, globals + 1);
+			if (result < UDB_STORAGE_NOT_FOUND ||
+				(result == UDB_STORAGE_OK && globals[1].kind != UDB_STORAGE_VALUE_STRING))
+				goto unavailable;
+			if (result == UDB_STORAGE_OK)
+				memcpy(quit, globals[1].string, globals[1].length + 1);
+		}
+	}
+	udb_storage_profile_free(&profile);
+	udb_storage_free(globals);
+	globals = NULL;
+	if (udb_storage_read_close(&read) != UDB_STORAGE_OK)
+		goto unavailable;
+	/* Privacy is mandatory even for a connect-flood-exempt entity. */
+	if (*host && client->user)
+		udb_ip_apply_host(client, ip_key, host);
 	udb_ip_refresh_derived_host(client);
 	if (!udb_ip_base_state(client, 0) || !udb_ip_safe_host(client, udb_ip_base_state(client, 0)->host))
 	{
 		exit_client(client, NULL, "No safe cloak is available");
 		return HOOK_DENY;
 	}
-
-	/* Fallback to global clones if no specific IP limit */
-	if (limit == 0 && udb_ctx && udb_ctx->settings)
-	{
-		UdbRecord *g_clones = udb_record_find(udb_ctx, SKEY_CLONES, udb_ctx->settings);
-		if (g_clones && g_clones->data_num > 0)
-			limit = (int)g_clones->data_num;
-	}
-
-	if (limit <= 0)
-		return 0;
-
+	if (exempt || !limit)
+		return HOOK_CONTINUE;
 	int clone_count = 0;
-	Client *c;
-	list_for_each_entry(c, &client_list, client_node)
+	Client *other;
+	list_for_each_entry(other, &client_list, client_node)
 	{
-		if (!IsUser(c) || IsDead(c) || c == client)
-			continue;
-		if (c->ip && !strcmp(c->ip, client->ip))
-			clone_count++;
+		if (IsUser(other) && !IsDead(other) && other != client && other->ip && !strcmp(other->ip, client->ip))
+		{
+			/* Stop at the validated INT_MAX-bounded threshold. */
+			if (++clone_count >= limit)
+				break;
+		}
 	}
-
 	if (clone_count < limit)
-		return 0;
-
-	const char *quit_msg =
-		(udb_ctx && udb_ctx->quit_clones) ? udb_ctx->quit_clones : "Too many connections from your IP";
-
+		return HOOK_CONTINUE;
 	udb_log(ULOG_INFO, "UDB_CLONES", client, "Rejecting $client.ip (Exceeds UDB clone limit of $limit)",
 			log_data_integer("limit", limit));
-	exit_client(client, NULL, quit_msg);
+	exit_client(client, NULL, quit);
+	return HOOK_DENY;
+unavailable:
+	udb_storage_profile_free(&profile);
+	udb_storage_free(globals);
+	if (read)
+		udb_storage_read_close(&read);
+	exit_client(client, NULL, "UDB policy data unavailable");
 	return HOOK_DENY;
 }
 
@@ -484,12 +550,36 @@ static int udb_hook_local_quit(Client *client, MessageTag *mtags, const char *co
 
 static void udb_ips_shutdown(void)
 {
-	UdbRecord *ip_rec;
-
-	if (udb_ctx && udb_ctx->ips)
+	TKL *tkl, *next;
+	for (unsigned int i = 0; i < TKLISTLEN; i++)
+		for (tkl = tklines[i]; tkl; tkl = next)
+		{
+			next = tkl->next;
+			if (udb_ip_tkl_is_owned(tkl))
+				tkl_del_line(tkl);
+		}
+	for (unsigned int i = 0; i < TKLIPHASHLEN1; i++)
+		for (unsigned int j = 0; j < TKLIPHASHLEN2; j++)
+			for (tkl = tklines_ip_hash[i][j]; tkl; tkl = next)
+			{
+				next = tkl->next;
+				if (udb_ip_tkl_is_owned(tkl))
+					tkl_del_line(tkl);
+			}
+	Client *client, *following;
+	list_for_each_entry_safe(client, following, &lclient_list, lclient_node)
 	{
-		for (ip_rec = udb_ctx->ips->child; ip_rec; ip_rec = ip_rec->sibling)
-			udb_ip_remove_record(ip_rec->key, ip_rec, IKEY_NOLINES);
+		UdbIpHostState *owned = udb_ip_host_md ? moddata_local_client(client, udb_ip_host_md).ptr : NULL;
+		if (!owned || !client->user)
+			continue;
+		char key[HOSTLEN + 1], visible[HOSTLEN + 1];
+		strlcpy(key, owned->key, sizeof(key));
+		strlcpy(visible, udb_ip_visible_host(client), sizeof(visible));
+		if (MyUser(client))
+			userhost_save_current(client);
+		udb_ip_restore_host(client, key);
+		if (strcmp(visible, udb_ip_visible_host(client)))
+			udb_ip_notify_host_change(client, NULL);
 	}
 }
 
@@ -542,29 +632,35 @@ CMD_OVERRIDE_FUNC(udb_override_safe_chghost)
 
 static void udb_ip_restore_nick_vhost(Client *client)
 {
-	UdbRecord *nick, *vhost;
-
+	UdbStorageProfile *nick = NULL;
 	if (!client || !MyUser(client) || IsDead(client))
 		return;
-	nick = udb_ready && udb_ctx ? udb_record_find(udb_ctx, client->name, udb_ctx->nicks) : NULL;
-	vhost = nick ? udb_record_find(udb_ctx, NKEY_VHOST, nick) : NULL;
-	if (!has_user_mode(client, 'r') || !nick || !udb_nick_identity_valid(client, nick) ||
-		udb_record_find(udb_ctx, NKEY_SUSPEND, nick) || udb_record_find(udb_ctx, NKEY_FORBID, nick) || !vhost ||
-		!udb_ip_safe_host(client, vhost->data_str))
+	UdbStorageResult result = udb_native_nick_load(client->name, &nick);
+	if (result < UDB_STORAGE_NOT_FOUND)
 	{
-		sendnotice(client, "UDB: +t requires an authenticated nickname with an authorized N vhost");
+		sendnotice(client, "UDB: nickname policy data unavailable");
 		return;
 	}
-	if (IsSetHost(client) && client->user->virthost && !strcmp(client->user->virthost, vhost->data_str))
-		return;
+	UdbStorageField *vhost = udb_nick_field(nick, NKEY_VHOST);
+	if (!has_user_mode(client, 'r') || !nick || !udb_nick_identity_valid(client, nick) ||
+		udb_nick_field(nick, NKEY_SUSPEND) || udb_nick_field(nick, NKEY_FORBID) || !vhost ||
+		!udb_ip_safe_host(client, vhost->string))
+	{
+		sendnotice(client, "UDB: +t requires an authenticated nickname with an authorized N vhost");
+		goto cleanup;
+	}
+	if (IsSetHost(client) && client->user->virthost && !strcmp(client->user->virthost, vhost->string))
+		goto cleanup;
 	if (UHOST_ALLOWED == UHALLOW_NEVER || (UHOST_ALLOWED == UHALLOW_NOCHANS && client->user->joined) ||
 		(!ValidatePermissionsForPath("immune:vhost-flood", client, NULL, NULL, NULL) &&
 		 flood_limit_exceeded(client, FLD_VHOST)))
 	{
 		sendnotice(client, "UDB: vhost change is currently restricted");
-		return;
+		goto cleanup;
 	}
 	udb_nick_effects_apply_vhost(client, vhost);
+cleanup:
+	udb_storage_profile_free(&nick);
 }
 
 CMD_OVERRIDE_FUNC(udb_override_host_mode)

@@ -1,6 +1,7 @@
 """Exercise the real bundle generator on disposable input/output trees."""
 
 import hashlib
+import re
 import shutil
 import subprocess
 import sys
@@ -83,3 +84,25 @@ def test_atomic_publication_replaces_bytes_and_leaves_no_temp(bundle, tmp_path):
     module.atomic_write(str(target), b"new")
     assert target.read_bytes() == b"new"
     assert not (tmp_path / "publication.tmp").exists()
+
+
+@pytest.mark.parametrize("version", ["4.0.0-rc1", "4.0.0", "4.2.3"])
+def test_catalog_version_follows_canonical_header(bundle, version):
+    module, source = bundle
+    header = source / "udb.h"
+    text = re.sub(r'^#define UDB_VERSION .*$', f'#define UDB_VERSION "{version}"',
+                  header.read_text(), flags=re.MULTILINE)
+    header.write_text(text)
+    assert f'version "{version}";'.encode() in module.build_modules_list(module.build_bundle())
+    assert header.read_text() == text
+
+
+@pytest.mark.parametrize("definition", ["", '#define UDB_VERSION "invalid"',
+                                      '#define UDB_VERSION "4.0.0"\n#define UDB_VERSION "4.0.0-rc1"'])
+def test_catalog_rejects_missing_malformed_or_duplicate_version(bundle, definition):
+    module, source = bundle
+    header = source / "udb.h"
+    header.write_text(re.sub(r'^#define UDB_VERSION .*$', lambda _: definition,
+                            header.read_text(), flags=re.MULTILINE))
+    with pytest.raises(SystemExit):
+        module.build_modules_list(module.build_bundle())

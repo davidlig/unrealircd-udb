@@ -12,7 +12,9 @@ Use this skill only when repository ownership/location is not already obvious.
 - `src/udb.c` — module composition/entry source.
 - `src/udb.h` — public definitions and module/protocol version constants.
 - `src/udb_internal.h` — internal shared definitions, limits and runtime state.
-- `src/udb_store.c.inc` — record tree, paths and persistence.
+- `src/udb_store.c.inc` — canonical paths and secret tuple classification.
+- `src/udb_storage*.c.inc` — exclusive binary disk engine, WAL, paged cache/catalogs.
+- `src/udb_native*.c.inc` — typed schema, reads, effects and staged HEL 4 transfers.
 - `src/udb_config.c.inc` — `udb {}` configuration plus S/L settings effects.
 - `src/udb_sync.c.inc` — HEL, propagator/authority, reconciliation and staged snapshots.
 - `src/udb_operclasses.c.inc` — OCL inventories, membership, replay and OCLG view.

@@ -21,7 +21,7 @@
  * conf.c owns the active operclass list and does not export it through h.h.
  * Every direct reference to these internals is confined to this section so an
  * upstream layout change has a single place to adapt. */
-extern ConfigItem_operclass *conf_operclass;
+extern MODVAR ConfigItem_operclass *conf_operclass;
 
 static ConfigItem_operclass *udb_compat_operclass_head(void)
 {

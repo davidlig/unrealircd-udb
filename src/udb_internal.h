@@ -14,6 +14,7 @@
 
 #include "udb.h"
 
+#include "udb_storage.h"
 #include "unrealircd.h"
 #include <errno.h>
 #include <inttypes.h>
@@ -27,7 +28,7 @@
 #define UDB_RECORD_PATH_MAX 8192
 #define UDB_PATH_MAX_COMPONENTS 8
 #define UDB_COMPONENT_RAW_MAX 4608
-#define UDB_COMPONENT_ENCODED_MAX 4608
+#define UDB_COMPONENT_ENCODED_MAX (3 * UDB_COMPONENT_RAW_MAX)
 #define UDB_COMPONENT_MAX UDB_COMPONENT_ENCODED_MAX
 #define UDB_RECORD_VALUE_MAX 4096
 #define UDB_RECORD_LINE_MAX (UDB_RECORD_PATH_MAX + UDB_RECORD_VALUE_MAX + 32)
@@ -35,20 +36,19 @@
 #define UDB_S2S_OVERHEAD_MAX 256
 #define UDB_TXID_MAX 31
 #define UDB_SYNC_INACTIVITY_TIMEOUT 60
-#define UDB_SYNC_ABSOLUTE_TIMEOUT 300
+#define UDB_SYNC_ABSOLUTE_TIMEOUT 3600
 #define UDB_SYNC_TIMEOUT UDB_SYNC_INACTIVITY_TIMEOUT
 #define UDB_RECONCILE_RETRY_MAX 6
 #define UDB_RECONCILE_RETRY_BASE 2
-#define UDB_STATE_FORMAT 1
 #define UDB_DEFAULT_ANTI_ENTROPY_INTERVAL 1800
 #define UDB_MIN_ANTI_ENTROPY_INTERVAL 1
 #define UDB_MAX_ANTI_ENTROPY_INTERVAL 86400
 #define UDB_ANTI_ENTROPY_TIMEOUT 10
 #define UDB_ANTI_ENTROPY_MIN_GAP 5
-#define UDB_DEFAULT_MAX_STAGED_BYTES (64 * 1024 * 1024) /* 64 MB */
+#define UDB_DEFAULT_MAX_STAGED_BYTES ((size_t)16 * 1024 * 1024 * 1024)
 #define UDB_MIN_MAX_STAGED_BYTES 1024
-#define UDB_MAX_MAX_STAGED_BYTES (1024ULL * 1024 * 1024)
-#define UDB_DEFAULT_MAX_STAGED_RECORDS 500000
+#define UDB_MAX_MAX_STAGED_BYTES ((size_t)64 * 1024 * 1024 * 1024)
+#define UDB_DEFAULT_MAX_STAGED_RECORDS 10000000
 #define UDB_MIN_MAX_STAGED_RECORDS 1
 #define UDB_MAX_MAX_STAGED_RECORDS 10000000
 #define UDB_HASH_MIN_BUCKETS 2048
@@ -66,17 +66,34 @@
 #define UDB_OCL_CANONICAL_MAX (256 * 1024)
 #define UDB_OCL_ACL_DEPTH_MAX 64
 
-typedef struct UdbRecord UdbRecord;
+/* Frozen daemon mode metadata, copied before native writer admission. */
+typedef struct UdbNativeModeSchema
+{
+	unsigned short parameters;
+	unsigned char known;
+	unsigned char member;
+	unsigned char unset_parameter;
+} UdbNativeModeSchema;
+typedef struct UdbNativeSchema
+{
+	UdbStorageBudget *budget;
+	UdbNativeModeSchema channels[256];
+	unsigned char users[256];
+	unsigned char snomasks[256];
+	int spamfilter_utf8;
+} UdbNativeSchema;
+static void udb_native_schema_capture(UdbNativeSchema *schema, UdbStorageBudget *budget);
+static UdbStorageResult udb_native_row_validate(const UdbStorageRecord *record, void *context);
+static UdbStorageResult udb_native_stage_validate(const UdbStorageSource *source, unsigned char block, void *context);
+static UdbStorageResult udb_native_mutation_validate(UdbStorageEngine *engine, const UdbStorageBlockRoot *root,
+													 const UdbStorageRow *changed, void *context);
+
+static UdbStorageResult udb_native_mutation_normalize(const UdbStorageRecord *record, UdbStorageRow *prefix,
+													  void *context);
+static UdbStorageResult udb_native_block_profiles_validate(UdbStorageEngine *engine, const UdbStorageBlockRoot *root,
+														   void *context);
 typedef struct UdbBlock UdbBlock;
 typedef struct UdbSyncSession UdbSyncSession;
-
-typedef struct UdbHashIndex
-{
-	UdbRecord **buckets;
-	size_t bucket_count;
-	size_t mask;
-	size_t entries;
-} UdbHashIndex;
 
 typedef struct UdbPropagatorSelection
 {
@@ -88,8 +105,8 @@ typedef struct UdbPropagatorSelection
 typedef enum UdbValueType
 {
 	UDB_VAL_NONE = 0, /* No value allowed (container node) */
-	UDB_VAL_STRING,	  /* Must be a string (no '*' prefix) */
-	UDB_VAL_NUMERIC,  /* Must be a numeric string ('*' prefix followed by digits) */
+	UDB_VAL_STRING,	  /* Typed non-empty string */
+	UDB_VAL_NUMERIC,  /* Typed unsigned numeric scalar */
 	UDB_VAL_ANY		  /* Accepts both string and numeric */
 } UdbValueType;
 
@@ -122,22 +139,6 @@ typedef struct UdbBlockDescriptor
 	const UdbBlockSchema *schema;
 } UdbBlockDescriptor;
 
-struct UdbRecord
-{
-	char *key;
-	unsigned int id;
-	char *data_str;
-	unsigned long data_num;
-	UdbRecord *hash_next;
-	UdbRecord *parent;
-	UdbRecord *sibling;
-	UdbRecord *child;
-	unsigned char block_idx;
-	unsigned int is_b64 : 1;
-	unsigned int is_dynamic_key : 1;
-	unsigned int nick_unsuspend_transition : 1;
-};
-
 typedef enum UdbBlockLoadState
 {
 	UDB_LOAD_UNINITIALIZED = 0,
@@ -149,73 +150,40 @@ typedef enum UdbBlockLoadState
 #define UDB_SHA256_HEX_LEN 64
 #define UDB_EMPTY_SHA256 "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
-typedef struct UdbManifest
-{
-	char letter;
-	unsigned int record_count;
-	char sha256[UDB_SHA256_HEX_LEN + 1];
-	time_t modified_at;
-	uint64_t watermark_seq;
-} UdbManifest;
-
-/* Startup files are parsed before their trees are allowed to affect runtime
- * state. The context flag keeps the loader side-effect-free until the full
- * six-block READY set has been accepted. */
-typedef struct UdbStartupCandidate
-{
-	UdbRecord *tree;
-	UdbHashIndex hash_index;
-	unsigned int record_count;
-	char sha256[UDB_SHA256_HEX_LEN + 1];
-	unsigned long generation;
-	UdbBlockLoadState load_state;
-} UdbStartupCandidate;
-
-typedef enum UdbSnapshotResult
-{
-	UDB_SNAPSHOT_FAILED_BEFORE_COMMIT = 0,
-	UDB_SNAPSHOT_COMMITTED = 1,
-	UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN = 2
-} UdbSnapshotResult;
-
 struct UdbBlock
 {
-	UdbRecord *tree;
 	UdbBlock *next;
 	char sha256[UDB_SHA256_HEX_LEN + 1];
 	char *filepath;
 	unsigned int id;
-	unsigned long filesize;
+	uint64_t filesize;
 	time_t modified_at;
 	Client *syncing_from;
 	UdbSyncSession *session;
 	Client *pending_from;
 	time_t pending_deadline;
 	unsigned long pending_round_id;
-	unsigned long generation;
-	unsigned int record_count;
+	uint64_t generation;
+	uint64_t record_count;
 	char letter;
 	unsigned int version;
 	UdbBlockLoadState load_state;
 };
 
-/* A receive session owns its private candidate tree and prepared index until
- * validated publication transfers them, or abort releases them. */
+/* Foreground receive session: copied identifiers only; disk staging is writer-owned. */
 struct UdbSyncSession
 {
-	Client *peer;
+	char peer_sid[4];
 	char txid[UDB_TXID_MAX + 1];
 	unsigned long round_id;
+	uint64_t owner;
+	uint64_t end_job;
+	uint64_t received_puts;
+	uint64_t watermark_seq;
 	time_t started_at;
 	time_t last_activity;
 	time_t deadline;
 	time_t absolute_deadline;
-	UdbRecord *tree;
-	UdbHashIndex hash_index;
-	size_t received_bytes;
-	unsigned int received_puts;
-	unsigned int record_count;
-	uint64_t watermark_seq;
 };
 
 typedef struct UdbPasswordFailure
@@ -287,6 +255,7 @@ typedef struct UdbConfig
 	int config_flood_period;
 	unsigned int max_staged_records;
 	size_t max_staged_bytes;
+	size_t cache_size;
 	int sync_inactivity_timeout;
 	int sync_absolute_timeout;
 	int stale_timeout;
@@ -295,17 +264,14 @@ typedef struct UdbConfig
 
 typedef struct UdbContext
 {
+	UdbStorageEngine *storage;
+	UdbNativeSchema native_schema;
+	char selected_sid[4];
+	char selected_epoch[17];
+	int selection_kind;
+	size_t native_charge;
 	UdbBlock *blocks[256];
 	UdbBlock *block_list;
-	UdbRecord *nicks;
-	UdbRecord *channels;
-	UdbRecord *ips;
-	UdbRecord *settings;
-	UdbRecord *links;
-	UdbRecord *lines;
-	UdbHashIndex hash[UDB_NUM_BLOCKS];
-	UdbStartupCandidate startup_candidates[UDB_NUM_BLOCKS];
-	char *startup_propagator_setting;
 	char *propagator_setting;
 	char *quit_clones;
 	char *encryption_key;
@@ -314,8 +280,6 @@ typedef struct UdbContext
 	char *chanserv_mask;
 	char *ipserv_mask;
 	int block_count;
-	int total_records;
-	int startup_loading;
 	uint64_t current_seq;
 	uint64_t last_applied_seq;
 	char authority_sid[IDLEN + 1];
@@ -326,6 +290,22 @@ typedef struct UdbContext
 	int candidate_authority_epoch_known;
 } UdbContext;
 
+/* Caller-owned canonical keys; no record-tree adapters or shared scratch. */
+typedef struct UdbNativeKey
+{
+	UdbStorageRow row;
+	unsigned char bytes[UDB_STORAGE_KEY_MAX];
+	unsigned char scratch[UDB_STORAGE_PATH_MAX];
+	size_t used;
+} UdbNativeKey;
+
+static UdbStorageResult udb_native_key_parse(const char *path, UdbNativeKey *key);
+static UdbStorageResult udb_native_key_path(const UdbStorageRow *row, char *out, size_t capacity);
+static UdbStorageResult udb_native_read_scalar(UdbStorageRead *read, unsigned char block, const char *entity,
+											   const char *property, UdbStorageField *field);
+static UdbStorageResult udb_native_profile_load(UdbContext *ctx, unsigned char block, const char *entity,
+												const char *const *fields, unsigned int count, UdbStorageProfile **out);
+
 static UdbContext *udb_ctx = NULL;
 static UdbPasswordFailure udb_password_failures[UDB_PASSWORD_FAILURE_SLOTS];
 static UdbSyncStatus udb_sync_status = UDB_SYNC_OK;
@@ -334,34 +314,6 @@ static time_t udb_propagator_unavailable_since = 0;
 static time_t udb_last_successful_sync = 0;
 static int udb_ready = 0;
 static Client *udb_bootstrap_peer = NULL;
-
-typedef enum UdbPersistentState
-{
-	UDB_PERSIST_BOOTSTRAPPING = 0,
-	UDB_PERSIST_READY = 1
-} UdbPersistentState;
-
-typedef enum UdbStatePersistResult
-{
-	UDB_STATE_FAILED_BEFORE_COMMIT = 0,
-	UDB_STATE_COMMITTED = 1,
-	UDB_STATE_COMMITTED_DURABILITY_UNCERTAIN = 2
-} UdbStatePersistResult;
-
-typedef enum UdbStartupState
-{
-	UDB_STARTUP_FRESH = 0,
-	UDB_STARTUP_PERSISTED_READY_VALID,
-	UDB_STARTUP_PERSISTED_BOOTSTRAPPING,
-	UDB_STARTUP_PERSISTED_INVALID,
-	UDB_STARTUP_PERSISTED_READY_INCOMPLETE
-} UdbStartupState;
-
-typedef enum UdbPersistenceOrigin
-{
-	UDB_ORIGIN_FRESH = 0,
-	UDB_ORIGIN_RECOVERY
-} UdbPersistenceOrigin;
 
 #define UDB_BLOCK_MASK_N (1 << 0)
 #define UDB_BLOCK_MASK_C (1 << 1)
@@ -389,6 +341,9 @@ typedef struct UdbReconcileState
 	time_t absolute_deadline;
 	uint64_t watermark_seq;
 	int watermark_known;
+	char source_sid[4];
+	char source_epoch[UDB_OCL_EPOCH_LEN + 1];
+	int source_known;
 } UdbReconcileState;
 
 static UdbReconcileState udb_reconcile = {0};
@@ -410,20 +365,10 @@ typedef struct UdbAntiEntropyState
 
 static UdbAntiEntropyState udb_anti_entropy = {0};
 
-/* While a staged commit is swapping a block tree (notably S), policy-change
- * notifications are deferred: the transient state between removing the old
- * tree's effects and installing the new tree must not abort the in-flight
- * session or the active round. */
+/* Ordered durable effects defer policy notifications until the complete
+ * derived settings set has been installed in foreground state. */
 static int udb_policy_notify_deferred = 0;
 static int udb_policy_notify_pending = 0;
-
-static int udb_persistence_load_state(UdbPersistentState *state_out, UdbPersistenceOrigin *origin_out,
-									  unsigned long *generation_out, time_t *last_sync_out);
-static UdbStatePersistResult udb_persistence_set_state(UdbPersistentState state, UdbPersistenceOrigin origin,
-													   unsigned long generation, time_t last_sync);
-static void udb_mark_durability_uncertain(UdbContext *ctx, UdbBlock *block, const char *operation);
-static void udb_handle_persistence_failure(UdbContext *ctx, Client *peer, UdbBlock *block, const char *operation,
-										   int commit_uncertain);
 
 static int udb_config_test(ConfigFile *cf, ConfigEntry *ce, int type, int *errs);
 static int udb_config_run(ConfigFile *cf, ConfigEntry *ce, int type);
@@ -440,23 +385,11 @@ static int udb_engine_init(void);
 static void udb_engine_cleanup(UdbContext *ctx);
 static void udb_engine_shutdown(void);
 static UdbBlock *udb_block_create(UdbContext *ctx, char letter, const char *name);
-static void udb_block_set_context_root(UdbContext *ctx, UdbBlock *block);
-static int udb_block_load(UdbContext *ctx, UdbBlock *block);
-static void udb_block_unload(UdbContext *ctx, UdbBlock *block);
-static void udb_block_reset(UdbContext *ctx, UdbBlock *block);
-static int udb_blocks_load_all(UdbContext *ctx);
-static void udb_startup_candidates_discard(UdbContext *ctx);
-static int udb_startup_publish(UdbContext *ctx);
-static void udb_startup_load_policy(UdbContext *ctx);
-static int udb_blocks_save_all(UdbContext *ctx);
 static UdbBlock *udb_block_by_letter(UdbContext *ctx, char letter);
-static int udb_record_fits_limits(const char *path, const char *value);
 static int udb_path_encode_component(const char *raw, char *buf, size_t bufsz);
 static int udb_path_decode_component(const char *encoded, char *buf, size_t bufsz);
 typedef int (*UdbPathComponentFunc)(const char *decoded, unsigned int index, void *data);
 static int udb_path_foreach(const char *path, unsigned int max_components, UdbPathComponentFunc fn, void *data);
-static int udb_path_append(char *dst, size_t dst_size, size_t *used, const char *component);
-static int udb_path_append_component(char *pathbuf, size_t bufsz, const char *raw_component);
 static int udb_secret_key_is_reserved(const char *key);
 static int udb_secret_key_matches(char block_letter, unsigned int depth, const char *key);
 static int udb_path_value_is_secret(const char *path);
@@ -472,43 +405,53 @@ static int udb_time_add(time_t base, unsigned long duration, time_t *result);
 static int udb_timestamp_parse(const char *s, time_t *out);
 static int udb_digest_parse(const char *input, char out_hex[UDB_SHA256_HEX_LEN + 1]);
 static UdbLineExpiryPending *udb_line_expiry_pending_add(char type, const char *pattern, time_t expires);
-static UdbRecord *udb_record_find(UdbContext *ctx, const char *key, UdbRecord *parent);
-static UdbRecord *udb_record_create(UdbRecord *parent);
-static UdbRecord *udb_record_find_path(UdbContext *ctx, UdbBlock *block, const char *path);
-static void udb_record_free_tree(UdbRecord *rec);
-static UdbRecord *udb_record_clone_tree(UdbRecord *rec, UdbRecord *needle, UdbRecord **needle_clone);
-static unsigned int udb_record_count_tree(UdbRecord *rec);
-static unsigned int udb_record_count_logical(UdbRecord *rec);
-static int udb_n_tree_profiles_valid(UdbRecord *tree);
-static void udb_n_profile_canonicalize_forbid(UdbRecord *profile);
-static UdbRecord *udb_record_insert_path(UdbRecord *tree, const char *path, const char *data);
-static void udb_record_delete_tree(UdbRecord *rec);
-static int udb_hash_init(UdbContext *ctx);
-static void udb_hash_destroy(UdbContext *ctx);
-static int udb_hash_prepare_tree(UdbRecord *tree, UdbHashIndex *index);
-static void udb_hash_dispose_prepared(UdbHashIndex *index);
-static void udb_hash_publish_prepared(UdbContext *ctx, int block_idx, UdbHashIndex *index);
-static void udb_hash_insert_record(UdbContext *ctx, UdbRecord *rec, int block_idx, const char *key);
-static int udb_hash_remove_record(UdbContext *ctx, UdbRecord *rec, int block_idx, const char *key);
-static UdbRecord *udb_hash_find(UdbContext *ctx, int block_idx, const char *key);
-static UdbSnapshotResult udb_file_write_snapshot(UdbBlock *block, UdbRecord *tree, unsigned int record_count);
-static int udb_file_save_block(UdbContext *ctx, UdbBlock *block);
-static void udb_block_replace_tree(UdbContext *ctx, UdbBlock *block, UdbRecord *tree, unsigned int record_count,
-								   UdbHashIndex *index);
-static int udb_file_load_block(UdbContext *ctx, UdbBlock *block);
-static UdbRecord *udb_file_parse_line(UdbContext *ctx, UdbBlock *block, char *line);
-static int udb_serialize_tree(UdbRecord *rec, int depth, FILE *fp, char *pathbuf, size_t pathlen);
-static int udb_compute_block_digest(UdbBlock *block, char out_hex[UDB_SHA256_HEX_LEN + 1]);
-static int udb_compute_tree_digest(UdbRecord *tree, char out_hex[UDB_SHA256_HEX_LEN + 1]);
-static void udb_block_get_manifest(UdbBlock *block, UdbManifest *manifest);
-static int udb_stage_parse_line(UdbBlock *block, UdbSyncSession *session, const char *line);
-static int udb_block_commit_stage(UdbContext *ctx, UdbBlock *block, UdbSyncSession *session, const char *sha256);
 static void udb_sync_session_free(UdbBlock *block);
 static int udb_block_letter_to_index(char letter);
 static const UdbBlockDescriptor *udb_block_descriptor(unsigned int index);
 static int udb_block_descriptors_validate(void);
 
 static int udb_sync_to_server(Client *server);
+static int udb_native_receive_inf(Client *peer, unsigned long round, char block, const char *digest, uint64_t count,
+								  const char *sid, const char *epoch, uint64_t watermark);
+static int udb_native_receive_promote(UdbContext *ctx);
+static void udb_native_receive_abort(unsigned long round);
+static void udb_native_receive_cleanup(void);
+static void udb_native_receive_tick_event(void *unused);
+static uint64_t udb_native_owner_next(void);
+static int udb_native_mutation_bind(Client *peer, unsigned long round, const char *sid, const char *epoch,
+									uint64_t watermark);
+static int udb_native_mutation_pending(unsigned long round);
+static int udb_native_mutation_replay(unsigned long round);
+static void udb_native_mutation_abort(unsigned long round);
+static void udb_native_mutation_cleanup(void);
+static int udb_native_deliveries_present(void);
+static void udb_native_mutation_round_begin(Client *peer);
+static void udb_native_mutation_complete(UdbStorageJob *job);
+static void udb_native_receive_replay_pump(void);
+static UdbStorageResult udb_native_runtime_publication(UdbStorageJob *job);
+static UdbStorageResult udb_native_runtime_startup(UdbContext *ctx);
+static int udb_native_local_bind(UdbContext *ctx);
+static UdbStorageResult udb_channel_reconcile_entity(UdbStorageRead *before, UdbStorageRead *after, const char *name);
+static UdbStorageResult udb_ip_reconcile_scope(UdbStorageRead *before, UdbStorageRead *after, const char *entity);
+static UdbStorageResult udb_lines_reconcile_scope(UdbStorageRead *before, UdbStorageRead *after,
+												  const UdbStorageRow *row);
+static UdbStorageResult udb_native_receive_publication(UdbStorageJob *job, unsigned long round, Client *peer);
+static void udb_native_digest_hex(const unsigned char digest[32], char out[65]);
+static int udb_native_sync_offer(Client *server);
+static int udb_native_sync_offer_round(Client *server, unsigned long requested, int manifest);
+static int udb_native_sync_send(Client *server, char block, unsigned long round);
+static int udb_native_sync_ack(Client *server, unsigned long round, char block, const char *txid, const char *digest,
+							   uint64_t watermark);
+static void udb_native_sync_cleanup(Client *server);
+static void udb_native_sync_pump(void);
+static void udb_native_sync_tick_event(void *unused);
+static int udb_reconcile_accept_watermark(Client *peer, unsigned long round, uint64_t watermark);
+static int udb_reconcile_accept_source(Client *peer, unsigned long round, const char *sid, const char *epoch,
+									   uint64_t watermark);
+static UdbStorageResult udb_native_value_encode(const UdbStorageRow *row, char *out, size_t capacity);
+static UdbStorageResult udb_native_value_decode(const char *wire, UdbStorageRow *row, unsigned char *value,
+												size_t capacity);
+
 static int udb_has_hello(Client *server);
 static int udb_has_staged_sync(Client *server);
 static int udb_peer_authorizes_us(Client *server);
@@ -519,37 +462,29 @@ static int udb_hello_peer_advertisement(Client *server, const char *propagator, 
 static const char *udb_sync_hello_propagator(UdbPropagatorSelection *selected);
 static void udb_sync_abort(UdbBlock *block, const char *reason);
 static unsigned int udb_block_letter_to_mask(char letter);
-static int udb_is_database_initialized(UdbContext *ctx);
-static void udb_persistence_mark_ready(void);
 static int udb_has_active_sessions(UdbContext *ctx);
-static int udb_transition_to_ready(UdbContext *ctx, time_t sync_time);
-static int udb_persistence_has_state_file(void);
 static void udb_block_clear_pending(UdbBlock *block);
 static int udb_has_pending_requests(UdbContext *ctx);
 static void udb_reconcile_reset(void);
 static void udb_reconcile_begin(Client *authority, unsigned long round_id);
 static void udb_reconcile_abort(UdbContext *ctx, const char *reason, int schedule_retry);
 static void udb_reconcile_start(Client *authority, unsigned long round_id);
-static void udb_reconcile_record_inf(Client *peer, unsigned long round_id, char letter, const char *remote_sha,
-									 unsigned int remote_count);
 static void udb_reconcile_record_res(Client *peer, unsigned long round_id, char letter);
 static void udb_reconcile_record_end(Client *peer, char letter, unsigned long round_id);
 static int udb_reconcile_check(UdbContext *ctx);
 static int udb_is_authorized_sync_source(UdbContext *ctx, Client *direct_peer);
-static int udb_sync_begin(UdbBlock *block, Client *peer, unsigned long round_id, const char *txid,
+static int udb_sync_begin(UdbBlock *block, Client *peer, unsigned long round_id, const char *txid, const char *digest,
 						  uint64_t watermark_seq);
 static int udb_sync_put(UdbBlock *block, Client *peer, unsigned long round_id, const char *txid, const char *path,
 						const char *data);
 static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, unsigned long round_id, const char *txid,
-						const char *sha256, char out_digest[UDB_SHA256_HEX_LEN + 1], uint64_t watermark_seq);
+						const char *sha256, uint64_t watermark_seq);
 static void udb_sync_ack(Client *peer, const char *block);
-static int udb_sync_send_tree(Client *server, UdbRecord *rec, int depth, char *pathbuf, size_t pathlen,
-							  unsigned long round_id, char letter, const char *txid);
 static int udb_sync_send_stage(Client *server, UdbBlock *block, unsigned long round_id);
 static void udb_sync_server_quit(Client *client);
 static void udb_anti_entropy_schedule_next(time_t now);
 static void udb_anti_entropy_timer_check(time_t now);
-static void udb_anti_entropy_record_ack(Client *peer, unsigned long round_id, char letter, unsigned int remote_count,
+static void udb_anti_entropy_record_ack(Client *peer, unsigned long round_id, char letter, uint64_t remote_count,
 										const char *remote_sha, uint64_t watermark_seq);
 static void udb_anti_entropy_handle_err(Client *peer, unsigned long round_id, int errcode);
 static void udb_anti_entropy_peer_quit(Client *client);
@@ -587,34 +522,31 @@ typedef enum
 	UDB_NICK_APPLY_UNSUSPEND
 } UdbNickApplyReason;
 
-static void udb_nick_apply(Client *client, UdbRecord *nick_rec, UdbNickApplyReason reason);
+static void udb_nick_apply(Client *client, UdbStorageProfile *nick_rec, UdbNickApplyReason reason);
 static void udb_nick_identity_clear(Client *client);
 static void udb_nick_pending_auth_clear(Client *client);
-static void udb_nick_prepare_tree_replace(UdbBlock *block, UdbRecord *candidate_tree);
-static void udb_nick_finish_tree_replace(void);
-static void udb_nick_remove_record(UdbBlock *block, UdbRecord *rec);
 static void udb_nick_preserve_on_rehash(int preserve);
+static void udb_nick_shutdown(void);
+static UdbStorageResult udb_nick_reconcile_generations(Client *client, UdbStorageRead *before, UdbStorageRead *after);
+static UdbStorageResult udb_native_nick_load(const char *nick, UdbStorageProfile **out);
+static UdbStorageField *udb_nick_field(UdbStorageProfile *profile, const char *name);
 static void udb_nick_reconcile_after_reload(void);
 static void udb_nick_revoke_oper(Client *client);
 static int udb_oper_owned(Client *client);
 static void udb_nick_effects_revoke_oper_vhost(Client *client);
 static void udb_nick_effects_apply_oper_vhost_default(Client *client);
-static int udb_check_password(const char *pass, UdbRecord *profile_rec, Client *client);
-static int udb_nick_access_allowed(Client *client, UdbRecord *nick_rec);
+static int udb_check_password(const char *pass, UdbStorageProfile *profile_rec, Client *client);
+static int udb_nick_access_allowed(Client *client, UdbStorageProfile *nick_rec);
 static void udb_nick_set_vhost(Client *client, const char *vhost);
 static void udb_nick_remove_vhost(Client *client);
-static int udb_nick_grant_oper(Client *client, UdbRecord *nick_rec, UdbRecord *oper_rec);
-static void udb_channel_apply_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new);
-static void udb_channel_remove_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
+static int udb_nick_grant_oper(Client *client, UdbStorageProfile *nick_rec, UdbStorageField *oper_rec);
 static int udb_channels_load(ModuleInfo *modinfo);
-static void udb_ips_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
-static void udb_ips_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
+static UdbStorageResult udb_ip_reconcile_generations(UdbStorageRead *before, UdbStorageRead *after);
 static void udb_ip_refresh_derived_hosts(void);
 static void udb_ips_shutdown(void);
-static void udb_config_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
-static void udb_config_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
-static void udb_lines_apply_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
-static void udb_lines_remove_effect(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
+static UdbStorageResult udb_native_settings_apply(UdbContext *ctx, UdbStorageRead *read);
+static int udb_native_link_debug(UdbStorageRead *read, const char *server);
+static UdbStorageResult udb_lines_reconcile_generations(UdbStorageRead *before, UdbStorageRead *after);
 static int udb_spamfilter_pattern(const char *stored, char *pattern, size_t patternsz);
 static const char *udb_get_bot_nick(const char *service_key, int force_default);
 static const char *udb_get_bot_mask(const char *service_key, int force_default);
@@ -624,13 +556,10 @@ static void udb_send_service_notice(Client *target, const char *service_key, FOR
 static int udb_ip_reapply_vhost(Client *client);
 static int udb_ip_safe_host(Client *client, const char *host);
 /* Runtime dispatcher; concrete per-block effects stay in their own modules. */
-static void udb_apply_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new);
-static void udb_remove_special_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec);
-static void udb_apply_tree_effects(UdbContext *ctx, UdbBlock *block);
-static void udb_remove_tree_effects(UdbContext *ctx, UdbBlock *block);
 static void udb_send_to_debugs(Client *source, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 
 /* Operclass registry (OCL) and global operclass view (OCLG) */
+static Client *udb_ocl_find_server(const char *sid);
 static void udb_ocl_shutdown(void);
 static int udb_ocl_local_rebuild(void);
 static void udb_ocl_maybe_replay_to_peer(Client *server);
@@ -647,30 +576,18 @@ static int udb_oclg_push(Client *to);
 static int udb_protocol_init(ModuleInfo *modinfo);
 int udb_nicks_init(ModuleInfo *modinfo);
 int udb_nicks_load(ModuleInfo *modinfo);
+static UdbStorageResult udb_channel_reconcile_generations(UdbStorageRead *before, UdbStorageRead *after);
+static void udb_channels_shutdown(void);
 static void udb_channels_init(ModuleInfo *modinfo);
 static int udb_ips_init(ModuleInfo *modinfo);
 static void udb_lines_init(ModuleInfo *modinfo);
 static void udb_lines_shutdown(void);
 static void udb_lines_expiry_sweep(time_t now);
 static void udb_lines_expiry_peer_disconnected(Client *client);
-static void udb_lines_expiry_pending_clear_record(UdbRecord *rec);
 static void udb_query_init(ModuleInfo *modinfo);
 static void udb_sync_snomask_filter(void);
 
-static inline int udb_is_debug_enabled(void)
-{
-	if (udb_ctx && udb_ctx->links)
-	{
-		UdbRecord *me_rec = udb_record_find(udb_ctx, me.name, udb_ctx->links);
-		if (me_rec)
-		{
-			UdbRecord *opt_rec = udb_record_find(udb_ctx, LKEY_OPTIONS, me_rec);
-			if (opt_rec && (opt_rec->data_num & UDB_LNKOPT_DEBUG))
-				return 1;
-		}
-	}
-	return 0;
-}
+static int udb_is_debug_enabled(void);
 
 #define udb_log(level, event_id, client, msg, ...)                                                                     \
 	unreal_log(level, "udb", event_id, client, "[UDB] " msg, ##__VA_ARGS__)

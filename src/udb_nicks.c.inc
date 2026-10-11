@@ -71,8 +71,11 @@ static ModDataInfo *udb_nick_pending_auth_md = NULL;
 static ModDataInfo *udb_nick_effects_md = NULL;
 static ModDataInfo *udb_nick_oper_owned_md = NULL;
 /* Only set during a synchronous N-tree replacement; never retained per client. */
-static UdbRecord *udb_nick_replacement_tree = NULL;
 static int udb_nick_rehash_keep_identity = 0;
+/* Foreground-only scope for hooks re-entered by a publication's SVSNICK.
+ * The caller retains the exact committed generation until this scope ends. */
+static Client *udb_nick_publication_client = NULL;
+static UdbStorageRead *udb_nick_publication_read = NULL;
 
 static void udb_nick_password_cache_entry_free(UdbNickPasswordCache *cache)
 {
@@ -138,6 +141,29 @@ static UdbNickPasswordCache *udb_nick_password_cache_take(Client *client, const 
 	return cache;
 }
 
+static const char *const udb_nick_fields[] = {NKEY_ACCESS, NKEY_PASS,  NKEY_VHOST,	  NKEY_FORBID, NKEY_SUSPEND,
+											  NKEY_OPER,   NKEY_MODES, NKEY_SNOMASKS, NKEY_SWHOIS};
+
+static UdbStorageField *udb_nick_field(UdbStorageProfile *profile, const char *name)
+{
+	if (!profile || profile->key.block != 'N' || profile->count != 9 || !name)
+		return NULL;
+	for (unsigned int i = 0; i < 9; i++)
+		if (!strcmp(udb_nick_fields[i], name))
+			return profile->fields[i].present ? profile->fields + i : NULL;
+	return NULL;
+}
+
+static UdbStorageResult udb_native_nick_load(const char *nick, UdbStorageProfile **out)
+{
+	if (!out)
+		return UDB_STORAGE_ERROR;
+	*out = NULL;
+	if (!udb_ready)
+		return UDB_STORAGE_ERROR;
+	return udb_native_profile_load(udb_ctx, 'N', nick, udb_nick_fields, 9, out);
+}
+
 static void udb_nick_identity_free(ModData *m)
 {
 	safe_free(m->ptr);
@@ -179,25 +205,25 @@ static int udb_nick_auth_policy_digest_field(EVP_MD_CTX *ctx, char label, const 
 /* Binds a one-shot pending credential to the exact pass/access policy that was
  * validated. Active identity deliberately does not use this digest: changing
  * pass, or an access list that still permits the holder, must not revoke it. */
-static int udb_nick_auth_policy_digest(UdbRecord *nick_rec, char out[65])
+static int udb_nick_auth_policy_digest(UdbStorageProfile *nick_rec, char out[65])
 {
 	EVP_MD_CTX *ctx;
 	unsigned char digest[EVP_MAX_MD_SIZE];
 	unsigned int digestlen = 0;
-	UdbRecord *rec;
+	UdbStorageField *rec;
 	const char *pass = NULL;
 	const char *access = NULL;
 	unsigned int i;
 
 	if (!nick_rec || !out)
 		return 0;
-	rec = udb_record_find(NULL, NKEY_PASS, nick_rec);
-	if (!rec || BadPtr(rec->data_str))
+	rec = udb_nick_field(nick_rec, NKEY_PASS);
+	if (!rec || BadPtr(rec->string))
 		return 0;
-	pass = rec->data_str;
-	rec = udb_record_find(udb_ctx, NKEY_ACCESS, nick_rec);
+	pass = rec->string;
+	rec = udb_nick_field(nick_rec, NKEY_ACCESS);
 	if (rec)
-		access = rec->data_str;
+		access = rec->string;
 	ctx = EVP_MD_CTX_new();
 	if (!ctx)
 		return 0;
@@ -217,45 +243,35 @@ static int udb_nick_auth_policy_digest(UdbRecord *nick_rec, char out[65])
 
 /* Having pass means UDB may own identity effects; it never means the current
  * holder is authenticated. Passless profiles can never have applied effects. */
-static int udb_nick_profile_has_pass(UdbRecord *nick_rec)
+static int udb_nick_profile_has_pass(UdbStorageProfile *nick_rec)
 {
-	return nick_rec && udb_record_find(NULL, NKEY_PASS, nick_rec) != NULL;
-}
-
-static void udb_nick_prepare_tree_replace(UdbBlock *block, UdbRecord *candidate_tree)
-{
-	udb_nick_replacement_tree = (block && block->letter == UDB_BLOCK_NICKS) ? candidate_tree : NULL;
-}
-
-static void udb_nick_finish_tree_replace(void)
-{
-	udb_nick_replacement_tree = NULL;
+	return nick_rec && udb_nick_field(nick_rec, NKEY_PASS) != NULL;
 }
 
 /* Called only after a confirmed nick change or initial registration consumes
  * valid pending auth. Policy checks and revocation belong to the callers;
  * this setter must never turn a matching nick or +r into authentication. */
-static void udb_nick_identity_set(Client *client, UdbRecord *nick_rec)
+static void udb_nick_identity_set(Client *client, UdbStorageProfile *nick_rec)
 {
 	UdbNickIdentity *identity;
 
-	if (!client || !MyConnect(client) || !nick_rec || BadPtr(nick_rec->key) || !udb_nick_profile_has_pass(nick_rec) ||
-		!udb_nick_identity_md)
+	if (!client || !MyConnect(client) || !nick_rec || BadPtr(nick_rec->entity) ||
+		!udb_nick_profile_has_pass(nick_rec) || !udb_nick_identity_md)
 		return;
 	identity = safe_alloc(sizeof(*identity));
-	strlcpy(identity->nick, nick_rec->key, sizeof(identity->nick));
+	strlcpy(identity->nick, nick_rec->entity, sizeof(identity->nick));
 	udb_nick_identity_clear(client);
 	moddata_local_client(client, udb_nick_identity_md).ptr = identity;
 }
 
-static int udb_nick_identity_valid(Client *client, UdbRecord *nick_rec)
+static int udb_nick_identity_valid(Client *client, UdbStorageProfile *nick_rec)
 {
 	UdbNickIdentity *identity;
 
-	if (!client || !nick_rec || BadPtr(nick_rec->key) || !udb_nick_identity_md)
+	if (!client || !nick_rec || BadPtr(nick_rec->entity) || !udb_nick_identity_md)
 		return 0;
 	identity = moddata_local_client(client, udb_nick_identity_md).ptr;
-	if (!identity || strcasecmp(identity->nick, nick_rec->key) || strcasecmp(client->name, identity->nick) ||
+	if (!identity || strcasecmp(identity->nick, nick_rec->entity) || strcasecmp(client->name, identity->nick) ||
 		!udb_nick_profile_has_pass(nick_rec) || !udb_nick_access_allowed(client, nick_rec))
 		return 0;
 	return 1;
@@ -308,12 +324,12 @@ static void udb_nick_pending_auth_clear(Client *client)
 	}
 }
 
-static void udb_nick_pending_auth_set(Client *client, UdbRecord *nick_rec)
+static void udb_nick_pending_auth_set(Client *client, UdbStorageProfile *nick_rec)
 {
 	UdbNickPendingAuth *auth;
 
-	if (!client || !MyConnect(client) || !nick_rec || BadPtr(nick_rec->key) || !udb_nick_profile_has_pass(nick_rec) ||
-		!udb_nick_pending_auth_md)
+	if (!client || !MyConnect(client) || !nick_rec || BadPtr(nick_rec->entity) ||
+		!udb_nick_profile_has_pass(nick_rec) || !udb_nick_pending_auth_md)
 		return;
 	auth = safe_alloc(sizeof(*auth));
 	if (!udb_nick_auth_policy_digest(nick_rec, auth->policy_digest))
@@ -321,20 +337,20 @@ static void udb_nick_pending_auth_set(Client *client, UdbRecord *nick_rec)
 		safe_free(auth);
 		return;
 	}
-	strlcpy(auth->nick, nick_rec->key, sizeof(auth->nick));
+	strlcpy(auth->nick, nick_rec->entity, sizeof(auth->nick));
 	udb_nick_pending_auth_clear(client);
 	moddata_local_client(client, udb_nick_pending_auth_md).ptr = auth;
 }
 
-static int udb_nick_pending_auth_valid(Client *client, UdbRecord *nick_rec)
+static int udb_nick_pending_auth_valid(Client *client, UdbStorageProfile *nick_rec)
 {
 	UdbNickPendingAuth *auth;
 	char digest[65];
 
-	if (!client || !nick_rec || BadPtr(nick_rec->key) || !udb_nick_pending_auth_md)
+	if (!client || !nick_rec || BadPtr(nick_rec->entity) || !udb_nick_pending_auth_md)
 		return 0;
 	auth = moddata_local_client(client, udb_nick_pending_auth_md).ptr;
-	if (!auth || strcasecmp(auth->nick, nick_rec->key) || strcasecmp(client->name, auth->nick) ||
+	if (!auth || strcasecmp(auth->nick, nick_rec->entity) || strcasecmp(client->name, auth->nick) ||
 		!udb_nick_profile_has_pass(nick_rec) || !udb_nick_auth_policy_digest(nick_rec, digest) ||
 		strcmp(auth->policy_digest, digest) || !udb_nick_access_allowed(client, nick_rec))
 		return 0;
@@ -345,7 +361,7 @@ static int udb_nick_pending_auth_valid(Client *client, UdbRecord *nick_rec)
  * and can only become active identity through the caller. Invalid or stale
  * pending state is always discarded without granting anything, and it never
  * survives as suspended proof. */
-static int udb_nick_pending_auth_consume(Client *client, UdbRecord *nick_rec)
+static int udb_nick_pending_auth_consume(Client *client, UdbStorageProfile *nick_rec)
 {
 	if (!udb_nick_pending_auth_valid(client, nick_rec))
 	{
@@ -424,7 +440,7 @@ static void udb_nick_effects_revoke_swhois(Client *client);
 /* Ownership of a user mode is exactly the set of bits UDB changed from 0 to 1.
  * Bits that were already active belong to another source and must survive
  * every revoke, even when the profile also lists them. */
-static void udb_nick_effects_apply_modes(Client *client, UdbRecord *mode_rec)
+static void udb_nick_effects_apply_modes(Client *client, UdbStorageField *mode_rec)
 {
 	UdbNickEffects *fx;
 	long desired;
@@ -432,13 +448,13 @@ static void udb_nick_effects_apply_modes(Client *client, UdbRecord *mode_rec)
 	long removed;
 	long added;
 
-	if (!client || !mode_rec || BadPtr(mode_rec->data_str) || !MyUser(client))
+	if (!client || !mode_rec || BadPtr(mode_rec->string) || !MyUser(client))
 		return;
 	fx = udb_nick_effects_ensure(client);
 	if (!fx)
 		return;
 	/* Host privacy and custom-host state are not revocable profile modes. */
-	desired = set_usermode(mode_rec->data_str) & ~(UMODE_OPER | UMODE_HIDE | UMODE_SETHOST);
+	desired = set_usermode(mode_rec->string) & ~(UMODE_OPER | UMODE_HIDE | UMODE_SETHOST);
 	old_umodes = client->umodes & ALL_UMODES;
 	removed = fx->modes_added & ~desired & ~(UMODE_HIDE | UMODE_SETHOST);
 	added = desired & ~old_umodes;
@@ -508,18 +524,18 @@ static void udb_nick_snomask_apply_expression(Client *client, const char *expr)
 /* The previous value is preserved so revocation can restore an external
  * snomask source; a value another source changed while UDB owned it is never
  * overwritten on revoke. */
-static void udb_nick_effects_apply_snomasks(Client *client, UdbRecord *snomask_rec)
+static void udb_nick_effects_apply_snomasks(Client *client, UdbStorageField *snomask_rec)
 {
 	UdbNickEffects *fx;
 	const char *expr;
 	const char *current;
 
-	if (!client || !client->user || !snomask_rec || BadPtr(snomask_rec->data_str) || !MyUser(client))
+	if (!client || !client->user || !snomask_rec || BadPtr(snomask_rec->string) || !MyUser(client))
 		return;
 	fx = udb_nick_effects_ensure(client);
 	if (!fx)
 		return;
-	expr = snomask_rec->data_str;
+	expr = snomask_rec->string;
 	current = client->user->snomask ? client->user->snomask : "";
 
 	if (fx->snomask_owned && fx->applied_snomask_expr && !strcmp(fx->applied_snomask_expr, expr))
@@ -571,17 +587,17 @@ static void udb_nick_effects_revoke_snomasks(Client *client)
 	fx->snomask_owned = 0;
 }
 
-static void udb_nick_effects_apply_vhost(Client *client, UdbRecord *vhost_rec)
+static void udb_nick_effects_apply_vhost(Client *client, UdbStorageField *vhost_rec)
 {
 	UdbNickEffects *fx;
 	const char *desired;
 
-	if (!client || !client->user || !vhost_rec || !udb_ip_safe_host(client, vhost_rec->data_str) || !MyUser(client))
+	if (!client || !client->user || !vhost_rec || !udb_ip_safe_host(client, vhost_rec->string) || !MyUser(client))
 		return;
 	fx = udb_nick_effects_ensure(client);
 	if (!fx)
 		return;
-	desired = vhost_rec->data_str;
+	desired = vhost_rec->string;
 	udb_nick_effects_revoke_oper_vhost(client);
 
 	if (fx->vhost_owned && !strcmp(fx->applied_vhost, desired))
@@ -858,17 +874,17 @@ static void udb_nick_effects_apply_oper_vhost_default(Client *client)
 		send_umode_out(client, 1, old_umodes);
 }
 
-static void udb_nick_effects_apply_swhois(Client *client, UdbRecord *swhois_rec)
+static void udb_nick_effects_apply_swhois(Client *client, UdbStorageField *swhois_rec)
 {
 	UdbNickEffects *fx;
 
-	if (!client || !client->user || !swhois_rec || BadPtr(swhois_rec->data_str) || !MyUser(client))
+	if (!client || !client->user || !swhois_rec || BadPtr(swhois_rec->string) || !MyUser(client))
 		return;
 	fx = udb_nick_effects_ensure(client);
 	if (!fx)
 		return;
 	swhois_delete(client, "udb", "*", &me, NULL);
-	swhois_add(client, "udb", 100, swhois_rec->data_str, &me, NULL);
+	swhois_add(client, "udb", 100, swhois_rec->string, &me, NULL);
 	fx->swhois_owned = 1;
 }
 
@@ -899,15 +915,15 @@ static void udb_nick_revoke_effects(Client *client)
 /* Desired state comes from the profile; owned state comes from UdbNickEffects.
  * Reconcile removes owned effects no longer desired, preserves external state
  * UDB never owned, and records exactly what UDB changes. */
-static void udb_nick_reconcile_effects(Client *client, UdbRecord *nick_rec)
+static void udb_nick_reconcile_effects(Client *client, UdbStorageProfile *nick_rec)
 {
-	UdbRecord *effect_rec;
+	UdbStorageField *effect_rec;
 
 	if (!client || !MyUser(client) || !nick_rec)
 		return;
 
-	effect_rec = udb_record_find(udb_ctx, NKEY_VHOST, nick_rec);
-	if (effect_rec && effect_rec->data_str)
+	effect_rec = udb_nick_field(nick_rec, NKEY_VHOST);
+	if (effect_rec)
 		udb_nick_effects_apply_vhost(client, effect_rec);
 	else
 	{
@@ -915,7 +931,7 @@ static void udb_nick_reconcile_effects(Client *client, UdbRecord *nick_rec)
 		udb_nick_effects_apply_oper_vhost_default(client);
 	}
 
-	effect_rec = udb_record_find(udb_ctx, NKEY_OPER, nick_rec);
+	effect_rec = udb_nick_field(nick_rec, NKEY_OPER);
 	if (effect_rec)
 	{
 		if (!udb_nick_grant_oper(client, nick_rec, effect_rec))
@@ -924,20 +940,20 @@ static void udb_nick_reconcile_effects(Client *client, UdbRecord *nick_rec)
 	else
 		udb_nick_revoke_oper(client);
 
-	effect_rec = udb_record_find(udb_ctx, NKEY_MODES, nick_rec);
-	if (effect_rec && effect_rec->data_str)
+	effect_rec = udb_nick_field(nick_rec, NKEY_MODES);
+	if (effect_rec)
 		udb_nick_effects_apply_modes(client, effect_rec);
 	else
 		udb_nick_effects_revoke_modes(client);
 
-	effect_rec = udb_record_find(udb_ctx, NKEY_SWHOIS, nick_rec);
-	if (effect_rec && effect_rec->data_str)
+	effect_rec = udb_nick_field(nick_rec, NKEY_SWHOIS);
+	if (effect_rec)
 		udb_nick_effects_apply_swhois(client, effect_rec);
 	else
 		udb_nick_effects_revoke_swhois(client);
 
-	effect_rec = udb_record_find(udb_ctx, NKEY_SNOMASKS, nick_rec);
-	if (effect_rec && effect_rec->data_str)
+	effect_rec = udb_nick_field(nick_rec, NKEY_SNOMASKS);
+	if (effect_rec)
 		udb_nick_effects_apply_snomasks(client, effect_rec);
 	else
 		udb_nick_effects_revoke_snomasks(client);
@@ -982,11 +998,11 @@ static int udb_oper_owned(Client *client)
 	return moddata_local_client(client, udb_nick_oper_owned_md).i ? 1 : 0;
 }
 
-static int udb_nick_grant_oper(Client *client, UdbRecord *nick_rec, UdbRecord *oper_rec)
+static int udb_nick_grant_oper(Client *client, UdbStorageProfile *nick_rec, UdbStorageField *oper_rec)
 {
 	UdbNickEffects *fx;
 	const char *operclass;
-	UdbRecord *vhost_rec;
+	UdbStorageField *vhost_rec;
 	const char *oper_vhost;
 	char *previous_vhost;
 	char previous_username[USERLEN + 1];
@@ -1001,7 +1017,7 @@ static int udb_nick_grant_oper(Client *client, UdbRecord *nick_rec, UdbRecord *o
 	if (!client || !oper_rec)
 		return 1;
 
-	operclass = oper_rec->data_str;
+	operclass = oper_rec->string;
 	if (BadPtr(operclass))
 		return 1;
 
@@ -1029,10 +1045,10 @@ static int udb_nick_grant_oper(Client *client, UdbRecord *nick_rec, UdbRecord *o
 
 	if (!IsOper(client))
 	{
-		vhost_rec = nick_rec ? udb_record_find(udb_ctx, NKEY_VHOST, nick_rec) : NULL;
-		has_profile_vhost = vhost_rec && udb_ip_safe_host(client, vhost_rec->data_str);
+		vhost_rec = nick_rec ? udb_nick_field(nick_rec, NKEY_VHOST) : NULL;
+		has_profile_vhost = vhost_rec && udb_ip_safe_host(client, vhost_rec->string);
 		if (has_profile_vhost)
-			oper_vhost = vhost_rec->data_str;
+			oper_vhost = vhost_rec->string;
 		else if (udb_nick_expand_oper_vhost_default(client, operclass, expanded_default, sizeof(expanded_default)))
 			oper_vhost = expanded_default;
 		else
@@ -1166,28 +1182,27 @@ static void udb_nick_force_rename_after_unsuspend(Client *client, const char *ni
 	udb_nick_force_rename_with_notice(client, nick_in_db, notice, 0, 1);
 }
 
-static void udb_nick_apply(Client *client, UdbRecord *nick_rec, UdbNickApplyReason reason)
+static void udb_nick_apply(Client *client, UdbStorageProfile *nick_rec, UdbNickApplyReason reason)
 {
-	UdbRecord *forbid;
-	UdbRecord *pass_rec;
-	UdbRecord *suspend;
+	UdbStorageField *forbid;
+	UdbStorageField *pass_rec;
+	UdbStorageField *suspend;
 	char notice[UDB_RECORD_VALUE_MAX + 64];
 
 	if (!client || !nick_rec)
 		return;
-	forbid = udb_record_find(udb_ctx, NKEY_FORBID, nick_rec);
+	forbid = udb_nick_field(nick_rec, NKEY_FORBID);
 	if (forbid)
 	{
 		/* A forbid always wins: revoke UDB-owned state before the rename. */
 		udb_nick_revoke_effects(client);
 		udb_nick_revoke_identity(client);
-		snprintf(notice, sizeof(notice), "This nickname is forbidden. Reason: %s",
-				 forbid->data_str ? forbid->data_str : "No reason given");
-		udb_nick_force_rename_with_notice(client, nick_rec->key, notice, 0, 0);
+		snprintf(notice, sizeof(notice), "This nickname is forbidden. Reason: %s", forbid->string);
+		udb_nick_force_rename_with_notice(client, nick_rec->entity, notice, 0, 0);
 		return;
 	}
-	pass_rec = udb_record_find(NULL, NKEY_PASS, nick_rec);
-	suspend = udb_record_find(udb_ctx, NKEY_SUSPEND, nick_rec);
+	pass_rec = udb_nick_field(nick_rec, NKEY_PASS);
+	suspend = udb_nick_field(nick_rec, NKEY_SUSPEND);
 
 	/* Access denial is fail-closed for adoption and refresh alike. UDB only
 	 * removes effects it actually owned; a passless profile never had any. */
@@ -1196,8 +1211,8 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, UdbNickApplyReas
 		udb_nick_password_cache_clear(client);
 		udb_nick_revoke_effects(client);
 		udb_nick_revoke_identity(client);
-		snprintf(notice, sizeof(notice), "Access to %s is not permitted from your IP address.", nick_rec->key);
-		udb_nick_force_rename_with_notice(client, nick_rec->key, notice, 0, 0);
+		snprintf(notice, sizeof(notice), "Access to %s is not permitted from your IP address.", nick_rec->entity);
+		udb_nick_force_rename_with_notice(client, nick_rec->entity, notice, 0, 0);
 		return;
 	}
 
@@ -1207,10 +1222,10 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, UdbNickApplyReas
 	if (!pass_rec)
 	{
 		udb_nick_password_cache_clear(client);
+		udb_nick_revoke_effects(client);
 		udb_nick_revoke_identity(client);
 		if (suspend)
-			udb_send_service_notice(client, SKEY_NICKSERV, "This nickname is suspended. Reason: %s",
-									suspend->data_str ? suspend->data_str : "No reason given");
+			udb_send_service_notice(client, SKEY_NICKSERV, "This nickname is suspended. Reason: %s", suspend->string);
 		return;
 	}
 
@@ -1220,8 +1235,7 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, UdbNickApplyReas
 	{
 		udb_nick_revoke_effects(client);
 		udb_nick_revoke_identity(client);
-		udb_send_service_notice(client, SKEY_NICKSERV, "This nickname is suspended. Reason: %s",
-								suspend->data_str ? suspend->data_str : "No reason given");
+		udb_send_service_notice(client, SKEY_NICKSERV, "This nickname is suspended. Reason: %s", suspend->string);
 		return;
 	}
 
@@ -1233,9 +1247,9 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, UdbNickApplyReas
 		udb_nick_revoke_effects(client);
 		udb_nick_revoke_identity(client);
 		if (reason == UDB_NICK_APPLY_UNSUSPEND)
-			udb_nick_force_rename_after_unsuspend(client, nick_rec->key);
+			udb_nick_force_rename_after_unsuspend(client, nick_rec->entity);
 		else
-			udb_nick_force_rename(client, nick_rec->key);
+			udb_nick_force_rename(client, nick_rec->entity);
 		return;
 	}
 
@@ -1245,15 +1259,14 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, UdbNickApplyReas
 	if (reason == UDB_NICK_APPLY_ADOPT && suspend)
 	{
 		udb_nick_revoke_identity(client);
-		udb_send_service_notice(client, SKEY_NICKSERV, "This nickname is suspended. Reason: %s",
-								suspend->data_str ? suspend->data_str : "No reason given");
+		udb_send_service_notice(client, SKEY_NICKSERV, "This nickname is suspended. Reason: %s", suspend->string);
 		return;
 	}
 
 	/* Materialize the public identity projection before its effects, then let
 	 * the reconciler decide effect-by-effect against runtime ownership. */
 	if (client->user)
-		strlcpy(client->user->account, nick_rec->key, sizeof(client->user->account));
+		strlcpy(client->user->account, nick_rec->entity, sizeof(client->user->account));
 
 	long old_umodes = client->umodes & ALL_UMODES;
 	client->umodes |= UMODE_REGNICK;
@@ -1263,7 +1276,7 @@ static void udb_nick_apply(Client *client, UdbRecord *nick_rec, UdbNickApplyReas
 	udb_nick_reconcile_effects(client, nick_rec);
 }
 
-static void udb_nick_adopt(Client *client, UdbRecord *nick_rec)
+static void udb_nick_adopt(Client *client, UdbStorageProfile *nick_rec)
 {
 	int authenticated_now = udb_nick_pending_auth_consume(client, nick_rec);
 
@@ -1271,91 +1284,11 @@ static void udb_nick_adopt(Client *client, UdbRecord *nick_rec)
 		udb_nick_identity_set(client, nick_rec);
 	udb_nick_apply(client, nick_rec, UDB_NICK_APPLY_ADOPT);
 	if (authenticated_now && udb_nick_identity_valid(client, nick_rec))
-		udb_send_service_notice(client, SKEY_NICKSERV, "You are now identified for nickname %s.", nick_rec->key);
+		udb_send_service_notice(client, SKEY_NICKSERV, "You are now identified for nickname %s.", nick_rec->entity);
 }
 
-/* Common DEL/removal primitive for a child record. Effect removal is expressed
- * through the ownership marker, never through the record being deleted; the
- * candidate profile is reapplied right after this by the common transaction. */
-static void udb_nick_remove_record(UdbBlock *block, UdbRecord *rec)
-{
-	if (rec->parent != block->tree)
-	{
-		UdbRecord *nick_rec = rec->parent;
-		Client *client = find_user(nick_rec->key, NULL);
-		if (client && MyUser(client))
-		{
-			if (!strcmp(rec->key, NKEY_PASS))
-			{
-				/* Removing the credential revokes UDB identity/effects while
-				 * leaving externally supplied state untouched. */
-				udb_nick_revoke_effects(client);
-				udb_nick_revoke_identity(client);
-				udb_nick_pending_auth_clear(client);
-			}
-			else if (!strcmp(rec->key, NKEY_VHOST))
-			{
-				udb_nick_effects_revoke_vhost(client);
-			}
-			else if (!strcmp(rec->key, NKEY_OPER))
-			{
-				udb_nick_revoke_oper(client);
-			}
-			else if (!strcmp(rec->key, NKEY_SWHOIS))
-			{
-				udb_nick_effects_revoke_swhois(client);
-			}
-			else if (!strcmp(rec->key, NKEY_MODES))
-			{
-				udb_nick_effects_revoke_modes(client);
-			}
-			else if (!strcmp(rec->key, NKEY_SNOMASKS))
-			{
-				udb_nick_effects_revoke_snomasks(client);
-			}
-			/* NKEY_ACCESS and NKEY_SUSPEND are policy markers: the candidate
-			 * reapply revokes identity when the policy no longer matches. */
-		}
-	}
-	else
-	{
-		Client *client = find_user(rec->key, NULL);
-		if (client && MyUser(client))
-		{
-			UdbRecord *candidate =
-				udb_nick_replacement_tree ? udb_record_find(NULL, rec->key, udb_nick_replacement_tree) : NULL;
-			int unsuspended = candidate && udb_record_find(udb_ctx, NKEY_SUSPEND, rec) &&
-							  !udb_record_find(udb_ctx, NKEY_SUSPEND, candidate);
-			/* Active identity survives a full replacement only for an existing
-			 * candidate with a credential, without forbid or suspend, and with
-			 * a still-permitted access check. A deleted profile, a removed
-			 * credential or a normal->suspend transition revokes it; changed
-			 * pass/access values that still permit the holder do not.
-			 * Equivalent candidates keep both markers and the candidate
-			 * reapply reconciles effects. */
-			int keep_identity = candidate && !udb_record_find(udb_ctx, NKEY_FORBID, candidate) &&
-								!udb_record_find(udb_ctx, NKEY_SUSPEND, candidate) &&
-								udb_nick_identity_valid(client, candidate);
-
-			if (unsuspended)
-				candidate->nick_unsuspend_transition = 1;
-
-			udb_nick_pending_auth_clear(client);
-			if (udb_nick_rehash_keep_identity && udb_nick_identity_valid(client, rec))
-			{
-				udb_nick_revoke_effects(client);
-				return;
-			}
-			if (!keep_identity)
-			{
-				udb_nick_revoke_effects(client);
-				udb_nick_revoke_identity(client);
-			}
-		}
-	}
-}
-
-static UdbPasswordFailure *udb_password_failure_find(UdbRecord *profile_rec, Client *client, int create, int *saturated)
+static UdbPasswordFailure *udb_password_failure_find(UdbStorageProfile *profile_rec, Client *client, int create,
+													 int *saturated)
 {
 	UdbPasswordFailure *free_slot = NULL;
 	const char *ip = client ? client->ip : NULL;
@@ -1367,15 +1300,15 @@ static UdbPasswordFailure *udb_password_failure_find(UdbRecord *profile_rec, Cli
 		period = 60;
 	if (saturated)
 		*saturated = 0;
-	if (!profile_rec || !profile_rec->key || BadPtr(ip))
+	if (!profile_rec || !*profile_rec->entity || BadPtr(ip))
 		return NULL;
 	for (i = 0; i < UDB_PASSWORD_FAILURE_SLOTS; i++)
 	{
 		UdbPasswordFailure *entry = &udb_password_failures[i];
 		if (entry->since && now - entry->since >= period)
 			memset(entry, 0, sizeof(*entry));
-		if (entry->since && entry->block_idx == profile_rec->block_idx && !strcmp(entry->profile, profile_rec->key) &&
-			!strcmp(entry->ip, ip))
+		if (entry->since && entry->block_idx == udb_storage_stage_block_index(profile_rec->key.block) &&
+			!strcmp(entry->profile, profile_rec->entity) && !strcmp(entry->ip, ip))
 			return entry;
 		if (!entry->since && !free_slot)
 			free_slot = entry;
@@ -1389,14 +1322,14 @@ static UdbPasswordFailure *udb_password_failure_find(UdbRecord *profile_rec, Cli
 	if (!create)
 		return NULL;
 	memset(free_slot, 0, sizeof(*free_slot));
-	strlcpy(free_slot->profile, profile_rec->key, sizeof(free_slot->profile));
+	strlcpy(free_slot->profile, profile_rec->entity, sizeof(free_slot->profile));
 	strlcpy(free_slot->ip, ip, sizeof(free_slot->ip));
-	free_slot->block_idx = profile_rec->block_idx;
+	free_slot->block_idx = udb_storage_stage_block_index(profile_rec->key.block);
 	free_slot->since = now;
 	return free_slot;
 }
 
-static int udb_password_flooded(UdbRecord *profile_rec, Client *client)
+static int udb_password_flooded(UdbStorageProfile *profile_rec, Client *client)
 {
 	int saturated = 0;
 	UdbPasswordFailure *entry = udb_password_failure_find(profile_rec, client, 0, &saturated);
@@ -1407,7 +1340,7 @@ static int udb_password_flooded(UdbRecord *profile_rec, Client *client)
 	return saturated || (entry && entry->attempts >= (unsigned int)attempts);
 }
 
-static void udb_password_failure_record(UdbRecord *profile_rec, Client *client, int success)
+static void udb_password_failure_record(UdbStorageProfile *profile_rec, Client *client, int success)
 {
 	UdbPasswordFailure *entry = udb_password_failure_find(profile_rec, client, !success, NULL);
 
@@ -1419,7 +1352,7 @@ static void udb_password_failure_record(UdbRecord *profile_rec, Client *client, 
 		entry->attempts++;
 }
 
-static void udb_nick_password_failure_notice(Client *client, UdbRecord *profile_rec, const char *nick)
+static void udb_nick_password_failure_notice(Client *client, UdbStorageProfile *profile_rec, const char *nick)
 {
 	if (udb_password_flooded(profile_rec, client))
 		udb_send_service_notice(client, SKEY_NICKSERV, "Too many failed password attempts for %s; try again later.",
@@ -1461,9 +1394,9 @@ static int udb_is_sha256_hash(const char *hash)
 	return 1;
 }
 
-static int udb_check_password(const char *pass, UdbRecord *profile_rec, Client *client)
+static int udb_check_password(const char *pass, UdbStorageProfile *profile_rec, Client *client)
 {
-	UdbRecord *pass_rec;
+	UdbStorageField *pass_rec;
 	const char *stored_pass;
 	const char *hash;
 	AuthConfig as;
@@ -1472,13 +1405,13 @@ static int udb_check_password(const char *pass, UdbRecord *profile_rec, Client *
 
 	if (!pass || !profile_rec || udb_password_flooded(profile_rec, client))
 		return 0;
-	pass_rec = udb_record_find(udb_ctx, NKEY_PASS, profile_rec);
-	if (!pass_rec || BadPtr(pass_rec->data_str))
+	pass_rec = udb_nick_field(profile_rec, NKEY_PASS);
+	if (!pass_rec || BadPtr(pass_rec->string))
 	{
 		udb_password_failure_record(profile_rec, client, 0);
 		return 0;
 	}
-	stored_pass = pass_rec->data_str;
+	stored_pass = pass_rec->string;
 	type = udb_password_type(stored_pass, &hash);
 	if (type == AUTHTYPE_ARGON2 && strncmp(hash, "$argon2id$", 10))
 		type = AUTHTYPE_INVALID;
@@ -1493,7 +1426,10 @@ static int udb_check_password(const char *pass, UdbRecord *profile_rec, Client *
 	{
 		char digest[65];
 		sha256hash(digest, pass, strlen(pass));
-		success = !strcasecmp(digest, hash);
+		char expected[64];
+		for (unsigned int i = 0; i < 64; i++)
+			expected[i] = hash[i] >= 'A' && hash[i] <= 'F' ? hash[i] + ('a' - 'A') : hash[i];
+		success = CRYPTO_memcmp(digest, expected, sizeof(expected)) == 0;
 	}
 	else
 	{
@@ -1538,16 +1474,16 @@ static int udb_cidr_matches(const char *ip, const char *cidr)
 	return 1;
 }
 
-static int udb_nick_access_allowed(Client *client, UdbRecord *nick_rec)
+static int udb_nick_access_allowed(Client *client, UdbStorageProfile *nick_rec)
 {
-	UdbRecord *access_rec = udb_record_find(udb_ctx, NKEY_ACCESS, nick_rec);
+	UdbStorageField *access_rec = udb_nick_field(nick_rec, NKEY_ACCESS);
 	const char *p;
 
 	if (!access_rec)
 		return 1;
-	if (BadPtr(access_rec->data_str) || !client || BadPtr(client->ip))
+	if (BadPtr(access_rec->string) || !client || BadPtr(client->ip))
 		return 0;
-	for (p = access_rec->data_str; *p;)
+	for (p = access_rec->string; *p;)
 	{
 		char cidr[INET6_ADDRSTRLEN + 5];
 		size_t len = 0;
@@ -1566,42 +1502,48 @@ static int udb_nick_access_allowed(Client *client, UdbRecord *nick_rec)
 
 CMD_FUNC(cmd_ghost)
 {
+	UdbStorageProfile *nick_rec = NULL;
 	if (parc < 3)
 	{
 		sendnumeric(client, ERR_NEEDMOREPARAMS, "GHOST");
-		return;
+		goto cleanup;
 	}
 	const char *target_nick = parv[1];
 	const char *pass = parv[2];
 
-	if (!udb_ctx || !udb_ctx->nicks)
+	if (!udb_ctx || !udb_ctx->storage || !udb_ready)
 	{
 		udb_send_service_notice(client, SKEY_NICKSERV, "UDB is not fully initialized.");
-		return;
+		goto cleanup;
 	}
 
-	UdbRecord *nick_rec = udb_record_find(udb_ctx, target_nick, udb_ctx->nicks);
+	UdbStorageResult loaded = udb_native_nick_load(target_nick, &nick_rec);
+	if (loaded < UDB_STORAGE_NOT_FOUND)
+	{
+		udb_send_service_notice(client, SKEY_NICKSERV, "Nickname policy data unavailable.");
+		goto cleanup;
+	}
 	if (!nick_rec)
 	{
 		udb_send_service_notice(client, SKEY_NICKSERV, "Nick %s is not registered.", target_nick);
-		return;
+		goto cleanup;
 	}
-	if (!udb_record_find(NULL, NKEY_PASS, nick_rec))
+	if (!udb_nick_field(nick_rec, NKEY_PASS))
 	{
 		udb_send_service_notice(client, SKEY_NICKSERV, "Nick %s has no UDB password.", target_nick);
-		return;
+		goto cleanup;
 	}
 
 	if (!udb_check_password(pass, nick_rec, client))
 	{
 		udb_nick_password_failure_notice(client, nick_rec, target_nick);
-		return;
+		goto cleanup;
 	}
 	if (!udb_nick_access_allowed(client, nick_rec))
 	{
 		udb_send_service_notice(client, SKEY_NICKSERV, "Access to %s is not permitted from your IP address.",
 								target_nick);
-		return;
+		goto cleanup;
 	}
 
 	Client *target = find_client(target_nick, NULL);
@@ -1610,7 +1552,7 @@ CMD_FUNC(cmd_ghost)
 		if (target == client)
 		{
 			udb_send_service_notice(client, SKEY_NICKSERV, "You cannot ghost yourself.");
-			return;
+			goto cleanup;
 		}
 		udb_send_service_notice(client, SKEY_NICKSERV, "Ghosting %s...", target_nick);
 		exit_client(target, NULL, "GHOST command used");
@@ -1619,12 +1561,20 @@ CMD_FUNC(cmd_ghost)
 	{
 		udb_send_service_notice(client, SKEY_NICKSERV, "%s is not online.", target_nick);
 	}
+cleanup:
+	udb_storage_profile_free(&nick_rec);
 }
 
 CMD_OVERRIDE_FUNC(udb_override_nick)
 {
-	if (parc <= 1 || !MyConnect(client))
+	UdbStorageProfile *rec = NULL;
+	if (parc <= 1 || !MyConnect(client) || IsServer(client))
 		goto passthrough;
+
+	/* An unnamed client cannot receive service notices. Reject admission
+	 * explicitly instead of swallowing NICK until registration times out. */
+	if (!IsUser(client) && udb_hook_readiness_pre_connect(client) == HOOK_DENY)
+		return;
 
 	/* A /NICK password belongs only to this attempt; it is never session
 	 * state and is consumed by CAN_USE_NICK or discarded here. */
@@ -1652,20 +1602,24 @@ CMD_OVERRIDE_FUNC(udb_override_nick)
 		force_ghost = 1;
 	}
 
-	UdbRecord *rec = (udb_ctx && udb_ctx->nicks) ? udb_record_find(udb_ctx, clean_nick, udb_ctx->nicks) : NULL;
+	UdbStorageResult loaded = udb_native_nick_load(clean_nick, &rec);
+	if (loaded < UDB_STORAGE_NOT_FOUND)
+	{
+		udb_send_service_notice(client, SKEY_NICKSERV, "Nickname policy data unavailable.");
+		goto cleanup;
+	}
 	if (rec)
 	{
-		UdbRecord *forbid = udb_record_find(udb_ctx, NKEY_FORBID, rec);
+		UdbStorageField *forbid = udb_nick_field(rec, NKEY_FORBID);
 		if (forbid)
 		{
-			udb_send_service_notice(client, SKEY_NICKSERV, "This nickname is forbidden. Reason: %s",
-									forbid->data_str ? forbid->data_str : "No reason given");
-			return;
+			udb_send_service_notice(client, SKEY_NICKSERV, "This nickname is forbidden. Reason: %s", forbid->string);
+			goto cleanup;
 		}
 	}
 	if (!pass)
 		goto passthrough;
-	if (rec && !udb_record_find(NULL, NKEY_PASS, rec))
+	if (rec && !udb_nick_field(rec, NKEY_PASS))
 		goto dispatch_clean_nick;
 
 	Client *acptr = rec ? find_client(clean_nick, NULL) : NULL;
@@ -1680,7 +1634,7 @@ CMD_OVERRIDE_FUNC(udb_override_nick)
 		{
 			udb_nick_password_failure_notice(client, rec, clean_nick);
 			sendnumeric(client, ERR_ERRONEUSNICKNAME, clean_nick, "Nickname requires a valid UDB password.");
-			return;
+			goto cleanup;
 		}
 		if (!udb_nick_access_allowed(client, rec))
 		{
@@ -1688,7 +1642,7 @@ CMD_OVERRIDE_FUNC(udb_override_nick)
 									clean_nick);
 			sendnumeric(client, ERR_ERRONEUSNICKNAME, clean_nick,
 						"Nickname requires a valid UDB password and authorized IP.");
-			return;
+			goto cleanup;
 		}
 		validated = 1;
 		if (force_ghost)
@@ -1717,34 +1671,30 @@ dispatch_clean_nick:;
 	/* The credential is bound to this attempt: a rejected change must not
 	 * leave a promotable pending proof behind for a later forced rename. */
 	udb_nick_pending_auth_expire(client, clean_nick);
-	return;
+	goto cleanup;
 
 passthrough:
 	CALL_NEXT_COMMAND_OVERRIDE();
 	udb_nick_pending_auth_expire(client, parc > 1 ? parv[1] : NULL);
+cleanup:
+	udb_storage_profile_free(&rec);
 }
 
-static int udb_hook_can_use_nick(Client *client, const char *newnick, const char **reject_reason)
+static int udb_nick_can_use_profile(Client *client, const char *newnick, const char **reject_reason,
+									UdbStorageProfile *nick_rec)
 {
-	if (!udb_ctx || !udb_ctx->nicks)
-		return HOOK_CONTINUE;
-	if (!MyConnect(client))
-		return HOOK_CONTINUE;
-
-	UdbRecord *nick_rec = udb_record_find(udb_ctx, newnick, udb_ctx->nicks);
 	if (nick_rec)
 	{
-		UdbRecord *forbid = udb_record_find(udb_ctx, NKEY_FORBID, nick_rec);
-		UdbRecord *pass_rec;
+		UdbStorageField *forbid = udb_nick_field(nick_rec, NKEY_FORBID);
+		UdbStorageField *pass_rec;
 		if (forbid)
 		{
 			static char forbid_reject[UDB_RECORD_VALUE_MAX + 64];
-			snprintf(forbid_reject, sizeof(forbid_reject), "This nickname is forbidden. Reason: %s",
-					 forbid->data_str ? forbid->data_str : "No reason given");
+			snprintf(forbid_reject, sizeof(forbid_reject), "This nickname is forbidden. Reason: %s", forbid->string);
 			*reject_reason = forbid_reject;
 			return HOOK_DENY;
 		}
-		pass_rec = udb_record_find(NULL, NKEY_PASS, nick_rec);
+		pass_rec = udb_nick_field(nick_rec, NKEY_PASS);
 		if (!pass_rec)
 		{
 			udb_nick_password_cache_clear(client);
@@ -1806,73 +1756,75 @@ static int udb_hook_can_use_nick(Client *client, const char *newnick, const char
 	return HOOK_CONTINUE;
 }
 
+static int udb_hook_can_use_nick(Client *client, const char *newnick, const char **reject_reason)
+{
+	if (!MyConnect(client))
+		return HOOK_CONTINUE;
+	UdbStorageProfile *profile = NULL;
+	UdbStorageResult loaded = udb_native_nick_load(newnick, &profile);
+	if (loaded < UDB_STORAGE_NOT_FOUND)
+	{
+		udb_nick_password_cache_clear(client);
+		udb_nick_pending_auth_clear(client);
+		*reject_reason = "UDB nickname policy data unavailable.";
+		return HOOK_DENY;
+	}
+	int result = udb_nick_can_use_profile(client, newnick, reject_reason, profile);
+	udb_storage_profile_free(&profile);
+	return result;
+}
+
 static int udb_hook_nick_change(Client *client, MessageTag *mtags, const char *newnick)
 {
-	if (!udb_ctx || !udb_ctx->nicks)
-		return 0;
-	if (!MyConnect(client))
-		return 0;
-
-	UdbRecord *old_rec = udb_record_find(udb_ctx, client->name, udb_ctx->nicks);
-	UdbRecord *new_rec = udb_record_find(udb_ctx, newnick, udb_ctx->nicks);
-
-	if (old_rec && old_rec != new_rec)
+	if (MyConnect(client) && strcasecmp(client->name, newnick))
 	{
-		/* Leaving a profile revokes exactly the runtime state UDB owns. A
-		 * dormant/passless/suspended profile owns nothing and must never
-		 * revoke externally supplied state on departure. */
 		udb_nick_revoke_effects(client);
 		udb_nick_revoke_identity(client);
 		udb_nick_password_cache_clear(client);
-		/* The pending credential for the destination nick survives here; only
-		 * a confirmed POST_NICKCHANGE may consume it. */
 	}
+	return HOOK_CONTINUE;
+}
 
-	return 0;
+static int udb_nick_confirmed(Client *client, UdbStorageRead *publication)
+{
+	UdbStorageProfile *profile = NULL;
+	UdbStorageResult result;
+	if (publication)
+	{
+		UdbStorageRow entity = {0};
+		entity.block = 'N';
+		entity.depth = 1;
+		entity.components[0].data = (const unsigned char *)client->name;
+		entity.components[0].length = (uint32_t)strlen(client->name);
+		result = udb_storage_profile_load(publication, &entity, udb_nick_fields, 9, &profile);
+	}
+	else
+		result = udb_native_nick_load(client->name, &profile);
+	if (result == UDB_STORAGE_OK)
+		udb_nick_adopt(client, profile);
+	else
+	{
+		udb_nick_revoke_effects(client);
+		udb_nick_revoke_identity(client);
+		udb_nick_pending_auth_clear(client);
+		udb_nick_password_cache_clear(client);
+	}
+	udb_storage_profile_free(&profile);
+	if (result < UDB_STORAGE_NOT_FOUND && !IsDead(client))
+		exit_client(client, NULL, "UDB nickname policy data unavailable");
+	return HOOK_CONTINUE;
 }
 
 static int udb_hook_post_nick_change(Client *client, MessageTag *recv_mtags, const char *oldnick)
 {
-	if (!udb_ctx || !udb_ctx->nicks)
-		return 0;
-	if (!MyConnect(client))
-		return 0;
-
-	UdbRecord *new_rec = udb_record_find(udb_ctx, client->name, udb_ctx->nicks);
-	if (new_rec)
-	{
-		/* A confirmed nick change consumes the preflight credential and only
-		 * then activates identity. SVSNICK and other forced changes own no
-		 * pending credential, so they never create identity. */
-		udb_nick_adopt(client, new_rec);
-	}
-	else
-	{
-		udb_nick_pending_auth_clear(client);
-		udb_nick_identity_clear(client);
-	}
-	return 0;
+	return MyConnect(client)
+			   ? udb_nick_confirmed(client, client == udb_nick_publication_client ? udb_nick_publication_read : NULL)
+			   : HOOK_CONTINUE;
 }
 
 static int udb_hook_local_connect(Client *client)
 {
-	if (!udb_ctx || !udb_ctx->nicks)
-		return 0;
-
-	UdbRecord *nick_rec = udb_record_find(udb_ctx, client->name, udb_ctx->nicks);
-	if (nick_rec)
-	{
-		/* Initial registration follows the same rule as a later nick change:
-		 * the preflight credential is consumed and becomes active identity
-		 * before the profile is applied. */
-		udb_nick_adopt(client, nick_rec);
-	}
-	else
-	{
-		udb_nick_pending_auth_clear(client);
-		udb_nick_identity_clear(client);
-	}
-	return 0;
+	return udb_nick_confirmed(client, NULL);
 }
 
 static void udb_nick_preserve_on_rehash(int preserve)
@@ -1883,15 +1835,77 @@ static void udb_nick_preserve_on_rehash(int preserve)
 static void udb_nick_reconcile_after_reload(void)
 {
 	Client *client;
-
 	list_for_each_entry(client, &lclient_list, lclient_node)
 	{
 		if (!MyUser(client))
 			continue;
-		if (udb_ready && udb_ctx && udb_record_find(udb_ctx, client->name, udb_ctx->nicks))
+		UdbStorageProfile *profile = NULL;
+		UdbStorageResult result = udb_native_nick_load(client->name, &profile);
+		if (result == UDB_STORAGE_OK)
+		{
+			udb_storage_profile_free(&profile);
 			continue;
+		}
 		udb_nick_revoke_effects(client);
 		udb_nick_revoke_identity(client);
+		udb_nick_pending_auth_clear(client);
+		udb_nick_password_cache_clear(client);
+	}
+}
+
+/* The durable job supplies both exact generations. No old-tree replacement
+ * pointer or mutable per-record unsuspend flag participates in reconciliation. */
+static UdbStorageResult udb_nick_reconcile_generations(Client *client, UdbStorageRead *before, UdbStorageRead *after)
+{
+	UdbStorageProfile *old = NULL, *current = NULL;
+	UdbStorageRow entity = {0};
+	UdbStorageResult result, previous;
+	if (!client || !MyUser(client) || !before || !after)
+		return UDB_STORAGE_ERROR;
+	entity.block = 'N';
+	entity.depth = 1;
+	entity.components[0].data = (const unsigned char *)client->name;
+	entity.components[0].length = (uint32_t)strlen(client->name);
+	previous = udb_storage_profile_load(before, &entity, udb_nick_fields, 9, &old);
+	result = previous < UDB_STORAGE_NOT_FOUND ? previous
+											  : udb_storage_profile_load(after, &entity, udb_nick_fields, 9, &current);
+	if (result < UDB_STORAGE_NOT_FOUND || result == UDB_STORAGE_NOT_FOUND)
+	{
+		udb_nick_revoke_effects(client);
+		udb_nick_revoke_identity(client);
+		udb_nick_pending_auth_clear(client);
+		udb_nick_password_cache_clear(client);
+	}
+	else
+	{
+		int unsuspended = old && udb_nick_field(old, NKEY_SUSPEND) && !udb_nick_field(current, NKEY_SUSPEND) &&
+						  udb_nick_profile_has_pass(current);
+		/* A pending preflight credential is bound to its original policy; a
+		 * committed profile replacement cannot silently carry it forward. */
+		udb_nick_pending_auth_clear(client);
+		Client *previous_client = udb_nick_publication_client;
+		UdbStorageRead *previous_read = udb_nick_publication_read;
+		udb_nick_publication_client = client;
+		udb_nick_publication_read = after;
+		udb_nick_apply(client, current, unsuspended ? UDB_NICK_APPLY_UNSUSPEND : UDB_NICK_APPLY_REFRESH);
+		udb_nick_publication_client = previous_client;
+		udb_nick_publication_read = previous_read;
+	}
+	udb_storage_profile_free(&old);
+	udb_storage_profile_free(&current);
+	return result;
+}
+
+static void udb_nick_shutdown(void)
+{
+	Client *client;
+	list_for_each_entry(client, &lclient_list, lclient_node)
+	{
+		if (!MyUser(client))
+			continue;
+		udb_nick_revoke_effects(client);
+		if (!udb_nick_rehash_keep_identity)
+			udb_nick_revoke_identity(client);
 		udb_nick_pending_auth_clear(client);
 		udb_nick_password_cache_clear(client);
 	}

@@ -194,12 +194,15 @@ static int udb_hello_peer_advertisement(Client *server, const char *propagator, 
 		udb_ocl_peer_instance_changed(server);
 		if (udb_ctx && udb_is_propagator(udb_ctx, server))
 		{
-			udb_ctx->last_applied_seq = 0;
-			udb_ctx->authority_epoch_known = 0;
-			udb_ctx->authority_sid[0] = '\0';
-			udb_ctx->candidate_authority_epoch_known = 0;
-			udb_ctx->candidate_authority_sid[0] = '\0';
-			udb_ctx->candidate_authority_epoch[0] = '\0';
+			/* A neighbor instance change invalidates in-flight ownership, not the
+			 * persisted root SID/epoch or its durable sequence. */
+			if (udb_ctx->storage)
+			{
+				uint64_t revision;
+				udb_storage_engine_authority(udb_ctx->storage, &revision);
+			}
+			if (udb_reconcile.active && udb_reconcile.authority_peer == server)
+				udb_reconcile_abort(udb_ctx, "authority peer instance changed", 1);
 			udb_sync_status = UDB_SYNC_DEGRADED;
 			if (!udb_degraded_since)
 				udb_degraded_since = time(NULL);
@@ -313,11 +316,15 @@ static void udb_reconcile_reset(void)
 	udb_reconcile.absolute_deadline = 0;
 	udb_reconcile.watermark_seq = 0;
 	udb_reconcile.watermark_known = 0;
+	udb_reconcile.source_known = 0;
+	udb_reconcile.source_sid[0] = 0;
+	udb_reconcile.source_epoch[0] = 0;
 }
 
 static void udb_reconcile_abort(UdbContext *ctx, const char *reason, int schedule_retry)
 {
 	UdbBlock *block;
+	udb_native_receive_abort(udb_reconcile.round_id);
 	udb_log(ULOG_WARNING, "UDB_RECONCILE_ABORT", udb_reconcile.authority_peer,
 			"Reconciliation round $round aborted: $reason", log_data_integer("round", (int)udb_reconcile.round_id),
 			log_data_string("reason", reason ? reason : "unspecified"));
@@ -345,6 +352,28 @@ static void udb_reconcile_abort(UdbContext *ctx, const char *reason, int schedul
 	udb_reconcile_reset();
 }
 
+/* INF, not the direct peer HEL, binds the root mutation lineage. Every block
+ * in a round must agree before it can enter a private durable stage. */
+static int udb_reconcile_accept_source(Client *peer, unsigned long round, const char *sid, const char *epoch,
+									   uint64_t watermark)
+{
+	if (!udb_reconcile.active || udb_reconcile.authority_peer != peer || udb_reconcile.round_id != round ||
+		!udb_storage_sid_valid(sid) || !udb_hello_epoch_valid(epoch))
+		return 0;
+	if (udb_reconcile.source_known &&
+		(strcmp(udb_reconcile.source_sid, sid) || strcmp(udb_reconcile.source_epoch, epoch)))
+	{
+		udb_reconcile_abort(udb_ctx, "inconsistent reconciliation source lineage", 1);
+		return 0;
+	}
+	if (!udb_reconcile_accept_watermark(peer, round, watermark))
+		return 0;
+	memcpy(udb_reconcile.source_sid, sid, 4);
+	memcpy(udb_reconcile.source_epoch, epoch, UDB_OCL_EPOCH_LEN + 1);
+	udb_reconcile.source_known = 1;
+	return 1;
+}
+
 static int udb_reconcile_accept_watermark(Client *peer, unsigned long round_id, uint64_t watermark_seq)
 {
 	if (!udb_reconcile.active || udb_reconcile.authority_peer != peer || udb_reconcile.round_id != round_id)
@@ -364,25 +393,6 @@ static int udb_reconcile_accept_watermark(Client *peer, unsigned long round_id, 
 /* One recovery boundary for every operation whose persistence outcome is not
  * trustworthy.  It intentionally reuses authority selection and retry bounds;
  * it does not alter HEL negotiation or hop-by-hop routing. */
-static void udb_handle_persistence_failure(UdbContext *ctx, Client *peer, UdbBlock *block, const char *operation,
-										   int commit_uncertain)
-{
-	if (commit_uncertain)
-		udb_mark_durability_uncertain(ctx, block, operation);
-	udb_ready = 0;
-	udb_last_successful_sync = 0;
-	udb_sync_status = UDB_SYNC_DEGRADED;
-	udb_degraded_since = time(NULL);
-	if (udb_reconcile.active)
-		udb_reconcile_abort(ctx, operation ? operation : "persistence failure", 1);
-	else if (udb_reconcile.retry_count < UDB_RECONCILE_RETRY_MAX)
-	{
-		udb_reconcile.retry_count++;
-		udb_reconcile.next_retry_at = time(NULL) + (UDB_RECONCILE_RETRY_BASE << udb_reconcile.retry_count);
-	}
-	(void)peer;
-}
-
 static void udb_sync_round_failure(UdbBlock *block, Client *peer, unsigned long round_id, const char *reason)
 {
 	if (block && peer && udb_reconcile.active && udb_reconcile.authority_peer == peer &&
@@ -393,6 +403,8 @@ static void udb_sync_round_failure(UdbBlock *block, Client *peer, unsigned long 
 static void udb_reconcile_begin(Client *authority, unsigned long round_id)
 {
 	unsigned int retry_count = udb_reconcile.retry_count;
+	udb_native_mutation_round_begin(authority);
+	udb_ready = 0;
 	udb_reconcile.authority_peer = authority;
 	udb_reconcile.round_id = round_id;
 	udb_reconcile.generation = round_id ? round_id : 1;
@@ -414,6 +426,9 @@ static void udb_reconcile_begin(Client *authority, unsigned long round_id)
 		((udb_cfg && udb_cfg->sync_absolute_timeout > 0) ? udb_cfg->sync_absolute_timeout : UDB_SYNC_ABSOLUTE_TIMEOUT);
 	udb_reconcile.watermark_seq = 0;
 	udb_reconcile.watermark_known = 0;
+	udb_reconcile.source_known = 0;
+	udb_reconcile.source_sid[0] = 0;
+	udb_reconcile.source_epoch[0] = 0;
 	udb_log(ULOG_INFO, "UDB_RECONCILE_ROUND_START", authority,
 			"Started reconciliation round $round with authority peer $peer",
 			log_data_integer("round", (int)udb_reconcile.round_id), log_data_client("peer", authority));
@@ -440,37 +455,6 @@ static void udb_sync_mark_degraded(Client *peer, const char *reason)
 	udb_log(ULOG_WARNING, "UDB_SYNC_DIVERGED", peer,
 			"Database divergence confirmed ($reason); recovery required before health returns to OK",
 			log_data_string("reason", reason ? reason : "unknown"));
-}
-
-static void udb_reconcile_record_inf(Client *peer, unsigned long round_id, char letter, const char *remote_sha,
-									 unsigned int remote_count)
-{
-	unsigned int mask = udb_block_letter_to_mask(letter);
-	UdbBlock *block = udb_block_by_letter(udb_ctx, letter);
-
-	if (!mask || !block)
-		return;
-
-	if (udb_reconcile.active && udb_reconcile.authority_peer == peer && round_id < udb_reconcile.round_id)
-		return;
-	udb_reconcile_start(peer, round_id);
-	udb_reconcile.last_activity = time(NULL);
-	udb_reconcile.deadline =
-		udb_reconcile.last_activity +
-		((udb_cfg && udb_cfg->sync_inactivity_timeout > 0) ? udb_cfg->sync_inactivity_timeout : UDB_SYNC_TIMEOUT);
-	udb_reconcile.compared_blocks |= mask;
-
-	(void)remote_count;
-	if (!remote_sha || strcmp(remote_sha, block->sha256) != 0)
-	{
-		udb_reconcile.divergent_blocks |= mask;
-		udb_reconcile.completed_blocks &= ~mask;
-		udb_sync_mark_degraded(peer, "inventory manifest mismatch");
-	}
-	else
-	{
-		udb_reconcile.divergent_blocks &= ~mask;
-	}
 }
 
 static void udb_reconcile_record_res(Client *peer, unsigned long round_id, char letter)
@@ -516,59 +500,7 @@ static void udb_reconcile_record_end(Client *peer, char letter, unsigned long ro
 
 static int udb_reconcile_check(UdbContext *ctx)
 {
-	if (!ctx || !udb_reconcile.active)
-		return 0;
-
-	if ((udb_reconcile.compared_blocks & UDB_ALL_BLOCKS_MASK) != UDB_ALL_BLOCKS_MASK)
-		return 0;
-
-	if ((udb_reconcile.divergent_blocks & udb_reconcile.completed_blocks) != udb_reconcile.divergent_blocks)
-		return 0;
-
-	if (udb_has_active_sessions(ctx) || udb_has_pending_requests(ctx))
-		return 0;
-
-	time_t now = time(NULL);
-	int was_stale_or_degraded = (udb_sync_status == UDB_SYNC_STALE || udb_sync_status == UDB_SYNC_DEGRADED);
-	int was_not_ready = !udb_ready;
-
-	if (!udb_transition_to_ready(ctx, now))
-	{
-		udb_reconcile_abort(ctx, "ready transition failed", 1);
-		return 0;
-	}
-
-	udb_sync_status = UDB_SYNC_OK;
-	udb_degraded_since = 0;
-	udb_bootstrap_peer = NULL;
-
-	/* The completed six-block round owns its watermark. A replacement stream
-	 * may legitimately restart below the previous stream's high-water mark. */
-	ctx->last_applied_seq = udb_reconcile.watermark_seq;
-	if (ctx->candidate_authority_epoch_known)
-	{
-		strlcpy(ctx->authority_sid, ctx->candidate_authority_sid, sizeof(ctx->authority_sid));
-		strlcpy(ctx->authority_epoch, ctx->candidate_authority_epoch, sizeof(ctx->authority_epoch));
-		ctx->authority_epoch_known = 1;
-		ctx->candidate_authority_epoch_known = 0;
-		ctx->candidate_authority_sid[0] = '\0';
-		ctx->candidate_authority_epoch[0] = '\0';
-	}
-
-	udb_reconcile_reset();
-	udb_reconcile.retry_count = 0;
-	udb_reconcile.next_retry_at = 0;
-
-	if (was_stale_or_degraded || was_not_ready)
-	{
-		UdbPropagatorSelection selected;
-		const char *prop_name = (ctx && udb_select_propagator(ctx, 1, &selected)) ? selected.name : "none";
-		udb_log(ULOG_INFO, "UDB_SYNC_RECOVERED", NULL,
-				"UDB synchronization recovered. Selected propagator: $propagator",
-				log_data_string("propagator", prop_name));
-	}
-
-	return 1;
+	return udb_native_receive_promote(ctx);
 }
 
 static int udb_is_authorized_sync_source(UdbContext *ctx, Client *direct_peer)
@@ -699,8 +631,9 @@ static void udb_sync_abort(UdbBlock *block, const char *reason)
 		return;
 	if (block->session)
 	{
-		udb_log(ULOG_WARNING, "UDB_SYNC_ABORT", block->session->peer, "Aborted staged sync of block $block: $reason",
-				log_data_string("block", (char[]){block->letter, '\0'}), log_data_string("reason", reason));
+		udb_log(ULOG_WARNING, "UDB_SYNC_ABORT", udb_ocl_find_server(block->session->peer_sid),
+				"Aborted staged sync of block $block: $reason", log_data_string("block", (char[]){block->letter, '\0'}),
+				log_data_string("reason", reason));
 		udb_sync_session_free(block);
 	}
 	block->syncing_from = NULL;
@@ -726,23 +659,62 @@ static void udb_propagator_policy_changed(UdbContext *ctx)
 		udb_policy_notify_pending = 1;
 		return;
 	}
-	if (udb_propagator_policy_present(ctx) && udb_select_propagator(ctx, 1, &selected) && !selected.is_local)
+	int policy = udb_propagator_policy_present(ctx);
+	int available = policy ? udb_select_propagator(ctx, 1, &selected) : 0;
+	if (policy && available && !selected.is_local)
 		peer = selected.peer;
+	int kind = !policy || (available && selected.is_local) ? 1 : peer ? 2 : 3;
+	char sid[4] = {0}, epoch[17] = {0};
+	if (kind == 1)
+		memcpy(sid, me.id, 4);
+	else if (peer)
+	{
+		UdbHelloPeer *hello = udb_hello_peer(peer, 0);
+		memcpy(sid, peer->id, 4);
+		if (hello && hello->remote_epoch_known)
+			memcpy(epoch, hello->remote_epoch, 17);
+	}
+	int selection_changed =
+		ctx->selection_kind != kind || memcmp(ctx->selected_sid, sid, 4) || memcmp(ctx->selected_epoch, epoch, 17);
+	if (ctx->storage && selection_changed)
+	{
+		uint64_t revision;
+		udb_storage_engine_authority(ctx->storage, &revision);
+		udb_native_mutation_abort(0);
+		ctx->selection_kind = kind;
+		memcpy(ctx->selected_sid, sid, 4);
+		memcpy(ctx->selected_epoch, epoch, 17);
+		if (kind != 1)
+		{
+			udb_ready = 0;
+			udb_sync_status = UDB_SYNC_DEGRADED;
+		}
+		if (udb_reconcile.active)
+			udb_reconcile_abort(ctx, "selected authority or instance changed", 1);
+	}
 
 	/* Without a policy the exclusive bootstrap owner stays valid until it
 	 * disconnects or READY completes; a later HEL from another peer must not
 	 * steal the ownership. */
 	if (udb_propagator_policy_present(ctx) && udb_bootstrap_peer && udb_bootstrap_peer != peer)
 		udb_bootstrap_peer = NULL;
-	if (udb_reconcile.authority_peer && udb_reconcile.authority_peer != peer)
+	if (udb_reconcile.authority_peer && policy && udb_reconcile.authority_peer != peer)
+	{
+		if (ctx->storage)
+		{
+			uint64_t revision;
+			udb_storage_engine_authority(ctx->storage, &revision);
+		}
 		udb_reconcile_abort(ctx, "propagator policy changed", 1);
+	}
 
 	for (block = ctx->block_list; block; block = block->next)
 	{
 		/* Replacing block S removes the old tree's effects while the S session
 		 * still owns its replacement tree. Do not abort that session from its
 		 * own policy callback; the new policy is applied after commit. */
-		if (block->session && block->letter != UDB_BLOCK_SETTINGS && block->session->peer != peer)
+		if (block->session && block->letter != UDB_BLOCK_SETTINGS &&
+			(!peer || strcmp(block->session->peer_sid, peer->id)))
 			udb_sync_abort(block, "propagator policy changed");
 		else if (!block->session && block->syncing_from && block->syncing_from != peer)
 			block->syncing_from = NULL;
@@ -754,7 +726,18 @@ static void udb_propagator_policy_changed(UdbContext *ctx)
 			block->pending_round_id = 0;
 		}
 	}
-	udb_sync_hello_refresh_all();
+	if (kind == 1 && ctx->storage && !udb_reconcile.active &&
+		(!ctx->authority_epoch_known || strcmp(ctx->authority_sid, me.id)))
+	{
+		udb_ready = 0;
+		udb_native_local_bind(ctx);
+	}
+	/* Confirming an unrelated downstream is not an upstream retry. Refreshing
+	 * unchanged selections provokes fresh inventories and withdraws READY for
+	 * no authority change; explicit retry paths still refresh HEL themselves.
+	 * Without a policy the advertised bootstrap role also depends on READY. */
+	if (selection_changed || !policy)
+		udb_sync_hello_refresh_all();
 	udb_propagator_availability_refresh();
 	udb_sync_status_refresh();
 
@@ -770,372 +753,15 @@ static void udb_propagator_policy_flush(UdbContext *ctx)
 	udb_propagator_policy_changed(ctx);
 }
 
-static int udb_sync_begin(UdbBlock *block, Client *peer, unsigned long round_id, const char *txid,
-						  uint64_t watermark_seq)
-{
-	UdbSyncSession *session;
-	int block_idx;
-	int inact =
-		(udb_cfg && udb_cfg->sync_inactivity_timeout) ? udb_cfg->sync_inactivity_timeout : UDB_SYNC_INACTIVITY_TIMEOUT;
-	int abs_to =
-		(udb_cfg && udb_cfg->sync_absolute_timeout) ? udb_cfg->sync_absolute_timeout : UDB_SYNC_ABSOLUTE_TIMEOUT;
-	size_t txid_len;
-	const char *p;
-
-	if (!block)
-		return UDB_ERR_NO_BLOCK;
-	block_idx = udb_block_letter_to_index(block->letter);
-	if (block_idx < 0)
-		return UDB_ERR_NO_BLOCK;
-	if (!peer || !txid || !*txid)
-		return UDB_ERR_PARAMS;
-
-	txid_len = strlen(txid);
-	if (txid_len > UDB_TXID_MAX)
-		return UDB_ERR_PARAMS;
-
-	for (p = txid; *p; p++)
-	{
-		unsigned char c = (unsigned char)*p;
-		if (!isalnum(c) && c != '-' && c != '_')
-			return UDB_ERR_PARAMS;
-	}
-
-	if (block->session)
-		return UDB_ERR_SYNC_ACTIVE;
-	if (!udb_reconcile.active || udb_reconcile.authority_peer != peer || udb_reconcile.round_id != round_id ||
-		block->pending_from != peer || block->pending_round_id != round_id)
-		return UDB_ERR_NO_SYNC;
-
-	session = safe_alloc(sizeof(*session));
-	session->peer = peer;
-	session->round_id = round_id;
-	memcpy(session->txid, txid, txid_len + 1);
-	session->started_at = time(NULL);
-	session->last_activity = session->started_at;
-	session->deadline = session->started_at + inact;
-	session->absolute_deadline = session->started_at + abs_to;
-	session->tree = udb_record_create(NULL);
-	session->tree->block_idx = (unsigned char)block_idx;
-	safe_strdup(session->tree->key, "UDB");
-	session->tree->is_dynamic_key = 1;
-	session->received_puts = 0;
-	session->received_bytes = 0;
-	session->record_count = 0;
-	if (!udb_reconcile_accept_watermark(peer, round_id, watermark_seq))
-	{
-		udb_record_free_tree(session->tree);
-		safe_free(session);
-		return UDB_ERR_PARAMS;
-	}
-	session->watermark_seq = watermark_seq;
-	block->session = session;
-	block->syncing_from = peer;
-	udb_block_clear_pending(block);
-	return 0;
-}
-
-static int udb_sync_put(UdbBlock *block, Client *peer, unsigned long round_id, const char *txid, const char *path,
-						const char *data)
-{
-	UdbSyncSession *session = block ? block->session : NULL;
-	char *line;
-	time_t now = time(NULL);
-	int inact =
-		(udb_cfg && udb_cfg->sync_inactivity_timeout) ? udb_cfg->sync_inactivity_timeout : UDB_SYNC_INACTIVITY_TIMEOUT;
-	size_t max_bytes =
-		(udb_cfg && udb_cfg->max_staged_bytes) ? udb_cfg->max_staged_bytes : UDB_DEFAULT_MAX_STAGED_BYTES;
-	unsigned int max_records =
-		(udb_cfg && udb_cfg->max_staged_records) ? udb_cfg->max_staged_records : UDB_DEFAULT_MAX_STAGED_RECORDS;
-	int parse_ok;
-
-	if (!session || session->peer != peer || session->round_id != round_id || strcmp(session->txid, txid))
-	{
-		if (session && session->peer == peer)
-		{
-			udb_sync_abort(block, "invalid PUT sequence");
-			udb_reconcile_abort(udb_ctx, "invalid PUT sequence", 1);
-		}
-		return UDB_ERR_NO_SYNC;
-	}
-	if (now >= session->deadline)
-	{
-		udb_sync_abort(block, "inactivity sync timeout exceeded");
-		udb_sync_round_failure(block, peer, round_id, "staged sync inactivity timeout");
-		return UDB_ERR_PARAMS;
-	}
-	if (now >= session->absolute_deadline)
-	{
-		udb_sync_abort(block, "absolute sync timeout exceeded");
-		udb_sync_round_failure(block, peer, round_id, "staged sync absolute timeout");
-		return UDB_ERR_PARAMS;
-	}
-	if (!udb_record_fits_limits(path, data))
-	{
-		udb_sync_abort(block, "PUT record exceeds limits");
-		udb_sync_round_failure(block, peer, round_id, "staged PUT limit exceeded");
-		return UDB_ERR_PARAMS;
-	}
-	session->received_puts++;
-	size_t payload_len = (path ? strlen(path) : 0) + (data ? strlen(data) : 0);
-	session->received_bytes += payload_len;
-	if (session->received_bytes > max_bytes)
-	{
-		udb_sync_abort(block, "staged byte limit exceeded");
-		udb_sync_round_failure(block, peer, round_id, "staged byte limit exceeded");
-		return UDB_ERR_PARAMS;
-	}
-	line = safe_alloc(UDB_RECORD_LINE_MAX + 2);
-	if (snprintf(line, UDB_RECORD_LINE_MAX + 2, "%s %s", path ? path : "", data ? data : "") >=
-		(int)UDB_RECORD_LINE_MAX)
-	{
-		safe_free(line);
-		udb_sync_abort(block, "invalid PUT payload");
-		udb_sync_round_failure(block, peer, round_id, "invalid staged PUT payload");
-		return UDB_ERR_PARAMS;
-	}
-	parse_ok = udb_stage_parse_line(block, session, line);
-	safe_free(line);
-	if (!parse_ok)
-	{
-		udb_sync_abort(block, "invalid PUT payload");
-		udb_sync_round_failure(block, peer, round_id, "invalid staged PUT payload");
-		return UDB_ERR_PARAMS;
-	}
-	if (session->record_count > max_records)
-	{
-		udb_sync_abort(block, "staged record count limit exceeded");
-		udb_sync_round_failure(block, peer, round_id, "staged record limit exceeded");
-		return UDB_ERR_PARAMS;
-	}
-	session->last_activity = now;
-	session->deadline = now + inact;
-	return 0;
-}
-
-static int udb_sync_end(UdbContext *ctx, UdbBlock *block, Client *peer, unsigned long round_id, const char *txid,
-						const char *sha256, char out_digest[UDB_SHA256_HEX_LEN + 1], uint64_t watermark_seq)
-{
-	UdbSyncSession *session = block ? block->session : NULL;
-	char received_digest[UDB_SHA256_HEX_LEN + 1];
-	char computed_digest[UDB_SHA256_HEX_LEN + 1];
-	unsigned long previous_generation;
-	char profile_failure_reason[96];
-
-	if (!session || session->peer != peer || session->round_id != round_id || strcmp(session->txid, txid))
-	{
-		if (session && session->peer == peer)
-		{
-			udb_sync_abort(block, "invalid END sequence");
-			udb_reconcile_abort(udb_ctx, "invalid END sequence", 1);
-		}
-		return UDB_ERR_NO_SYNC;
-	}
-	if (watermark_seq != session->watermark_seq)
-	{
-		udb_sync_abort(block, "inconsistent staged sync watermark");
-		udb_reconcile_abort(udb_ctx, "inconsistent staged sync watermark", 1);
-		return UDB_ERR_PARAMS;
-	}
-	if (!udb_reconcile_accept_watermark(peer, round_id, watermark_seq))
-		return UDB_ERR_PARAMS;
-	time_t now = time(NULL);
-	if (now >= session->deadline)
-	{
-		udb_sync_abort(block, "inactivity sync timeout exceeded");
-		udb_sync_round_failure(block, peer, round_id, "staged END inactivity timeout");
-		return UDB_ERR_PARAMS;
-	}
-	if (now >= session->absolute_deadline)
-	{
-		udb_sync_abort(block, "absolute sync timeout exceeded");
-		udb_sync_round_failure(block, peer, round_id, "staged END absolute timeout");
-		return UDB_ERR_PARAMS;
-	}
-	session->record_count = udb_record_count_tree(session->tree);
-	if ((block->letter == UDB_BLOCK_LINES && !udb_k_tree_profiles_valid(session->tree)) ||
-		(block->letter == UDB_BLOCK_NICKS && !udb_n_tree_profiles_valid(session->tree)))
-	{
-		snprintf(profile_failure_reason, sizeof(profile_failure_reason),
-				 "invalid complete profile in staged END for block %c", block->letter);
-		udb_sync_abort(block, profile_failure_reason);
-		udb_sync_round_failure(block, peer, round_id, profile_failure_reason);
-		return UDB_ERR_PARAMS;
-	}
-	if (!udb_compute_tree_digest(session->tree, computed_digest))
-	{
-		udb_sync_abort(block, "digest calculation failure");
-		udb_sync_round_failure(block, peer, round_id, "staged digest calculation failure");
-		return UDB_ERR_FATAL;
-	}
-	if (!udb_digest_parse(sha256, received_digest) || strcmp(computed_digest, received_digest) != 0)
-	{
-		udb_sync_abort(block, "digest validation failure");
-		udb_sync_round_failure(block, peer, round_id, "staged digest validation failure");
-		return UDB_ERR_FATAL;
-	}
-	if (out_digest)
-		strlcpy(out_digest, computed_digest, UDB_SHA256_HEX_LEN + 1);
-
-	previous_generation = block->generation;
-	if (!udb_hash_prepare_tree(session->tree, &session->hash_index))
-	{
-		udb_sync_abort(block, "hash index allocation failure");
-		udb_sync_round_failure(block, peer, round_id, "staged hash index allocation failure");
-		return UDB_ERR_FATAL;
-	}
-	block->generation = udb_reconcile.generation;
-	UdbSnapshotResult snap_res = udb_file_write_snapshot(block, session->tree, session->record_count);
-	if (snap_res == UDB_SNAPSHOT_FAILED_BEFORE_COMMIT)
-	{
-		udb_hash_dispose_prepared(&session->hash_index);
-		block->generation = previous_generation;
-		udb_sync_abort(block, "digest or persistence failure");
-		udb_handle_persistence_failure(ctx, peer, block, "END snapshot", 0);
-		return UDB_ERR_FATAL;
-	}
-	if (!udb_block_commit_stage(ctx, block, session, computed_digest))
-	{
-		block->generation = previous_generation;
-		udb_sync_abort(block, "staged commit failure");
-		return UDB_ERR_FATAL;
-	}
-	if (snap_res == UDB_SNAPSHOT_COMMITTED_DURABILITY_UNCERTAIN)
-	{
-		/* rename(2) is the irreversible point: keep memory equal to the visible
-		 * snapshot, but fail the round and readiness until durability is proven. */
-		udb_handle_persistence_failure(ctx, peer, block, "END snapshot", 1);
-		return UDB_ERR_FATAL;
-	}
-	return 0;
-}
-
 static void udb_sync_ack(Client *peer, const char *block)
 {
 	udb_log(ULOG_INFO, "UDB_SYNC_ACK", peer, "Staged sync acknowledged for block $block",
 			log_data_string("block", block));
 }
 
-static int udb_sync_send_tree(Client *server, UdbRecord *rec, int depth, char *pathbuf, size_t pathlen,
-							  unsigned long round_id, char letter, const char *txid)
-{
-	size_t orig_len;
-	UdbRecord *child;
-	char encoded_key[UDB_COMPONENT_ENCODED_MAX + 1];
-
-	if (!rec || !rec->key)
-		return 1;
-	orig_len = strlen(pathbuf);
-	if (!udb_path_encode_component(rec->key, encoded_key, sizeof(encoded_key)))
-		return 0;
-	size_t enc_len = strlen(encoded_key);
-	if (depth > 0)
-	{
-		if (orig_len + 2 + enc_len >= pathlen)
-			return 0;
-		strlcat(pathbuf, "::", pathlen);
-	}
-	else
-	{
-		if (enc_len >= pathlen)
-			return 0;
-	}
-	strlcat(pathbuf, encoded_key, pathlen);
-	if (rec->data_str || rec->data_num > 0 || !rec->child)
-	{
-		char numbuf[32];
-		const char *val_str;
-		int ok;
-
-		if (rec->data_str)
-		{
-			val_str = rec->data_str;
-		}
-		else
-		{
-			snprintf(numbuf, sizeof(numbuf), "*%lu", rec->data_num);
-			val_str = numbuf;
-		}
-
-		if (!udb_record_fits_limits(pathbuf, val_str))
-		{
-			pathbuf[orig_len] = '\0';
-			return 0;
-		}
-
-		if (rec->data_str)
-			ok = udb_send_db_to_one(server, ":%s DB %s PUT %lu %c %s %s :%s", me.id, server->id, round_id, letter, txid,
-									pathbuf, rec->data_str);
-		else
-			ok = udb_send_db_to_one(server, ":%s DB %s PUT %lu %c %s %s *%lu", me.id, server->id, round_id, letter,
-									txid, pathbuf, rec->data_num);
-		if (!ok)
-		{
-			pathbuf[orig_len] = '\0';
-			return 0;
-		}
-	}
-	for (child = rec->child; child; child = child->sibling)
-	{
-		if (!udb_sync_send_tree(server, child, depth + 1, pathbuf, pathlen, round_id, letter, txid))
-		{
-			pathbuf[orig_len] = '\0';
-			return 0;
-		}
-	}
-	pathbuf[orig_len] = '\0';
-	return 1;
-}
-
 static int udb_sync_send_stage(Client *server, UdbBlock *block, unsigned long round_id)
 {
-	char txid[UDB_TXID_MAX + 1];
-	char pathbuf[UDB_RECORD_PATH_MAX + 1] = "";
-	UdbRecord *rec;
-	int success = 1;
-	uint64_t watermark =
-		udb_ctx ? (udb_ctx->current_seq > udb_ctx->last_applied_seq ? udb_ctx->current_seq : udb_ctx->last_applied_seq)
-				: 0;
-
-	/* HEL confirms protocol support; snapshots require the selected data source. */
-	if (!udb_peer_authorizes_us(server) || !block)
-		return 0;
-	snprintf(txid, sizeof(txid), "%08lx", ++udb_sync_txid);
-	if (!udb_send_db_to_one(server, ":%s DB %s BEGIN %lu %c %s %s %" PRIu64, me.id, server->id, round_id, block->letter,
-							txid, block->sha256, watermark))
-	{
-		udb_log(ULOG_ERROR, "UDB_SYNC_SEND_FAILED", server, "Failed to send staged sync BEGIN for block $block",
-				log_data_string("block", (char[]){block->letter, '\0'}));
-		return 0;
-	}
-	if (block->tree)
-	{
-		for (rec = block->tree->child; rec; rec = rec->sibling)
-		{
-			if (!udb_sync_send_tree(server, rec, 0, pathbuf, sizeof(pathbuf), round_id, block->letter, txid))
-			{
-				success = 0;
-				break;
-			}
-		}
-	}
-	if (!success)
-	{
-		udb_log(ULOG_ERROR, "UDB_SYNC_SEND_FAILED", server,
-				"Failed to serialize/send tree records during staged sync for block $block, aborting transfer",
-				log_data_string("block", (char[]){block->letter, '\0'}));
-		udb_send_db_to_one(server, ":%s DB %s ERR PUT %d %lu %c", me.id, server->id, UDB_ERR_FATAL, round_id,
-						   block->letter);
-		return 0;
-	}
-	if (!udb_send_db_to_one(server, ":%s DB %s END %lu %c %s %s %" PRIu64, me.id, server->id, round_id, block->letter,
-							txid, block->sha256, watermark))
-	{
-		udb_log(ULOG_ERROR, "UDB_SYNC_SEND_FAILED", server, "Failed to send staged sync END for block $block",
-				log_data_string("block", (char[]){block->letter, '\0'}));
-		return 0;
-	}
-	return 1;
+	return block && udb_native_sync_send(server, block->letter, round_id);
 }
 
 static time_t udb_anti_entropy_calc_interval(void)
@@ -1220,80 +846,30 @@ static void udb_anti_entropy_timer_check(time_t now)
 	}
 }
 
-static void udb_anti_entropy_record_ack(Client *peer, unsigned long round_id, char letter, unsigned int remote_count,
-										const char *remote_sha, uint64_t watermark_seq)
+/* MANIFEST ACK remains request correlation/diagnostics only. Extended INF
+ * from the same pinned generation owns lineage and native stage admission. */
+static void udb_anti_entropy_record_ack(Client *peer, unsigned long id, char block, uint64_t count, const char *digest,
+										uint64_t watermark)
 {
-	if (!udb_anti_entropy.pending || udb_anti_entropy.round_id != round_id)
+	unsigned int mask = udb_block_letter_to_mask(block);
+	if (!udb_anti_entropy.pending || udb_anti_entropy.round_id != id || !mask ||
+		!udb_is_authorized_sync_source(udb_ctx, peer) || (udb_anti_entropy.acked_blocks & mask))
 		return;
-
-	unsigned int mask = udb_block_letter_to_mask(letter);
-	UdbBlock *block = udb_block_by_letter(udb_ctx, letter);
-	if (!mask || !block)
-		return;
-
-	if (udb_anti_entropy.acked_blocks & mask)
-		return;
-	if (!udb_anti_entropy.watermark_known)
+	if (udb_anti_entropy.watermark_known && udb_anti_entropy.watermark_seq != watermark)
 	{
-		udb_anti_entropy.watermark_seq = watermark_seq;
-		udb_anti_entropy.watermark_known = 1;
-	}
-	else if (udb_anti_entropy.watermark_seq != watermark_seq)
-	{
-		udb_anti_entropy.pending = 0;
-		udb_anti_entropy.fail_count++;
-		udb_sync_mark_degraded(peer, "inconsistent anti-entropy watermark");
-		udb_sync_hello_refresh_all();
+		udb_anti_entropy_handle_err(peer, id, UDB_ERR_PARAMS);
+		udb_reconcile_abort(udb_ctx, "inconsistent anti-entropy watermark", 1);
 		return;
 	}
-
+	udb_anti_entropy.watermark_seq = watermark;
+	udb_anti_entropy.watermark_known = 1;
 	udb_anti_entropy.acked_blocks |= mask;
-
-	if (block->record_count != remote_count || strcmp(block->sha256, remote_sha) != 0)
+	(void)count;
+	(void)digest;
+	if (udb_anti_entropy.acked_blocks == UDB_ALL_BLOCKS_MASK)
 	{
-		udb_anti_entropy.divergent_blocks |= mask;
-	}
-
-	if ((udb_anti_entropy.acked_blocks & UDB_ALL_BLOCKS_MASK) == UDB_ALL_BLOCKS_MASK)
-	{
-		time_t now = time(NULL);
 		udb_anti_entropy.pending = 0;
-
-		if (udb_anti_entropy.divergent_blocks == 0)
-		{
-			udb_anti_entropy.last_success = now;
-			udb_anti_entropy.fail_count = 0;
-			udb_anti_entropy_schedule_next(now);
-		}
-		else
-		{
-			udb_sync_mark_degraded(peer, "anti-entropy divergence detected");
-			udb_reconcile_start(peer, round_id);
-			udb_reconcile.divergent_blocks = udb_anti_entropy.divergent_blocks;
-			udb_reconcile.compared_blocks = UDB_ALL_BLOCKS_MASK;
-			udb_reconcile.completed_blocks = UDB_ALL_BLOCKS_MASK & ~udb_anti_entropy.divergent_blocks;
-			udb_reconcile.watermark_seq = udb_anti_entropy.watermark_seq;
-			udb_reconcile.watermark_known = udb_anti_entropy.watermark_known;
-
-			UdbBlock *b;
-			for (b = udb_ctx->block_list; b; b = b->next)
-			{
-				unsigned int bmask = udb_block_letter_to_mask(b->letter);
-				if (bmask & udb_anti_entropy.divergent_blocks)
-				{
-					if (udb_send_db_to_one(peer, ":%s DB %s RES %lu %c", me.id, peer->id, round_id, b->letter))
-					{
-						udb_reconcile_record_res(peer, round_id, b->letter);
-						b->pending_from = peer;
-						b->pending_deadline =
-							now + ((udb_cfg && udb_cfg->sync_inactivity_timeout > 0) ? udb_cfg->sync_inactivity_timeout
-																					 : UDB_SYNC_TIMEOUT);
-						b->pending_round_id = round_id;
-					}
-				}
-			}
-			udb_anti_entropy_schedule_next(now);
-		}
+		udb_anti_entropy_schedule_next(time(NULL));
 	}
 }
 
@@ -1397,6 +973,12 @@ EVENT(udb_sync_timeout_event)
 
 static void udb_sync_server_quit(Client *client)
 {
+	if (udb_ctx && udb_ctx->storage && client &&
+		(udb_is_propagator(udb_ctx, client) || udb_reconcile.authority_peer == client))
+	{
+		uint64_t revision;
+		udb_storage_engine_authority(udb_ctx->storage, &revision);
+	}
 	udb_lines_expiry_peer_disconnected(client);
 	udb_anti_entropy_peer_quit(client);
 	UdbBlock *block;
@@ -1414,7 +996,7 @@ static void udb_sync_server_quit(Client *client)
 		}
 	for (block = udb_ctx->block_list; block; block = block->next)
 	{
-		if (block->session && block->session->peer == client)
+		if (block->session && !strcmp(block->session->peer_sid, client->id))
 			udb_sync_abort(block, "peer quit");
 		else if (block->syncing_from == client)
 			block->syncing_from = NULL;

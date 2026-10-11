@@ -31,19 +31,20 @@ def _module_path() -> Path:
     configured = os.environ.get("UDB_MODULE_PATH")
     candidates = [Path(configured)] if configured else []
     repository = Path(__file__).resolve().parents[3]
-    candidates.extend((repository / "src/udb.so", repository / "dist/udb.so"))
+    extension = "dll" if os.name == "nt" else "so"
+    candidates.extend((repository / f"src/udb.{extension}", repository / f"dist/udb.{extension}"))
     for candidate in candidates:
         if candidate.is_file():
             return candidate.resolve()
     raise FileNotFoundError(
-        "compiled UDB module unavailable; set UDB_MODULE_PATH or build src/udb.so"
+        f"compiled UDB module unavailable; set UDB_MODULE_PATH or build src/udb.{extension}"
     )
 
 
 def _runtime_state_module() -> Path:
     repository = Path(__file__).resolve().parents[3]
     source = repository / "tests/udb_test_state.c"
-    module = source.with_suffix(".so")
+    module = source.with_suffix(".dll" if os.name == "nt" else ".so")
     if not source.is_file():
         raise FileNotFoundError(f"test-only runtime state module source unavailable: {source}")
     if module.is_file() and module.stat().st_mtime >= source.stat().st_mtime:
@@ -54,11 +55,10 @@ def _runtime_state_module() -> Path:
     source_root = Path(configured) if configured else (
         candidate if (candidate / "Makefile").is_file() else repository
     )
-    result = subprocess.run(
-        ["make", "custommodule", "MODULEFILE=udb/tests/udb_test_state"],
-        cwd=source_root, text=True, stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT, timeout=120,
-    )
+    command = (["build.bat", "CUSTOMMODULE", "MODULEFILE=udb/tests/udb_test_state"]
+               if os.name == "nt" else ["make", "custommodule", "MODULEFILE=udb/tests/udb_test_state"])
+    result = subprocess.run(command, cwd=source_root, text=True, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, timeout=120, shell=(os.name == "nt"))
     if result.returncode or not module.is_file():
         raise RuntimeError(f"test-only runtime state module build failed:\n{result.stdout}")
     return module
@@ -138,36 +138,47 @@ class UdbNode:
         if not self.outgoing.keys() <= set(self.peers):
             raise ValueError("every outgoing server requires an explicit peer entry")
         self.runtime_root = _runtime_root()
-        self.ircd = self.runtime_root / "bin/unrealircd"
-        if not self.ircd.is_file() or not os.access(self.ircd, os.X_OK):
+        self.ircd = self.runtime_root / ("bin/UnrealIRCd.exe" if os.name == "nt" else "bin/unrealircd")
+        if not self.ircd.is_file() or (os.name != "nt" and not os.access(self.ircd, os.X_OK)):
             raise FileNotFoundError(f"configured UnrealIRCd binary unavailable: {self.ircd}")
-        if not shutil.which("bwrap"):
+        if os.name != "nt" and not shutil.which("bwrap"):
             raise RuntimeError("bubblewrap is required for isolated runtime integration tests")
 
         self.module_source = _module_path()
-        self.data_dir = path / "runtime-data"
+        self.data_dir = path / ("data" if os.name == "nt" else "runtime-data")
         self.temp_dir = path / "tmp"
         self.cache_dir = path / "cache"
         self.log_dir = path / "logs"
         self.modules_dir = path / "modules/third"
         for directory in (self.data_dir, self.temp_dir, self.cache_dir, self.log_dir, self.modules_dir):
             directory.mkdir(parents=True, exist_ok=True)
+        if os.name == "nt":
+            shutil.copytree(self.runtime_root / "modules", path / "modules", dirs_exist_ok=True)
 
         self.client_port = _free_port()
         self.tls_port = _free_port()
         self.server_port = _free_port()
-        shutil.copy2(self.module_source, self.modules_dir / "udb.so")
+        if os.name == "nt":
+            shutil.copy2(self.module_source, self.modules_dir / "udb.dll")
+        else:
+            shutil.copy2(self.module_source, self.modules_dir / "udb.so")
         if self.runtime_state_fixture:
-            shutil.copy2(_runtime_state_module(), self.modules_dir / "udb_test_state.so")
-        if ready:
-            self._seed_ready()
+            suffix = ".dll" if os.name == "nt" else ".so"
+            shutil.copy2(_runtime_state_module(), self.modules_dir / f"udb_test_state{suffix}")
         if prepare is not None:
             prepare(self.data_dir)
-        self.config = path / "unrealircd.conf"
+        self.config = path / ("conf/unrealircd.conf" if os.name == "nt" else "unrealircd.conf")
+        if os.name == "nt":
+            self.config.parent.mkdir(parents=True, exist_ok=True)
+            for name in ("modules.default.conf", "operclass.default.conf", "snomasks.default.conf"):
+                shutil.copy2(self.runtime_root / "conf" / name, self.config.parent / name)
+            self._create_test_tls_certificate()
         self._write_config()
+        (path / "bin").mkdir(parents=True, exist_ok=True)
         self._run_configtest()
 
-        self.process = OwnedProcess(self._command(foreground=True), self.log_dir / "ircd.log", cwd=path)
+        self.process = OwnedProcess(self._command(foreground=True), self.log_dir / "ircd.log",
+                                    cwd=self._process_cwd(), env=self._process_env())
         self.clients: list[IrcClient] = []
         self.process.start()
         try:
@@ -178,22 +189,11 @@ class UdbNode:
             self.close()
             raise
 
-    def _seed_ready(self) -> None:
-        for letter in BLOCKS:
-            (self.data_dir / f"udb_{letter}.db").write_text(
-                f"; UDB Block {letter} - Version 1\n; Generation: 1\n",
-                encoding="ascii",
-            )
-        (self.data_dir / ".udb_state").write_text(
-            "FORMAT=1\nSTATE=READY\nORIGIN=FRESH\nGENERATION=1\nLAST_SYNC=1787720000\n",
-            encoding="ascii",
-        )
-
     def _write_config(self) -> None:
         cloak = " ".join(f'"{key}";' for key in CLOAK_KEYS)
         links = []
         for peer in self.peers:
-            outgoing = (f'outgoing {{ hostname "127.0.0.1"; port {self.outgoing[peer]}; }}'
+            outgoing = (f'outgoing {{ hostname "127.0.0.1"; port {self.outgoing[peer]}; options {{ autoconnect; }} }}'
                         if peer in self.outgoing else "")
             links.append(f'link {peer} {{ incoming {{ mask "127.0.0.1"; }} {outgoing} password "testlinkpassword"; class servers; }}')
         links = "\n".join(links)
@@ -221,10 +221,17 @@ class UdbNode:
             'except ban { mask "lineoper@*"; type { gline; gzline; } }'
             if self.tkl_monitor_exception else ""
         )
+        tls_listener = f'listen {{ ip "127.0.0.1"; port {self.tls_port}; options {{ tls; }} }}' if self.tls_port else ""
+        if os.name == "nt":
+            include_lines = '\n'.join(f'include "conf/{name}";' for name in
+                                       ("modules.default.conf", "operclass.default.conf", "snomasks.default.conf"))
+        else:
+            config_includes = [self.runtime_root / "conf/modules.default.conf",
+                               self.runtime_root / "conf/operclass.default.conf",
+                               self.runtime_root / "conf/snomasks.default.conf"]
+            include_lines = "\n".join(f'include "{item.as_posix()}";' for item in config_includes)
         self.config.write_text(
-            f'''include "{self.runtime_root}/conf/modules.default.conf";
-include "{self.runtime_root}/conf/operclass.default.conf";
-include "{self.runtime_root}/conf/snomasks.default.conf";
+            f'''{include_lines}
 blacklist-module "geoip_classic";
 blacklist-module "geoip_mmdb";
 blacklist-module "geoip_csv";
@@ -245,7 +252,7 @@ class servers {{ pingfreq 60; connfreq 6; maxclients 20; sendq 20M; }}
 oper testoper {{ mask "127.0.0.1"; password "operpass"; operclass "netadmin-with-override"; class clients; }}
 allow {{ mask "127.0.0.1"; class clients; maxperip 20; }}
 listen {{ ip "127.0.0.1"; port {self.client_port}; }}
-listen {{ ip "127.0.0.1"; port {self.tls_port}; options {{ tls; }} }}
+{tls_listener}
 listen {{ ip "127.0.0.1"; port {self.server_port}; options {{ serversonly; }} }}
 {links}
 {ulines}
@@ -255,10 +262,56 @@ loadmodule "third/udb";
 {runtime_state_module}
 udb {{ {policy} {self.settings} }}
 ''',
-            encoding="ascii",
+            encoding="utf-8",
         )
 
+    def _create_test_tls_certificate(self) -> None:
+        tls_dir = self.config.parent / "tls"
+        tls_dir.mkdir(parents=True, exist_ok=True)
+        ca_bundle = self.runtime_root / "conf/tls/curl-ca-bundle.crt"
+        if ca_bundle.is_file():
+            shutil.copy2(ca_bundle, tls_dir / ca_bundle.name)
+        libraries = os.environ.get("UDB_TEST_LIBRARIES_ROOT")
+        candidates = [Path(libraries) / "openssl/bin/openssl.exe"] if libraries else []
+        candidates.append(self.runtime_root / "openssl.exe")
+        candidates.append(Path(shutil.which("openssl") or ""))
+        openssl = next((item for item in candidates if item.is_file()), None)
+        if openssl is None:
+            raise FileNotFoundError(
+                "OpenSSL is required for the disposable Windows IRC test listener; "
+                "set UDB_TEST_LIBRARIES_ROOT"
+            )
+        env = os.environ.copy()
+        env["OPENSSL_CONF"] = "NUL"
+        result = subprocess.run(
+            [str(openssl), "req", "-x509", "-newkey", "rsa:2048",
+             "-keyout", str(tls_dir / "server.key.pem"),
+             "-out", str(tls_dir / "server.cert.pem"), "-sha256", "-days", "1",
+             "-nodes", "-subj", "/CN=udb-test.test"],
+            cwd=self.path, env=env, text=True, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, timeout=30,
+        )
+        if result.returncode:
+            raise RuntimeError(f"could not create disposable test TLS certificate:\n{result.stdout}")
+
+    def _process_cwd(self) -> Path:
+        if os.name == "nt":
+            # UnrealIRCd's Windows GUI wrapper always changes from bin\ to
+            # its parent before initializing the daemon and reading relative paths.
+            return self.path / "bin"
+        return self.path
+
+    def _process_env(self) -> dict[str, str] | None:
+        if os.name != "nt":
+            return None
+        env = os.environ.copy()
+        env["PATH"] = os.pathsep.join((str(self.runtime_root), str(self.runtime_root / "bin"), env.get("PATH", "")))
+        return env
+
     def _command(self, *, foreground: bool) -> list[str]:
+        if os.name == "nt":
+            config_arg = self.config.relative_to(self.path).as_posix()
+            return [str(self.ircd), "-f", config_arg, "-F" if foreground else "-c"]
         runtime_data = self.runtime_root / "data"
         command = [
             "bwrap", "--die-with-parent", "--ro-bind", "/", "/",
@@ -275,10 +328,21 @@ udb {{ {policy} {self.settings} }}
         return command
 
     def _run_configtest(self) -> None:
-        result = subprocess.run(
-            self._command(foreground=False), text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30,
-        )
+        if os.name == "nt":
+            from .windows_configtest import run_windows_configtest
+
+            self._configtest_sequence = getattr(self, "_configtest_sequence", 0) + 1
+            result = run_windows_configtest(
+                self._command(foreground=False),
+                self.log_dir / f"configtest-{self._configtest_sequence:02d}.log",
+                timeout=30, cwd=self._process_cwd(), env=self._process_env(),
+            )
+        else:
+            result = subprocess.run(
+                self._command(foreground=False), text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30, cwd=self._process_cwd(),
+                env=self._process_env(),
+            )
         if result.returncode:
             raise RuntimeError(
                 f"UnrealIRCd configtest failed ({result.returncode}):\n{result.stdout}"
@@ -298,29 +362,19 @@ udb {{ {policy} {self.settings} }}
                 time.sleep(0.05)
         raise TimeoutError(f"UnrealIRCd did not open its client listener:\n{self.log_text()}")
 
-    @property
-    def state_file(self) -> Path:
-        return self.data_dir / ".udb_state"
-
-    def state(self) -> dict[str, str]:
-        try:
-            lines = self.state_file.read_text(encoding="ascii").splitlines()
-        except OSError as error:
-            raise AssertionError(f"UDB state is unavailable: {self.state_file}") from error
-        return dict(line.split("=", 1) for line in lines if "=" in line)
-
-    def wait_for_state(self, expected: str, timeout: float = 15) -> dict[str, str]:
-        deadline = time.monotonic() + timeout
-        state: dict[str, str] = {}
-        while time.monotonic() < deadline:
-            if self.state_file.is_file():
-                state = self.state()
-                if state.get("STATE") == expected:
-                    return state
-            if self.process.process.poll() is not None:
-                break
-            time.sleep(0.05)
-        raise TimeoutError(f"expected UDB STATE={expected}; state={state}\n{self.log_text()}")
+    def wait_for_state(self, expected: str, timeout: float = 15):
+        """Readiness is a runtime protocol property, not a legacy text marker."""
+        if expected != "READY":
+            raise ValueError("use server DBQ STATUS for bootstrap assertions")
+        # Local BIND completion is consumed by the daemon event within 250 ms.
+        # One finite grace avoids treating a just-opened listener as readiness.
+        time.sleep(0.35)
+        client = self.client("readiness")
+        replies = client.request("OPER testoper operpass")
+        assert any(" 381 " in line for line in replies), replies
+        replies = client.request("UDB STATUS", timeout=timeout)
+        assert any("Database readiness: READY" in line for line in replies), replies
+        return {"STATE": "READY"}
 
     def client(self, nickname: str) -> IrcClient:
         client = IrcClient("127.0.0.1", self.client_port, nickname)

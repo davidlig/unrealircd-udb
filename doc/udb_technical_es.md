@@ -1,10 +1,10 @@
-# UDB 4 — Documentación técnica
+# UDB — Documentación técnica
 
-> Documento reconstruido desde la implementación actual de `davidlig/unrealircd-udb` en la rama `main` y revisado el 11 de septiembre de 2026. El código, no las versiones anteriores de esta documentación, se ha utilizado como fuente de verdad.
+> Este documento describe la implementación canónica de `src/` preparada para la release del módulo `4.0.0-rc1` el 11 de octubre de 2026. La versión del módulo es independiente de HEL 4 y de la generación 4 del almacenamiento nativo. Consulta las [notas de lanzamiento](releases/4.0.0-rc1_es.md) para conocer el alcance de la validación y los requisitos de despliegue.
 
 ## 1. Alcance
 
-UDB (Unreal DataBase) es un módulo global para UnrealIRCd 6 que mantiene y aplica una base de datos distribuida para registros de nick, canales, políticas por IP, ajustes, opciones por servidor y sanciones. La versión del módulo es **4.0.0** y el metadato de distribución declara **UnrealIRCd 6.2.x** como versión mínima (`min-unrealircd-version "6.2.*"`).
+UDB (Unreal DataBase) es un módulo global para UnrealIRCd 6 que mantiene y aplica una base de datos distribuida para registros de nick, canales, políticas por IP, ajustes, opciones por servidor y sanciones. La versión del módulo es **4.0.0-rc1** y el metadato de distribución declara **UnrealIRCd 6.2.x** como versión mínima (`min-unrealircd-version "6.2.*"`).
 
 La implementación canónica está dividida en `src/` y se amalgama de forma determinista en `dist/udb.c`. El módulo se registra como `third/udb` y utiliza el comando S2S `DB` como protocolo propio.
 
@@ -12,72 +12,35 @@ UDB no implementa un servicio de registro autónomo para crear cuentas o canales
 
 ## 2. Arquitectura
 
-`src/udb.c` compone una única unidad de compilación en este orden:
-
-1. `udb_store.c.inc`: árbol de registros, rutas y persistencia.
-2. `udb_config.c.inc`: `udb {}`, bloque S y opciones L.
-3. `udb_core.c.inc`: validación, esquemas, manifiestos de estado SHA-256 y operaciones del árbol.
-4. `udb_services.c.inc`: resolución de fuentes NickServ/ChanServ/IpServ.
-5. `udb_effects.c.inc`: aplicación y retirada de efectos en runtime.
-6. `udb_sync.c.inc`: HEL, autoridad, reconciliación y snapshots staged.
-7. `udb_operclasses.c.inc`: inventarios OCL y vista global OCLG.
-8. `udb_mutation.c.inc`: `INS`, `DEL`, `DRP` y `EXP`.
-9. `udb_protocol.c.inc`: parser y encaminamiento del comando `DB`.
-10. `udb_nicks.c.inc`, `udb_channels.c.inc`, `udb_ips.c.inc`, `udb_lines.c.inc`: comportamiento específico por bloque.
-11. `udb_query.c.inc`: comandos de diagnóstico `DBQ` y `UDB`.
-12. `udb_lifecycle.c.inc`: arranque, publicación, apagado y estado durable.
-
-El estado lógico se separa en seis bloques independientes, pero **READY es una propiedad del conjunto completo**, no de un bloque individual.
-
-| Bloque | Nombre | Función principal |
-|---|---|---|
-| `N` | Nicks | Registro, autenticación y atributos de nicks |
-| `C` | Channels | Canales registrados, acceso y políticas de canal |
-| `I` | IPs | Clones, excepciones y hosts por IP/realhost |
-| `S` | Settings | Ajustes globales y selección de propagador |
-| `L` | Links | Opciones locales por nombre de servidor |
-| `K` | Lines | G/Z/Shun/Q y spamfilters |
+`src/udb.c` compone una unidad de traducción. `udb_storage*.c.inc` implementa el
+motor binario nativo; `udb_native*.c.inc` aporta schema capturado, consultas tipadas,
+codec de protocolo, envío/recepción staged y efectos sobre generaciones exactas.
+`udb_store.c.inc` sólo contiene rutas/clasificación de secretos.
+`udb_core.c.inc` contiene schemas de negocio y parsing puros. Las unidades de
+configuración, servicios, HEL/OCL, mutaciones, protocolo, consumidores N/C/I/K,
+diagnósticos y ciclo de vida coordinan el daemon en foreground. `dist/udb.c` se genera.
+READY pertenece a los seis bloques N/C/I/S/L/K, no a una raíz aislada.
 
 ## 3. Modelo de datos y rutas
 
-Cada bloque mantiene un árbol `UdbRecord`. Los componentes de ruta se separan con `::` y se codifican de forma canónica cuando contienen bytes reservados. El encoder convierte `:`, `%`, bytes de control/espacio (`<= 0x20`) y bytes no ASCII (`>= 0x7f`) a `%HH` en hexadecimal mayúscula.
-
-Ejemplos conceptuales:
-
-```text
-N::alice::pass
-C::#chat::founder
-C::#chat::access::alice
-I::203.0.113.20::clones
-S::propagator
-K::F::<pattern>::action
-```
-
-En los ficheros de bloque se omite la letra, ya que ésta está implícita en el fichero:
-
-```text
-alice::pass sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-alice::modes +iw
-```
-
-Los valores numéricos se serializan como `*<entero>`; los valores de texto se escriben literalmente después del primer espacio. El parser numérico es estricto: no admite signo, espacios ni caracteres sobrantes.
+Las rutas lógicas usan `Block::componente::propiedad`, por ejemplo `N::alice::pass`,
+`C::#chat::access::alice`, `I::203.0.113.20::clones` y `S::propagator`.
+Los componentes codifican `:`, `%`, espacios/control y bytes no ASCII como `%HH`
+mayúsculo; los imprimibles `@`, `/` y `*` permanecen literales. Se rechazan controles
+estructurales y NUL aunque estén escapados. Las claves pliegan ASCII salvo patrones
+K::F exactos. La fila binaria distingue NONE/STRING/uint64. El protocolo usa
+`!n`, `!s<Base64>` y `!u<decimal>`, nunca formato de texto ni valores sin etiqueta.
+Las tablas siguientes describen valores lógicos, no payloads de protocolo.
 
 ### 3.1 Límites de representación
 
-La implementación aplica, entre otros, estos límites:
-
-- ruta lógica codificada: **8192 bytes**;
-- componente sin codificar: **4608 bytes**;
-- componente codificado: **4608 bytes**;
-- valor de registro: **4096 bytes**;
-- `txid` de snapshot: **31 caracteres**;
-- patrón de spamfilter decodificado: **3072 bytes**;
-- cada registro debe caber también en una línea S2S de UnrealIRCd dejando un margen interno de 256 bytes;
-- hash de primer nivel dimensionado dinámicamente por bloque, con un mínimo de
-  2048 buckets; los tamaños son potencias de dos y crecen con la carga de
-  perfiles raíz.
-
-No basta con que una ruta quepa en disco: debe cumplir además el límite S2S para poder ser sincronizada de forma segura.
+- Hasta 8 componentes estructurales; los schemas actuales admiten hasta 3.
+- Ruta lógica raw menor de 8192 bytes; componente raw de hasta 4608 bytes.
+- Valor de hasta 4096 bytes; txid de snapshot de hasta 31 caracteres.
+- Patrón spamfilter decodificado de hasta 3072 bytes.
+- Cada fila transmitida debe caber además en MAXLINELENGTH menos 256 bytes
+  reservados para S2S; la expansión percent/Base64 cuenta para ese límite.
+- Counts y números usan uint64 con aritmética comprobada y codificación LE explícita.
 
 ## 4. Esquema de los seis bloques
 
@@ -158,7 +121,7 @@ El bloque N separa tres planos y nunca infiere uno desde otro:
 | Identidad | El cliente posee ahora la identidad del perfil y su proyección pública (`account=<nick>`, `+r`) | Marcador `UdbNickIdentity` |
 | Ownership de efectos | Exactamente qué estado runtime (`vhost`, modos, snomasks, SWHOIS, oper) cambió UDB | Marcador `UdbNickEffects` |
 
-Los records del perfil son **estado deseado**: lo que UDB quiere ahora. El marcador de ownership es **estado aplicado**: lo que UDB cambió realmente. La limpieza nunca lee el perfil para decidir qué retirar: el árbol no puede describir el pasado porque otra fuente pudo reemplazar un valor que UDB aplicó antes.
+Los records del perfil son **estado deseado**: lo que UDB quiere ahora. El marcador de ownership es **estado aplicado**: lo que UDB cambió realmente. La limpieza nunca lee el perfil para decidir qué retirar: el perfil actual no puede describir el pasado porque otra fuente pudo reemplazar un valor que UDB aplicó antes.
 
 Ownership por efecto:
 
@@ -339,7 +302,7 @@ K::<tipo>::<patron>::expires *<timestamp_unix>
 
 El nodo patrón es un contenedor y no tiene valor directo. `expires` es un único timestamp Unix absoluto elegido por el origen; su ausencia es la única representación de una línea permanente. `expires *0` es inválido. Un timestamp igual o anterior a la hora local nunca se materializa como TKL.
 
-La expiración no se deriva del estado runtime de la TKL. La autoridad raíz barre perfiles K vencidos y realiza el `DEL K::<tipo>::<patron>` transaccional canónico, que elimina el subtree completo de memoria y de `udb_K.db`; los followers sólo eliminan su TKL runtime local y envían o retransmiten una solicitud compare-and-delete `EXP <path> <expected-expires>` hacia su upstream seleccionado. Por tanto restart, reload, snapshot, reconnect o un cambio de una propiedad del perfil no pueden renovar ni resucitar una línea temporal. Sólo un `INS ...::expires` explícito cambia su vida; `DEL ...::expires` convierte un perfil restante válido en permanente.
+La expiración no se deriva del estado runtime de la TKL. La autoridad raíz barre perfiles K vencidos y realiza el `DEL K::<tipo>::<patron>` transaccional canónico, que elimina el subtree completo de la raíz activa y de `udb_K.db`; los followers sólo eliminan su TKL runtime local y envían o retransmiten una solicitud compare-and-delete `EXP <path> <expected-expires>` hacia su upstream seleccionado. Por tanto restart, reload, snapshot, reconnect o un cambio de una propiedad del perfil no pueden renovar ni resucitar una línea temporal. Sólo un `INS ...::expires` explícito cambia su vida; `DEL ...::expires` convierte un perfil restante válido en permanente.
 
 UDB etiqueta las TKL gestionadas con el marcador reservado `set_by="UDB:managed"` y sólo elimina líneas propias coincidentes.
 
@@ -399,12 +362,12 @@ Z tiene un validador propio. Sólo admite una dirección IPv4/IPv6 o red CIDR ca
 CIDR también es identidad. Z valida el rango del prefijo y rechaza bits de host en vez de enmascararlos. Por ejemplo, `2001:db8:1234:5678::1/48` se rechaza; debe enviarse `2001:db8:1234::/48`. Esta política se aplica a redes Z IPv4 e IPv6.
 
 ```text
-DB * INS K::Z::2001%3Adb8%3A%3A1234::reason :IPv6 bloqueada
-DB * INS K::Z::2001%3Adb8%3A%3A1234::expires *<unix_timestamp>
-DB * DEL K::Z::2001%3Adb8%3A%3A1234
+:<root-SID> DB * INS <root-epoch> <seq> K::Z::2001%3Adb8%3A%3A1234::reason :!sSVB2NiBibG9xdWVhZGE=
+:<root-SID> DB * INS <root-epoch> <seq> K::Z::2001%3Adb8%3A%3A1234::expires :!u<unix_timestamp>
+:<root-SID> DB * DEL <root-epoch> <seq> K::Z::2001%3Adb8%3A%3A1234
 
-DB * INS K::Z::2001%3Adb8%3A1234%3A%3A/48::reason :Red IPv6 bloqueada
-DB * DEL K::Z::2001%3Adb8%3A1234%3A%3A/48
+:<root-SID> DB * INS <root-epoch> <seq> K::Z::2001%3Adb8%3A1234%3A%3A/48::reason :!sUmVkIElQdjYgYmxvcXVlYWRh
+:<root-SID> DB * DEL <root-epoch> <seq> K::Z::2001%3Adb8%3A1234%3A%3A/48
 ```
 
 #### G-Line y Shun con IPv6
@@ -412,12 +375,12 @@ DB * DEL K::Z::2001%3Adb8%3A1234%3A%3A/48
 G y S conservan la identidad `user@host`; una IPv6 pertenece a la parte `host`. El encoder de rutas UDB sólo transforma los dos puntos:
 
 ```text
-DB * INS K::G::*@2001%3Adb8%3A%3A1234::reason :G-Line IPv6
-DB * INS K::G::baduser@2001%3Adb8%3A%3A1234::reason :G-Line IPv6 por ident
-DB * DEL K::G::*@2001%3Adb8%3A%3A1234
+:<root-SID> DB * INS <root-epoch> <seq> K::G::*@2001%3Adb8%3A%3A1234::reason :!sRy1MaW5lIElQdjY=
+:<root-SID> DB * INS <root-epoch> <seq> K::G::baduser@2001%3Adb8%3A%3A1234::reason :!sRy1MaW5lIElQdjYgcG9yIGlkZW50
+:<root-SID> DB * DEL <root-epoch> <seq> K::G::*@2001%3Adb8%3A%3A1234
 
-DB * INS K::S::*@2001%3Adb8%3A%3A1234::reason :Shun IPv6
-DB * DEL K::S::*@2001%3Adb8%3A%3A1234
+:<root-SID> DB * INS <root-epoch> <seq> K::S::*@2001%3Adb8%3A%3A1234::reason :!sU2h1biBJUHY2
+:<root-SID> DB * DEL <root-epoch> <seq> K::S::*@2001%3Adb8%3A%3A1234
 ```
 
 El schema UDB actual de G/S comprueba que existan `user` y `host`, que haya exactamente un `@` y que cada componente tenga como máximo 127 bytes. Reenvía el host decodificado a la API nativa de server-ban de UnrealIRCd. **No** parsea, normaliza ni rechaza grafías IPv6/CIDR alternativas para G/S. Por tanto, un CIDR IPv6 como `*@2001%3Adb8%3A1234%3A%3A/48` pasa la validación estructural de UDB y se reenvía como `*@2001:db8:1234::/48`, pero las garantías de identidad canónica anteriores sólo se aplican a Z. Los operadores deben usar la misma grafía canónica de `inet_ntop()` para G/S y evitar aliases textuales hasta que exista canonicalización específica de G/S.
@@ -425,15 +388,15 @@ El schema UDB actual de G/S comprueba que existan `user` y `host`, que haya exac
 Ejemplos de protocolo DB listos para enviar:
 
 ```text
-DB * INS K::Z::2001%3Adb8%3A%3A1::reason :Prueba Z IPv6
-DB * INS K::Z::2001%3Adb8%3A1234%3A%3A/48::reason :Prueba red IPv6
-DB * INS K::G::*@2001%3Adb8%3A%3A1::reason :Prueba G IPv6
-DB * INS K::S::*@2001%3Adb8%3A%3A1::reason :Prueba Shun IPv6
+:<root-SID> DB * INS <root-epoch> <seq> K::Z::2001%3Adb8%3A%3A1::reason :!sUHJ1ZWJhIFogSVB2Ng==
+:<root-SID> DB * INS <root-epoch> <seq> K::Z::2001%3Adb8%3A1234%3A%3A/48::reason :!sUHJ1ZWJhIHJlZCBJUHY2
+:<root-SID> DB * INS <root-epoch> <seq> K::G::*@2001%3Adb8%3A%3A1::reason :!sUHJ1ZWJhIEcgSVB2Ng==
+:<root-SID> DB * INS <root-epoch> <seq> K::S::*@2001%3Adb8%3A%3A1::reason :!sUHJ1ZWJhIFNodW4gSVB2Ng==
 
-DB * DEL K::Z::2001%3Adb8%3A%3A1
-DB * DEL K::Z::2001%3Adb8%3A1234%3A%3A/48
-DB * DEL K::G::*@2001%3Adb8%3A%3A1
-DB * DEL K::S::*@2001%3Adb8%3A%3A1
+:<root-SID> DB * DEL <root-epoch> <seq> K::Z::2001%3Adb8%3A%3A1
+:<root-SID> DB * DEL <root-epoch> <seq> K::Z::2001%3Adb8%3A1234%3A%3A/48
+:<root-SID> DB * DEL <root-epoch> <seq> K::G::*@2001%3Adb8%3A%3A1
+:<root-SID> DB * DEL <root-epoch> <seq> K::S::*@2001%3Adb8%3A%3A1
 ```
 ## 5. Configuración `udb {}`
 
@@ -453,10 +416,11 @@ Directivas admitidas:
 |---|---|---|
 | `propagator` | un único nombre de servidor válido | no definido |
 | `password-flood` | `intentos:segundos`, ambos > 0 | `5:60` |
-| `max-staged-records` | 1..10,000,000 | 500,000 |
-| `max-staged-bytes` | 1,024..1,073,741,824 bytes | 64 MiB |
+| `cache-size` | 16 MiB..SIZE_MAX/2 bytes | 128 MiB (local) |
+| `max-staged-records` | 1..10,000,000 | 10,000,000 |
+| `max-staged-bytes` | 1,024..SIZE_MAX/2 bytes | 16 GiB |
 | `sync-inactivity-timeout` | 1..86,400 s | 60 s |
-| `sync-absolute-timeout` | 1..86,400 s | 300 s |
+| `sync-absolute-timeout` | 1..86,400 s | 3600 s |
 | `stale-timeout` | 1..604,800 s | 300 s |
 | `anti-entropy-interval` | 1..86,400 s | 1800 s |
 
@@ -475,74 +439,85 @@ Hay una diferencia deliberada: `udb::propagator` valida **un servidor**, mientra
 
 Un candidato remoto sólo es seleccionable si es un servidor **directamente enlazado** al nodo actual; cuando se exige disponibilidad de protocolo, también debe tener `HEL 4` confirmado. Un servidor no adyacente no se convierte en fuente de snapshots de ese nodo aunque aparezca en la topología global.
 
-## 6. Persistencia y atomicidad
+## 6. Persistencia nativa y durabilidad
 
-Cada bloque se guarda como:
-
-```text
-PERMDATADIR/udb_N.db
-PERMDATADIR/udb_C.db
-PERMDATADIR/udb_I.db
-PERMDATADIR/udb_S.db
-PERMDATADIR/udb_L.db
-PERMDATADIR/udb_K.db
-```
-
-Los ficheros se guardan bajo `PERMDATADIR` con permisos `0600`.
-
-Cabecera de snapshot:
+La nueva disposición exclusiva es `PERMDATADIR/udb/`:
 
 ```text
-; UDB Block N - Version 1
-; Generation: 12345
-; Saved: 1780000000
-; Records: 42
+udb_N.db  udb_C.db  udb_I.db  udb_S.db  udb_L.db  udb_K.db
+udb_wal.db  udb_meta0.db  udb_meta1.db
 ```
 
-`Records` cuenta líneas lógicas persistidas, no nodos contenedor. El digest del manifiesto no incluye estas cabeceras ni el orden de las líneas. Se calcula como SHA-256 canónico sobre las líneas lógicas `ruta valor\n`, ordenadas lexicográficamente. Un árbol vacío tiene digest `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+Los seis contenedores binarios estables contienen páginas inmutables de 64 KiB
+con integridad verificada, fragmentos ordenados de hasta 4 MiB, índices paginados
+y catálogos copy-on-write. No hay bloques completos residentes, directorio completo
+de claves, lector de snapshots de texto, migración ni decodificador compatible.
+Despliega la implementación nueva en todos los nodos. No edites ni reemplaces
+parcialmente estos archivos. Una copia de seguridad debe capturar todo el almacén
+con el daemon detenido, no copiar bloques por separado mientras está activo.
 
-### 6.1 Commit de un bloque
+### 6.1 Lecturas indexadas y acotadas
 
-La escritura de snapshot usa:
+Las consultas exactas usan una partición de entidad entre 4096 y después un árbol
+radix SHA-256 de la clave completa. Las hojas se dividen por encima de 16 MiB de
+filas codificadas más 128 bytes por fila y colapsan cuando el contenido visible
+queda por debajo de ese límite. Los índices de fragmentos/runs localizan los datos
+sin cargar un bloque completo. Los prefijos usan iteradores de disco acotados.
+Un pin de generación inmutable protege las extensiones hasta liberar el lector.
+Las consultas distinguen FOUND, NOT_FOUND y errores de almacenamiento; un error
+nunca significa ausencia. El cero numérico es un valor, no un campo inexistente.
 
-1. `open(<fichero>.tmp, O_CREAT|O_EXCL, 0600)` y `O_NOFOLLOW` si existe.
-2. serialización completa.
-3. `fflush()`.
-4. `fsync()` del fichero.
-5. `rename(.tmp, fichero)` como punto visible de commit.
-6. `fsync()` del directorio padre.
+La caché LRU local usa 128 MiB por defecto. `udb::cache-size` recibe bytes decimales
+(mínimo 16 MiB), puede diferir entre nodos y no se replica. Por ejemplo,
+`cache-size 268435456;` selecciona 256 MiB. Más caché puede retener más páginas
+calientes de datos/índices y reducir I/O y validaciones repetidas, pero no elimina
+la validación del arranque ni garantiza cargas masivas más rápidas. El rehash
+aplica el presupuesto local; si los pins impiden reducirlo, se mantiene el tamaño
+actual y hace falta otro rehash. Las asignaciones auxiliares gestionadas tienen
+un límite de 64 MiB, incluidos 16 MiB de memtables y una cola total de entregas,
+jobs y completados de 8 MiB. Los clientes/TKL del daemon y la caché del sistema
+operativo no pertenecen a ese presupuesto de almacenamiento.
 
-Si falla antes del `rename`, el estado activo no debe publicarse. Si el `rename` ya fue visible pero falla el `fsync`/close del directorio, el resultado se considera **COMMITTED_DURABILITY_UNCERTAIN**: la memoria se mantiene alineada con el fichero visible, pero UDB fuerza `BOOTSTRAPPING` y recuperación.
+### 6.2 Commit, checkpoint y recuperación
 
-Las mutaciones `INS`/`DEL` usan copy-on-write: clonan el árbol, aplican/validan la modificación, escriben el snapshot y sólo después sustituyen el árbol activo y sus efectos.
+Un único escritor nativo recibe jobs copiados con IDs estables y revisiones de
+módulo/autoridad, nunca punteros `Client *` en el worker. Los grupos tienen un
+objetivo de hasta 5 ms o 1 MiB de jobs en cola. Una barrera final de autorización
+precede la durabilidad. El orden es flush de datos, flush del conjunto de raíces
+en el WAL global, publicación inmutable y después efectos, ACK y relay en el
+foreground. Los recibos fijan las raíces exactas anterior/posterior incluso cuando
+ya se publicó otro grupo. Cancelar antes de la barrera impide publicar; hacerlo
+después no revierte un commit durable, pero tampoco concede READY ni relay obsoletos.
 
-### 6.2 READY como conjunto generacional
+Los checkpoints usan el slot de metadatos inactivo de 4 MiB, flush y verificación
+por relectura, un suelo durable en el WAL y después retiran entradas cubiertas.
+La reutilización de extensiones exige un inventario completo, condicionado por
+checkpoint, de todas las generaciones activas, staged y fijadas. La caché incluye
+identidad de archivo y generación de extensión. El mantenimiento escribe hasta
+64 MiB por paso privado. Los tombstones de prefijo mantienen el orden: un PUT
+posterior sobrevive a un borrado previo del subárbol. DRP publica una raíz vacía.
 
-Al entrar en READY, los seis bloques se guardan con una misma generación. Antes de reemplazarlos, los ficheros previos se renombran temporalmente a `.udb_previous`. Si cualquiera de los seis falla, se intenta restaurar el conjunto anterior completo.
+El arranque valida WAL/checkpoints y recorre los datos físicos y lógicos referenciados
+de los seis bloques antes de servir. Cuesta CPU/I/O O(datos referenciados), no memoria
+residente O(registros), y no admite páginas DATA en caché durante la validación.
+Una búsqueda indexada caliente no sustituye esa comprobación. Los almacenes
+corruptos, incompletos, ajenos o ambiguamente provisionados fallan de forma cerrada,
+sin reemplazarse silenciosamente por datos vacíos. Sólo se retiran colas incompletas
+no referenciadas del WAL después de validar las raíces comprometidas. La limpieza
+de temporales huérfanos exige identidad de almacén, cabecera íntegra, propietario
+e identidad del archivo abierto; preserva archivos malformados, ajenos y symlinks.
+Se detiene la admisión y se espera al escritor antes de liberar pins, schema,
+efectos o handles de almacenamiento.
 
-Después se publica `.udb_state` de forma atómica:
+### 6.3 Plataformas y límites de la evidencia
 
-```text
-FORMAT=1
-STATE=READY
-ORIGIN=FRESH
-GENERATION=12345
-LAST_SYNC=1780000000
-```
-
-Estados persistentes: `READY` y `BOOTSTRAPPING`. Orígenes: `FRESH` y `RECOVERY`.
-
-En arranque, un `READY` persistido sólo se acepta si:
-
-- `.udb_state` es sintácticamente válido;
-- su generación es distinta de cero;
-- existen y parsean correctamente los seis snapshots;
-- los seis snapshots tienen la misma generación indicada por `.udb_state`;
-- no queda ningún `.udb_previous` de una publicación incompleta.
-
-Snapshots existentes sin `.udb_state`, un estado corrupto, una generación incompleta o backups pendientes **no se publican parcialmente**. UDB mantiene raíces activas vacías y queda NOT_READY/BOOTSTRAPPING hasta recuperar una base autoritativa.
-
-En un directorio realmente nuevo, si no existe política de propagador (modo autoridad standalone) o el primario configurado es el propio servidor, UDB puede persistir los seis bloques vacíos y entrar en READY localmente.
+Linux usa I/O posicionado de 64 bits, archivos sólo del propietario, bloqueo
+exclusivo y flush real. La rama Windows usa rutas wide, I/O/flush nativos, handles
+exclusivos, ACL del propietario, NTFS local fijo y verificaciones de reparse/hardlinks.
+El commit no depende de unlink/rename ni de simular fsync de directorios Windows.
+Los objetivos son Windows 11 y Server 2022/2025 x64 con MSVC v142; las comprobaciones
+Linux no prueban ejecución real MSVC/NTFS. Consulta `tests/README.md` para la evidencia
+y sus límites.
 
 ## 7. Negociación HEL 4
 
@@ -612,101 +587,74 @@ UDB opera bajo un modelo de autoridad explícito y determinista (**Política A �
    - En despliegues sin política explícita, el primer peer directo confirmado durante el bootstrap se fija como dueño exclusivo de bootstrap. Al alcanzar `READY`, el nodo sin política se blinda como autoridad standalone y rechaza imports remotos entrantes, evitando que un vecino recién enlazado sobreescriba accidentalmente sus datos.
 
 
-## 9. Reconciliación de snapshots
+## 9. Reconciliación nativa por snapshots
 
-La reconciliación es **pull dirigida por inventario** y hop-by-hop. Los frames de reconciliación no se reenvían a través de la red.
+La reconciliación usa inventario y pull entre vecinos elegibles directamente
+conectados con HEL 4/OCL. Un snapshot nunca se reenvía por otro salto. MANIFEST,
+INF y las filas del emisor proceden de una generación fijada de seis raíces.
 
-Secuencia para cada ronda:
-
-```text
-Autoridad                                     Receptor
-    |                                            |
-    | INF round N block sha256 mtime watermark   |
-    |------------------------------------------->|
-    |                                            | compara digest sha256
-    |            RES round N block               | si diverge
-    |<-------------------------------------------|
-    | BEGIN round N block txid sha256 watermark  |
-    |------------------------------------------->|
-    | PUT round N block txid path :value         |
-    |------------------------------------------->|
-    | ...                                        |
-    | END round N block txid sha256 watermark    |
-    |------------------------------------------->|
-    | ACK round N block txid sha256 watermark    |
-    |<-------------------------------------------|
-```
-
-La autoridad ofrece `INF` para los **seis bloques**. El receptor sólo puede pasar a READY cuando:
-
-1. ha comparado N/C/I/S/L/K en la ronda;
-2. cada bloque divergente ha finalizado la transferencia de su snapshot;
-3. no quedan sesiones staged ni `RES` pendientes;
-4. puede guardar de forma durable el conjunto READY y `.udb_state`.
-
-### 9.1 Frames
+### 9.1 Gramática nueva exacta
 
 ```text
-INF   <round> <block> <sha256> <record_count> <modified_at> [<watermark_seq>]
-RES   <round> <block>
-BEGIN <round> <block> <txid> <sha256> [<watermark_seq>]
-PUT   <round> <block> <txid> <path> :<string>
-PUT   <round> <block> <txid> <path> *<number>
-END   <round> <block> <txid> <sha256> [<watermark_seq>]
-ACK   <round> <block> <txid> <sha256> [<watermark_seq>]
-ERR   <subcmd> <code> <round_or_seq> <block>
+:<peer-SID> DB <target> INF <round> <block> <sha256> <count> 0 <watermark> <root-SID> <root-epoch>
+:<peer-SID> DB <target> RES <round> <block>
+:<peer-SID> DB <target> BEGIN <round> <block> <txid> <sha256> <watermark>
+:<peer-SID> DB <target> PUT <round> <block> <txid> <Block::path> :<typed-value>
+:<peer-SID> DB <target> END <round> <block> <txid> <sha256> <watermark>
+:<receiver-SID> DB <peer> ACK <round> <block> <txid> <sha256> <watermark>
 ```
 
-Parámetros:
-- Los IDs de ronda válidos son enteros decimales no cero.
-- `txid` sólo admite caracteres alfanuméricos, `-` y `_`, con un máximo de 31 caracteres.
-- `sha256` es el digest criptográfico hexadecimal en minúsculas de 64 caracteres de la serialización canónica del bloque.
-- `watermark_seq` es el entero monotónico de 64 bits que representa la última mutación incluida en el snapshot.
-- Sólo se aceptan las aridades documentadas. `INF`, `BEGIN`, `END` y `ACK` pueden omitir el watermark opcional por compatibilidad heredada, pero si aparece debe ser un valor decimal unsigned válido dentro del rango de `uint64_t`.
+`typed-value` es exactamente `!n` (NONE), `!u<decimal uint64 canónico>` (incluido cero)
+o `!s<Base64 canónico>` (bytes de cadena). Se rechazan valores sin etiqueta e INF
+sin origen. HEL sigue en 4; las formas de solicitud y ACK no cambian. Los seis INF
+deben coincidir en SID, epoch y watermark del origen. El epoch HEL del vecino
+identifica su instancia, no necesariamente el origen raíz de las mutaciones.
+El timestamp reservado se emite como cero y no determina frescura.
 
-`BEGIN` sólo se acepta si existe una reconciliación activa con la misma autoridad/ronda y ese bloque tenía un `RES` pendiente. `PUT` debe coincidir exactamente con peer/ronda/txid. Una secuencia inválida aborta la sesión y la ronda.
+### 9.2 Staging privado durable
 
-`END` recalcula el digest SHA-256 canónico del árbol staged y exige coincidencia exacta con el digest recibido antes de persistir y aplicar commit atómico.
+BEGIN asigna un propietario privado en el escritor; PUT copiados alimentan un
+ordenamiento externo acotado. Claves canónicas duplicadas, schema inválido,
+propietario incorrecto, count/digest erróneo, replay, cuota agotada o secuencia
+inválida no pueden publicar datos activos. END sella y valida una raíz aislada en
+disco y la registra duramente como pendiente; sólo su recibo durable permite ACK.
+Las raíces activas iguales usan REUSE durable. PROMOTE publica atómicamente seis
+raíces y su origen. El ACK de un bloque no significa READY de toda la base. Los
+recibos de la cola live retenida y sus efectos deben terminar bajo la misma
+autoridad actual antes de READY.
 
-### 9.2 Límites staged
+Valores por defecto por bloque: 10.000.000 filas, cuota física de staging de 16 GiB
+incluidos ordenamiento y salida, 60 s de inactividad y 3600 s absolutos. El envío
+está acotado y respeta SendQ. Desconexión/reinicio HEL cancela el propietario sin
+inventar otro origen raíz. La recuperación descarta propietarios pendientes
+abandonados sólo después de validar sus raíces referenciadas.
 
-Defaults:
+### 9.3 Checksums lógicos
 
-- 500.000 registros staged;
-- 64 MiB acumulados de `len(path)+len(data)`;
-- 60 s de inactividad;
-- 300 s de timeout absoluto.
+Los hashes SHA-256 separan dominios y usan filas binarias little-endian explícitas,
+ordenadas por hoja canónica, vinculando posición/count/peso. Particiones de entidad,
+división/colapso radix de clave completa, dominios hoja/rama/bloque y posiciones
+vacías son canónicos: el hash no depende de orden de inserción, caché, IDs físicos
+ni historial de compactación. Los bloques vacíos tienen entradas de digest
+específicas del bloque, no SHA-256 de una cadena vacía. Las claves ASCII se pliegan
+salvo el patrón exacto K::F. La referencia independiente está en
+`tests/support/udb_test_support/native_reference.py`.
 
-El timeout de inactividad se renueva con cada PUT; el absoluto no. También existen timeout de inventario/reconciliación y timeout de un `RES` que no recibe `BEGIN`.
+### 9.4 Orden snapshot/live
 
-Las rondas fallidas programan reintentos limitados (`UDB_RECONCILE_RETRY_MAX = 6`) con backoff.
-
-### 9.3 Identidad fuerte y serialización canónica
-
-La detección de convergencia se basa en digests deterministas SHA-256 en lugar de checksums:
-- Cada registro se serializa en formato canónico de línea wire: `<Block::path> <value>\n` (o `<Block::path>\n` si carece de valor).
-- Los registros se ordenan estrictamente por orden lexicográfico de bytes (`strcmp`).
-- Un bloque vacío genera el digest de una cadena vacía de bytes.
-- No se incluye padding de structs C, punteros, memoria no inicializada ni dependencias del orden interno de tablas hash.
-- Cualquier diferencia semántica de un solo byte genera un digest SHA-256 hexadecimal completamente distinto.
-
-### 9.4 Watermark y resolución de carreras snapshot/mutación viva
-
-Para eliminar condiciones de carrera entre mutaciones online y snapshots de reconciliación en segundo plano:
-1. Cada snapshot transporta `watermark_seq`, indicando el número de secuencia exacto de la autoridad reflejado en el dataset. Las seis entradas `INF` y cada `BEGIN`/`END` de una ronda deben declarar el mismo watermark; una ronda inconsistente se aborta de forma cerrada.
-2. Al consolidar el commit del snapshot y pasar a `READY`, el nodo fija:
-   - `last_applied_seq = watermark_seq`
-   - `expected_seq = watermark_seq + 1`
-3. Las mutaciones online recibidas con `seq <= watermark_seq` se descartan como duplicados (`seq <= last_applied_seq`).
-4. Las mutaciones online con `seq == watermark_seq + 1` se aplican limpiamente sobre el estado comprometido.
-5. Las mutaciones con `seq > watermark_seq + 1` disparan detección de hueco y una nueva reconciliación.
+El import vincula el SID/epoch/watermark exacto del origen. Se descartan entradas
+provisionales cubiertas y la cola retenida debe comenzar en watermark+1, sin huecos
+ni orígenes incorrectos. Los envelopes de replay reservan crédito para su job
+futuro dentro del mismo límite de 8 MiB: una entrada llena no bloquea su drenaje.
+Promoción/efectos preceden a replay; replay/efectos preceden a READY. Una ronda
+parcial u obsoleta no autoriza READY, servicio a downstream ni relay obsoleto.
 
 ## 10. Mutaciones en vivo y secuenciación
 
 Las mutaciones autorizadas originadas por el propagador autoritativo seleccionado son:
 
 ```text
-INS <epoch> <seq> <Block::path> <value>
+INS <epoch> <seq> <Block::path> :<typed-value>
 DEL <epoch> <seq> <Block::path>
 DRP <epoch> <seq> <block>
 EXP <path> <expected-expires>
@@ -783,6 +731,8 @@ Reglas principales:
 - La indisponibilidad de un propagador se mide por separado para observabilidad y **no** degrada por sí sola un nodo READY.
 
 El hook `PRE_LOCAL_CONNECT` de readiness tiene prioridad negativa y rechaza **nuevos clientes locales** siempre que `udb_ready == 0`, con un mensaje de indisponibilidad temporal. No expulsa por esa regla a los clientes que ya estaban conectados.
+
+El comando `NICK` inicial aplica el mismo rechazo de readiness antes de consultar la política de nicknames, también durante la negociación CAP. Un cliente todavía sin nickname recibe un `ERROR` explícito y se desconecta, en lugar de esperar silenciosamente hasta un timeout de registro; esto no elude el bootstrap ni cambia la selección de autoridad.
 
 Errores de persistencia que impidan demostrar durabilidad pueden retirar READY aunque el contenido visible ya se haya actualizado; esta política es fail-closed.
 
@@ -902,7 +852,7 @@ La implementación aplica varias reglas de fail-closed:
 
 HEL 4 no autentica al servidor ni al payload. UDB confía en el enlace de servidores autenticado de UnrealIRCd y después aplica su propia política de autoridad por peer directo, secuenciación, staging y esquema. Cada salto UDB debe usar por tanto TLS con verificación de certificado y credenciales de enlace estrictamente controladas. Sin TLS, el protocolo DB expone snapshots completos y valores en vivo durante el tránsito, incluidos hashes de contraseña, material de cifrado y claves de canal; la integridad también depende de la autenticación del enlace subyacente. UDB no aporta cifrado ni firma end-to-end por encima del enlace de servidores.
 
-No se recomienda editar `udb_*.db` con el daemon activo. Además de no actualizar el árbol en memoria, una edición manual puede romper generación, esquema, digests canónicos, límites S2S o el conjunto protegido por `.udb_state`.
+No edites archivos binarios nativos con el daemon activo. Los cambios manuales eluden la propiedad de generaciones inmutables y pueden corromper páginas, schemas, digests o la autoridad global WAL/checkpoints.
 
 ## 16. Rehash y cambios de política
 
@@ -911,7 +861,7 @@ En rehash:
 - la configuración nueva no borra prematuramente el propagador activo si el rehash falla;
 - al completar con éxito, si desapareció `udb::propagator`, se elimina el override local y vuelve a aplicarse la precedencia normal;
 - se notifica el cambio de política y se cancelan sesiones que ya no pertenezcan a la fuente correcta;
-- los titulares identificados conservan nickname, cuenta y efectos: el bloque de nicks se preserva mientras el módulo se descarga y se reconcilia contra los registros recargados, y el estado preservado se revoca si la base recargada no queda READY o el módulo no consigue recargar;
+- los titulares identificados conservan nickname, cuenta y efectos: los marcadores de identidad aplicada se preservan durante la recarga por rehash y se reconcilia contra los registros recargados, y el estado preservado se revoca si la base recargada no queda READY o el módulo no consigue recargar;
 - se reconstruye el inventario OCL local y, si cambia, se publica una nueva generación.
 
 Cambios de `S::propagator` tienen el mismo efecto de re-evaluación en runtime después de que el nuevo bloque/registro haya sido comprometido.
@@ -921,6 +871,7 @@ Cambios de `S::propagator` tienen el mismo efecto de re-evaluación en runtime d
 Fuentes canónicas: `src/`. Artefacto de distribución: `dist/udb.c`.
 
 ```bash
+scripts/format-sources.sh
 python3 scripts/bundle.py
 ```
 
@@ -940,16 +891,15 @@ El flujo CI actual compila UnrealIRCd **6.2.6**, construye el módulo modular de
 HEL 4 <selector> <epoch> OCL [OCLG]
 HEL 4 ACK <selector> <epoch> OCL [OCLG]
 
-INF <round> <block> <sha256> <record_count> <mtime> [<watermark_seq>]
+INF <round> <block> <sha256> <record_count> 0 <watermark_seq> <root-SID> <root-epoch>
 RES <round> <block>
-BEGIN <round> <block> <txid> <sha256> [<watermark_seq>]
-PUT <round> <block> <txid> <path> :<string>
-PUT <round> <block> <txid> <path> *<number>
-END <round> <block> <txid> <sha256> [<watermark_seq>]
-ACK <round> <block> <txid> <sha256> [<watermark_seq>]
+BEGIN <round> <block> <txid> <sha256> <watermark_seq>
+PUT <round> <block> <txid> <Block::path> :<typed-value>
+END <round> <block> <txid> <sha256> <watermark_seq>
+ACK <round> <block> <txid> <sha256> <watermark_seq>
 ERR <subcmd> <code> <round/correlation> <block>
 
-INS <epoch> <seq> <Block::path> <value>
+INS <epoch> <seq> <Block::path> :<typed-value>
 DEL <epoch> <seq> <Block::path>
 DRP <epoch> <seq> <block>
 EXP <path> <expected-expires>
@@ -977,7 +927,7 @@ Para diagnosticar un nodo:
 5. usar `/UDB OPERCLASSES` para detectar inventarios OCL ausentes;
 6. usar `/UDB OPERCLASS <name>` para detectar diferencias de definición/herencia/ACL;
 7. revisar eventos `udb` de UnrealIRCd, especialmente HEL, persistencia, staged sync, READY y OCL;
-8. inspeccionar `.udb_state` y las seis generaciones sólo con fines de diagnóstico, sin editarlas en vivo.
+8. conservar el almacén binario completo detenido y los logs para diagnóstico; no editar datos activos.
 
 ## 20. Limitaciones actuales verificadas
 
@@ -990,3 +940,55 @@ A fecha del commit documentado:
 - `OPER_ONLY` aplica el JOIN desde el estado UDB incluso cuando no está disponible el handler nativo `+O` de UnrealIRCd.
 
 Estas observaciones describen el comportamiento real del código y son deliberadamente explícitas para evitar documentar capacidades que aún no están conectadas a runtime.
+
+## 21. Evidencia de validación en Linux
+
+Registrado en Linux x86-64, 2026-10-10 UTC. El [informe JSON](native_storage_benchmarks.json) incluye nueve ejecuciones de una muestra y la prueba separada de escritura puntual.
+
+| Filas | Caché MiB | Recuperación (s) | 10K lecturas repetidas (ms) | Pico RSS (MiB) |
+|---:|---:|---:|---:|---:|
+| 1,000,000 | 128 | 2.400 | 1055 | 141.9 |
+| 1,000,000 | 256 | 2.415 | 845 | 273.9 |
+| 1,000,000 | 512 | 2.315 | 456 | 537.9 |
+| 5,000,000 | 128 | 6.398 | 1084 | 142.2 |
+| 5,000,000 | 256 | 5.900 | 878 | 273.9 |
+| 5,000,000 | 512 | 5.751 | 557 | 538.1 |
+| 10,000,000 | 128 | 12.597 | 1069 | 141.8 |
+| 10,000,000 | 256 | 10.443 | 879 | 273.9 |
+| 10,000,000 | 512 | 12.059 | 715 | 538.0 |
+
+Las filas son propiedades vhost de nicks distintos, no perfiles completos. La
+creación masiva usa el sorter/rebuilder real con el writer detenido y serializado
+por su propietario; no es una importación de 10M por protocolo. La recuperación
+realiza toda la validación de datos referenciados. La primera lectura parte con
+DATA fría, índices calientes y caché del sistema operativo conservada; la segunda
+repite las mismas 10K claves. No son latencias de disco físicamente frío ni una
+comparación estadísticamente controlada de tamaños de caché.
+
+Las nueve ejecuciones masivas/lecturas alcanzaron 2,23–2,35 MiB de memoria AUX
+contabilizada. Los ficheros estables ocuparon 1,74/1,99/2,45 GiB para 1M/5M/10M:
+incluyen metadatos, páginas físicas COW/catálogo y extensiones muertas reutilizables,
+no solo filas vivas. La prueba separada 10M/256 MiB ejecutó diez mutaciones puntuales
+reales encoladas y durables más el enlace de origen en 59 ms, escribió 4.653.056
+bytes mediante la E/S posicionada real y no amplió los ficheros gracias a la
+reutilización de extensiones. Su pico AUX fue 2,89 MiB. Comprueba que el snapshot
+anterior retenido todavía devuelve el valor original; no mide escritura sostenida
+ni demuestra que todas las actualizaciones tengan ese coste.
+
+La validación del contrato nuevo cubre valores tipados, corrupción, colas WAL
+incompletas, EIO/ENOSPC, salida del proceso antes/durante WAL y tras su flush,
+checkpoint con pins, división/colapso radix, límites de caché/cola, importación
+atómica de seis bloques, rechazo de checksum, replay retenido, publicación de
+efectos nativos, reinicio, rehash local, failover/failback ordenado y snapshots A→B→C/mutaciones multihop con
+origen raíz. Los inventarios OCL se validan aparte; no es prueba exhaustiva de
+OCL multihop ni de todas las topologías de failover.
+
+Los límites de caché/AUX acotan las asignaciones gestionadas de almacenamiento,
+no la memoria total del daemon. TKL/spamfilters nativos, canales persistentes,
+usuarios conectados y propiedad de efectos se asignan aparte en UnrealIRCd: millones
+de sanciones K activas o canales C persistentes pueden consumir memoria adicional.
+El RSS registrado es del driver con propiedades N vhost, no de esa carga del daemon.
+
+Siguen sin verificarse la ejecución real MSVC v142/Windows 11 o Server 2022/2025
+con NTFS local, sus ACL/crashes, pérdida de alimentación del host y carga sostenida
+de importación por red/escrituras. El éxito Linux no demuestra esas garantías.

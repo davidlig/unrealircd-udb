@@ -32,6 +32,7 @@ struct UdbBanSnapshot
 };
 
 static ModDataInfo *udb_channel_modes_md = NULL;
+static ModDataInfo *udb_channel_registration_md = NULL;
 static ModDataInfo *udb_channel_oper_only_md = NULL;
 static ModDataInfo *udb_channel_ban_owners_md = NULL;
 
@@ -44,15 +45,40 @@ static int udb_hook_pre_chanmode(Client *client, Channel *channel, MessageTag *m
 static const char *udb_hook_pre_topic(Client *client, Channel *channel, const char *topic);
 CMD_OVERRIDE_FUNC(udb_override_mode);
 
-static int udb_channel_is_identified_founder(Client *client, UdbRecord *chan_rec)
+static const char *const udb_native_channel_fields[] = {CKEY_FOUNDER, CKEY_MODES,	CKEY_TOPIC, CKEY_FORBID,
+														CKEY_SUSPEND, CKEY_OPTIONS, CKEY_ACCESS};
+static UdbStorageField *udb_channel_field(UdbStorageProfile *profile, const char *name)
 {
-	UdbRecord *founder_rec;
+	if (!profile || profile->key.block != UDB_BLOCK_CHANNELS || profile->count != 7)
+		return NULL;
+	for (unsigned int i = 0; i < 7; i++)
+		if (!strcmp(name, udb_native_channel_fields[i]))
+			return profile->fields[i].present ? profile->fields + i : NULL;
+	return NULL;
+}
+static UdbStorageResult udb_native_channel_load(UdbStorageRead *read, const char *name, UdbStorageProfile **out)
+{
+	if (!read)
+		return udb_native_profile_load(udb_ctx, UDB_BLOCK_CHANNELS, name, udb_native_channel_fields, 7, out);
+	UdbStorageRow entity = {0};
+	if (!name || !*name || strlen(name) > UDB_STORAGE_COMPONENT_MAX)
+		return UDB_STORAGE_REJECTED;
+	entity.block = UDB_BLOCK_CHANNELS;
+	entity.depth = 1;
+	entity.components[0].data = (const unsigned char *)name;
+	entity.components[0].length = (uint32_t)strlen(name);
+	return udb_storage_profile_load(read, &entity, udb_native_channel_fields, 7, out);
+}
+
+static int udb_channel_is_identified_founder(Client *client, UdbStorageProfile *chan_rec)
+{
+	UdbStorageField *founder_rec;
 
 	if (!client || !chan_rec)
 		return 0;
-	founder_rec = udb_record_find(udb_ctx, CKEY_FOUNDER, chan_rec);
-	return founder_rec && founder_rec->data_str && !strcasecmp(client->name, founder_rec->data_str) &&
-		   has_user_mode(client, 'r');
+	founder_rec = udb_channel_field(chan_rec, CKEY_FOUNDER);
+	return founder_rec && founder_rec->kind == UDB_STORAGE_VALUE_STRING &&
+		   !strcasecmp(client->name, founder_rec->string) && has_user_mode(client, 'r');
 }
 
 static void udb_channel_modes_free(ModData *m)
@@ -199,50 +225,50 @@ static void udb_channel_remove_modes(Channel *channel)
 	}
 }
 
-static int udb_channel_option_enabled(UdbContext *ctx, UdbRecord *chan_rec, unsigned long option)
+static int udb_channel_option_enabled(UdbContext *ctx, UdbStorageProfile *chan_rec, unsigned long option)
 {
 	if (!chan_rec)
 		return 0;
-	UdbRecord *rec = udb_record_find(ctx, CKEY_OPTIONS, chan_rec);
-	return rec && !rec->data_str && (rec->data_num & option);
+	UdbStorageField *rec = udb_channel_field(chan_rec, CKEY_OPTIONS);
+	return rec && rec->kind == UDB_STORAGE_VALUE_NUMBER && (rec->number & option);
 }
 
-static int udb_channel_is_persistent(UdbContext *ctx, UdbRecord *chan_rec)
+static int udb_channel_is_persistent(UdbContext *ctx, UdbStorageProfile *chan_rec)
 {
-	if (!chan_rec || udb_record_find(ctx, CKEY_SUSPEND, chan_rec))
+	if (!chan_rec || udb_channel_field(chan_rec, CKEY_SUSPEND))
 		return 0;
 	return udb_channel_option_enabled(ctx, chan_rec, UDB_CHOPT_PERSISTENT);
 }
 
-static int udb_channel_is_oper_only(UdbContext *ctx, UdbRecord *chan_rec)
+static int udb_channel_is_oper_only(UdbContext *ctx, UdbStorageProfile *chan_rec)
 {
-	if (!chan_rec || udb_record_find(ctx, CKEY_SUSPEND, chan_rec))
+	if (!chan_rec || udb_channel_field(chan_rec, CKEY_SUSPEND))
 		return 0;
 	return udb_channel_option_enabled(ctx, chan_rec, UDB_CHOPT_OPER_ONLY);
 }
 
-static int udb_channel_is_lock_modes(UdbContext *ctx, UdbRecord *chan_rec)
+static int udb_channel_is_lock_modes(UdbContext *ctx, UdbStorageProfile *chan_rec)
 {
-	if (!chan_rec || udb_record_find(ctx, CKEY_SUSPEND, chan_rec))
+	if (!chan_rec || udb_channel_field(chan_rec, CKEY_SUSPEND))
 		return 0;
-	UdbRecord *rec = udb_record_find(ctx, CKEY_OPTIONS, chan_rec);
-	return rec && !rec->data_str && (rec->data_num & UDB_CHOPT_LOCK_MODES);
+	UdbStorageField *rec = udb_channel_field(chan_rec, CKEY_OPTIONS);
+	return rec && rec->kind == UDB_STORAGE_VALUE_NUMBER && (rec->number & UDB_CHOPT_LOCK_MODES);
 }
 
-static int udb_channel_is_lock_topic(UdbContext *ctx, UdbRecord *chan_rec)
+static int udb_channel_is_lock_topic(UdbContext *ctx, UdbStorageProfile *chan_rec)
 {
-	if (!chan_rec || udb_record_find(ctx, CKEY_SUSPEND, chan_rec))
+	if (!chan_rec || udb_channel_field(chan_rec, CKEY_SUSPEND))
 		return 0;
-	UdbRecord *rec = udb_record_find(ctx, CKEY_OPTIONS, chan_rec);
-	return rec && !rec->data_str && (rec->data_num & UDB_CHOPT_LOCK_TOPIC);
+	UdbStorageField *rec = udb_channel_field(chan_rec, CKEY_OPTIONS);
+	return rec && rec->kind == UDB_STORAGE_VALUE_NUMBER && (rec->number & UDB_CHOPT_LOCK_TOPIC);
 }
 
-static int udb_channel_is_protect_bans(UdbContext *ctx, UdbRecord *chan_rec)
+static int udb_channel_is_protect_bans(UdbContext *ctx, UdbStorageProfile *chan_rec)
 {
-	if (!chan_rec || udb_record_find(ctx, CKEY_SUSPEND, chan_rec))
+	if (!chan_rec || udb_channel_field(chan_rec, CKEY_SUSPEND))
 		return 0;
-	UdbRecord *rec = udb_record_find(ctx, CKEY_OPTIONS, chan_rec);
-	return rec && !rec->data_str && (rec->data_num & UDB_CHOPT_PROTECT_BANS);
+	UdbStorageField *rec = udb_channel_field(chan_rec, CKEY_OPTIONS);
+	return rec && rec->kind == UDB_STORAGE_VALUE_NUMBER && (rec->number & UDB_CHOPT_PROTECT_BANS);
 }
 
 static void udb_channel_set_persistent(Channel *channel, int enabled)
@@ -308,7 +334,7 @@ static int udb_hook_rehash_complete_oper_only(void)
 		return 0;
 	for (channel = channels; channel; channel = channel->nextch)
 	{
-		UdbRecord *chan_rec;
+		UdbStorageProfile *chan_rec;
 
 		/* The core clears +O directly after REHASH_COMPLETE if its handler
 		 * remains unloaded. MODECHAR_DEL is not emitted for that change. */
@@ -317,9 +343,12 @@ static int udb_hook_rehash_complete_oper_only(void)
 			moddata_channel(channel, udb_channel_oper_only_md).i = 0;
 			continue;
 		}
-		chan_rec = udb_record_find(udb_ctx, channel->name, udb_ctx->channels);
-		if (chan_rec)
+		chan_rec = NULL;
+		if (udb_native_channel_load(NULL, channel->name, &chan_rec) == UDB_STORAGE_OK)
 			udb_channel_set_oper_only(channel, udb_channel_is_oper_only(udb_ctx, chan_rec));
+		else
+			udb_channel_set_oper_only(channel, 0);
+		udb_storage_profile_free(&chan_rec);
 	}
 	return 0;
 }
@@ -417,7 +446,7 @@ static void udb_channel_track_new_bans(Channel *channel, Client *client, UdbBanS
 	}
 }
 
-static void udb_channel_reconcile_founder(Channel *channel, UdbRecord *chan_rec, int suspended)
+static void udb_channel_reconcile_founder(Channel *channel, UdbStorageProfile *chan_rec, int suspended)
 {
 	Member *member;
 
@@ -442,7 +471,11 @@ static void udb_channel_reconcile_founder(Channel *channel, UdbRecord *chan_rec,
 
 static void udb_channel_reconcile_registered(Channel *channel, int registered, int suspended, MessageTag *mtags)
 {
-	if (!channel || !find_channel_mode_handler('r'))
+	if (!channel)
+		return;
+	if (udb_channel_registration_md)
+		moddata_channel(channel, udb_channel_registration_md).i = registered != 0;
+	if (!find_channel_mode_handler('r'))
 		return;
 	if (registered && !suspended)
 	{
@@ -468,34 +501,34 @@ static void udb_channel_clear_topic(Channel *channel)
 	}
 }
 
-static void udb_channel_apply_topic(Channel *channel, UdbRecord *topic_rec)
+static void udb_channel_apply_topic(Channel *channel, UdbStorageField *topic_rec)
 {
 	Client *source;
 
-	if (!topic_rec || !topic_rec->data_str)
+	if (!topic_rec || topic_rec->kind != UDB_STORAGE_VALUE_STRING)
 		return;
-	if (channel->topic && !strcmp(channel->topic, topic_rec->data_str))
+	if (channel->topic && !strcmp(channel->topic, topic_rec->string))
 		return;
 	source = udb_service_source(SKEY_CHANSERV);
 	if (set_channel_topic)
-		set_channel_topic(source, channel, NULL, topic_rec->data_str, source->name, TStime());
+		set_channel_topic(source, channel, NULL, topic_rec->string, source->name, TStime());
 }
 
-static void udb_channel_apply_subrecord(UdbContext *ctx, Channel *channel, UdbRecord *chan_rec, const char *subkey,
-										int is_new)
+static void udb_channel_apply_subrecord(UdbContext *ctx, Channel *channel, UdbStorageProfile *chan_rec,
+										const char *subkey, int is_new)
 {
-	int suspended = udb_record_find(ctx, CKEY_SUSPEND, chan_rec) != NULL;
+	int suspended = udb_channel_field(chan_rec, CKEY_SUSPEND) != NULL;
 
 	/* A channel-profile replacement revokes every UDB-owned channel state;
 	 * mirror that removal so the surviving profile restores it all. */
-	if (!strcasecmp(subkey, chan_rec->key))
+	if (!strcasecmp(subkey, chan_rec->entity))
 	{
-		UdbRecord *mode_rec = udb_record_find(ctx, CKEY_MODES, chan_rec);
-		UdbRecord *topic_rec = udb_record_find(ctx, CKEY_TOPIC, chan_rec);
+		UdbStorageField *mode_rec = udb_channel_field(chan_rec, CKEY_MODES);
+		UdbStorageField *topic_rec = udb_channel_field(chan_rec, CKEY_TOPIC);
 
 		udb_channel_reconcile_founder(channel, chan_rec, suspended);
-		if (!suspended && mode_rec && mode_rec->data_str)
-			udb_channel_apply_modes(channel, mode_rec->data_str);
+		if (!suspended && mode_rec && mode_rec->kind == UDB_STORAGE_VALUE_STRING)
+			udb_channel_apply_modes(channel, mode_rec->string);
 		if (!suspended)
 			udb_channel_apply_topic(channel, topic_rec);
 		udb_channel_reconcile_options(channel, udb_channel_is_oper_only(ctx, chan_rec),
@@ -510,8 +543,8 @@ static void udb_channel_apply_subrecord(UdbContext *ctx, Channel *channel, UdbRe
 		return;
 	}
 
-	UdbRecord *sub_rec = udb_record_find(ctx, subkey, chan_rec);
-	if (!sub_rec || !sub_rec->data_str)
+	UdbStorageField *sub_rec = udb_channel_field(chan_rec, subkey);
+	if (!sub_rec || sub_rec->kind != UDB_STORAGE_VALUE_STRING)
 		return;
 
 	if (!strcmp(subkey, CKEY_FOUNDER))
@@ -521,7 +554,7 @@ static void udb_channel_apply_subrecord(UdbContext *ctx, Channel *channel, UdbRe
 	else if (!strcmp(subkey, CKEY_MODES))
 	{
 		if (!suspended)
-			udb_channel_apply_modes(channel, sub_rec->data_str);
+			udb_channel_apply_modes(channel, sub_rec->string);
 	}
 	else if (!strcmp(subkey, CKEY_TOPIC))
 	{
@@ -537,7 +570,8 @@ static void udb_channel_apply_subrecord(UdbContext *ctx, Channel *channel, UdbRe
 	}
 }
 
-static void udb_channel_remove_subrecord(UdbContext *ctx, Channel *channel, UdbRecord *chan_rec, const char *subkey)
+static void udb_channel_remove_subrecord(UdbContext *ctx, Channel *channel, UdbStorageProfile *chan_rec,
+										 const char *subkey)
 {
 	if (!strcmp(subkey, CKEY_FOUNDER))
 	{
@@ -560,13 +594,13 @@ static void udb_channel_remove_subrecord(UdbContext *ctx, Channel *channel, UdbR
 	{
 		/* Lifting a suspension restores the registered marker, founder +q,
 		 * modes, topic, OPER_ONLY +O, and persistent +P. */
-		UdbRecord *mode_rec = udb_record_find(ctx, CKEY_MODES, chan_rec);
-		UdbRecord *topic_rec = udb_record_find(ctx, CKEY_TOPIC, chan_rec);
+		UdbStorageField *mode_rec = udb_channel_field(chan_rec, CKEY_MODES);
+		UdbStorageField *topic_rec = udb_channel_field(chan_rec, CKEY_TOPIC);
 
 		udb_channel_reconcile_founder(channel, chan_rec, 0);
 		udb_channel_reconcile_registered(channel, 1, 0, NULL);
-		if (mode_rec && mode_rec->data_str)
-			udb_channel_apply_modes(channel, mode_rec->data_str);
+		if (mode_rec && mode_rec->kind == UDB_STORAGE_VALUE_STRING)
+			udb_channel_apply_modes(channel, mode_rec->string);
 		if (topic_rec)
 			udb_channel_apply_topic(channel, topic_rec);
 		/* DEL effects run before the candidate tree replaces the active tree,
@@ -574,9 +608,9 @@ static void udb_channel_remove_subrecord(UdbContext *ctx, Channel *channel, UdbR
 		udb_channel_reconcile_options(channel, udb_channel_option_enabled(ctx, chan_rec, UDB_CHOPT_OPER_ONLY),
 									  udb_channel_option_enabled(ctx, chan_rec, UDB_CHOPT_PERSISTENT));
 	}
-	else if (!strcasecmp(subkey, chan_rec->key))
+	else if (!strcasecmp(subkey, chan_rec->entity))
 	{
-		int had_topic = udb_record_find(ctx, CKEY_TOPIC, chan_rec) != NULL;
+		int had_topic = udb_channel_field(chan_rec, CKEY_TOPIC) != NULL;
 
 		udb_channel_reconcile_founder(channel, NULL, 0);
 		udb_channel_reconcile_registered(channel, 0, 0, NULL);
@@ -589,61 +623,170 @@ static void udb_channel_remove_subrecord(UdbContext *ctx, Channel *channel, UdbR
 	}
 }
 
-static void udb_channel_apply_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec, int is_new)
+/* Publication operates only on copied scalar profiles. An empty channel may
+ * disappear when -P is emitted; re-resolve by immutable name after that step. */
+static void udb_channel_project_profile(Channel *channel, UdbStorageProfile *old, UdbStorageProfile *current)
 {
-	UdbRecord *chan_rec;
-	Channel *channel;
-
-	if (!ctx || !block || !rec)
+	if (!current)
+	{
+		if (old)
+			udb_channel_remove_subrecord(udb_ctx, channel, old, old->entity);
 		return;
-	chan_rec = rec->parent == block->tree ? rec : rec->parent;
-	channel = find_channel(chan_rec->key);
-	if (!channel && udb_channel_is_persistent(ctx, chan_rec) && find_channel_mode_handler('P'))
-	{
-		channel = make_channel(chan_rec->key);
-		channel->creationtime = TStime();
 	}
-	if (channel)
+	if (old && udb_channel_field(old, CKEY_TOPIC) && !udb_channel_field(current, CKEY_TOPIC))
+		udb_channel_clear_topic(channel);
+	if (old && udb_channel_field(old, CKEY_MODES) && !udb_channel_field(current, CKEY_MODES))
+		udb_channel_remove_modes(channel);
+	int suspended = udb_channel_field(current, CKEY_SUSPEND) != NULL;
+	udb_channel_reconcile_founder(channel, current, suspended);
+	udb_channel_reconcile_registered(channel, 1, suspended, NULL);
+	if (!suspended)
 	{
-		udb_channel_apply_subrecord(ctx, channel, chan_rec, rec->key, is_new);
-		/* Dropping -P may have destroyed an empty channel. */
-		channel = find_channel(chan_rec->key);
+		UdbStorageField *modes = udb_channel_field(current, CKEY_MODES);
+		if (modes && modes->kind == UDB_STORAGE_VALUE_STRING)
+			udb_channel_apply_modes(channel, modes->string);
+		udb_channel_apply_topic(channel, udb_channel_field(current, CKEY_TOPIC));
+	}
+	udb_channel_reconcile_options(channel, udb_channel_is_oper_only(udb_ctx, current),
+								  udb_channel_is_persistent(udb_ctx, current));
+	/* No use of channel after reconcile_options may have removed +P. */
+}
+
+/* A point/subtree mutation belongs to one channel; never enumerate the C
+ * container to materialize that single owner's changed policy. */
+static UdbStorageResult udb_channel_reconcile_entity(UdbStorageRead *before, UdbStorageRead *after, const char *name)
+{
+	UdbStorageProfile *old = NULL, *current = NULL;
+	UdbStorageResult prior = udb_native_channel_load(before, name, &old);
+	UdbStorageResult result = udb_native_channel_load(after, name, &current);
+	if (prior < UDB_STORAGE_NOT_FOUND || result < UDB_STORAGE_NOT_FOUND)
+		result = prior < UDB_STORAGE_NOT_FOUND ? prior : result;
+	else
+	{
+		Channel *channel = find_channel(name);
+		if (!channel && current && udb_channel_is_persistent(udb_ctx, current) && find_channel_mode_handler('P'))
+		{
+			channel = make_channel(current->entity);
+			channel->creationtime = TStime();
+			udb_channel_set_persistent(channel, 1);
+		}
 		if (channel)
-			udb_channel_reconcile_registered(channel, 1, udb_record_find(ctx, CKEY_SUSPEND, chan_rec) != NULL, NULL);
+			udb_channel_project_profile(channel, old, current);
+		result = UDB_STORAGE_OK;
+	}
+	udb_storage_profile_free(&old);
+	udb_storage_profile_free(&current);
+	return result;
+}
+
+static UdbStorageResult udb_channel_reconcile_generations(UdbStorageRead *before, UdbStorageRead *after)
+{
+	UdbStorageResult result = UDB_STORAGE_OK;
+	Channel *channel, *next;
+	for (channel = channels; channel; channel = next)
+	{
+		next = channel->nextch;
+		UdbStorageProfile *old = NULL, *current = NULL;
+		UdbStorageResult prior = udb_native_channel_load(before, channel->name, &old);
+		UdbStorageResult loaded = udb_native_channel_load(after, channel->name, &current);
+		if (prior < UDB_STORAGE_NOT_FOUND || loaded < UDB_STORAGE_NOT_FOUND)
+			result = prior < UDB_STORAGE_NOT_FOUND ? prior : loaded;
+		else
+			udb_channel_project_profile(channel, old, current);
+		udb_storage_profile_free(&old);
+		udb_storage_profile_free(&current);
+	}
+	if (result != UDB_STORAGE_OK)
+		return result;
+	/* Persistent policies may create channels not present in daemon memory.
+	 * Only their unique options scalar is visited; no resident channel keydir. */
+	UdbStorageBlockIterator *iterator = NULL;
+	result = udb_storage_read_iterator(after, UDB_BLOCK_CHANNELS, NULL, &iterator);
+	if (result != UDB_STORAGE_OK)
+		return result;
+	UdbStorageRecord record;
+	while ((result = udb_storage_block_iterator_next(iterator, &record)) == UDB_STORAGE_OK)
+	{
+		const UdbStorageRow *row = &record.row;
+		if (row->depth != 2 || row->components[1].length != strlen(CKEY_OPTIONS) ||
+			memcmp(row->components[1].data, CKEY_OPTIONS, row->components[1].length) ||
+			row->kind != UDB_STORAGE_VALUE_NUMBER || !(row->number & UDB_CHOPT_PERSISTENT))
+			continue;
+		char name[CHANNELLEN + 1];
+		if (!udb_native_span_string(row->components[0], name, sizeof(name)))
+		{
+			result = UDB_STORAGE_CORRUPT;
+			break;
+		}
+		if (find_channel(name) || !find_channel_mode_handler('P'))
+			continue;
+		UdbStorageProfile *current = NULL;
+		result = udb_native_channel_load(after, name, &current);
+		if (result != UDB_STORAGE_OK)
+			break;
+		if (udb_channel_is_persistent(udb_ctx, current))
+		{
+			Channel *created = make_channel(current->entity);
+			created->creationtime = TStime();
+			/* +P must be materialized before any reentrant effect can remove
+			 * this newly created empty channel. */
+			udb_channel_set_persistent(created, 1);
+			udb_channel_project_profile(created, NULL, current);
+		}
+		udb_storage_profile_free(&current);
+	}
+	if (result == UDB_STORAGE_NOT_FOUND)
+		result = UDB_STORAGE_OK;
+	if (udb_storage_block_iterator_close(&iterator) != UDB_STORAGE_OK)
+		result = UDB_STORAGE_ERROR;
+	return result;
+}
+
+static void udb_channels_shutdown(void)
+{
+	Channel *channel, *next;
+	for (channel = channels; channel; channel = next)
+	{
+		next = channel->nextch;
+		/* Never revoke external ranks or modes on unregistered channels. */
+		if (!udb_channel_registration_md || !moddata_channel(channel, udb_channel_registration_md).i)
+			continue;
+		udb_channel_reconcile_founder(channel, NULL, 0);
+		udb_channel_reconcile_registered(channel, 0, 0, NULL);
+		udb_channel_remove_modes(channel);
+		udb_channel_set_oper_only(channel, 0);
+		/* +P removal may destroy this channel; it is the final operation. */
+		udb_channel_set_persistent(channel, 0);
 	}
 }
 
-static void udb_channel_remove_record(UdbContext *ctx, UdbBlock *block, UdbRecord *rec)
+static int udb_channel_pre_join_profile(Client *client, Channel *channel, const char *key, UdbStorageProfile *chan_rec)
 {
-	UdbRecord *chan_rec;
-	Channel *channel;
-
-	if (!ctx || !block || !rec)
-		return;
-	chan_rec = rec->parent == block->tree ? rec : rec->parent;
-	channel = find_channel(chan_rec->key);
-	if (channel)
-		udb_channel_remove_subrecord(ctx, channel, chan_rec, rec->key);
-}
-
-static int udb_hook_pre_local_join(Client *client, Channel *channel, const char *key)
-{
-	UdbRecord *chan_rec = udb_record_find(udb_ctx, channel->name, udb_ctx->channels);
 	(void)key;
 	if (!chan_rec)
 		return HOOK_CONTINUE;
-	if (udb_record_find(udb_ctx, CKEY_FORBID, chan_rec))
+	if (udb_channel_field(chan_rec, CKEY_FORBID))
 		return HOOK_CONTINUE; /* Let CAN_JOIN provide the numeric. */
-	if (udb_record_find(udb_ctx, CKEY_SUSPEND, chan_rec))
+	if (udb_channel_field(chan_rec, CKEY_SUSPEND))
 		return HOOK_CONTINUE;
 	if (udb_channel_is_identified_founder(client, chan_rec))
 		return HOOK_ALLOW; /* Preserve the established founder exemption. */
 	return HOOK_CONTINUE;
 }
 
-static int udb_hook_pre_local_join_oper_only(Client *client, Channel *channel, const char *key)
+static int udb_hook_pre_local_join(Client *client, Channel *channel, const char *key)
 {
-	UdbRecord *chan_rec = udb_record_find(udb_ctx, channel->name, udb_ctx->channels);
+	UdbStorageProfile *profile = NULL;
+	UdbStorageResult loaded = udb_native_channel_load(NULL, channel->name, &profile);
+	if (loaded < UDB_STORAGE_NOT_FOUND)
+		return HOOK_DENY;
+	int result = udb_channel_pre_join_profile(client, channel, key, profile);
+	udb_storage_profile_free(&profile);
+	return result;
+}
+
+static int udb_channel_oper_join_profile(Client *client, Channel *channel, const char *key, UdbStorageProfile *chan_rec)
+{
 	if (!chan_rec)
 		return HOOK_CONTINUE;
 	if (IsOper(client) && udb_channel_is_oper_only(udb_ctx, chan_rec) && udb_channel_oper_only_md &&
@@ -680,6 +823,17 @@ static int udb_hook_pre_local_join_oper_only(Client *client, Channel *channel, c
 		return HOOK_ALLOW;
 	}
 	return HOOK_CONTINUE;
+}
+
+static int udb_hook_pre_local_join_oper_only(Client *client, Channel *channel, const char *key)
+{
+	UdbStorageProfile *profile = NULL;
+	UdbStorageResult loaded = udb_native_channel_load(NULL, channel->name, &profile);
+	if (loaded < UDB_STORAGE_NOT_FOUND)
+		return HOOK_DENY;
+	int result = udb_channel_oper_join_profile(client, channel, key, profile);
+	udb_storage_profile_free(&profile);
+	return result;
 }
 
 static int udb_channel_modes_has_added(const char *value, char wanted)
@@ -778,30 +932,29 @@ static void udb_escape_percent(const char *src, char *dst, size_t dst_size)
 	dst[pos] = '\0';
 }
 
-static int udb_hook_can_join(Client *client, Channel *channel, const char *key, char **errmsg)
+static int udb_channel_can_join_profile(Client *client, Channel *channel, const char *key, char **errmsg,
+										UdbStorageProfile *chan_rec, UdbStorageRead *read)
 {
 	static char errbuf[512];
-	UdbRecord *chan_rec = udb_record_find(udb_ctx, channel->name, udb_ctx->channels);
-	UdbRecord *forbid_rec;
-	UdbRecord *access_rec;
+	UdbStorageField *forbid_rec;
 	int is_founder;
 
 	if (!chan_rec)
 		return 0;
 	if (IsOper(client))
 		return 0;
-	forbid_rec = udb_record_find(udb_ctx, CKEY_FORBID, chan_rec);
+	forbid_rec = udb_channel_field(chan_rec, CKEY_FORBID);
 	if (forbid_rec)
 	{
 		char escaped_reason[512];
 
-		udb_escape_percent(forbid_rec->data_str ? forbid_rec->data_str : "No reason given", escaped_reason,
-						   sizeof(escaped_reason));
+		udb_escape_percent(forbid_rec->kind == UDB_STORAGE_VALUE_STRING ? forbid_rec->string : "No reason given",
+						   escaped_reason, sizeof(escaped_reason));
 		snprintf(errbuf, sizeof(errbuf), "%%s :This channel is forbidden. Reason: %s", escaped_reason);
 		*errmsg = errbuf;
 		return ERR_FORBIDDENCHANNEL;
 	}
-	if (udb_record_find(udb_ctx, CKEY_SUSPEND, chan_rec))
+	if (udb_channel_field(chan_rec, CKEY_SUSPEND))
 		return 0;
 	is_founder = udb_channel_is_identified_founder(client, chan_rec);
 	if (udb_channel_is_oper_only(udb_ctx, chan_rec) && !is_founder)
@@ -811,8 +964,9 @@ static int udb_hook_can_join(Client *client, Channel *channel, const char *key, 
 	}
 	if (channel->users == 0 && !is_founder)
 	{
-		UdbRecord *modes_rec = udb_record_find(udb_ctx, CKEY_MODES, chan_rec);
-		const char *configured_modes = modes_rec && modes_rec->data_str ? modes_rec->data_str : NULL;
+		UdbStorageField *modes_rec = udb_channel_field(chan_rec, CKEY_MODES);
+		const char *configured_modes =
+			modes_rec && modes_rec->kind == UDB_STORAGE_VALUE_STRING ? modes_rec->string : NULL;
 
 		if (!has_channel_mode(channel, 'i') && udb_channel_modes_has_added(configured_modes, 'i') &&
 			!find_invex(channel, client))
@@ -838,59 +992,112 @@ static int udb_hook_can_join(Client *client, Channel *channel, const char *key, 
 	 * C::modes key compete with the native mode when it is materialized. */
 	if (channel->users == 0 && !cm_getparameter(channel, 'k') && !is_founder)
 	{
-		UdbRecord *modes_rec = udb_record_find(udb_ctx, CKEY_MODES, chan_rec);
+		UdbStorageField *modes_rec = udb_channel_field(chan_rec, CKEY_MODES);
 		char configured_key[512];
-		if (modes_rec && modes_rec->data_str &&
-			udb_channel_modes_key(modes_rec->data_str, configured_key, sizeof(configured_key)) &&
+		if (modes_rec && modes_rec->kind == UDB_STORAGE_VALUE_STRING &&
+			udb_channel_modes_key(modes_rec->string, configured_key, sizeof(configured_key)) &&
 			(!key || strcmp(key, configured_key)))
 		{
 			*errmsg = STR_ERR_BADCHANNELKEY;
 			return ERR_BADCHANNELKEY;
 		}
 	}
-	access_rec = udb_record_find(udb_ctx, CKEY_ACCESS, chan_rec);
-	if (access_rec && !is_founder)
+	if (!is_founder)
 	{
-		UdbRecord *acc_entry = udb_record_find(udb_ctx, client->name, access_rec);
-		if (!acc_entry || !has_user_mode(client, 'r'))
+		UdbStorageRow prefix = {0};
+		prefix.block = UDB_BLOCK_CHANNELS;
+		prefix.depth = 2;
+		prefix.components[0].data = (const unsigned char *)chan_rec->entity;
+		prefix.components[0].length = (uint32_t)strlen(chan_rec->entity);
+		prefix.components[1].data = (const unsigned char *)CKEY_ACCESS;
+		prefix.components[1].length = (uint32_t)strlen(CKEY_ACCESS);
+		UdbStorageResult access = udb_storage_read_exists(read, &prefix);
+		if (access == UDB_STORAGE_OK)
 		{
-			snprintf(errbuf, sizeof(errbuf), "%%s :You must be authorized and identified to join this channel");
-			*errmsg = errbuf;
+			prefix.components[2].data = (const unsigned char *)client->name;
+			prefix.components[2].length = (uint32_t)strlen(client->name);
+			prefix.depth = 3;
+			access = udb_storage_read_exists(read, &prefix);
+			if (access != UDB_STORAGE_OK || !has_user_mode(client, 'r'))
+			{
+				snprintf(errbuf, sizeof(errbuf), "%%s :You must be authorized and identified to join this channel");
+				*errmsg = errbuf;
+				return ERR_FORBIDDENCHANNEL;
+			}
+		}
+		else if (access < UDB_STORAGE_NOT_FOUND)
+		{
+			*errmsg = "%s :Channel authorization unavailable";
 			return ERR_FORBIDDENCHANNEL;
 		}
 	}
 	return 0;
 }
 
-static int udb_hook_invite_bypass(Client *client, Channel *channel)
+static int udb_hook_can_join(Client *client, Channel *channel, const char *key, char **errmsg)
 {
-	UdbRecord *chan_rec = udb_record_find(udb_ctx, channel->name, udb_ctx->channels);
+	UdbStorageRead *read = NULL;
+	UdbStorageProfile *profile = NULL;
+	UdbStorageResult loaded =
+		udb_ctx && udb_ctx->storage ? udb_storage_read_open(udb_ctx->storage, &read) : UDB_STORAGE_ERROR;
+	if (loaded == UDB_STORAGE_OK)
+		loaded = udb_native_channel_load(read, channel->name, &profile);
+	int result;
+	if (loaded < UDB_STORAGE_NOT_FOUND)
+	{
+		*errmsg = "%s :Channel authorization unavailable";
+		result = ERR_FORBIDDENCHANNEL;
+	}
+	else
+		result = udb_channel_can_join_profile(client, channel, key, errmsg, profile, read);
+	udb_storage_profile_free(&profile);
+	if (read && udb_storage_read_close(&read) != UDB_STORAGE_OK)
+	{
+		*errmsg = "%s :Channel authorization unavailable";
+		result = ERR_FORBIDDENCHANNEL;
+	}
+	return result;
+}
+
+static int udb_channel_invite_profile(Client *client, Channel *channel, UdbStorageProfile *chan_rec)
+{
 
 	if (!chan_rec || IsOper(client))
 		return HOOK_CONTINUE;
-	if (udb_record_find(udb_ctx, CKEY_FORBID, chan_rec))
+	if (udb_channel_field(chan_rec, CKEY_FORBID))
 		return HOOK_DENY;
-	if (udb_record_find(udb_ctx, CKEY_SUSPEND, chan_rec))
+	if (udb_channel_field(chan_rec, CKEY_SUSPEND))
 		return HOOK_CONTINUE;
 	if (udb_channel_is_oper_only(udb_ctx, chan_rec) && !udb_channel_is_identified_founder(client, chan_rec))
 		return HOOK_DENY;
 	return HOOK_CONTINUE;
 }
 
-static void handle_join(Client *client, Channel *channel, MessageTag *mtags)
+static int udb_hook_invite_bypass(Client *client, Channel *channel)
 {
-	UdbRecord *chan_rec = udb_record_find(udb_ctx, channel->name, udb_ctx->channels);
-	UdbRecord *suspend_rec;
+	UdbStorageProfile *profile = NULL;
+	UdbStorageResult loaded = udb_native_channel_load(NULL, channel->name, &profile);
+	if (loaded < UDB_STORAGE_NOT_FOUND)
+		return HOOK_DENY;
+	int result = udb_channel_invite_profile(client, channel, profile);
+	udb_storage_profile_free(&profile);
+	return result;
+}
+
+static void udb_channel_join_profile(Client *client, Channel *channel, MessageTag *mtags, UdbStorageProfile *chan_rec)
+{
+	UdbStorageField *suspend_rec;
 	int suspended;
 
 	if (!client || !MyUser(client) || !chan_rec)
 		return;
 
-	suspend_rec = udb_record_find(udb_ctx, CKEY_SUSPEND, chan_rec);
+	suspend_rec = udb_channel_field(chan_rec, CKEY_SUSPEND);
 	suspended = suspend_rec != NULL;
 	if (suspended && !IsULine(client))
 		udb_send_service_notice(client, SKEY_CHANSERV, "This channel is suspended. Reason: %s",
-								suspend_rec->data_str ? suspend_rec->data_str : "No reason given");
+								suspend_rec->kind == UDB_STORAGE_VALUE_STRING ? suspend_rec->string
+																			  : "No reason given");
 
 	if (channel->users == 1)
 	{
@@ -918,6 +1125,16 @@ static void handle_join(Client *client, Channel *channel, MessageTag *mtags)
 
 	/* Founder +q is UDB-owned and must have exactly one current holder. */
 	udb_channel_reconcile_founder(channel, chan_rec, suspended);
+}
+
+static void handle_join(Client *client, Channel *channel, MessageTag *mtags)
+{
+	if (!client || !MyUser(client))
+		return;
+	UdbStorageProfile *profile = NULL;
+	if (udb_native_channel_load(NULL, channel->name, &profile) == UDB_STORAGE_OK)
+		udb_channel_join_profile(client, channel, mtags, profile);
+	udb_storage_profile_free(&profile);
 }
 
 static int udb_hook_local_join(Client *client, Channel *channel, MessageTag *mtags)
@@ -1107,26 +1324,25 @@ static int udb_channel_blocks_ban_removal(Client *client, Channel *channel, int 
 	return 0;
 }
 
-CMD_OVERRIDE_FUNC(udb_override_mode)
+static void udb_channel_override_mode_profile(CommandOverride *ovr, ClientContext *clictx, Client *client,
+											  MessageTag *recv_mtags, int parc, const char *parv[],
+											  UdbStorageProfile *chan_rec)
 {
 	Channel *channel;
 	char channel_name[CHANNELLEN + 1];
-	UdbRecord *chan_rec;
 	UdbBanSnapshot *snapshot = NULL;
 	int is_founder;
 	int had_ban_add = 0;
 
 	if (!MyUser(client) || parc < 3 || !IsChannelName(parv[1]))
 	{
-		CALL_NEXT_COMMAND_OVERRIDE();
+		CallCommandOverride(ovr, clictx, client, recv_mtags, parc, parv);
 		return;
 	}
 	channel = find_channel(parv[1]);
-	chan_rec =
-		(channel && udb_ctx && udb_ctx->channels) ? udb_record_find(udb_ctx, channel->name, udb_ctx->channels) : NULL;
-	if (!chan_rec || udb_record_find(udb_ctx, CKEY_SUSPEND, chan_rec))
+	if (!chan_rec || udb_channel_field(chan_rec, CKEY_SUSPEND))
 	{
-		CALL_NEXT_COMMAND_OVERRIDE();
+		CallCommandOverride(ovr, clictx, client, recv_mtags, parc, parv);
 		return;
 	}
 	strlcpy(channel_name, channel->name, sizeof(channel_name));
@@ -1163,7 +1379,7 @@ CMD_OVERRIDE_FUNC(udb_override_mode)
 		had_ban_add = 1;
 		snapshot = udb_channel_ban_snapshot(channel);
 	}
-	CALL_NEXT_COMMAND_OVERRIDE();
+	CallCommandOverride(ovr, clictx, client, recv_mtags, parc, parv);
 	channel = find_channel(channel_name);
 	if (had_ban_add)
 	{
@@ -1175,27 +1391,39 @@ CMD_OVERRIDE_FUNC(udb_override_mode)
 		udb_channel_ban_owners_prune(channel);
 }
 
-CMD_OVERRIDE_FUNC(udb_override_topic)
+CMD_OVERRIDE_FUNC(udb_override_mode)
+{
+	UdbStorageProfile *profile = NULL;
+	Channel *channel = MyUser(client) && parc >= 2 && IsChannelName(parv[1]) ? find_channel(parv[1]) : NULL;
+	if (channel && udb_native_channel_load(NULL, channel->name, &profile) < UDB_STORAGE_NOT_FOUND)
+	{
+		udb_send_service_notice(client, SKEY_CHANSERV, "Channel policy unavailable");
+		return;
+	}
+	udb_channel_override_mode_profile(ovr, clictx, client, recv_mtags, parc, parv, profile);
+	udb_storage_profile_free(&profile);
+}
+
+static void udb_channel_override_topic_profile(CommandOverride *ovr, ClientContext *clictx, Client *client,
+											   MessageTag *recv_mtags, int parc, const char *parv[],
+											   UdbStorageProfile *chan_rec)
 {
 	Channel *channel;
-	UdbRecord *chan_rec;
 
 	if (!MyUser(client) || parc < 2 || !IsChannelName(parv[1]))
 	{
-		CALL_NEXT_COMMAND_OVERRIDE();
+		CallCommandOverride(ovr, clictx, client, recv_mtags, parc, parv);
 		return;
 	}
 	if (parc < 3 || BadPtr(parv[2]))
 	{
-		CALL_NEXT_COMMAND_OVERRIDE();
+		CallCommandOverride(ovr, clictx, client, recv_mtags, parc, parv);
 		return;
 	}
 	channel = find_channel(parv[1]);
-	chan_rec =
-		(channel && udb_ctx && udb_ctx->channels) ? udb_record_find(udb_ctx, channel->name, udb_ctx->channels) : NULL;
-	if (!chan_rec || udb_record_find(udb_ctx, CKEY_SUSPEND, chan_rec))
+	if (!chan_rec || udb_channel_field(chan_rec, CKEY_SUSPEND))
 	{
-		CALL_NEXT_COMMAND_OVERRIDE();
+		CallCommandOverride(ovr, clictx, client, recv_mtags, parc, parv);
 		return;
 	}
 	if (udb_channel_is_lock_topic(udb_ctx, chan_rec))
@@ -1204,7 +1432,7 @@ CMD_OVERRIDE_FUNC(udb_override_topic)
 								"You do not have permission to change the topic in %s (locked by UDB)", channel->name);
 		return;
 	}
-	UdbRecord *topic_rec = udb_record_find(udb_ctx, CKEY_TOPIC, chan_rec);
+	UdbStorageField *topic_rec = udb_channel_field(chan_rec, CKEY_TOPIC);
 	if (topic_rec)
 	{
 		int is_founder = udb_channel_is_identified_founder(client, chan_rec);
@@ -1214,16 +1442,29 @@ CMD_OVERRIDE_FUNC(udb_override_topic)
 			return;
 		}
 	}
-	CALL_NEXT_COMMAND_OVERRIDE();
+	CallCommandOverride(ovr, clictx, client, recv_mtags, parc, parv);
 }
 
-static const char *udb_hook_pre_topic(Client *client, Channel *channel, const char *topic)
+CMD_OVERRIDE_FUNC(udb_override_topic)
+{
+	UdbStorageProfile *profile = NULL;
+	Channel *channel = MyUser(client) && parc >= 2 && IsChannelName(parv[1]) ? find_channel(parv[1]) : NULL;
+	if (channel && udb_native_channel_load(NULL, channel->name, &profile) < UDB_STORAGE_NOT_FOUND)
+	{
+		udb_send_service_notice(client, SKEY_CHANSERV, "Channel policy unavailable");
+		return;
+	}
+	udb_channel_override_topic_profile(ovr, clictx, client, recv_mtags, parc, parv, profile);
+	udb_storage_profile_free(&profile);
+}
+
+static const char *udb_channel_pre_topic_profile(Client *client, Channel *channel, const char *topic,
+												 UdbStorageProfile *chan_rec)
 {
 	if (IsServer(client))
 		return topic;
 
-	UdbRecord *chan_rec = udb_record_find(udb_ctx, channel->name, udb_ctx->channels);
-	if (!chan_rec || udb_record_find(udb_ctx, CKEY_SUSPEND, chan_rec))
+	if (!chan_rec || udb_channel_field(chan_rec, CKEY_SUSPEND))
 		return topic;
 
 	if (udb_channel_is_lock_topic(udb_ctx, chan_rec))
@@ -1233,7 +1474,7 @@ static const char *udb_hook_pre_topic(Client *client, Channel *channel, const ch
 		return NULL;
 	}
 
-	UdbRecord *topic_rec = udb_record_find(udb_ctx, CKEY_TOPIC, chan_rec);
+	UdbStorageField *topic_rec = udb_channel_field(chan_rec, CKEY_TOPIC);
 	if (topic_rec)
 	{
 		int is_founder = udb_channel_is_identified_founder(client, chan_rec);
@@ -1246,6 +1487,18 @@ static const char *udb_hook_pre_topic(Client *client, Channel *channel, const ch
 	return topic;
 }
 
+static const char *udb_hook_pre_topic(Client *client, Channel *channel, const char *topic)
+{
+	if (IsServer(client))
+		return topic;
+	UdbStorageProfile *profile = NULL;
+	if (udb_native_channel_load(NULL, channel->name, &profile) < UDB_STORAGE_NOT_FOUND)
+		return NULL;
+	const char *result = udb_channel_pre_topic_profile(client, channel, topic, profile);
+	udb_storage_profile_free(&profile);
+	return result;
+}
+
 static void udb_channels_init(ModuleInfo *modinfo)
 {
 	ModDataInfo mreq;
@@ -1255,6 +1508,11 @@ static void udb_channels_init(ModuleInfo *modinfo)
 	mreq.type = MODDATATYPE_CHANNEL;
 	mreq.free = udb_channel_modes_free;
 	udb_channel_modes_md = ModDataAdd(modinfo->handle, mreq);
+
+	memset(&mreq, 0, sizeof(mreq));
+	mreq.name = "udb_channel_registration";
+	mreq.type = MODDATATYPE_CHANNEL;
+	udb_channel_registration_md = ModDataAdd(modinfo->handle, mreq);
 
 	memset(&mreq, 0, sizeof(mreq));
 	mreq.name = "udb_channel_oper_only";
