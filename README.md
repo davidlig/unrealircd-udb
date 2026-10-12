@@ -7,10 +7,10 @@ UDB (Unreal DataBase) is a global **UnrealIRCd 6** module that maintains a distr
 **Module name:** `third/udb`
 **License:** GPL v2 or later
 
-This is the first release candidate, not a stable release. Module versioning is
-independent of the **HEL 4** protocol and native storage generation **4**.
-See the [release notes](doc/releases/4.0.0-rc1.md) for deployment requirements,
-validation scope and remaining limitations.
+Module versioning is independent of the **HEL 4** protocol and native storage
+generation **4**. See the [technical guide](doc/udb_technical_en.md) for deployment
+requirements and the [test guide](tests/README.md) for validation scope and
+remaining limitations.
 
 ## What UDB manages
 
@@ -142,6 +142,26 @@ DB <peer> HEL 4 <selector> <epoch> OCL [OCLG]
 
 The rest of the protocol is not accepted until HEL 4/OCL is confirmed; HEL timeout can cause UDB to abort the server link. HEL is capability/authority negotiation, not cryptographic peer authentication: UDB inherits the UnrealIRCd server-link trust boundary. Use authenticated TLS links with certificate verification on every UDB hop; without TLS, snapshots, password hashes, channel keys, and mutations are exposed in transit.
 
+DB property values always have explicit type tags: `!n` is NONE (not deletion),
+`!u5` is integer 5, and `!sSGVsbG8gd29ybGQ=` is text `Hello world` encoded as
+canonical Base64. Numbers and bitmasks use canonical decimal.
+Paths use percent-encoding independently; there is no separate BYTES type.
+Base64 preserves string bytes but does not encrypt them; schemas reject invalid
+contents, including NUL/CR/LF. HEL alone does not authorize writes: the selected
+peer and adopted six-block root stream must also permit them.
+
+For an already synchronized authorized root stream (example SID `9SV`, epoch
+`0123456789abcdef`, previous watermark 0), the first two live mutations could be:
+
+```text
+:9SV DB * INS 0123456789abcdef 1 I::203.0.113.20::clones :!u5
+:9SV DB * INS 0123456789abcdef 2 C::#chat::topic :!sSGVsbG8gd29ybGQ=
+```
+
+Use the server SID, not a services user UID, and the next consecutive sequence
+of the actual stream. See [all properties and S2S examples for IRC services](doc/udb_technical_en.md#104-s2s-examples-for-irc-services)
+for prerequisites, every block, option bits, deletion and initial PUT snapshots.
+
 Block `K` uses `expires` as a uint64 (`!u<unix_timestamp>` on wire) for temporary G/Z/S/Q/F sanctions; no `expires` means permanent. Followers relay directed `EXP` requests hop by hop toward the selected root authority and never delete authoritative persistence locally; only that authority removes the expired subtree and originates the sequenced `DEL`.
 
 
@@ -150,7 +170,7 @@ Block `K` uses `expires` as a uint64 (`!u<unix_timestamp>` on wire) for temporar
 In a UDB path, `::` is the component separator, so every IPv6 `:` is `%3A`; printable `@` and `/` remain literal. For example, use `K::Z::2001%3Adb8%3A%3A1::reason`, `K::Z::2001%3Adb8%3A1234%3A%3A/48::reason`, `K::G::*@2001%3Adb8%3A%3A1::reason`, and `K::S::*@2001%3Adb8%3A%3A1::reason`. Z requires the canonical `inet_ntop()` address spelling and CIDR network address (no host bits); G/S retain `user@host` and do not yet canonicalize IPv6 hosts. See the technical guide for `DB INS`/`DEL` examples and the full policy.
 
 
-INF binds all six block digests/counts to one root SID, epoch and watermark. Divergent blocks use isolated disk BEGIN/PUT/END staging. Durable END permits ACK, not READY; atomic six-root promotion and complete retained-tail replay/effects precede READY. Values use explicit `!n`, `!u<uint64>` or `!s<Base64>` tags. Old INF/value forms are rejected.
+INF binds all six block digests/counts to one root SID, epoch and watermark. Divergent blocks use isolated disk BEGIN/PUT/END staging. Durable END permits ACK, not READY; atomic six-root promotion and complete retained-tail replay/effects precede READY. Values use explicit `!n`, `!u<uint64>` or `!s<Base64>` tags. INF requires the root SID/epoch, and PUT/INS require typed values.
 
 Live mutations are `INS`, `DEL`, and `DRP`; `EXP` is a directed follower-to-authority expiry request. Mutations retain the root origin SID/epoch/sequence while relays validate and forward them; staged snapshot transfers remain hop by hop and are never forwarded.
 
@@ -179,7 +199,7 @@ A `/NICK nick:Password` credential is one-shot and only applies to that attempt:
 
 A suspended password-protected nick still requires its normal `pass`/`access` checks before it can be adopted. `N::pass` supports the `argon2id`, `sha256`, and `crypt` types, selected by its own prefix (`argon2id:`, `sha256:`, or `crypt:`). Use `argon2id` for new credentials and migrate legacy `sha256`/`crypt` records when users authenticate; compatibility support does not make unsalted SHA-256 suitable for new passwords. Require TLS for client sessions that send `/NICK nick:Password` or `/GHOST`, because those commands carry the supplied password. Successful authentication is bound to the active nick only: while `N::suspend` exists UDB exposes no account/`+r`, applies no profile effects, and retains no authentication whatsoever. Removing `suspend` from a profile with `pass` renames the current holder and sends the NickServ notices `The nickname <nick> is no longer suspended.` followed by `You have been renamed. If you are the owner, please identify: /NICK <nick>:Password`; the holder must authenticate again, while a profile without `pass` has no identity to revoke and keeps its occupant in place. Account/`+r` alone cannot create identity. UDB neither adds nor removes externally owned `+S`.
 
-A channel key is exclusively the native `+k` parameter in `C::<channel>::modes`, for example `+ntk secret`. Stored `+i`, `+R`, `+z`, and `+k` protect the first JOIN as well as later joins. `C::<channel>::modes` rejects the registration marker `r`, member ranks (`q`, `a`, `o`, `h`, `v`), `P`, and `O`; persistence and oper-only policy are expressed only by the `C::options` bits `PERSISTENT` (`0x08`) and `OPER_ONLY` (`0x10`). `LOCK_MODES` (`0x02`) permits member ranks and list modes `b/e/I`; `SECURE_OPS` (`0x20`) lets only `+q` grant ranks and lets other members remove lower ranks or their own rank where native rules permit. `SAMODE` retains native administrator access. `*31` enables the original five channel-option bits; `*63` enables all six. `OPER_ONLY` applies native `+O` when available but remains fail-closed for JOIN without that handler; suspend/unsuspend, option removal, and profile replacement reconcile it before `+P/-P`. If the native handler is unloaded, UDB clears its `+O` ownership and restores the mode for active `OPER_ONLY` channels when the handler returns; a later independent `+O` remains independent. An IRC operator bypasses all UDB JOIN restrictions, including `forbid`, `OPER_ONLY`, and `+k`; an identified founder bypasses them except when the profile has `suspend` or `forbid`. Invitations cannot bypass `forbid` or `OPER_ONLY`, while `/INVITE` and materialized `+I` otherwise retain native semantics. Existing `C::modes +O` records require manual conversion to `options` bit `0x10` before upgrade. Native `+r` is UDB-owned registered-channel state: it is applied when the channel is registered even if the channel already exists, removed while `C::<channel>::suspend` exists or the profile is deleted, and restored together with founder `+q` when suspension is lifted. While `C::<channel>::suspend` exists, every local user who joins the channel receives a ChanServ notice carrying the stored record value as the suspension reason.
+A channel key is exclusively the native `+k` parameter in `C::<channel>::modes`, for example `+ntk secret`. Stored `+i`, `+R`, `+z`, and `+k` protect the first JOIN as well as later joins. `C::<channel>::modes` rejects the registration marker `r`, member ranks (`q`, `a`, `o`, `h`, `v`), `P`, and `O`; persistence and oper-only policy are expressed only by the `C::options` bits `PERSISTENT` (`0x08`) and `OPER_ONLY` (`0x10`). `LOCK_MODES` (`0x02`) permits member ranks and list modes `b/e/I`; `SECURE_OPS` (`0x20`) lets only `+q` grant ranks and lets other members remove lower ranks or their own rank where native rules permit. `SAMODE` retains native administrator access. Channel-option bits combine into a mask; logical value `63` enables all six (wire `!u63`). `OPER_ONLY` applies native `+O` when available but remains fail-closed for JOIN without that handler; suspend/unsuspend, option removal, and profile replacement reconcile it before `+P/-P`. If the native handler is unloaded, UDB clears its `+O` ownership and restores the mode for active `OPER_ONLY` channels when the handler returns; a later independent `+O` remains independent. An IRC operator bypasses all UDB JOIN restrictions, including `forbid`, `OPER_ONLY`, and `+k`; an identified founder bypasses them except when the profile has `suspend` or `forbid`. Invitations cannot bypass `forbid` or `OPER_ONLY`, while `/INVITE` and materialized `+I` otherwise retain native semantics. Native `+r` is UDB-owned registered-channel state: it is applied when the channel is registered even if the channel already exists, removed while `C::<channel>::suspend` exists or the profile is deleted, and restored together with founder `+q` when suspension is lifted. While `C::<channel>::suspend` exists, every local user who joins the channel receives a ChanServ notice carrying the stored record value as the suspension reason.
 
 Independent native JOIN restrictions still apply to IRC operators unless they have the relevant native override permission. Any IRC operator may join through UDB-owned `+O` without the native `channel:operonly:join` permission; independently set `+O` still requires it. UDB removes native `+O` only when UDB applied it; independently set `+O` survives unrelated option updates.
 
@@ -234,4 +254,4 @@ UDB uses the derived `.virtual` host as the base cloak (`+x`, without `+t`), not
 
 Disconnect never changes the chosen host visibility: cloaked users remain cloaked, while voluntary `-x` remains explicit disclosure. Realhost/IP remain available internally for matching and authorized diagnostics. If the derivation key/suffix disappears, existing users retain their protected base; new users use a validated native cloak or are rejected if none is safe. Base hostnames are synchronized as origin-owned early client ModData, without keys or a DB protocol change.
 
-UDB can be reloaded but cannot be hot-unloaded. Upgrade every participating IRCd. For the first upgrade from the old implementation, prefer a controlled restart: an old module's cleanup still executes during a hot replacement. These protections concern ordinary users' public host display, not trusted server transport or authorized realhost/IP diagnostics.
+UDB can be reloaded but cannot be hot-unloaded. Upgrade every participating IRCd. When replacing the installed module, prefer a controlled restart. These protections concern ordinary users' public host display, not trusted server transport or authorized realhost/IP diagnostics.

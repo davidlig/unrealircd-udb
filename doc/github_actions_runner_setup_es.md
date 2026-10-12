@@ -539,11 +539,11 @@ systemctl --user start --wait ircd-certbot-renew.service
    ```bash
    git status --short
    python3 .agentic/test_ci_workflow.py
-   python3 tests/test_release_manifest.py
+   python3 -m pytest -q -m tooling tests/tooling/test_release.py
    python3 .agentic/generate.py --check
    ./.agentic/ci-check.sh
    git add .github/workflows/ci.yml .agentic/test_ci_workflow.py \
-     scripts/resolve_unrealircd_release.py tests/test_release_manifest.py
+     scripts/resolve_unrealircd_release.py tests/tooling/test_release.py
    git commit -m 'ci: automate UnrealIRCd UDB deployment'
    git push
    gh run list --limit 5
