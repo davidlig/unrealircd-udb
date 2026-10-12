@@ -1,6 +1,6 @@
 # UDB — Technical documentation
 
-> This document describes the canonical `src/` implementation prepared for module release `4.0.0-rc1` on October 11, 2026. Module versioning is independent of HEL 4 and native storage generation 4. See the [release notes](releases/4.0.0-rc1.md) for validation scope and deployment requirements.
+> This document describes the current canonical `src/` implementation. Module versioning is independent of HEL 4 and native storage generation 4. Deployment requirements and current limitations are documented below; see the [test guide](../tests/README.md) for validation scope.
 
 ## 1. Scope
 
@@ -29,8 +29,24 @@ Components percent-encode `:`, `%`, space/control and non-ASCII bytes as upperca
 `%HH`; literal printable `@`, `/` and `*` remain literal. Structural control bytes
 and NUL are rejected even if escaped. Keys fold ASCII case except exact K::F patterns.
 The binary row carries explicit NONE/STRING/uint64 types. Protocol values use
-`!n`, `!s<Base64>` and `!u<decimal>`, never text-file or untagged value syntax.
+`!n`, `!s<Base64>` and `!u<decimal>` as explicit type tags.
 Tables below describe logical values, not wire payload spellings.
+
+| Logical type | Wire value | Example |
+|---|---|---|
+| NONE (entry without a value) | `!n` | `!n` |
+| Unsigned integer (uint64) | `!u<canonical decimal>` | `5` → `!u5` |
+| STRING (string bytes) | `!s<canonical RFC4648 Base64>` | `Hello world` → `!sSGVsbG8gd29ybGQ=` |
+
+`!n` is a literal tag, not a number or a deletion. `!u0` is a numeric value;
+`!s` is an empty string at codec level, but individual properties may reject it.
+There is no separate BYTES type: STRING preserves the supplied bytes without
+transcoding (for UTF-8 text, encode its UTF-8 bytes). NUL, CR and LF are rejected,
+and each property's schema imposes further restrictions. Base64 is not encryption.
+Numbers are canonical decimal on wire, including bitmasks. The leading `:`
+before a payload introduces the trailing IRC
+parameter and is not part of the typed value. Paths use `%HH`, not Base64;
+see [the complete services examples](#104-s2s-examples-for-irc-services).
 
 ### 3.1 Representation limits
 
@@ -159,7 +175,7 @@ Keys:
 | `suspend` | string | Suppresses registered-channel/founder behavior: while present it removes native `+r` and founder `+q`; lifting it restores both on a live channel. The stored value is reported as the reason to every local user who joins the channel while it is suspended. |
 | `options` | numeric | Bitmask described below. |
 
-`C::<channel>::access::<nick>` may carry a numeric or string value according to the schema, but **the current JOIN hook only checks that the child exists and that the user has `+r`**. The child value is not interpreted as a rank.
+`C::<channel>::access::<nick>` may carry NONE, a numeric value or a non-empty string according to the schema, but **the current JOIN hook only checks that the child exists and that the user has `+r`**. The child value is not interpreted as a rank.
 
 Options:
 
@@ -172,7 +188,7 @@ Options:
 | `0x10` | 16 | `OPER_ONLY` | Restricts JOIN to IRC operators and applies native `+O` when its handler exists. JOIN remains fail-closed if the handler is absent. |
 | `0x20` | 32 | `SECURE_OPS` | Only a `+q` member may grant ranks, except for the isolated founder self-recovery described below. Other members may remove ranks below their highest rank, or their own rank when UnrealIRCd permits it. `SAMODE` retains native administrator access. |
 
-Bits may be combined; `*31` enables the original five and `*63` enables all six. With `SECURE_OPS` unset, native rank permissions are unchanged apart from the founder self-recovery described below. `suspend` removes UDB-owned `+O` and lifting it restores `+O`; deleting `options` or the profile removes it. UDB always reconciles `+O/-O` before `+P/-P`, because removing `+P` may destroy an empty channel.
+Bits combine with bitwise OR; logical value `63` enables all six (wire `!u63`). With `SECURE_OPS` unset, native rank permissions are unchanged apart from the founder self-recovery described below. `suspend` removes UDB-owned `+O` and lifting it restores `+O`; deleting `options` or the profile removes it. UDB always reconciles `+O/-O` before `+P/-P`, because removing `+P` may destroy an empty channel.
 
 #### JOIN, founder and native key
 
@@ -196,7 +212,7 @@ Protected-ban ownership is tracked in channel runtime memory. The owner is not a
 Forms:
 
 ```text
-I::<ip-or-realhost>::clones *N
+I::<ip-or-realhost>::clones <uint64>
 I::<ip-or-realhost>::nolines <flags>
 I::<ip-or-realhost>::host <vhost>
 ```
@@ -227,7 +243,7 @@ UDB uses the derived `.virtual` host as the base cloak (`+x`, without `+t`), not
 
 Disconnect never changes the chosen host visibility: cloaked users remain cloaked, while voluntary `-x` remains explicit disclosure. Realhost/IP remain available internally for matching and authorized diagnostics. If the derivation key/suffix disappears, existing users retain their protected base; new users use a validated native cloak or are rejected if none is safe. Base hostnames are synchronized as origin-owned early client ModData, without keys or a DB protocol change.
 
-UDB can be reloaded but cannot be hot-unloaded. Upgrade every participating IRCd. For the first upgrade from the old implementation, prefer a controlled restart: an old module's cleanup still executes during a hot replacement. These protections concern ordinary users' public host display, not trusted server transport or authorized realhost/IP diagnostics.
+UDB can be reloaded but cannot be hot-unloaded. Upgrade every participating IRCd. When replacing the installed module, prefer a controlled restart. These protections concern ordinary users' public host display, not trusted server transport or authorized realhost/IP diagnostics.
 
 `N::modes` does not own `x` or `t`; host state is managed separately.
 
@@ -262,7 +278,7 @@ The first usable candidate wins.
 Form:
 
 ```text
-L::<servername>::options *N
+L::<servername>::options <uint64>
 ```
 
 Only one bit is defined:
@@ -292,10 +308,10 @@ K::G::<user@host>::reason <text>
 K::Z::<ip-or-network>::reason <text>
 K::S::<user@host>::reason <text>
 K::Q::<nickmask>::reason <text>
-K::<type>::<pattern>::expires *<unix_timestamp>
+K::<type>::<pattern>::expires <unix_timestamp>
 ```
 
-The pattern node is a container and has no direct value. `expires` is one absolute Unix timestamp chosen by the origin; its absence is the only representation of a permanent line. `expires *0` is invalid. A timestamp at or before the local time is never materialized as a TKL.
+The pattern node is a container and has no direct value. `expires` is one absolute Unix timestamp chosen by the origin; its absence is the only representation of a permanent line. `expires = 0` is invalid. A timestamp at or before the local time is never materialized as a TKL.
 
 Expiry is not derived from the TKL runtime state. The root authority sweeps expired K profiles and performs the canonical transactional `DEL K::<type>::<pattern>`, which removes the complete subtree from the active root and `udb_K.db`; followers remove only their local runtime TKL and send or relay an `EXP <path> <expected-expires>` compare-and-delete request toward their selected upstream. Therefore restart, reload, snapshot, reconnect, or a change to a profile property cannot renew or resurrect a temporary line. Only an explicit `INS ...::expires` changes its lifetime; `DEL ...::expires` converts a valid remaining profile to permanent.
 
@@ -307,9 +323,9 @@ Spamfilter F is a dynamic native Spamfilter profile. Its pattern is **always** c
 K::F::<b64-pattern>::match-type <regex|simple>
 K::F::<b64-pattern>::targets <canonical-target-letters>
 K::F::<b64-pattern>::action <dynamic-action>
-K::F::<b64-pattern>::ban-time *<seconds>
+K::F::<b64-pattern>::ban-time <seconds>
 K::F::<b64-pattern>::reason <text>
-K::F::<b64-pattern>::expires *<unix_timestamp>
+K::F::<b64-pattern>::expires <unix_timestamp>
 ```
 
 `match-type` is explicit: `regex` compiles PCRE; `simple` uses UnrealIRCd's native wildcard matcher. `targets` must use the native canonical order `cpnNPqduatTR` (channel/private/private-notice/channel-notice/part/quit/dcc/user/away/topic/message-tag/raw), with no duplicates. `action` is accepted only when UnrealIRCd recognizes it as a dynamic, non-config-only action. `ban-time` is optional, positive, and is the duration of a sanction generated by a match; it is distinct from the rule's `expires`. A partial F profile is safely inert; a complete invalid candidate is rejected before persistence and cannot replace an active rule.
@@ -524,7 +540,7 @@ ACK:
 :<sid> DB <peer-sid> HEL 4 ACK <selector> <epoch> OCL [OCLG]
 ```
 
-- required version: `4` (strict single version; no negotiation, downgrade shims, or legacy compatibility);
+- required version: `4` (the single accepted protocol version);
 - `epoch`: 16 lowercase hexadecimal characters identifying the peer's runtime instance;
 - `OCL`: mandatory runtime operclass capability;
 - `OCLG`: optional subscription to the derived global view, typically for consumers such as Services.
@@ -582,7 +598,7 @@ Reconciliation is inventory-driven pull between eligible directly linked HEL 4/O
 peers. It is never forwarded as a snapshot through another hop. Sender manifests,
 INF and transferred rows derive from one pinned six-root generation.
 
-### 9.1 Exact new grammar
+### 9.1 Exact wire grammar
 
 ```text
 :<peer-SID> DB <target> INF <round> <block> <sha256> <count> 0 <watermark> <root-SID> <root-epoch>
@@ -701,6 +717,281 @@ Workflow:
 | 5 | `NO_SYNC` |
 | 6 | `FORBIDDEN` |
 
+
+### 10.4 S2S examples for IRC services
+
+This catalogue covers every persistent property of N/C/I/S/L/K and all five K
+types. It is not an initial-sync implementation or a batch to deploy unchanged:
+it includes operator privileges, bans and public demonstration secrets. Local
+`unrealircd.conf` directives and runtime-only OCL/OCLG are separate interfaces.
+
+Assume the connected services server is `services.example.net` (SID `9SV`) and
+the directly linked IRCd is `irc.example.net` (SID `001`). Services is the root
+authority for this example, with epoch `0123456789abcdef` (16 lowercase hex digits).
+Its capability advertisement uses its own server name as selector. A request is:
+
+```text
+:9SV DB 001 HEL 4 services.example.net 0123456789abcdef OCL
+```
+
+When receiving the IRCd's own HEL request, services responds:
+
+```text
+:9SV DB 001 HEL 4 ACK services.example.net 0123456789abcdef OCL
+```
+
+Both directions must confirm HEL 4/OCL. HEL is not cryptographic authentication
+or a grant of write authority; use authenticated TLS with certificate verification.
+The receiving IRCd must already select this direct peer as its authority and have
+reconciled all six blocks, adopting root `(9SV, 0123456789abcdef)` at watermark `0`.
+Advertising OCL requires supporting its contract; a token alone is not a services
+implementation. An unauthorized peer cannot authorize itself by writing
+`S::propagator`.
+
+Only under those assumptions do the following live mutations start at sequence 1.
+For an existing stream, continue at its next sequence, never restart this example's
+counter. INS/DEL/DRP share one consecutive uint64 sequence across all six blocks.
+Prefix frames with the root **server SID**, not a NickServ user UID. Relays preserve
+the root SID/epoch/sequence even when the selected direct transport peer differs.
+Terminate every line with CRLF (`\r\n`); send no Markdown fences or comments.
+Each INS is an individual mutation, not an atomic transaction containing the catalogue.
+Modes/snomasks must have loaded handlers, and the example operclass `netadmin`
+must exist for its intended effect. Replace server names and policies with your
+network's authorized values; HEL selectors must reflect the sender's actual state.
+
+#### N — Nicks
+
+All nine properties are strings. The optional root entry illustrates NONE.
+The `pass` below is the full `argon2id:$argon2id$…` string, Base64-encoded, for
+public example password `EXAMPLE-ONLY-CHANGE-ME` and salt `udb-example-salt`.
+Do not reuse these demonstration credentials. The supported `sha256:` and `crypt:`
+hash strings use the same `!s` envelope; use Argon2id for new credentials.
+`forbid` and `suspend` target separate demonstration nicks, not `alice`.
+
+Decoded pass value (before Base64):
+
+```text
+argon2id:$argon2id$v=19$m=19456,t=2,p=1$dWRiLWV4YW1wbGUtc2FsdA$i5Orjj4GOgK7ORVIoiTYp+9CFRLbOifSIkDenWCrFVo
+```
+
+| Wire path | Logical value |
+|---|---|
+| `N::alice` | `NONE` |
+| `N::alice::access` | `203.0.113.0/24` |
+| `N::alice::pass` | Argon2id hash shown above |
+| `N::alice::vhost` | `alice.example.net` |
+| `N::Reserved::forbid` | `Reserved nick` |
+| `N::Suspended::suspend` | `Suspended account` |
+| `N::alice::oper` | `netadmin` |
+| `N::alice::modes` | `+i` |
+| `N::alice::snomasks` | `+c-k` |
+| `N::alice::swhois` | `Network staff` |
+
+```text
+:9SV DB * INS 0123456789abcdef 1 N::alice :!n
+:9SV DB * INS 0123456789abcdef 2 N::alice::access :!sMjAzLjAuMTEzLjAvMjQ=
+:9SV DB * INS 0123456789abcdef 3 N::alice::pass :!sYXJnb24yaWQ6JGFyZ29uMmlkJHY9MTkkbT0xOTQ1Nix0PTIscD0xJGRXUmlMV1Y0WVcxd2JHVXRjMkZzZEEkaTVPcmpqNEdPZ0s3T1JWSW9pVFlwKzlDRlJMYk9pZlNJa0RlbldDckZWbw==
+:9SV DB * INS 0123456789abcdef 4 N::alice::vhost :!sYWxpY2UuZXhhbXBsZS5uZXQ=
+:9SV DB * INS 0123456789abcdef 5 N::Reserved::forbid :!sUmVzZXJ2ZWQgbmljaw==
+:9SV DB * INS 0123456789abcdef 6 N::Suspended::suspend :!sU3VzcGVuZGVkIGFjY291bnQ=
+:9SV DB * INS 0123456789abcdef 7 N::alice::oper :!sbmV0YWRtaW4=
+:9SV DB * INS 0123456789abcdef 8 N::alice::modes :!sK2k=
+:9SV DB * INS 0123456789abcdef 9 N::alice::snomasks :!sK2Mtaw==
+:9SV DB * INS 0123456789abcdef 10 N::alice::swhois :!sTmV0d29yayBzdGFmZg==
+```
+
+#### C — Channels
+
+The founder is `alice`, modes are `+nt` and the topic is `Hello world`.
+The access container and `bob` entry illustrate NONE. The child can alternatively
+carry `!u10` or `!sbWVtYmVy` (text `member`), but the JOIN hook does not interpret
+its value as a rank. Forbid/suspend target separate demonstration channels.
+
+| Wire path | Logical value |
+|---|---|
+| `C::#chat` | `NONE` |
+| `C::#chat::founder` | `alice` |
+| `C::#chat::modes` | `+nt` |
+| `C::#chat::topic` | `Hello world` |
+| `C::#chat::access` | `NONE` |
+| `C::#chat::access::bob` | `NONE` |
+| `C::#reserved::forbid` | `Reserved channel` |
+| `C::#suspended::suspend` | `Suspended channel` |
+| `C::#chat::options` | `63` |
+
+```text
+:9SV DB * INS 0123456789abcdef 11 C::#chat :!n
+:9SV DB * INS 0123456789abcdef 12 C::#chat::founder :!sYWxpY2U=
+:9SV DB * INS 0123456789abcdef 13 C::#chat::modes :!sK250
+:9SV DB * INS 0123456789abcdef 14 C::#chat::topic :!sSGVsbG8gd29ybGQ=
+:9SV DB * INS 0123456789abcdef 15 C::#chat::access :!n
+:9SV DB * INS 0123456789abcdef 16 C::#chat::access::bob :!n
+:9SV DB * INS 0123456789abcdef 17 C::#reserved::forbid :!sUmVzZXJ2ZWQgY2hhbm5lbA==
+:9SV DB * INS 0123456789abcdef 18 C::#suspended::suspend :!sU3VzcGVuZGVkIGNoYW5uZWw=
+:9SV DB * INS 0123456789abcdef 19 C::#chat::options :!u63
+```
+
+The example mask 63 enables all six bits; 6 combines LOCK_MODES and LOCK_TOPIC.
+
+| Bit | Value | Wire payload alone |
+|---|---:|---|
+| `PROTECT_BANS` | 1 | `!u1` |
+| `LOCK_MODES` | 2 | `!u2` |
+| `LOCK_TOPIC` | 4 | `!u4` |
+| `PERSISTENT` | 8 | `!u8` |
+| `OPER_ONLY` | 16 | `!u16` |
+| `SECURE_OPS` | 32 | `!u32` |
+
+#### I — IP/realhost policies
+
+The example allows five connections, stores all allowed `nolines` flags as the
+string `GZQSTmc`, and sets visible host `shared.example.net`. This root lookup is
+exact against IP or realhost, not CIDR matching.
+
+| Wire path | Logical value |
+|---|---|
+| `I::203.0.113.20` | `NONE` |
+| `I::203.0.113.20::clones` | `5` |
+| `I::203.0.113.20::nolines` | `GZQSTmc` |
+| `I::203.0.113.20::host` | `shared.example.net` |
+
+```text
+:9SV DB * INS 0123456789abcdef 20 I::203.0.113.20 :!n
+:9SV DB * INS 0123456789abcdef 21 I::203.0.113.20::clones :!u5
+:9SV DB * INS 0123456789abcdef 22 I::203.0.113.20::nolines :!sR1pRU1RtYw==
+:9SV DB * INS 0123456789abcdef 23 I::203.0.113.20::host :!sc2hhcmVkLmV4YW1wbGUubmV0
+```
+
+#### S — Settings
+
+The global clone limit is 3; the rejection message is `Too many connections` and
+password-failure flood policy is text `5:60`. The suffix is `.users.example.net`.
+Service masks below are strings `NickServ!service@services.example.net`,
+`ChanServ!service@services.example.net` and `IpServ!service@services.example.net`;
+they select matching connected ULine users rather than introducing those users.
+The propagator value is the ordered list `services.example.net,backup.example.net`.
+`encryption_key` contains `0123456789abcdef` repeated four times: Base64 encodes
+those **64 hexadecimal characters**, not 32 raw key bytes. This public key is
+for demonstration only; do not deploy it.
+
+| Wire path | Logical value |
+|---|---|
+| `S::clones` | `3` |
+| `S::quit_clones` | `Too many connections` |
+| `S::flood` | `5:60` |
+| `S::encryption_key` | `0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef` |
+| `S::suffix` | `.users.example.net` |
+| `S::nickserv` | `NickServ!service@services.example.net` |
+| `S::chanserv` | `ChanServ!service@services.example.net` |
+| `S::ipserv` | `IpServ!service@services.example.net` |
+| `S::propagator` | `services.example.net,backup.example.net` |
+
+```text
+:9SV DB * INS 0123456789abcdef 24 S::clones :!u3
+:9SV DB * INS 0123456789abcdef 25 S::quit_clones :!sVG9vIG1hbnkgY29ubmVjdGlvbnM=
+:9SV DB * INS 0123456789abcdef 26 S::flood :!sNTo2MA==
+:9SV DB * INS 0123456789abcdef 27 S::encryption_key :!sMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZg==
+:9SV DB * INS 0123456789abcdef 28 S::suffix :!sLnVzZXJzLmV4YW1wbGUubmV0
+:9SV DB * INS 0123456789abcdef 29 S::nickserv :!sTmlja1NlcnYhc2VydmljZUBzZXJ2aWNlcy5leGFtcGxlLm5ldA==
+:9SV DB * INS 0123456789abcdef 30 S::chanserv :!sQ2hhblNlcnYhc2VydmljZUBzZXJ2aWNlcy5leGFtcGxlLm5ldA==
+:9SV DB * INS 0123456789abcdef 31 S::ipserv :!sSXBTZXJ2IXNlcnZpY2VAc2VydmljZXMuZXhhbXBsZS5uZXQ=
+:9SV DB * INS 0123456789abcdef 32 S::propagator :!sc2VydmljZXMuZXhhbXBsZS5uZXQsYmFja3VwLmV4YW1wbGUubmV0
+```
+
+#### L — Per-server options
+
+`irc.example.net` is the IRCd whose local debug effect is selected. Its only
+known bit is `DEBUG = 1` (`!u1`); a zero mask is `!u0`.
+
+| Wire path | Logical value |
+|---|---|
+| `L::irc.example.net` | `NONE` |
+| `L::irc.example.net::options` | `1` |
+
+```text
+:9SV DB * INS 0123456789abcdef 33 L::irc.example.net :!n
+:9SV DB * INS 0123456789abcdef 34 L::irc.example.net::options :!u1
+```
+
+#### K — G/Z/S/Q lines and F spamfilters
+
+Each G/Z/S/Q profile accepts `reason` and `expires`. The example's future expiry
+`2000000000` is an **absolute Unix timestamp**, not a duration. For new temporary
+profiles send expires before reason: a partial profile without reason is inert,
+avoiding an intermediate permanent effect. Existing profiles may already be active.
+
+The F regex is `spam[0-9]+`. Its stored component is `b64:c3BhbVswLTldKw==`, so
+the wire path uses `b64%3Ac3BhbVswLTldKw==`. The decoded values are `regex`,
+`cp` (channel/private messages), `gline`, 300 seconds of sanction duration,
+expiry `2000000000` for the rule itself, and reason `Spam detected`. Reason is
+sent last so the new rule stays incomplete until the other properties exist.
+Property names are exactly **`match-type`** and **`ban-time`**, with hyphens.
+
+| Wire path | Logical value |
+|---|---|
+| `K::G::*@bad.example::expires` | `2000000000` |
+| `K::G::*@bad.example::reason` | `G-Line example` |
+| `K::Z::2001%3Adb8%3A%3A1::expires` | `2000000000` |
+| `K::Z::2001%3Adb8%3A%3A1::reason` | `Z-Line example` |
+| `K::S::*@flood.example::expires` | `2000000000` |
+| `K::S::*@flood.example::reason` | `Shun example` |
+| `K::Q::BadNick*::expires` | `2000000000` |
+| `K::Q::BadNick*::reason` | `Q-Line example` |
+| `K::F::b64%3Ac3BhbVswLTldKw==::match-type` | `regex` |
+| `K::F::b64%3Ac3BhbVswLTldKw==::targets` | `cp` |
+| `K::F::b64%3Ac3BhbVswLTldKw==::action` | `gline` |
+| `K::F::b64%3Ac3BhbVswLTldKw==::ban-time` | `300` |
+| `K::F::b64%3Ac3BhbVswLTldKw==::expires` | `2000000000` |
+| `K::F::b64%3Ac3BhbVswLTldKw==::reason` | `Spam detected` |
+
+```text
+:9SV DB * INS 0123456789abcdef 35 K::G::*@bad.example::expires :!u2000000000
+:9SV DB * INS 0123456789abcdef 36 K::G::*@bad.example::reason :!sRy1MaW5lIGV4YW1wbGU=
+:9SV DB * INS 0123456789abcdef 37 K::Z::2001%3Adb8%3A%3A1::expires :!u2000000000
+:9SV DB * INS 0123456789abcdef 38 K::Z::2001%3Adb8%3A%3A1::reason :!sWi1MaW5lIGV4YW1wbGU=
+:9SV DB * INS 0123456789abcdef 39 K::S::*@flood.example::expires :!u2000000000
+:9SV DB * INS 0123456789abcdef 40 K::S::*@flood.example::reason :!sU2h1biBleGFtcGxl
+:9SV DB * INS 0123456789abcdef 41 K::Q::BadNick*::expires :!u2000000000
+:9SV DB * INS 0123456789abcdef 42 K::Q::BadNick*::reason :!sUS1MaW5lIGV4YW1wbGU=
+:9SV DB * INS 0123456789abcdef 43 K::F::b64%3Ac3BhbVswLTldKw==::match-type :!scmVnZXg=
+:9SV DB * INS 0123456789abcdef 44 K::F::b64%3Ac3BhbVswLTldKw==::targets :!sY3A=
+:9SV DB * INS 0123456789abcdef 45 K::F::b64%3Ac3BhbVswLTldKw==::action :!sZ2xpbmU=
+:9SV DB * INS 0123456789abcdef 46 K::F::b64%3Ac3BhbVswLTldKw==::ban-time :!u300
+:9SV DB * INS 0123456789abcdef 47 K::F::b64%3Ac3BhbVswLTldKw==::expires :!u2000000000
+:9SV DB * INS 0123456789abcdef 48 K::F::b64%3Ac3BhbVswLTldKw==::reason :!sU3BhbSBkZXRlY3RlZA==
+```
+
+The IPv6 Z path percent-encodes its colons; printable `*`, `@`, `/` and `=`
+remain literal where used. The F pattern's Base64 belongs to the key and is
+independent of the `!s<Base64>` encoding of property values. Pattern containers
+`K::<type>::<pattern>` do **not** accept INS, including `:!n`.
+No expires property means a permanent line; `expires = 0` is invalid.
+
+#### Deletion and initial synchronization
+
+To remove a property or a subtree, use DEL without a value; INS with NONE is
+not a deletion. Continuing the example stream:
+
+```text
+:9SV DB * DEL 0123456789abcdef 49 N::Reserved::forbid
+:9SV DB * DEL 0123456789abcdef 50 K::Z::2001%3Adb8%3A%3A1
+```
+
+Deleting only `expires` makes the remaining valid K profile permanent. For
+initial snapshots, use the same typed payload inside PUT rather than sending
+a catalogue of live INS frames immediately after HEL. For example, within an
+already authorized round and begun transaction:
+
+```text
+:9SV DB 001 PUT <round> N <txid> N::alice::vhost :!sYWxpY2UuZXhhbXBsZS5uZXQ=
+```
+
+This requires the complete INF/RES/BEGIN/PUT/END/ACK lifecycle from section 9,
+including exact digests and origin/watermark binding for all six blocks. A bare
+PUT, successful send or PONG is not proof of durable commit or READY. Handle ERR
+and recovery according to the actual stream state; do not reuse a sequence for
+a different mutation. These examples are checked against the schema and codec;
+they are not a claim of live integration testing with an external services daemon.
 
 ## 11. Readiness, health and client admission
 

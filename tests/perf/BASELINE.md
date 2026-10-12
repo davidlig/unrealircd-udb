@@ -1,50 +1,18 @@
-# UDB scalability baseline procedure
+# Native storage benchmark reference
 
-This directory provides deterministic, offline root-index measurements. It is
-not a substitute for the UnrealIRCd runtime harness: record `startup_ms`, RSS,
-snapshot/fdatasync time, mutation time and staged-sync time on the target
-machine separately. The generator deliberately does **not** use `; Records:`
-for any sizing or verification.
+The maintained storage benchmark is [benchmark_native.py](benchmark_native.py).
+See the [test guide](../README.md#exclusive-native-persistence-qualification) for
+setup, supported dataset/cache sizes, commands and output locations.
 
-## Reproduce the root-index baseline
+The benchmark builds the production storage engine and measures bulk build,
+recovery and indexed reads using owned scratch stores. Optional point-write
+measurements exercise durable mutations. It never writes installed server data.
 
-```sh
-for n in 10000 50000 100000 500000; do
-  python3 tests/perf/generate_udb_dataset.py --block N --profiles "$n" \
-    --output "tests/perf/out/N-$n.db"
-  python3 tests/perf/benchmark_hash_index.py "tests/perf/out/N-$n.db" \
-    --output "tests/perf/out/N-$n.json"
-done
-```
+OS caches are retained: these measurements do not demonstrate cold-device
+performance, IRC throughput, runtime convergence or power-loss durability.
+Record the machine, compiler, source revision and cache size with each report.
+Keep generated stores and reports outside tracked source files.
 
-The JSON records the fixed-2048 and dynamically sized index distributions,
-including bucket occupancy and probe-count proxies. Run each configuration at
-least three times and report medians/p95 with the machine, compiler and module
-revision. Keep generated `out/` files out of Git.
-
-## Captured offline baseline (2026-09-11)
-
-One deterministic pass of the minimal-profile dataset on the development
-machine produced the following chain/probe distribution. Timings are omitted
-from this table because they are Python/offline timings, not UDB event-loop
-measurements.
-
-| Profiles | Fixed 2048 max / hit-p95 probes | Dynamic buckets | Dynamic max / hit-p95 probes |
-| ---: | ---: | ---: | ---: |
-| 10,000 | 14 / 9 | 16,384 | 5 / 3 |
-| 50,000 | 38 / 27 | 131,072 | 3 / 2 |
-| 100,000 | 70 / 53 | 262,144 | 3 / 2 |
-| 500,000 | 306 / 245 | 1,048,576 | 4 / 2 |
-
-The result justifies the index-sizing change, but not a WAL/journal redesign:
-no runtime snapshot, fsync, copy-on-write, RSS or staged-sync bottleneck has
-yet been measured on representative deployment hardware.
-
-## Runtime collection
-
-Load each generated snapshot through the normal UDB runtime harness, after
-copying a freshly built module. Capture `startup_ms`, `peak_rss_kib`,
-`block_load_ms`, snapshot and mutation latency, and `staged_sync_ms` externally
-(the module deliberately has no permanently enabled detailed instrumentation).
-Use the same dataset, machine, configuration and iteration count before and
-after a hash-index change.
+Observed Linux results and their limitations are documented in the
+[technical qualification](../../doc/udb_technical_en.md#21-linux-qualification-evidence)
+and its [machine-readable report](../../doc/native_storage_benchmarks.json).
