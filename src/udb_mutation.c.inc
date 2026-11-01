@@ -362,6 +362,8 @@ static int udb_native_mutation_ingress(UdbContext *ctx, Client *source, Client *
 		record.stamp.sequence = 1;
 		if (result == UDB_STORAGE_OK)
 			result = udb_native_row_validate(&record, &ctx->native_schema);
+		if (result == UDB_STORAGE_OK && kind == UDB_STORAGE_JOB_POINT)
+			result = udb_line_ingress_validate(&record.row);
 		if (result == UDB_STORAGE_OK)
 			result = udb_storage_row_encode(&record.row, scratch->bytes, sizeof(scratch->bytes), &row_length);
 		block = (char)record.row.block;

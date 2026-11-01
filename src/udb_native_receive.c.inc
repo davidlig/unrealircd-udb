@@ -279,6 +279,8 @@ static int udb_sync_put(UdbBlock *block, Client *peer, unsigned long id, const c
 		result = UDB_STORAGE_REJECTED;
 	if (result == UDB_STORAGE_OK)
 		result = udb_native_value_decode(value, &scratch->key.row, scratch->value, sizeof(scratch->value));
+	if (result == UDB_STORAGE_OK)
+		result = udb_line_ingress_validate(&scratch->key.row);
 	size_t length = 0;
 	if (result == UDB_STORAGE_OK)
 		result = udb_storage_row_encode(&scratch->key.row, scratch->bytes, sizeof(scratch->bytes), &length);

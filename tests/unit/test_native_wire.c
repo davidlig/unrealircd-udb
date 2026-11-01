@@ -36,5 +36,14 @@ static void canonical_paths_fail_closed(void **state)
     for(size_t i=0;i<sizeof(invalid)/sizeof(invalid[0]);i++)
         assert_int_equal(udb_native_key_parse(invalid[i],&key),UDB_STORAGE_REJECTED);
 }
-static const UdbTestCase cases[]={UDB_CASE(typed_zero_none_and_strings),UDB_CASE(malformed_values_fail_closed),UDB_CASE(canonical_paths_fail_closed)};
+static void country_key_is_storage_canonical(void **state)
+{
+    (void)state;
+    UdbNativeKey key;
+    char path[256];
+    assert_int_equal(udb_native_key_parse("K::G::~country%3A@ES::reason", &key), UDB_STORAGE_OK);
+    assert_int_equal(udb_native_key_path(&key.row, path, sizeof(path)), UDB_STORAGE_OK);
+    assert_string_equal(path, "K::g::~country%3A@es::reason");
+}
+static const UdbTestCase cases[]={UDB_CASE(country_key_is_storage_canonical),UDB_CASE(typed_zero_none_and_strings),UDB_CASE(malformed_values_fail_closed),UDB_CASE(canonical_paths_fail_closed)};
 int main(int argc,char **argv) { return udb_test_main(argc,argv,"native_wire",cases,sizeof(cases)/sizeof(cases[0])); }

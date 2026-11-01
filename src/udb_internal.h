@@ -83,6 +83,7 @@ typedef struct UdbNativeSchema
 	int spamfilter_utf8;
 } UdbNativeSchema;
 static void udb_native_schema_capture(UdbNativeSchema *schema, UdbStorageBudget *budget);
+static UdbStorageResult udb_line_ingress_validate(const UdbStorageRow *row);
 static UdbStorageResult udb_native_row_validate(const UdbStorageRecord *record, void *context);
 static UdbStorageResult udb_native_stage_validate(const UdbStorageSource *source, unsigned char block, void *context);
 static UdbStorageResult udb_native_mutation_validate(UdbStorageEngine *engine, const UdbStorageBlockRoot *root,
