@@ -164,6 +164,56 @@ static int udb_line_stored_pattern(UdbStorageProfile *profile, char *out, size_t
 {
 	return profile && profile->key.depth == 2 && udb_native_span_string(profile->key.components[1], out, capacity);
 }
+/* Foreground only: native callbacks and their static buffers are not writer-safe. */
+static int udb_line_extended_pattern(const char *stored, char *out, size_t capacity)
+{
+	char native[UDB_STORAGE_COMPONENT_MAX + 1];
+	char *user, *host;
+	const char *error = NULL;
+	int soft = 0;
+	const char *colon = strchr(stored, ':');
+	/* UDB stores the TKL user/host separator; native extbans do not. */
+	if (colon && colon[1] == '@')
+	{
+		size_t prefix = (size_t)(colon - stored) + 1;
+		memcpy(native, stored, prefix);
+		strlcpy(native + prefix, colon + 2, sizeof(native) - prefix);
+	}
+	else
+		strlcpy(native, stored, sizeof(native));
+	/* Reject rather than accept the native parser's truncated input. */
+	if (strlen(native) >= USERLEN + NICKLEN + HOSTLEN + 32)
+		return 0;
+	if (!server_ban_parse_mask(NULL, 1, 'G', native, &user, &host, &soft, &error))
+		return 0;
+	const char *parameter = strchr(native, ':');
+	parameter = parameter ? parameter + 1 : "";
+	const char *remainder = NULL;
+	Extban *extban = findmod_by_bantype(native, &remainder);
+	int country = extban && !strcmp(extban->name, "country");
+	if (country ? strcasecmp(parameter, host) : strcmp(parameter, host))
+		return 0;
+	/* Copy the parser's static buffers immediately. Keep the persistent
+	 * key separate: expiry and replication still use its original bytes. */
+	if (strlen(user) >= 128 || strlen(host) >= 128)
+		return 0;
+	int length = snprintf(out, capacity, "%s@%s", user, host);
+	return length >= 0 && (size_t)length < capacity;
+}
+
+static UdbStorageResult udb_line_ingress_validate(const UdbStorageRow *row)
+{
+	if (row->block != 'K' || row->depth < 2 || row->components[0].length != 1 ||
+		udb_storage_fold(row->components[0].data[0]) != 'g')
+		return UDB_STORAGE_OK;
+	char stored[UDB_STORAGE_COMPONENT_MAX + 1], runtime[UDB_STORAGE_COMPONENT_MAX + 1];
+	if (!udb_native_span_string(row->components[1], stored, sizeof(stored)))
+		return UDB_STORAGE_REJECTED;
+	return !is_extended_server_ban(stored) || udb_line_extended_pattern(stored, runtime, sizeof(runtime))
+			   ? UDB_STORAGE_OK
+			   : UDB_STORAGE_REJECTED;
+}
+
 static int udb_line_runtime_pattern(UdbStorageProfile *profile, char *out, size_t capacity)
 {
 	char stored[UDB_STORAGE_COMPONENT_MAX + 1];
@@ -171,6 +221,8 @@ static int udb_line_runtime_pattern(UdbStorageProfile *profile, char *out, size_
 		return 0;
 	if (udb_line_type(profile) == 'F')
 		return udb_spamfilter_pattern(stored, out, capacity);
+	if (udb_line_type(profile) == 'G' && is_extended_server_ban(stored))
+		return udb_line_extended_pattern(stored, out, capacity);
 	if (strlen(stored) >= capacity)
 		return 0;
 	memcpy(out, stored, strlen(stored) + 1);
@@ -348,6 +400,90 @@ static void udb_line_remove_profile(UdbStorageProfile *profile)
 		udb_line_remove_owned(type, pattern);
 }
 
+/* Rebuild one normalized group from the published generation, not just the
+ * owner whose key changed. Permanent/latest expiry wins; stored key breaks ties. */
+static UdbStorageResult udb_line_reconcile_effect(UdbStorageProfile *changed, UdbStorageRead *after)
+{
+	char pattern[UDB_SPAMFILTER_PATTERN_MAX + 1];
+	if (udb_line_type(changed) != 'G' || !udb_line_runtime_pattern(changed, pattern, sizeof(pattern)) ||
+		!is_extended_server_ban(pattern))
+	{
+		UdbStorageProfile *present = NULL;
+		UdbStorageResult found = udb_storage_profile_load(after, &changed->key, udb_native_line_fields, 6, &present);
+		if (found == UDB_STORAGE_NOT_FOUND)
+			udb_line_remove_profile(changed);
+		else if (found == UDB_STORAGE_OK)
+			found = udb_line_apply_profile(present);
+		udb_storage_profile_free(&present);
+		return found == UDB_STORAGE_NOT_FOUND ? UDB_STORAGE_OK : found;
+	}
+	const char *remainder = NULL;
+	Extban *extban = findmod_by_bantype(pattern[0] == '%' ? pattern + 1 : pattern, &remainder);
+	const char *colon = strchr(pattern, ':');
+	if (!extban || !colon || colon[1] != '@')
+		return UDB_STORAGE_CORRUPT;
+	const char *parameter = colon + 2;
+	const char *prefix = pattern[0] == '%' ? "%~" : "~";
+	char letter[2] = {extban->letter, 0};
+	const char *names[2] = {extban->name, letter};
+	UdbStorageProfile *winner = NULL;
+	char winner_key[UDB_STORAGE_COMPONENT_MAX + 1] = "";
+	time_t winner_expiry = 0;
+	UdbStorageResult result = UDB_STORAGE_OK;
+	/* Lossless normalization leaves only name/letter and the optional UDB
+	 * separator as alternate spellings. Probe their indexed owner keys;
+	 * never scan K here (this helper also runs once per snapshot owner).
+	 * Key encoding folds country case; runtime equality rejects any letter
+	 * whose folded spelling resolves to a different registered handler. */
+	for (unsigned int form = 0; form < 4; form++)
+	{
+		const char *name = names[form / 2];
+		if (!name || !*name)
+			continue;
+		char alias[UDB_STORAGE_COMPONENT_MAX + 1];
+		int length = snprintf(alias, sizeof(alias), "%s%s:%s%s", prefix, name, form % 2 ? "@" : "", parameter);
+		if (length < 0 || (size_t)length >= sizeof(alias) || !udb_line_mask_valid(alias))
+			continue;
+		UdbStorageRow key = changed->key;
+		key.components[1].data = (const unsigned char *)alias;
+		key.components[1].length = (uint32_t)length;
+		UdbStorageProfile *candidate = NULL;
+		result = udb_storage_profile_load(after, &key, udb_native_line_fields, 6, &candidate);
+		if (result == UDB_STORAGE_NOT_FOUND)
+		{
+			result = UDB_STORAGE_OK;
+			continue;
+		}
+		if (result != UDB_STORAGE_OK)
+			break;
+		char runtime[UDB_SPAMFILTER_PATTERN_MAX + 1], stored[UDB_STORAGE_COMPONENT_MAX + 1];
+		time_t expires = 0;
+		int expiry = udb_line_expiry(candidate, &expires);
+		if (udb_line_field(candidate, KKEY_REASON) && expiry >= 0 && (!expiry || expires > TStime()) &&
+			udb_line_runtime_pattern(candidate, runtime, sizeof(runtime)) && !strcmp(runtime, pattern) &&
+			udb_line_stored_pattern(candidate, stored, sizeof(stored)) &&
+			(!winner || (winner_expiry && (!expires || expires > winner_expiry)) ||
+			 (expires == winner_expiry && strcmp(stored, winner_key) < 0)))
+		{
+			udb_storage_profile_free(&winner);
+			winner = candidate;
+			candidate = NULL;
+			winner_expiry = expires;
+			strlcpy(winner_key, stored, sizeof(winner_key));
+		}
+		udb_storage_profile_free(&candidate);
+	}
+	if (result == UDB_STORAGE_OK)
+	{
+		if (winner)
+			result = udb_line_apply_profile(winner);
+		else
+			udb_line_remove_owned('G', pattern);
+	}
+	udb_storage_profile_free(&winner);
+	return result;
+}
+
 static int udb_line_profiles_equal(UdbStorageProfile *a, UdbStorageProfile *b)
 {
 	if (!a || !b)
@@ -409,12 +545,14 @@ static UdbStorageResult udb_line_profile_scan(UdbStorageRead *source, UdbStorage
 			if (old_pass && !udb_line_profiles_equal(profile, replacement))
 			{
 				if (replacement)
-					result = udb_line_apply_profile(replacement);
+					result = udb_line_reconcile_effect(replacement, other);
+				else if (udb_line_type(profile) == 'G')
+					result = udb_line_reconcile_effect(profile, other);
 				else
 					udb_line_remove_profile(profile);
 			}
 			else if (!old_pass && !replacement)
-				result = udb_line_apply_profile(profile);
+				result = udb_line_reconcile_effect(profile, source);
 		}
 		udb_storage_profile_free(&profile);
 		udb_storage_profile_free(&replacement);
@@ -453,7 +591,9 @@ static UdbStorageResult udb_lines_reconcile_scope(UdbStorageRead *before, UdbSto
 		if (!udb_line_profiles_equal(old, current))
 		{
 			if (current)
-				result = udb_line_apply_profile(current);
+				result = udb_line_reconcile_effect(current, after);
+			else if (old && udb_line_type(old) == 'G')
+				result = udb_line_reconcile_effect(old, after);
 			else if (old)
 				udb_line_remove_profile(old);
 			char stored[UDB_STORAGE_COMPONENT_MAX + 1];
@@ -536,6 +676,8 @@ static void udb_lines_expiry_sweep(time_t now)
 			time_t live_expiry = 0;
 			int matching =
 				checked == UDB_STORAGE_OK && udb_line_expiry(live, &live_expiry) == 1 && live_expiry == expiry;
+			if (matching && udb_line_reconcile_effect(profile, current) != UDB_STORAGE_OK)
+				matching = 0;
 			udb_storage_profile_free(&live);
 			if (current && udb_storage_read_close(&current) != UDB_STORAGE_OK)
 				matching = 0;
@@ -544,7 +686,6 @@ static void udb_lines_expiry_sweep(time_t now)
 				udb_storage_profile_free(&profile);
 				continue;
 			}
-			udb_line_remove_profile(profile);
 			if (!udb_propagator_policy_present(udb_ctx) ||
 				(udb_select_propagator(udb_ctx, 1, &selected) && selected.is_local))
 				udb_mutation_expire_local(udb_ctx, path, expiry);

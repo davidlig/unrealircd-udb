@@ -63,6 +63,47 @@ CMD_FUNC(cmd_udbtest)
 
 	if (parc < 2)
 		return;
+	/* Supply deterministic GeoIP only while evaluating the real TKL matcher. */
+	if (!strcasecmp(parv[1], "MATCHCOUNTRY") && parc >= 4)
+	{
+		target = find_user(parv[2], NULL);
+		if (!target)
+			return;
+		ModData *md = moddata_client_get_raw(target, "geoip");
+		if (!md)
+			return;
+		void *saved = md->ptr;
+		GeoIPResult geo = {0};
+		geo.country_code = (char *)parv[3];
+		md->ptr = &geo;
+		char saved_host[HOSTLEN + 1];
+		strlcpy(saved_host, target->user->realhost, sizeof(saved_host));
+		if (parc >= 5)
+			strlcpy(target->user->realhost, parv[4], sizeof(target->user->realhost));
+		char saved_info[sizeof(target->info)], saved_account[sizeof(target->user->account)];
+		memcpy(saved_info, target->info, sizeof(saved_info));
+		memcpy(saved_account, target->user->account, sizeof(saved_account));
+		if (parc >= 6)
+			strlcpy(target->info, parv[5], sizeof(target->info));
+		if (parc >= 7)
+			strlcpy(target->user->account, parv[6], sizeof(target->user->account));
+		int count = 0, matched = 0;
+		for (TKL *line = tklines[tkl_hash('G')]; line; line = line->next)
+		{
+			if (!TKLIsServerBan(line) || !line->set_by || strcmp(line->set_by, "UDB:managed"))
+				continue;
+			char mask[512];
+			tkl_uhost(line, mask, sizeof(mask), 0);
+			count++;
+			matched += !!match_user(mask, target, MATCH_CHECK_REAL);
+		}
+		memcpy(target->info, saved_info, sizeof(saved_info));
+		memcpy(target->user->account, saved_account, sizeof(saved_account));
+		md->ptr = saved;
+		strlcpy(target->user->realhost, saved_host, sizeof(target->user->realhost));
+		sendto_one(client, NULL, ":%s NOTICE %s :UDBTEST MATCH=%d COUNT=%d", me.name, client->name, matched, count);
+		return;
+	}
 	if (!strcasecmp(parv[1], "GETHOST") && parc >= 3)
 	{
 		target = find_user(parv[2], NULL);

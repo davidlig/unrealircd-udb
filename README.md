@@ -2,7 +2,7 @@
 
 UDB (Unreal DataBase) is a global **UnrealIRCd 6** module that maintains a distributed database for nicknames, channels, per-IP policy, settings, per-server options, and sanctions, with atomic persistence, staged snapshot reconciliation, and explicit authority control.
 
-**Current module version:** `4.0.0-rc1` (release candidate)
+**Current module version:** `4.0.0-rc2` (release candidate)
 **Declared compatibility:** UnrealIRCd `6.2.*`
 **Module name:** `third/udb`
 **License:** GPL v2 or later

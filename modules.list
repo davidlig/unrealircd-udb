@@ -2,12 +2,12 @@
 module "third/udb"
 {
 	description "UDB 4 (Unreal DataBase) distributed nick/channel/IP management & sync";
-	version "4.0.0-rc1";
+	version "4.0.0-rc2";
 	author "David Abuín Fontán ('davidlig')";
 	documentation "https://github.com/davidlig/unrealircd-udb";
 	troubleshooting "In case of problems, report issues at https://github.com/davidlig/unrealircd-udb/issues";
 	source "https://raw.githubusercontent.com/davidlig/unrealircd-udb/main/dist/udb.c";
-	sha256sum "393ec31e33f528012ab15f2a243907026b94f8a2ed5c59ab64a33393f4e5ab51";
+	sha256sum "e2c20a4627467035609cc1c485945d56ed34ad8606575db9674d35eea5335996";
 	min-unrealircd-version "6.2.*";
 	post-install-text
 	{
