@@ -5,7 +5,6 @@
  * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
  * Based on the original UDB concept by Trocotronic.
  *
- * (C) 2026 David Abuín Fontán
  * License: GNU General Public License v2+
  */
 
@@ -246,8 +245,11 @@ CMD_FUNC(cmd_db)
 	if (!direct_peer || !udb_has_hello(direct_peer))
 		return;
 
-	snprintf(logbuf, sizeof(logbuf), "[UDB] S2S DB received: parc=%d target=%s subcmd=%s", parc, target, subcmd);
-	unreal_log(ULOG_INFO, "udb", "UDB_CMD_DB", client, "$msg", log_data_string("msg", logbuf));
+	if (udb_is_debug_enabled())
+	{
+		snprintf(logbuf, sizeof(logbuf), "[UDB] S2S DB received: parc=%d target=%s subcmd=%s", parc, target, subcmd);
+		unreal_log(ULOG_INFO, "udb", "UDB_CMD_DB", client, "$msg", log_data_string("msg", logbuf));
+	}
 
 	int is_broadcast = !strcmp(target, "*");
 	int is_for_me = is_broadcast || !strcmp(target, me.id) || !strcmp(target, me.name);

@@ -4,7 +4,7 @@
 
 ## 1. Scope
 
-UDB (Unreal DataBase) is a global UnrealIRCd 6 module that maintains and applies a distributed database for nickname registrations, channels, per-IP policy, settings, per-server options, and network sanctions. The module version is **4.0.0-rc1** and the distribution metadata declares **UnrealIRCd 6.2.x** as its minimum version (`min-unrealircd-version "6.2.*"`).
+UDB (Unreal DataBase) is a global UnrealIRCd 6 module that maintains and applies a distributed database for nickname registrations, channels, per-IP policy, settings, per-server options, and network sanctions. The module version is **4.0.0-rc3** and the distribution metadata declares **UnrealIRCd 6.2.x** as its minimum version (`min-unrealircd-version "6.2.*"`).
 
 Canonical implementation sources live under `src/` and are deterministically amalgamated into `dist/udb.c`. The module is registered as `third/udb` and uses the S2S `DB` command for its protocol.
 
@@ -167,7 +167,7 @@ Keys:
 
 | Key | Type | Current runtime effect |
 |---|---|---|
-| `founder` | nick | Identified founder; receives UDB-owned `+q`. |
+| `founder` | nick | Identified founder; receives UDB-owned `+q` and keeps/receives `+o` on JOIN. |
 | `modes` | string | Channel modes/parameters validated against loaded handlers. The registration marker `r`, member ranks (`q`, `a`, `o`, `h`, `v`), `P`, and `O` are rejected in mutations, staged sync, and persisted files; persistence and oper-only policy are expressed only by their `options` bits. |
 | `topic` | string | UDB-managed topic. |
 | `access` | container | Authorized nickname list. |
@@ -192,7 +192,7 @@ Bits combine with bitwise OR; logical value `63` enables all six (wire `!u63`). 
 
 #### JOIN, founder and native key
 
-The founder is identified only when the nickname matches `founder` and the user has `+r`. An identified founder bypasses JOIN restrictions, including `OPER_ONLY` and `+k`, unless the profile has `suspend` or `forbid`; the founder receives `+q` unless suspended. An IRC operator bypasses all UDB JOIN restrictions, including `forbid`, `OPER_ONLY`, and the stored first-JOIN `+k`, but independent native restrictions still run and require their own override permission. `suspend` retains its existing non-blocking JOIN behavior.
+The founder is identified only when the nickname matches `founder` and the user has `+r`. An identified founder bypasses JOIN restrictions, including `OPER_ONLY` and `+k`, unless the profile has `suspend` or `forbid`; on JOIN the founder keeps/receives `+o` in addition to UDB-owned `+q` unless suspended, whereas non-founder first joiners have initial `+o` stripped. An IRC operator bypasses all UDB JOIN restrictions, including `forbid`, `OPER_ONLY`, and the stored first-JOIN `+k`, but independent native restrictions still run and require their own override permission. `suspend` retains its existing non-blocking JOIN behavior.
 
 If identification occurs after JOIN, `/MODE #channel +q nickname` lets the local identified founder recover their own `+q` without rejoining. UDB requires channel membership, a non-suspended C profile, the current founder nick with user mode `+r`, and exactly the isolated `+q` mode with one parameter resolving to the issuer. The recovery works with or without `SECURE_OPS` and `LOCK_MODES`; repeating it while already holding `+q` emits no additional mode change. Other targets, compound or malformed commands, and `SAMODE` keep their existing handling. Removing a nick suspension still requires reauthentication; this command never authenticates the user.
 

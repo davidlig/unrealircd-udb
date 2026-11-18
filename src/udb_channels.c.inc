@@ -5,7 +5,6 @@
  * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
  * Based on the original UDB concept by Trocotronic.
  *
- * (C) 2026 David Abuín Fontán
  * License: GNU General Public License v2+
  */
 
@@ -39,9 +38,6 @@ static ModDataInfo *udb_channel_ban_owners_md = NULL;
 static int udb_hook_can_join(Client *client, Channel *channel, const char *key, char **errmsg);
 static int udb_hook_pre_local_join(Client *client, Channel *channel, const char *key);
 static int udb_hook_local_join(Client *client, Channel *channel, MessageTag *mtags);
-static int udb_hook_remote_join(Client *client, Channel *channel, MessageTag *mtags);
-static int udb_hook_pre_chanmode(Client *client, Channel *channel, MessageTag *mtags, const char *modebuf,
-								 const char *parabuf, time_t sendts, int samode);
 static const char *udb_hook_pre_topic(Client *client, Channel *channel, const char *topic);
 CMD_OVERRIDE_FUNC(udb_override_mode);
 
@@ -168,27 +164,80 @@ static void udb_channel_reverse_modes(Channel *channel, const char *value)
 {
 	char modebuf[512];
 	char inverse[512];
-	char *parabuf;
-	char *src;
+	char inverse_params[512];
+	char *modes;
+	char *p;
+	const char *src;
 	char *dst = inverse;
+	int what = MODE_ADD;
+	int emitted_what = 0;
 
 	if (!value || !*value)
 		return;
 	strlcpy(modebuf, value, sizeof(modebuf));
-	parabuf = strchr(modebuf, ' ');
-	if (parabuf)
-		*parabuf++ = '\0';
-	for (src = modebuf; *src && (size_t)(dst - inverse) < sizeof(inverse) - 1; src++)
+	modes = strtoken(&p, modebuf, " ");
+	if (!modes || !*modes)
+		return;
+	inverse_params[0] = '\0';
+	for (src = modes; *src && (size_t)(dst - inverse) < sizeof(inverse) - 2; src++)
 	{
+		Cmode *cm;
+		char *param = NULL;
+		int target_what;
+
 		if (*src == '+')
-			*dst++ = '-';
-		else if (*src == '-')
-			*dst++ = '+';
-		else
+		{
+			what = MODE_ADD;
+			continue;
+		}
+		if (*src == '-')
+		{
+			what = MODE_DEL;
+			continue;
+		}
+		cm = find_channel_mode_handler(*src);
+		if (what == MODE_ADD)
+		{
+			target_what = MODE_DEL;
+			if (cm && cm->paracount > 0)
+				param = strtoken(&p, NULL, " ");
+			if (emitted_what != target_what)
+			{
+				*dst++ = '-';
+				emitted_what = target_what;
+			}
 			*dst++ = *src;
+			if (cm && cm->paracount > 0 && cm->unset_with_param && param && *param)
+			{
+				if (inverse_params[0])
+					strlcat(inverse_params, " ", sizeof(inverse_params));
+				strlcat(inverse_params, param, sizeof(inverse_params));
+			}
+		}
+		else
+		{
+			target_what = MODE_ADD;
+			if (cm && cm->paracount > 0 && cm->unset_with_param)
+				param = strtoken(&p, NULL, " ");
+			if (cm && cm->paracount > 0 && (!param || !*param))
+				continue;
+			if (emitted_what != target_what)
+			{
+				*dst++ = '+';
+				emitted_what = target_what;
+			}
+			*dst++ = *src;
+			if (param && *param)
+			{
+				if (inverse_params[0])
+					strlcat(inverse_params, " ", sizeof(inverse_params));
+				strlcat(inverse_params, param, sizeof(inverse_params));
+			}
+		}
 	}
 	*dst = '\0';
-	udb_channel_do_mode(channel, NULL, inverse, parabuf ? parabuf : "");
+	if (inverse[0])
+		udb_channel_do_mode(channel, NULL, inverse, inverse_params);
 }
 
 static void udb_channel_apply_modes(Channel *channel, const char *value)
@@ -219,6 +268,8 @@ static void udb_channel_remove_modes(Channel *channel)
 	state = moddata_channel(channel, udb_channel_modes_md).ptr;
 	if (state)
 	{
+		if (state->value && *state->value)
+			udb_channel_reverse_modes(channel, state->value);
 		safe_free(state->value);
 		safe_free(state);
 		moddata_channel(channel, udb_channel_modes_md).ptr = NULL;
@@ -646,6 +697,10 @@ static void udb_channel_project_profile(Channel *channel, UdbStorageProfile *old
 		if (modes && modes->kind == UDB_STORAGE_VALUE_STRING)
 			udb_channel_apply_modes(channel, modes->string);
 		udb_channel_apply_topic(channel, udb_channel_field(current, CKEY_TOPIC));
+	}
+	else
+	{
+		udb_channel_remove_modes(channel);
 	}
 	udb_channel_reconcile_options(channel, udb_channel_is_oper_only(udb_ctx, current),
 								  udb_channel_is_persistent(udb_ctx, current));
@@ -1099,12 +1154,13 @@ static void udb_channel_join_profile(Client *client, Channel *channel, MessageTa
 								suspend_rec->kind == UDB_STORAGE_VALUE_STRING ? suspend_rec->string
 																			  : "No reason given");
 
+	int is_founder = !suspended && udb_channel_is_identified_founder(client, chan_rec);
+
 	if (channel->users == 1)
 	{
 		if (!suspended)
 		{
-			/* A registered channel assigns founder authority exclusively as +q. */
-			if (!IsServer(client) && !IsULine(client))
+			if (!IsServer(client) && !IsULine(client) && !is_founder && check_channel_access(client, channel, "o"))
 			{
 				udb_channel_do_mode(channel, mtags, "-o", client->name);
 			}
@@ -1123,7 +1179,9 @@ static void udb_channel_join_profile(Client *client, Channel *channel, MessageTa
 		}
 	}
 
-	/* Founder +q is UDB-owned and must have exactly one current holder. */
+	if (is_founder && !check_channel_access(client, channel, "o"))
+		udb_channel_do_mode(channel, mtags, "+o", client->name);
+
 	udb_channel_reconcile_founder(channel, chan_rec, suspended);
 }
 
@@ -1138,12 +1196,6 @@ static void handle_join(Client *client, Channel *channel, MessageTag *mtags)
 }
 
 static int udb_hook_local_join(Client *client, Channel *channel, MessageTag *mtags)
-{
-	handle_join(client, channel, mtags);
-	return 0;
-}
-
-static int udb_hook_remote_join(Client *client, Channel *channel, MessageTag *mtags)
 {
 	handle_join(client, channel, mtags);
 	return 0;
@@ -1533,7 +1585,6 @@ static void udb_channels_init(ModuleInfo *modinfo)
 	/* Run after native pre-JOIN hooks before the scoped +O compatibility check. */
 	HookAdd(modinfo->handle, HOOKTYPE_PRE_LOCAL_JOIN, INT_MAX, udb_hook_pre_local_join_oper_only);
 	HookAdd(modinfo->handle, HOOKTYPE_LOCAL_JOIN, 0, udb_hook_local_join);
-	HookAdd(modinfo->handle, HOOKTYPE_REMOTE_JOIN, 0, udb_hook_remote_join);
 	HookAddConstString(modinfo->handle, HOOKTYPE_PRE_LOCAL_TOPIC, 0, udb_hook_pre_topic);
 }
 
