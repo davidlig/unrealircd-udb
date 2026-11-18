@@ -1,6 +1,6 @@
-# Guía local: configurar runner, despliegue y TLS desde cero
+# Guía operativa: configurar runner, despliegue y TLS desde cero
 
-Esta guía contiene comandos copiables para reconstruir la automatización. **Debe permanecer sin versionar**. Sustituye exclusivamente los marcadores `<...>` o las variables de la primera sección; no añadas valores reales de host, usuario, DNS, correo, token, rutas privadas ni secretos al fichero.
+Esta guía contiene comandos copiables para reconstruir la automatización. Sustituye exclusivamente los marcadores `<...>` o las variables en el fichero privado de entorno (`setup.env`); no añadas valores reales de host, usuario, DNS, correo, token, rutas privadas ni secretos al fichero.
 
 > La única acción que requiere administrador es habilitar `linger` una vez. El runner, Certbot, systemd de usuario y el despliegue diario funcionan sin `sudo`.
 
@@ -22,8 +22,8 @@ export RUNNER_STATE="$ACTIONS_ROOT/runner-state"
 export RUNNER_COMMAND_DIR="$ACTIONS_ROOT/runner-command"
 export CERTBOT_STATE="$ACTIONS_ROOT/certbot"
 export RUNNER_URL='https://github.com/<owner>/<repository>'
-export RUNNER_NAME='ircd-deploy'
-export RUNNER_LABELS='ircd-deploy'
+export RUNNER_NAME='udb-deploy'
+export RUNNER_LABELS='udb-deploy'
 export RUNNER_REGISTRATION_TOKEN='<single-use-registration-token>'
 export TLS_NAME='<public-tls-name>'
 export CERTBOT_EMAIL='<certificate-contact-email>'
@@ -90,8 +90,8 @@ services:
     environment:
       RUNNER_URL: ${RUNNER_URL:-}
       RUNNER_TOKEN: ${RUNNER_REGISTRATION_TOKEN:-}
-      RUNNER_NAME: ${RUNNER_NAME:-ircd-deploy}
-      RUNNER_LABELS: ${RUNNER_LABELS:-ircd-deploy}
+      RUNNER_NAME: ${RUNNER_NAME:-udb-deploy}
+      RUNNER_LABELS: ${RUNNER_LABELS:-udb-deploy}
       HOME: /runner-state
     volumes:
       - ${RUNNER_STATE}:/runner-state
@@ -319,6 +319,7 @@ udb_archive=$(map_runner_file "$udb_container_path")
 printf '%s  %s\n' "$unreal_sha256" "$unreal_archive" | sha256sum --check --status - || fail "UnrealIRCd checksum mismatch"
 printf '%s  %s\n' "$udb_sha256" "$udb_archive" | sha256sum --check --status - || fail "UDB checksum mismatch"
 
+mkdir -p "$(dirname "$LOCK_FILE")"
 exec 9>"$LOCK_FILE"
 flock -n 9 || fail "another deployment is running"
 [[ -x "$TARGET/bin/unrealircd" ]] || fail "current target is not executable"
@@ -383,6 +384,13 @@ systemctl --user stop "$SERVICE"
 
 rm -rf -- "$TARGET/conf" "$TARGET/data"
 cp -a -- "$rollback_dir/conf" "$TARGET/conf"
+install -m 0600 "$new_source"/doc/conf/*.default.conf "$TARGET/conf"
+install -m 0600 "$new_source"/doc/conf/*.optional.conf "$TARGET/conf"
+install -m 0700 -d "$TARGET/conf/aliases" "$TARGET/conf/help" "$TARGET/conf/examples" "$TARGET/conf/tls"
+install -m 0600 "$new_source"/doc/conf/aliases/*.conf "$TARGET/conf/aliases"
+install -m 0600 "$new_source"/doc/conf/help/*.conf "$TARGET/conf/help"
+install -m 0600 "$new_source"/doc/conf/examples/*.conf "$TARGET/conf/examples"
+install -m 0600 "$new_source/doc/conf/tls/curl-ca-bundle.crt" "$TARGET/conf/tls"
 if [[ -d "$rollback_dir/data" ]]; then
   cp -a -- "$rollback_dir/data" "$TARGET/data"
 fi
@@ -566,9 +574,8 @@ loginctl show-user "$DEPLOY_USER" -p Linger
   | grep -q '/var/run/docker.sock'
 ```
 
-La guía sigue siendo local: comprueba antes de cada commit que permanezca sin seguimiento:
+Comprueba antes de cualquier commit que ambas guías sigan libres de hosts, rutas locales, tokens o secretos reales:
 
 ```bash
-git status --short -- doc/github_actions_runner_setup_es.md
-# Debe mostrar: ?? doc/github_actions_runner_setup_es.md
+git diff -- doc/github_actions_runner_setup_es.md doc/github_actions_runner_setup_en.md
 ```
