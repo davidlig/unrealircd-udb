@@ -120,7 +120,8 @@ class OwnedProcess:
         if self.process is not None:
             raise RuntimeError("process owner may only be started once")
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        self.log_handle = self.log_path.open("w", encoding="utf-8")
+        self.log_path.write_text("", encoding="utf-8")
+        self.log_handle = self.log_path.open("a", encoding="utf-8")
         try:
             flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
             self.process = subprocess.Popen(
