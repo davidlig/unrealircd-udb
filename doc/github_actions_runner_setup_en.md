@@ -276,7 +276,7 @@ udb_container_path=$4
 udb_sha256=$5
 commit=$6
 
-[[ "$version" =~ ^6\.2\.[0-9]+$ ]] || fail "unsupported release version"
+[[ "$version" =~ ^6\.2\.[0-9]+(\.[0-9]+)?$ ]] || fail "unsupported release version"
 [[ "$unreal_sha256" =~ ^[0-9a-f]{64}$ ]] || fail "invalid UnrealIRCd checksum"
 [[ "$udb_sha256" =~ ^[0-9a-f]{64}$ ]] || fail "invalid UDB checksum"
 [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || fail "invalid commit"

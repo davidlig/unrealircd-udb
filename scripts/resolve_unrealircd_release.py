@@ -25,7 +25,7 @@ def select_release(manifest):
 
     if release.get("type") != "Stable":
         raise ValueError("the selected release is not Stable")
-    if not isinstance(version, str) or not re.fullmatch(r"6\.2\.[0-9]+", version):
+    if not isinstance(version, str) or not re.fullmatch(r"6\.2\.[0-9]+(?:\.[0-9]+)?", version):
         raise ValueError(f"unsupported UnrealIRCd Stable version: {version!r}")
     expected_url = f"https://www.unrealircd.org/downloads/unrealircd-{version}.tar.gz"
     if source_url != expected_url:

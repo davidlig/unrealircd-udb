@@ -217,7 +217,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$RELEASE_VERSION" =~ ^6\.2\.[0-9]+$ && "$RELEASE_SHA256" =~ ^[0-9a-f]{64}$ && "$UDB_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$RELEASE_VERSION" =~ ^6\.2\.[0-9]+(\.[0-9]+)?$ && "$RELEASE_SHA256" =~ ^[0-9a-f]{64}$ && "$UDB_SHA256" =~ ^[0-9a-f]{64}$ ]]
           deploy_uid=$(id -u)
           [[ "$deploy_uid" -ne 0 ]]
           [[ -n "$DEPLOY_COMMAND" && "$DEPLOY_COMMAND" == /* && -f "$DEPLOY_COMMAND" && -x "$DEPLOY_COMMAND" && ! -L "$DEPLOY_COMMAND" ]]

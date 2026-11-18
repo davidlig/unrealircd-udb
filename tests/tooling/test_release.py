@@ -20,7 +20,7 @@ def manifest(version="6.2.7", kind="Stable", url=None):
         "src": url or f"https://www.unrealircd.org/downloads/unrealircd-{version}.tar.gz"}}}}
 
 
-@pytest.mark.parametrize("version", ["6.2.0", "6.2.7", "6.2.123"])
+@pytest.mark.parametrize("version", ["6.2.0", "6.2.7", "6.2.7.1", "6.2.123"])
 def test_only_supported_versioned_official_stable_tarballs_are_selected(resolver, version):
     assert resolver.select_release(manifest(version)) == (
         version, f"https://www.unrealircd.org/downloads/unrealircd-{version}.tar.gz")
