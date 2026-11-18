@@ -5,7 +5,6 @@
  * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
  * Based on the original UDB concept by Trocotronic.
  *
- * (C) 2026 David Abuín Fontán
  * License: GNU General Public License v2+
  */
 
@@ -29,35 +28,13 @@ module
 *** <<<MODULE MANAGER END>>>
 */
 
-/*
- * UDB 4 - Unreal Database System for UnrealIRCd 6
- * Subsystem: Internal Module Interfaces & Subsystem State
- *
- * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
- * Based on the original UDB concept by Trocotronic.
- *
- * (C) 2026 David Abuín Fontán
- * License: GNU General Public License v2+
- */
-
 #ifndef UDB_INTERNAL_H
 #define UDB_INTERNAL_H
-
-/*
- * UDB 4 - Unreal Database System for UnrealIRCd 6
- * Subsystem: Public Module Header & Constants
- *
- * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
- * Based on the original UDB concept by Trocotronic.
- *
- * (C) 2026 David Abuín Fontán
- * License: GNU General Public License v2+
- */
 
 #ifndef UDB_H
 #define UDB_H
 
-#define UDB_VERSION "4.0.0-rc2"
+#define UDB_VERSION "4.0.0-rc3"
 #define UDB_PROTOCOL_HEL "4"
 
 /* Block Identifiers */
@@ -13437,17 +13414,6 @@ static UdbStorageResult udb_storage_block_object_bound(UdbStorageCache *cache, U
 
 /* Canonical wire path encoding and secret tuple classification */
 /* Inlined: udb_store.c.inc */
-/*
- * UDB 4 - Unreal Database System for UnrealIRCd 6
- * Subsystem: Canonical Wire Paths and Secret Classification
- *
- * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
- * Based on the original UDB concept by Trocotronic.
- *
- * (C) 2026 David Abuín Fontán
- * License: GNU General Public License v2+
- */
-
 /* Canonical path components */
 static int udb_path_encode_component(const char *raw, char *buf, size_t bufsz)
 {
@@ -13623,17 +13589,6 @@ static int udb_path_value_is_secret(const char *path)
 
 /* Configuration: daemon block parsing and UDB settings state */
 /* Inlined: udb_config.c.inc */
-/*
- * UDB 4 - Unreal Database System for UnrealIRCd 6
- * Subsystem: Configuration Parsing, Block S Settings & Link Options
- *
- * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
- * Based on the original UDB concept by Trocotronic.
- *
- * (C) 2026 David Abuín Fontán
- * License: GNU General Public License v2+
- */
-
 static UdbConfig *udb_cfg = NULL;
 static int udb_config_seen_propagator = 0;
 static int udb_config_seen_cache;
@@ -14178,17 +14133,6 @@ finish:
 
 /* Pure business schema, bounded parsing, and foreground session lifetime */
 /* Inlined: udb_core.c.inc */
-/*
- * UDB 4 - Unreal Database System for UnrealIRCd 6
- * Subsystem: Database Core Engine & Record Manipulation
- *
- * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
- * Based on the original UDB concept by Trocotronic.
- *
- * (C) 2026 David Abuín Fontán
- * License: GNU General Public License v2+
- */
-
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15690,17 +15634,6 @@ static UdbStorageResult udb_native_block_profiles_validate(UdbStorageEngine *eng
 
 /* Dynamic connected service clients and service-originated notices */
 /* Inlined: udb_services.c.inc */
-/*
- * UDB 4 - Unreal Database System for UnrealIRCd 6
- * Subsystem: Service-Client Resolution (NickServ, ChanServ, IpServ) & Notices
- *
- * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
- * Based on the original UDB concept by Trocotronic.
- *
- * (C) 2026 David Abuín Fontán
- * License: GNU General Public License v2+
- */
-
 /* Resolve a unique live ULine user for this operation; missing or ambiguous
  * matches fall back to &me. The returned Client is borrowed, never cached. */
 static Client *udb_service_source(const char *service_key)
@@ -15774,17 +15707,6 @@ static void udb_send_service_notice(Client *target, const char *service_key, FOR
 
 /* Staged synchronization sessions: HEL capability and transfer state */
 /* Inlined: udb_sync.c.inc */
-/*
- * UDB 4 - Unreal Database System for UnrealIRCd 6
- * Subsystem: Staged Synchronization Sessions & Snapshot Transfers
- *
- * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
- * Based on the original UDB concept by Trocotronic.
- *
- * (C) 2026 David Abuín Fontán
- * License: GNU General Public License v2+
- */
-
 static unsigned long udb_sync_txid = 0;
 
 typedef struct UdbHelloPeer UdbHelloPeer;
@@ -17909,17 +17831,6 @@ static UdbStorageResult udb_native_value_decode(const char *wire, UdbStorageRow 
 
 /* Operclass registry: local inventory, OCL propagation and OCLG view */
 /* Inlined: udb_operclasses.c.inc */
-/*
- * UDB 4 - Unreal Database System for UnrealIRCd 6
- * Subsystem: Operclass Inventory (OCL) & Global Operclass View (OCLG)
- *
- * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
- * Based on the original UDB concept by Trocotronic.
- *
- * (C) 2026 David Abuín Fontán
- * License: GNU General Public License v2+
- */
-
 /* OCL is the distributed source of truth about the operclasses each
  * participant IRCd currently has loaded.  OCLG is a derived projection (the
  * intersection of every participant inventory with matching effective
@@ -19228,17 +19139,6 @@ static void udb_oclg_recompute(void)
 
 /* Authorized real-time mutations: validation, effects, persistence, forwarding */
 /* Inlined: udb_mutation.c.inc */
-/*
- * UDB 4 - Unreal Database System for UnrealIRCd 6
- * Subsystem: Real-time Database Mutations & Propagator Resolution
- *
- * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
- * Based on the original UDB concept by Trocotronic.
- *
- * (C) 2026 David Abuín Fontán
- * License: GNU General Public License v2+
- */
-
 static const char *udb_propagator_policy(UdbContext *ctx)
 {
 	if (udb_cfg && udb_cfg->propagator && *udb_cfg->propagator)
@@ -19926,17 +19826,6 @@ static void udb_native_mutation_complete(UdbStorageJob *job)
 
 /* S2S protocol handler: DB command parsing, routing, and server sync */
 /* Inlined: udb_protocol.c.inc */
-/*
- * UDB 4 - Unreal Database System for UnrealIRCd 6
- * Subsystem: DB Frame Parsing, Routing & HEL Capability Negotiation
- *
- * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
- * Based on the original UDB concept by Trocotronic.
- *
- * (C) 2026 David Abuín Fontán
- * License: GNU General Public License v2+
- */
-
 static int udb_send_db_to_one(Client *to, const char *fmt, ...)
 {
 	char *line;
@@ -20174,8 +20063,11 @@ CMD_FUNC(cmd_db)
 	if (!direct_peer || !udb_has_hello(direct_peer))
 		return;
 
-	snprintf(logbuf, sizeof(logbuf), "[UDB] S2S DB received: parc=%d target=%s subcmd=%s", parc, target, subcmd);
-	unreal_log(ULOG_INFO, "udb", "UDB_CMD_DB", client, "$msg", log_data_string("msg", logbuf));
+	if (udb_is_debug_enabled())
+	{
+		snprintf(logbuf, sizeof(logbuf), "[UDB] S2S DB received: parc=%d target=%s subcmd=%s", parc, target, subcmd);
+		unreal_log(ULOG_INFO, "udb", "UDB_CMD_DB", client, "$msg", log_data_string("msg", logbuf));
+	}
 
 	int is_broadcast = !strcmp(target, "*");
 	int is_for_me = is_broadcast || !strcmp(target, me.id) || !strcmp(target, me.name);
@@ -20644,17 +20536,6 @@ static int udb_protocol_init(ModuleInfo *modinfo)
 
 /* Nick management: registration, identification, ghost, vhost, oper */
 /* Inlined: udb_nicks.c.inc */
-/*
- * UDB 4 - Unreal Database System for UnrealIRCd 6
- * Subsystem: Nick Authentication, Identity & Runtime Effect Ownership
- *
- * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
- * Based on the original UDB concept by Trocotronic.
- *
- * (C) 2026 David Abuín Fontán
- * License: GNU General Public License v2+
- */
-
 #include <openssl/evp.h>
 
 typedef struct UdbNickPasswordCache UdbNickPasswordCache;
@@ -22604,17 +22485,6 @@ int udb_nicks_load(ModuleInfo *modinfo)
 
 /* Channel management: registration, founder, modes, topic, access */
 /* Inlined: udb_channels.c.inc */
-/*
- * UDB 4 - Unreal Database System for UnrealIRCd 6
- * Subsystem: Channel Registration, Founder +q & Channel Options
- *
- * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
- * Based on the original UDB concept by Trocotronic.
- *
- * (C) 2026 David Abuín Fontán
- * License: GNU General Public License v2+
- */
-
 typedef struct UdbChannelModeState UdbChannelModeState;
 typedef struct UdbBanOwner UdbBanOwner;
 typedef struct UdbBanSnapshot UdbBanSnapshot;
@@ -22645,9 +22515,6 @@ static ModDataInfo *udb_channel_ban_owners_md = NULL;
 static int udb_hook_can_join(Client *client, Channel *channel, const char *key, char **errmsg);
 static int udb_hook_pre_local_join(Client *client, Channel *channel, const char *key);
 static int udb_hook_local_join(Client *client, Channel *channel, MessageTag *mtags);
-static int udb_hook_remote_join(Client *client, Channel *channel, MessageTag *mtags);
-static int udb_hook_pre_chanmode(Client *client, Channel *channel, MessageTag *mtags, const char *modebuf,
-								 const char *parabuf, time_t sendts, int samode);
 static const char *udb_hook_pre_topic(Client *client, Channel *channel, const char *topic);
 CMD_OVERRIDE_FUNC(udb_override_mode);
 
@@ -22774,27 +22641,80 @@ static void udb_channel_reverse_modes(Channel *channel, const char *value)
 {
 	char modebuf[512];
 	char inverse[512];
-	char *parabuf;
-	char *src;
+	char inverse_params[512];
+	char *modes;
+	char *p;
+	const char *src;
 	char *dst = inverse;
+	int what = MODE_ADD;
+	int emitted_what = 0;
 
 	if (!value || !*value)
 		return;
 	strlcpy(modebuf, value, sizeof(modebuf));
-	parabuf = strchr(modebuf, ' ');
-	if (parabuf)
-		*parabuf++ = '\0';
-	for (src = modebuf; *src && (size_t)(dst - inverse) < sizeof(inverse) - 1; src++)
+	modes = strtoken(&p, modebuf, " ");
+	if (!modes || !*modes)
+		return;
+	inverse_params[0] = '\0';
+	for (src = modes; *src && (size_t)(dst - inverse) < sizeof(inverse) - 2; src++)
 	{
+		Cmode *cm;
+		char *param = NULL;
+		int target_what;
+
 		if (*src == '+')
-			*dst++ = '-';
-		else if (*src == '-')
-			*dst++ = '+';
-		else
+		{
+			what = MODE_ADD;
+			continue;
+		}
+		if (*src == '-')
+		{
+			what = MODE_DEL;
+			continue;
+		}
+		cm = find_channel_mode_handler(*src);
+		if (what == MODE_ADD)
+		{
+			target_what = MODE_DEL;
+			if (cm && cm->paracount > 0)
+				param = strtoken(&p, NULL, " ");
+			if (emitted_what != target_what)
+			{
+				*dst++ = '-';
+				emitted_what = target_what;
+			}
 			*dst++ = *src;
+			if (cm && cm->paracount > 0 && cm->unset_with_param && param && *param)
+			{
+				if (inverse_params[0])
+					strlcat(inverse_params, " ", sizeof(inverse_params));
+				strlcat(inverse_params, param, sizeof(inverse_params));
+			}
+		}
+		else
+		{
+			target_what = MODE_ADD;
+			if (cm && cm->paracount > 0 && cm->unset_with_param)
+				param = strtoken(&p, NULL, " ");
+			if (cm && cm->paracount > 0 && (!param || !*param))
+				continue;
+			if (emitted_what != target_what)
+			{
+				*dst++ = '+';
+				emitted_what = target_what;
+			}
+			*dst++ = *src;
+			if (param && *param)
+			{
+				if (inverse_params[0])
+					strlcat(inverse_params, " ", sizeof(inverse_params));
+				strlcat(inverse_params, param, sizeof(inverse_params));
+			}
+		}
 	}
 	*dst = '\0';
-	udb_channel_do_mode(channel, NULL, inverse, parabuf ? parabuf : "");
+	if (inverse[0])
+		udb_channel_do_mode(channel, NULL, inverse, inverse_params);
 }
 
 static void udb_channel_apply_modes(Channel *channel, const char *value)
@@ -22825,6 +22745,8 @@ static void udb_channel_remove_modes(Channel *channel)
 	state = moddata_channel(channel, udb_channel_modes_md).ptr;
 	if (state)
 	{
+		if (state->value && *state->value)
+			udb_channel_reverse_modes(channel, state->value);
 		safe_free(state->value);
 		safe_free(state);
 		moddata_channel(channel, udb_channel_modes_md).ptr = NULL;
@@ -23252,6 +23174,10 @@ static void udb_channel_project_profile(Channel *channel, UdbStorageProfile *old
 		if (modes && modes->kind == UDB_STORAGE_VALUE_STRING)
 			udb_channel_apply_modes(channel, modes->string);
 		udb_channel_apply_topic(channel, udb_channel_field(current, CKEY_TOPIC));
+	}
+	else
+	{
+		udb_channel_remove_modes(channel);
 	}
 	udb_channel_reconcile_options(channel, udb_channel_is_oper_only(udb_ctx, current),
 								  udb_channel_is_persistent(udb_ctx, current));
@@ -23705,12 +23631,13 @@ static void udb_channel_join_profile(Client *client, Channel *channel, MessageTa
 								suspend_rec->kind == UDB_STORAGE_VALUE_STRING ? suspend_rec->string
 																			  : "No reason given");
 
+	int is_founder = !suspended && udb_channel_is_identified_founder(client, chan_rec);
+
 	if (channel->users == 1)
 	{
 		if (!suspended)
 		{
-			/* A registered channel assigns founder authority exclusively as +q. */
-			if (!IsServer(client) && !IsULine(client))
+			if (!IsServer(client) && !IsULine(client) && !is_founder && check_channel_access(client, channel, "o"))
 			{
 				udb_channel_do_mode(channel, mtags, "-o", client->name);
 			}
@@ -23729,7 +23656,9 @@ static void udb_channel_join_profile(Client *client, Channel *channel, MessageTa
 		}
 	}
 
-	/* Founder +q is UDB-owned and must have exactly one current holder. */
+	if (is_founder && !check_channel_access(client, channel, "o"))
+		udb_channel_do_mode(channel, mtags, "+o", client->name);
+
 	udb_channel_reconcile_founder(channel, chan_rec, suspended);
 }
 
@@ -23744,12 +23673,6 @@ static void handle_join(Client *client, Channel *channel, MessageTag *mtags)
 }
 
 static int udb_hook_local_join(Client *client, Channel *channel, MessageTag *mtags)
-{
-	handle_join(client, channel, mtags);
-	return 0;
-}
-
-static int udb_hook_remote_join(Client *client, Channel *channel, MessageTag *mtags)
 {
 	handle_join(client, channel, mtags);
 	return 0;
@@ -24139,7 +24062,6 @@ static void udb_channels_init(ModuleInfo *modinfo)
 	/* Run after native pre-JOIN hooks before the scoped +O compatibility check. */
 	HookAdd(modinfo->handle, HOOKTYPE_PRE_LOCAL_JOIN, INT_MAX, udb_hook_pre_local_join_oper_only);
 	HookAdd(modinfo->handle, HOOKTYPE_LOCAL_JOIN, 0, udb_hook_local_join);
-	HookAdd(modinfo->handle, HOOKTYPE_REMOTE_JOIN, 0, udb_hook_remote_join);
 	HookAddConstString(modinfo->handle, HOOKTYPE_PRE_LOCAL_TOPIC, 0, udb_hook_pre_topic);
 }
 
@@ -24155,17 +24077,6 @@ static int udb_channels_load(ModuleInfo *modinfo)
 
 /* IP management: clones, nolines, host overrides */
 /* Inlined: udb_ips.c.inc */
-/*
- * UDB 4 - Unreal Database System for UnrealIRCd 6
- * Subsystem: Clone Limits, Protected Base Cloaks & IP Host Overlays
- *
- * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
- * Based on the original UDB concept by Trocotronic.
- *
- * (C) 2026 David Abuín Fontán
- * License: GNU General Public License v2+
- */
-
 typedef struct UdbIpHostState UdbIpHostState;
 /* Track the I::host overlay UDB applied; revocation must preserve a later
  * external host replacement and otherwise recover the protected base. */
@@ -24918,17 +24829,6 @@ static int udb_ips_init(ModuleInfo *modinfo)
 
 /* Distributed *lines: glines, zlines, shuns, qlines, spamfilters */
 /* Inlined: udb_lines.c.inc */
-/*
- * UDB 4 - Unreal Database System for UnrealIRCd 6
- * Subsystem: Distributed G/Z/S/Q Lines, Spamfilters & Expiry
- *
- * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
- * Based on the original UDB concept by Trocotronic.
- *
- * (C) 2026 David Abuín Fontán
- * License: GNU General Public License v2+
- */
-
 static UdbLineExpiryPending *udb_line_expiry_pending = NULL;
 
 static void udb_line_split_mask(const char *mask, char *user, size_t usersz, char *host, size_t hostsz)
@@ -25676,17 +25576,6 @@ static void udb_lines_init(ModuleInfo *modinfo)
 
 /* DBQ query command for users and opers */
 /* Inlined: udb_query.c.inc */
-/*
- * UDB 4 - Unreal Database System for UnrealIRCd 6
- * Subsystem: DBQ Query Command & Secret Redaction
- *
- * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
- * Based on the original UDB concept by Trocotronic.
- *
- * (C) 2026 David Abuín Fontán
- * License: GNU General Public License v2+
- */
-
 /* Secret classification uses the canonical block/depth/property tuple, never
  * display text or a record's parent pointers. */
 static int udb_query_is_secret(const UdbStorageRow *row)
@@ -25999,14 +25888,19 @@ CMD_FUNC(cmd_dbq)
 		sendto_one(client, NULL, ":%s 339 %s :Syntax: /DBQ [server] <block>[::path]", me.name, client->name);
 		return;
 	}
-	if (parc >= 3 && !match_simple(parv[1], me.name))
+	if (parc >= 3 && !match_simple(parv[1], me.name) && strcasecmp(parv[1], me.id) != 0)
 	{
 		Client *server = find_server_quick(parv[1]);
-		if (server)
+		if (server && !IsMe(server))
+		{
 			sendto_one(server, NULL, ":%s DBQ %s %s", client->id, parv[1], parv[2]);
-		else
+			return;
+		}
+		if (!server)
+		{
 			sendnumeric(client, ERR_NOSUCHSERVER, parv[1]);
-		return;
+			return;
+		}
 	}
 	query = parv[parc >= 3 ? 2 : 1];
 	if (!strcasecmp(query, "STATUS"))
@@ -26112,17 +26006,6 @@ static void udb_query_init(ModuleInfo *modinfo)
 
 /* Engine, block, configuration, and module lifecycle coordination */
 /* Inlined: udb_lifecycle.c.inc */
-/*
- * UDB 4 - Unreal Database System for UnrealIRCd 6
- * Subsystem: Module and Database Lifecycle Coordination
- *
- * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
- * Based on the original UDB concept by Trocotronic.
- *
- * (C) 2026 David Abuín Fontán
- * License: GNU General Public License v2+
- */
-
 static char *udb_block_filepath(char letter)
 {
 	const char *directory = PERMDATADIR;

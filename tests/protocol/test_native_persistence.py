@@ -1,4 +1,5 @@
 """Exclusive native HEL 4 contracts on disposable real daemon nodes."""
+import hashlib
 import time
 import socket
 import pytest
@@ -398,3 +399,53 @@ def test_native_ordered_authority_failover_and_failback(node_factory):
         primary.close()
         if backup is not None:
             backup.close()
+
+
+def test_founder_retains_and_receives_chanop_and_channel_modes_reverse_cleanly(node_factory):
+    node = node_factory(ready=False, expected_state=None, peers=['peer.test'], propagator='peer.test')
+    pw_hash = 'sha256:' + hashlib.sha256(b'secret').hexdigest()
+    blocks = {
+        'N': {'alice': None, 'alice::pass': pw_hash},
+        'C': {
+            '#vault': None,
+            '#vault::founder': 'alice',
+            '#vault::modes': 'lk 50 vaultkey',
+            '#lobby': None,
+            '#lobby::founder': 'alice',
+        },
+    }
+    with Peer(node) as peer:
+        peer.synchronize(blocks)
+        time.sleep(0.3)
+
+        founder = node.client('visitor')
+        founder.send('CAP REQ :multi-prefix')
+        replies = founder.request('NICK alice:secret')
+        assert any('You are now identified' in line for line in replies), replies
+        start = len(founder.lines)
+        founder.request('JOIN #vault', terminator=lambda line: ' 366 ' in line)
+        assert not any(' MODE #vault -o ' in line for line in founder.lines[start:]), founder.lines[start:]
+        names = founder.request('NAMES #vault', terminator=lambda line: ' 366 ' in line)
+        assert any('~@alice' in line for line in names), names
+
+        guest = node.client('bob')
+        guest.send('CAP REQ :multi-prefix')
+        guest.request('JOIN #lobby', terminator=lambda line: ' 366 ' in line)
+        lobby_names = guest.request('NAMES #lobby', terminator=lambda line: ' 366 ' in line)
+        assert any(' 353 ' in line and 'bob' in line and '@bob' not in line for line in lobby_names), lobby_names
+        founder.request('JOIN #lobby', terminator=lambda line: ' 366 ' in line)
+        lobby_names = founder.request('NAMES #lobby', terminator=lambda line: ' 366 ' in line)
+        assert any('~@alice' in line for line in lobby_names), lobby_names
+
+        mode_replies = founder.request('MODE #vault', terminator=lambda line: ' 324 ' in line)
+        assert any(' 324 ' in line and 'l' in line.split()[4] and 'k' in line.split()[4] for line in mode_replies), mode_replies
+        peer.mutation(1, 'C::#vault::modes', delete=True)
+        time.sleep(0.4)
+        mode_replies = founder.request('MODE #vault', terminator=lambda line: ' 324 ' in line)
+        mode_str = next(line.split()[4] for line in mode_replies if ' 324 ' in line)
+        assert 'l' not in mode_str and 'k' not in mode_str, mode_replies
+
+        oper = node.client('opercheck')
+        oper.request('OPER testoper operpass')
+        dbq_sid = oper.request(f'DBQ {node.sid} STATUS')
+        assert any('Database readiness: READY' in line for line in dbq_sid), dbq_sid

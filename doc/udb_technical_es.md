@@ -4,7 +4,7 @@
 
 ## 1. Alcance
 
-UDB (Unreal DataBase) es un módulo global para UnrealIRCd 6 que mantiene y aplica una base de datos distribuida para registros de nick, canales, políticas por IP, ajustes, opciones por servidor y sanciones. La versión del módulo es **4.0.0-rc1** y el metadato de distribución declara **UnrealIRCd 6.2.x** como versión mínima (`min-unrealircd-version "6.2.*"`).
+UDB (Unreal DataBase) es un módulo global para UnrealIRCd 6 que mantiene y aplica una base de datos distribuida para registros de nick, canales, políticas por IP, ajustes, opciones por servidor y sanciones. La versión del módulo es **4.0.0-rc3** y el metadato de distribución declara **UnrealIRCd 6.2.x** como versión mínima (`min-unrealircd-version "6.2.*"`).
 
 La implementación canónica está dividida en `src/` y se amalgama de forma determinista en `dist/udb.c`. El módulo se registra como `third/udb` y utiliza el comando S2S `DB` como protocolo propio.
 
@@ -172,7 +172,7 @@ Claves:
 
 | Clave | Tipo | Efecto actual |
 |---|---|---|
-| `founder` | nick | Fundador identificado. Recibe `+q` gestionado por UDB. |
+| `founder` | nick | Fundador identificado. Recibe `+q` gestionado por UDB y conserva/recibe `+o` al hacer JOIN. |
 | `modes` | texto | Modos de canal y parámetros validados contra los handlers cargados. El marcador de registro `r`, los rangos de miembro (`q`, `a`, `o`, `h`, `v`), `P` y `O` se rechazan en mutaciones, sync staged y ficheros persistidos; la persistencia y la política sólo-oper se expresan únicamente con sus bits de `options`. |
 | `topic` | texto | Topic gestionado por UDB. |
 | `access` | contenedor | Lista de nicks autorizados. |
@@ -197,7 +197,7 @@ Los bits se combinan mediante OR bit a bit; el valor lógico `63` activa los sei
 
 #### JOIN, fundador y clave nativa
 
-El fundador sólo se considera identificado si su nick coincide con `founder` y tiene `+r`. Un fundador identificado se salta las restricciones de JOIN, incluidos `OPER_ONLY` y `+k`, salvo que el perfil tenga `suspend` o `forbid`; recibe `+q` salvo que esté suspendido. Un operador IRC se salta todas las restricciones JOIN de UDB, incluidos `forbid`, `OPER_ONLY` y el `+k` almacenado para el primer JOIN, pero las restricciones nativas independientes siguen ejecutándose y exigen sus propios permisos de override. `suspend` conserva su comportamiento actual y no bloquea el JOIN por sí solo.
+El fundador sólo se considera identificado si su nick coincide con `founder` y tiene `+r`. Un fundador identificado se salta las restricciones de JOIN, incluidos `OPER_ONLY` y `+k`, salvo que el perfil tenga `suspend` o `forbid`; al hacer JOIN conserva/recibe `+o` además del `+q` gestionado por UDB salvo que esté suspendido, mientras que a los primeros usuarios no fundadores se les retira el `+o` inicial. Un operador IRC se salta todas las restricciones JOIN de UDB, incluidos `forbid`, `OPER_ONLY` y el `+k` almacenado para el primer JOIN, pero las restricciones nativas independientes siguen ejecutándose y exigen sus propios permisos de override. `suspend` conserva su comportamiento actual y no bloquea el JOIN por sí solo.
 
 Si la identificación ocurre después del JOIN, `/MODE #canal +q nickname` permite al fundador local identificado recuperar su propio `+q` sin rejoin. UDB exige pertenencia al canal, un perfil C no suspendido, el nick actual del fundador con el modo de usuario `+r` y exactamente el modo `+q` aislado con un parámetro que resuelva al emisor. La recuperación funciona con o sin `SECURE_OPS` y `LOCK_MODES`; repetirla cuando ya se tiene `+q` no emite otro cambio de modo. Otros destinatarios, comandos compuestos o malformados y `SAMODE` mantienen su tratamiento actual. Retirar una suspensión de nick sigue exigiendo reautenticación; este comando nunca autentica al usuario.
 

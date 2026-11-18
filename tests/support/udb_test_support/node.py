@@ -373,7 +373,7 @@ udb {{ {policy} {self.settings} }}
         replies = client.request("OPER testoper operpass")
         assert any(" 381 " in line for line in replies), replies
         replies = client.request("UDB STATUS", timeout=timeout)
-        assert any("Database readiness: READY" in line for line in replies), replies
+        assert any("Database readiness: READY" in line for line in replies), (replies, self.log_text()[-2000:])
         return {"STATE": "READY"}
 
     def client(self, nickname: str) -> IrcClient:

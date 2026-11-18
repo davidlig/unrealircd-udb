@@ -5,14 +5,13 @@
  * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
  * Based on the original UDB concept by Trocotronic.
  *
- * (C) 2026 David Abuín Fontán
  * License: GNU General Public License v2+
  */
 
 #ifndef UDB_H
 #define UDB_H
 
-#define UDB_VERSION "4.0.0-rc2"
+#define UDB_VERSION "4.0.0-rc3"
 #define UDB_PROTOCOL_HEL "4"
 
 /* Block Identifiers */

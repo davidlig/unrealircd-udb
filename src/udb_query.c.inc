@@ -5,7 +5,6 @@
  * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
  * Based on the original UDB concept by Trocotronic.
  *
- * (C) 2026 David Abuín Fontán
  * License: GNU General Public License v2+
  */
 
@@ -321,14 +320,19 @@ CMD_FUNC(cmd_dbq)
 		sendto_one(client, NULL, ":%s 339 %s :Syntax: /DBQ [server] <block>[::path]", me.name, client->name);
 		return;
 	}
-	if (parc >= 3 && !match_simple(parv[1], me.name))
+	if (parc >= 3 && !match_simple(parv[1], me.name) && strcasecmp(parv[1], me.id) != 0)
 	{
 		Client *server = find_server_quick(parv[1]);
-		if (server)
+		if (server && !IsMe(server))
+		{
 			sendto_one(server, NULL, ":%s DBQ %s %s", client->id, parv[1], parv[2]);
-		else
+			return;
+		}
+		if (!server)
+		{
 			sendnumeric(client, ERR_NOSUCHSERVER, parv[1]);
-		return;
+			return;
+		}
 	}
 	query = parv[parc >= 3 ? 2 : 1];
 	if (!strcasecmp(query, "STATUS"))

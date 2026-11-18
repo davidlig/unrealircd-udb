@@ -120,7 +120,8 @@ class OwnedProcess:
         if self.process is not None:
             raise RuntimeError("process owner may only be started once")
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        self.log_handle = self.log_path.open("w", encoding="utf-8")
+        self.log_path.write_text("", encoding="utf-8")
+        self.log_handle = self.log_path.open("a", encoding="utf-8")
         try:
             flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
             self.process = subprocess.Popen(
@@ -165,6 +166,47 @@ class OwnedProcess:
             raise
         return self
 
+    def _posix_process_tree(root_pid: int) -> tuple[set[int], set[int]]:
+        children_map: dict[int, list[int]] = {}
+        pgid_map: dict[int, int] = {}
+        proc_root = Path("/proc")
+        if proc_root.is_dir():
+            for entry in proc_root.iterdir():
+                if not entry.name.isdigit():
+                    continue
+                pid = int(entry.name)
+                try:
+                    stat = (entry / "stat").read_text(encoding="utf-8", errors="replace")
+                    rparen = stat.rfind(")")
+                    if rparen < 0:
+                        continue
+                    fields = stat[rparen + 2:].split()
+                    ppid = int(fields[1])
+                    pgrp = int(fields[2])
+                    children_map.setdefault(ppid, []).append(pid)
+                    pgid_map[pid] = pgrp
+                except (OSError, ValueError, IndexError):
+                    continue
+        pids = {root_pid}
+        pgids = {root_pid}
+        queue = [root_pid]
+        while queue:
+            current = queue.pop()
+            if current in pgid_map and pgid_map[current] > 0:
+                pgids.add(pgid_map[current])
+            try:
+                pgid = os.getpgid(current)
+                if pgid > 0:
+                    pgids.add(pgid)
+            except OSError:
+                pass
+            for child in children_map.get(current, ()):
+                if child not in pids:
+                    pids.add(child)
+                    pgids.add(child)
+                    queue.append(child)
+        return pids, pgids
+
     def stop(self, timeout: float = 5) -> None:
         process = self.process
         try:
@@ -183,18 +225,65 @@ class OwnedProcess:
                             process.kill()
                         process.wait()
                     return
-                try:
-                    os.killpg(process.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
+                deadline = time.monotonic() + timeout
+                pids, pgids = OwnedProcess._posix_process_tree(process.pid)
+                for pid in sorted(pids - {process.pid}, reverse=True):
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                for pgid in sorted(pgids, reverse=True):
+                    try:
+                        os.killpg(pgid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
                 try:
                     process.wait(timeout=timeout)
                 except subprocess.TimeoutExpired:
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
+                    for pid in sorted(pids, reverse=True):
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    for pgid in sorted(pgids, reverse=True):
+                        try:
+                            os.killpg(pgid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
                     process.wait()
+                while True:
+                    alive = False
+                    for pid in list(pids):
+                        try:
+                            os.kill(pid, 0)
+                            alive = True
+                        except ProcessLookupError:
+                            pids.discard(pid)
+                        except PermissionError:
+                            alive = True
+                    for pgid in list(pgids):
+                        try:
+                            os.killpg(pgid, 0)
+                            alive = True
+                        except ProcessLookupError:
+                            pgids.discard(pgid)
+                        except PermissionError:
+                            alive = True
+                    if not alive:
+                        break
+                    if time.monotonic() >= deadline:
+                        for pid in list(pids):
+                            try:
+                                os.kill(pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pids.discard(pid)
+                        for pgid in list(pgids):
+                            try:
+                                os.killpg(pgid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pgids.discard(pgid)
+                        deadline = time.monotonic() + timeout
+                    time.sleep(0.02)
         finally:
             if self.job:
                 ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(self.job)

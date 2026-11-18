@@ -34,7 +34,6 @@ MODULE_MANAGER_HEADER = """/*
  * Author: David Abuín Fontán ('davidlig') <https://github.com/davidlig/unrealircd-udb>
  * Based on the original UDB concept by Trocotronic.
  *
- * (C) 2026 David Abuín Fontán
  * License: GNU General Public License v2+
  */
 
@@ -82,6 +81,16 @@ def replace_include(text, pattern, replacement, source):
     return inline_regex.sub(lambda m: replacement, text)
 
 
+def strip_banner(text):
+    return re.sub(
+        r'\A\s*/\*\s*\n \* UDB 4 - Unreal Database System for UnrealIRCd 6.*?\*/[ \t]*\n*',
+        '',
+        text,
+        count=1,
+        flags=re.DOTALL,
+    )
+
+
 def inline_unit(filename, stack, included):
     path = os.path.join(SRC_DIR, filename)
     if not os.path.isfile(path):
@@ -91,7 +100,7 @@ def inline_unit(filename, stack, included):
     if filename in included:
         fail(f"unit included more than once: {filename}")
     included.add(filename)
-    text = read_source(path)
+    text = strip_banner(read_source(path))
     text = re.sub(r'^[ \t]*#include\s+"udb\.h"[ \t]*$', '', text, flags=re.MULTILINE)
     text = re.sub(
         r'^[ \t]*#include\s+"([^"]+\.c\.inc)"[ \t]*$',
@@ -104,15 +113,15 @@ def inline_unit(filename, stack, included):
 
 
 def build_bundle():
-    udb_h = read_source(os.path.join(SRC_DIR, "udb.h"))
-    udb_internal_h = read_source(os.path.join(SRC_DIR, "udb_internal.h"))
+    udb_h = strip_banner(read_source(os.path.join(SRC_DIR, "udb.h")))
+    udb_internal_h = strip_banner(read_source(os.path.join(SRC_DIR, "udb_internal.h")))
     udb_c = read_source(os.path.join(SRC_DIR, "udb.c"))
 
     # The bundle carries its own manager header; drop the entry banner of udb.c.
     clean_udb_c = re.sub(r'/\*.*?\*/', '', udb_c, count=1, flags=re.DOTALL).strip()
 
     udb_internal_h = replace_include(udb_internal_h, r'"udb\.h"', udb_h, "udb_internal.h")
-    udb_storage_h = read_source(os.path.join(SRC_DIR, "udb_storage.h"))
+    udb_storage_h = strip_banner(read_source(os.path.join(SRC_DIR, "udb_storage.h")))
     udb_internal_h = replace_include(udb_internal_h, r'"udb_storage\.h"', udb_storage_h, "udb_internal.h")
     clean_udb_c = replace_include(clean_udb_c, r'"udb_internal\.h"', udb_internal_h, "udb.c")
 

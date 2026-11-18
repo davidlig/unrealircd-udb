@@ -29,6 +29,8 @@ def test_generation_is_reproducible_and_never_edits_inputs(bundle):
     second = module.build_bundle()
     assert first == second == (ROOT / "dist/udb.c").read_bytes()
     assert before == {p.name: p.read_bytes() for p in source.iterdir() if p.is_file()}
+    assert first.count(b"UDB 4 - Unreal Database System for UnrealIRCd 6") == 1
+    assert b"(C) 2026 David Abu\xc3\xadn Font\xc3\xa1n" not in first
     assert hashlib.sha256(first).hexdigest().encode() in module.build_modules_list(first)
     assert module.build_modules_list(first) == (ROOT / "modules.list").read_bytes()
 
