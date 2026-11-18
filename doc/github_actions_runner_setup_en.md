@@ -1,6 +1,6 @@
-# Local guide: set up the runner, deployment, and renewable TLS
+# Operational guide: set up the runner, deployment, and renewable TLS
 
-This is the English companion to `github_actions_runner_setup_es.md`. It is a local operational guide and **must remain untracked**. Replace only `<...>` placeholders or values in the private environment file. Do not add a real host, user, DNS name, email, token, key, certificate name, host path, or secret value to either guide.
+This is the English companion to `github_actions_runner_setup_es.md`. Replace `<...>` placeholders only in the private environment file (`setup.env`). Do not add a real host, user, DNS name, email, token, key, certificate name, host path, or secret value to either guide.
 
 > Only enabling `linger` needs an administrator, once. The runner, Certbot, user systemd, and normal deployments run without `sudo`.
 
@@ -20,8 +20,8 @@ export RUNNER_STATE="$ACTIONS_ROOT/runner-state"
 export RUNNER_COMMAND_DIR="$ACTIONS_ROOT/runner-command"
 export CERTBOT_STATE="$ACTIONS_ROOT/certbot"
 export RUNNER_URL='https://github.com/<owner>/<repository>'
-export RUNNER_NAME='ircd-deploy'
-export RUNNER_LABELS='ircd-deploy'
+export RUNNER_NAME='udb-deploy'
+export RUNNER_LABELS='udb-deploy'
 export RUNNER_REGISTRATION_TOKEN='<single-use-registration-token>'
 export TLS_NAME='<public-tls-name>'
 export CERTBOT_EMAIL='<certificate-contact-email>'
@@ -78,8 +78,8 @@ services:
     environment:
       RUNNER_URL: ${RUNNER_URL:-}
       RUNNER_TOKEN: ${RUNNER_REGISTRATION_TOKEN:-}
-      RUNNER_NAME: ${RUNNER_NAME:-ircd-deploy}
-      RUNNER_LABELS: ${RUNNER_LABELS:-ircd-deploy}
+      RUNNER_NAME: ${RUNNER_NAME:-udb-deploy}
+      RUNNER_LABELS: ${RUNNER_LABELS:-udb-deploy}
       HOME: /runner-state
     volumes:
       - ${RUNNER_STATE}:/runner-state
@@ -301,6 +301,7 @@ udb_archive=$(map_runner_file "$udb_container_path")
 printf '%s  %s\n' "$unreal_sha256" "$unreal_archive" | sha256sum --check --status - || fail "UnrealIRCd checksum mismatch"
 printf '%s  %s\n' "$udb_sha256" "$udb_archive" | sha256sum --check --status - || fail "UDB checksum mismatch"
 
+mkdir -p "$(dirname "$LOCK_FILE")"
 exec 9>"$LOCK_FILE"
 flock -n 9 || fail "another deployment is running"
 [[ -x "$TARGET/bin/unrealircd" ]] || fail "current target is not executable"
@@ -365,6 +366,13 @@ systemctl --user stop "$SERVICE"
 
 rm -rf -- "$TARGET/conf" "$TARGET/data"
 cp -a -- "$rollback_dir/conf" "$TARGET/conf"
+install -m 0600 "$new_source"/doc/conf/*.default.conf "$TARGET/conf"
+install -m 0600 "$new_source"/doc/conf/*.optional.conf "$TARGET/conf"
+install -m 0700 -d "$TARGET/conf/aliases" "$TARGET/conf/help" "$TARGET/conf/examples" "$TARGET/conf/tls"
+install -m 0600 "$new_source"/doc/conf/aliases/*.conf "$TARGET/conf/aliases"
+install -m 0600 "$new_source"/doc/conf/help/*.conf "$TARGET/conf/help"
+install -m 0600 "$new_source"/doc/conf/examples/*.conf "$TARGET/conf/examples"
+install -m 0600 "$new_source/doc/conf/tls/curl-ca-bundle.crt" "$TARGET/conf/tls"
 if [[ -d "$rollback_dir/data" ]]; then
   cp -a -- "$rollback_dir/data" "$TARGET/data"
 fi
@@ -521,6 +529,6 @@ systemctl --user is-enabled --quiet ircd-certbot-renew.timer
 loginctl show-user "$DEPLOY_USER" -p Linger
 ! docker inspect "$(docker compose ps -q runner)" --format '{{range .Mounts}}{{println .Destination}}{{end}}' | grep -q '/var/run/docker.sock'
 
-git -C '<repository-root>' status --short -- doc/github_actions_runner_setup_es.md doc/github_actions_runner_setup_en.md
-# Both local guides must remain ?? (untracked) unless explicitly approved for a commit.
+git -C '<repository-root>' diff -- doc/github_actions_runner_setup_es.md doc/github_actions_runner_setup_en.md
+# Confirm before any commit that neither guide contains real hostnames, paths, tokens, or secrets.
 ```
