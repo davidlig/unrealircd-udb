@@ -183,6 +183,7 @@ class OwnedProcess:
                             process.kill()
                         process.wait()
                     return
+                deadline = time.monotonic() + timeout
                 try:
                     os.killpg(process.pid, signal.SIGTERM)
                 except ProcessLookupError:
@@ -195,6 +196,20 @@ class OwnedProcess:
                     except ProcessLookupError:
                         pass
                     process.wait()
+                while True:
+                    try:
+                        os.killpg(process.pid, 0)
+                    except ProcessLookupError:
+                        break
+                    except PermissionError:
+                        pass
+                    if time.monotonic() >= deadline:
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            break
+                        deadline = time.monotonic() + timeout
+                    time.sleep(0.02)
         finally:
             if self.job:
                 ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(self.job)
